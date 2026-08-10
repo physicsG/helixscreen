@@ -978,8 +978,21 @@ void AmsOverviewPanel::setup_detail_path_canvas(const AmsUnit& unit, const AmsSy
         }
     }
 
+    // hub_only stops the drawing at this unit's hub, which is right when the
+    // downstream is shared and this view cannot say whose nozzle it reaches. A
+    // unit whose lanes all feed ONE known head can say exactly that, so let it
+    // draw the rest: an ACE bound to a U1 head then shows bays -> combiner ->
+    // that head, which is the whole point of opening it.
+    bool single_known_head = !unit.slots.empty();
+    const int head = unit.slots.empty() ? -1 : unit.slots.front().mapped_tool;
+    for (const auto& s : unit.slots) {
+        if (s.mapped_tool < 0 || s.mapped_tool != head) {
+            single_known_head = false;
+            break;
+        }
+    }
     ams_detail_setup_path_canvas(detail_path_canvas_, detail_widgets_.slot_grid, unit_index,
-                                 true /* hub_only */);
+                                 /*hub_only=*/!single_known_head);
 }
 
 // ============================================================================
