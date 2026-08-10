@@ -24,10 +24,22 @@
 > 3. ~~§10.3 — toolhead context menu.~~ ✅ **done 2026-08-10**, verified on the U1.
 > 4. ~~Phase 2 proper~~ ✅ **done 2026-08-10** — `AmsBackendMultiAce` is live: detected,
 >    backend created, `ace` parsed, "ACE 2 Pro" card with real temp/RH beside SnapSwap.
-> 5. **Phase 3 — head-major layout.** Now the top UI item, with a concrete symptom to fix:
->    with 4 ACE bays all mapped to head 3 in head mode, the aggregate canvas draws **five
->    nozzles, T3 twice**. Backend data is already correct; this is purely the renderer.
+> 5. **Phase 3 — head-major layout. PARTLY done 2026-08-10.** The duplicate nozzle is fixed
+>    (one nozzle per head, cross-unit sharing in `compute_system_tool_layout`), and the ACE's
+>    line now routes through a hub box into E3. **What is NOT built** is the richer part of
+>    the mockup: each head's seat showing its source stack inline ("PETG · ACE bay 1"), and
+>    the rows-vs-columns switch of §6. Mockups: `2026-08-10-multiace-ui-improvements-mockup.html`.
 > 6. **Phase 1's AFC generalisation** (§2 banner) — still open, and no longer claimed as done.
+>
+> **Also landed 2026-08-10** (same mockup doc): the toolhead menu opens from the overview's
+> nozzle row; an ACE-fed head's spool identity is owned by the ACE, so the slot menu drops
+> Edit/Spoolman/Clear and offers "Open in ACE" while keeping Load/Unload; and the ACE unit
+> detail draws the AFC combiner view — no new renderer, just `get_unit_topology()` answering
+> `HUB` so `render_linear_hub()` is reached.
+>
+> **Trap worth knowing:** `<bind_flag_if_eq>` does NOT win against an imperative
+> `lv_obj_clear_flag()` that runs later in `on_created()`. Three buttons in the slot menu are
+> shown that way and needed a C++ gate as well as the binding.
 >
 > **Pre-existing failure, not yours:** the full suite (`./build/bin/helix-tests`, no filter)
 > segfaults in `test_clock_widget.cpp:157` — "ClockWidget: timer fires during LVGL
