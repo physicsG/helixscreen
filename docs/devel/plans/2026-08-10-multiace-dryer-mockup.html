@@ -1,0 +1,338 @@
+<title>HelixScreen — ACE dryer in the environment panel</title>
+
+<style>
+/* Same two palettes as the other multiACE mockups: the FRAME is deliberately
+   not HelixScreen's, so the device screens read as "the product". */
+:root {
+  --ground:#F6F5F8; --ground-2:#ECEAF1; --ink:#1B1A21; --ink-2:#4A4856;
+  --muted:#6E6C7C; --rule:#DCDAE4; --rule-soft:#E8E6EE;
+  --accent:#1F7F8C; --accent-dim:#8FC6CE; --bad:#B5322E; --good:#3E7F41;
+  --bench:#17161C;
+  --mono: ui-monospace,"SFMono-Regular","Cascadia Mono","Roboto Mono",Menlo,Consolas,monospace;
+  --sans: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --measure: 68ch;
+  --pad: clamp(1.25rem,4vw,3rem);
+
+  --d-screen:#19191C; --d-card:#202023; --d-elevated:#4A4A52; --d-border:#36363C;
+  --d-text:#E8E8EC; --d-muted:#B8B8C0; --d-subtle:#787882;
+  --d-primary:#3A7CC8; --d-success:#5CB85C; --d-warning:#E8A83A;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --ground:#111015; --ground-2:#191821; --ink:#EAE9EF; --ink-2:#B9B7C6;
+          --muted:#8E8C9A; --rule:#2C2A36; --rule-soft:#23212C;
+          --accent:#6FC6D2; --accent-dim:#2E5F67; --bad:#E4736F; --good:#7FC182; --bench:#0B0A0E; }
+}
+:root[data-theme="dark"] { --ground:#111015; --ground-2:#191821; --ink:#EAE9EF; --ink-2:#B9B7C6;
+  --muted:#8E8C9A; --rule:#2C2A36; --rule-soft:#23212C; --accent:#6FC6D2;
+  --accent-dim:#2E5F67; --bad:#E4736F; --good:#7FC182; --bench:#0B0A0E; }
+:root[data-theme="light"] { --ground:#F6F5F8; --ground-2:#ECEAF1; --ink:#1B1A21; --ink-2:#4A4856;
+  --muted:#6E6C7C; --rule:#DCDAE4; --rule-soft:#E8E6EE; --accent:#1F7F8C;
+  --accent-dim:#8FC6CE; --bad:#B5322E; --good:#3E7F41; --bench:#17161C; }
+
+* { box-sizing: border-box; }
+body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--sans);
+       font-size:16px; line-height:1.6; }
+.wrap { max-width:1180px; margin:0 auto; padding:var(--pad); }
+h1 { font-size:clamp(1.7rem,3.6vw,2.4rem); line-height:1.15; margin:0 0 .5rem;
+     letter-spacing:-0.02em; text-wrap:balance; }
+h2 { font-size:clamp(1.1rem,2vw,1.35rem); margin:0; letter-spacing:-0.01em; text-wrap:balance; }
+p { margin:0 0 .9rem; max-width:var(--measure); color:var(--ink-2); }
+strong { color:var(--ink); }
+code { font-family:var(--mono); font-size:.88em; background:var(--ground-2);
+       padding:.1em .36em; border-radius:3px; color:var(--ink); }
+.lede { font-size:1.05rem; color:var(--ink-2); max-width:var(--measure); }
+.eyebrow { font-family:var(--mono); font-size:11px; letter-spacing:.14em;
+           text-transform:uppercase; color:var(--muted); }
+header.page { border-bottom:1px solid var(--rule); padding-bottom:1.5rem; margin-bottom:2rem; }
+.meta { font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:.8rem; }
+section { padding:2rem 0; border-bottom:1px solid var(--rule-soft); }
+section:last-of-type { border-bottom:0; }
+.sec-head { display:flex; align-items:baseline; gap:.8rem; margin-bottom:.5rem; }
+.tick { font-family:var(--mono); font-size:12px; color:var(--accent);
+        border:1px solid var(--accent-dim); border-radius:3px; padding:.1rem .42rem; flex:none; }
+
+.callout { border-left:3px solid var(--bad); background:var(--ground-2);
+           padding:.85rem 1rem; border-radius:0 5px 5px 0; margin:1rem 0; max-width:var(--measure); }
+.callout p:last-child { margin-bottom:0; }
+.callout .eyebrow { color:var(--bad); }
+
+.bench { background:var(--bench); border-radius:8px; padding:1.3rem; margin:1.2rem 0 .8rem;
+         overflow-x:auto; display:flex; gap:1.4rem; align-items:flex-start; }
+.ba-item { display:flex; flex-direction:column; gap:.5rem; flex:none; }
+.ba-tag { font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+          padding:.12rem .45rem; border-radius:3px; align-self:flex-start;
+          color:#7FC182; border:1px solid #2F5A31; }
+.ba-tag.warn { color:#E8A83A; border-color:#6A5220; }
+.ba-note { font-family:var(--mono); font-size:11px; color:#8E8C9A; max-width:480px; line-height:1.45; }
+.fit { font-family:var(--mono); font-size:10px; letter-spacing:.08em; }
+.fit.ok { color:#7FC182; } .fit.no { color:#E4736F; }
+
+/* device screen */
+.screen { width:480px; height:320px; flex:none; background:var(--d-screen); color:var(--d-text);
+          font-family:var(--sans); font-size:12px; line-height:1.3; display:flex;
+          overflow:hidden; position:relative; box-shadow:0 0 0 1px #000,0 14px 40px rgba(0,0,0,.55); }
+.screen * { box-sizing:border-box; }
+.rail { width:42px; flex:none; background:var(--d-screen); border-right:1px solid var(--d-border);
+        display:flex; flex-direction:column; align-items:center; padding:10px 0; gap:12px; }
+.rail i { width:20px; height:20px; border-radius:3px; background:var(--d-elevated); opacity:.55; }
+.rail i.on { background:var(--d-primary); opacity:1; }
+.pane { flex:1; display:flex; flex-direction:column; min-width:0; background:var(--d-card); }
+.p-head { height:34px; flex:none; display:flex; align-items:center; gap:7px; padding:0 9px;
+          border-bottom:1px solid var(--d-border); }
+.chev { color:var(--d-muted); font-size:15px; }
+.p-title { font-family:var(--mono); font-size:11px; letter-spacing:.06em; text-transform:uppercase; }
+.p-main { flex:1; padding:7px 9px; display:flex; flex-direction:column; gap:6px; min-height:0; }
+
+.card { border:1px solid var(--d-border); border-radius:5px; background:var(--d-screen);
+        padding:6px 8px; display:flex; flex-direction:column; gap:5px; }
+.rowsplit { display:flex; gap:8px; align-items:center; justify-content:space-between; }
+.lab { font-family:var(--mono); font-size:9px; color:var(--d-subtle);
+       letter-spacing:.06em; text-transform:uppercase; }
+.big { font-size:19px; font-weight:650; letter-spacing:-.01em; }
+.unitpick { display:flex; gap:4px; }
+.chip { font-family:var(--mono); font-size:9px; padding:2px 7px; border-radius:9px;
+        border:1px solid var(--d-border); color:var(--d-muted); }
+.chip.on { border-color:var(--d-primary); color:var(--d-text); background:rgba(58,124,200,.18); }
+.bar { height:7px; border-radius:4px; background:var(--d-border); overflow:hidden; }
+.bar > i { display:block; height:100%; background:var(--d-warning); }
+.btn { border:1px solid var(--d-border); border-radius:4px; background:var(--d-screen);
+       color:var(--d-text); font-size:11px; padding:6px 8px; text-align:center; }
+.btn.pri { background:var(--d-primary); border-color:var(--d-primary); color:#fff; }
+.btn.stop { background:#7a2f2c; border-color:#7a2f2c; color:#fff; }
+.btn.off { color:var(--d-subtle); }
+.ro { font-family:var(--mono); font-size:10px; color:var(--d-muted); }
+.ro b { color:var(--d-text); font-weight:600; }
+.note { font-size:9px; color:var(--d-subtle); line-height:1.35; }
+.two { display:flex; gap:6px; }
+.two > * { flex:1; }
+.pill { font-family:var(--mono); font-size:9px; padding:1px 6px; border-radius:8px;
+        border:1px solid var(--d-success); color:var(--d-success); }
+.pill.idle { border-color:var(--d-subtle); color:var(--d-subtle); }
+.pill.warn { border-color:var(--d-warning); color:var(--d-warning); }
+
+dl.q { border-left:2px solid var(--accent-dim); padding-left:1rem; max-width:var(--measure); }
+dl.q dt { font-weight:600; margin-top:.8rem; }
+dl.q dt:first-child { margin-top:0; }
+dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
+
+.themebar { position:fixed; right:12px; top:12px; z-index:20; }
+.themebar button { font-family:var(--mono); font-size:11px; padding:.3rem .6rem;
+                   background:var(--ground-2); color:var(--ink-2); border:1px solid var(--rule);
+                   border-radius:4px; cursor:pointer; }
+.themebar button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+@media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
+</style>
+
+<div class="themebar"><button type="button" id="themetoggle">theme</button></div>
+
+<div class="wrap">
+
+<header class="page">
+  <span class="eyebrow">Snapmaker U1 + multiACE — design memo</span>
+  <h1>Drying the ACE from the environment panel</h1>
+  <p class="lede">HelixScreen already has the whole dryer UI — readout, progress bar, temperature
+  and duration inputs, start/stop — in <code>ams_environment_overlay.xml</code>. It has never
+  appeared on this printer for one reason: no Snapmaker backend reports a dryer, so
+  <code>get_dryer_info()</code> answers <code>supported = false</code> and the panel shows its
+  "no dryer" branch. The ACE has one, and reports it live.</p>
+  <p class="meta">Screens are 1:1 at 480&nbsp;&times;&nbsp;320 and self-measure on load.
+  Live values from the ACE 2 Pro at <code>192.168.2.242</code>: 31&nbsp;°C, 35&nbsp;% RH,
+  <code>dryer_status.status = "stop"</code>.</p>
+</header>
+
+<section>
+  <div class="sec-head"><span class="tick">!</span><h2>The constraint that shapes this</h2></div>
+
+  <div class="callout">
+    <span class="eyebrow">Read this before designing anything</span>
+    <p><code>ACED__Dry_Start_0..3</code> takes <strong>no parameters</strong> — multiACE's own
+    macro table says "uses config settings". Temperature and duration live in
+    <code>dryer_temp</code> / <code>dryer_duration</code> in multiACE's config file, with a
+    <code>max_dryer_temperature</code> safety cap. There is no G-code to set them.</p>
+    <p>So the existing panel's <strong>temperature and duration inputs cannot be honoured</strong>
+    on this backend. Showing them editable and quietly ignoring the values is the one option
+    that must not ship.</p>
+  </div>
+
+  <p>Everything else the panel wants <em>is</em> published, per ACE:
+  <code>dryer_status {status, target_temp, duration, remain_time}</code>, plus
+  <code>temp</code> and <code>humidity</code>. multiACE additionally has an
+  <strong>auto-dry</strong> feature HelixScreen's <code>DryerInfo</code> does not model at all:
+  <code>auto_dry {enabled, rh_start, rh_end, temp, master, add_time}</code> — start drying when
+  humidity crosses <code>rh_start</code>, stop at <code>rh_end</code>.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="tick">A</span><h2>Idle, and drying</h2></div>
+  <p>The proposal: keep the existing panel, drop the two inputs this backend cannot honour, and
+  state the configured values as fact instead. The unit chips at the top pick which ACE — a
+  1-unit rig shows one chip and it is not interactive.</p>
+
+  <div class="bench">
+    <div class="ba-item">
+      <span class="ba-tag">idle — your rig now</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">ACE 2 Pro &mdash; environment</span></div>
+          <div class="p-main">
+            <div class="card">
+              <div class="rowsplit">
+                <div><span class="lab">Chamber</span><div class="big">31 &deg;C</div></div>
+                <div><span class="lab">Humidity</span><div class="big">35 %</div></div>
+                <span class="pill idle">Not drying</span>
+              </div>
+            </div>
+            <div class="card">
+              <div class="rowsplit">
+                <span class="lab">Dryer</span>
+                <span class="ro"><b>55 &deg;C</b> &middot; <b>240 min</b></span>
+              </div>
+              <p class="note">Temperature and duration come from multiACE's config
+                (<code>dryer_temp</code>, <code>dryer_duration</code>). Cap 70&nbsp;&deg;C.</p>
+              <div class="btn pri">Start drying</div>
+            </div>
+            <div class="card">
+              <div class="rowsplit">
+                <span class="lab">Auto-dry</span><span class="chip">off</span>
+              </div>
+              <p class="note">Would start at 45&nbsp;% RH and stop at 35&nbsp;%.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">Nothing editable that the backend cannot act on. The configured
+      values are still visible — you just change them where they actually live.</p>
+    </div>
+
+    <div class="ba-item">
+      <span class="ba-tag">drying</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">ACE 2 Pro &mdash; environment</span></div>
+          <div class="p-main">
+            <div class="card">
+              <div class="rowsplit">
+                <div><span class="lab">Chamber</span><div class="big">48 &deg;C</div></div>
+                <div><span class="lab">Humidity</span><div class="big">22 %</div></div>
+                <span class="pill">Drying</span>
+              </div>
+            </div>
+            <div class="card">
+              <div class="rowsplit">
+                <span class="lab">Drying to 55 &deg;C</span>
+                <span class="ro"><b>3 h 12 m</b> left</span>
+              </div>
+              <div class="bar"><i style="width:20%"></i></div>
+              <div class="btn stop">Stop drying</div>
+            </div>
+            <div class="card">
+              <div class="rowsplit">
+                <span class="lab">Auto-dry</span><span class="chip on">on &middot; master</span>
+              </div>
+              <p class="note">Started automatically at 45&nbsp;% RH. Stops at 35&nbsp;%.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">Progress and remaining come straight from
+      <code>dryer_status.remain_time</code> and <code>duration</code> — the existing
+      <code>DryerInfo::get_progress_pct()</code> already computes exactly this.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="tick">B</span><h2>Several ACEs</h2></div>
+  <p>Up to four. The panel is per unit, so the chips select which one and everything below
+  follows. <code>ACED__Dry_Stop</code> stops <em>the current ACE</em>, so selecting a unit has
+  to also make it current — otherwise Stop would act on whichever ACE happened to be active.</p>
+
+  <div class="bench">
+    <div class="ba-item">
+      <span class="ba-tag warn">3 ACEs, the middle one drying</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">ACE drying</span></div>
+          <div class="p-main">
+            <div class="unitpick">
+              <span class="chip">ACE 1</span><span class="chip on">ACE 2</span><span class="chip">ACE 3</span>
+            </div>
+            <div class="card">
+              <div class="rowsplit">
+                <div><span class="lab">Chamber</span><div class="big">48 &deg;C</div></div>
+                <div><span class="lab">Humidity</span><div class="big">22 %</div></div>
+                <span class="pill">Drying</span>
+              </div>
+            </div>
+            <div class="card">
+              <div class="rowsplit">
+                <span class="lab">Drying to 55 &deg;C</span>
+                <span class="ro"><b>3 h 12 m</b> left</span>
+              </div>
+              <div class="bar"><i style="width:20%"></i></div>
+              <div class="two">
+                <div class="btn stop">Stop</div>
+                <div class="btn off">Start &mdash; ACE 2 only</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">Per-ACE temp/duration overrides exist in multiACE's config
+      (<code>dryer_temp_0</code>, <code>dryer_duration_1</code>…), so the read-only line is
+      per unit too, not one global value.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="tick">?</span><h2>Two calls I'd like you to make</h2></div>
+
+  <dl class="q">
+    <dt>The temp / duration inputs — drop them, or keep them and write config?</dt>
+    <dd>Mocked above as read-only, which is honest and small. The alternative is for
+    HelixScreen to edit multiACE's config file and restart Klipper to apply — a much bigger,
+    much more invasive feature, and one that fights multiACE for ownership of its own config.
+    I would drop them here and leave the config where it is.</dd>
+
+    <dt>Auto-dry — display only, or a toggle?</dt>
+    <dd>Shown display-only above. multiACE's macro table lists no auto-dry command, so a toggle
+    would need the same config-writing machinery as the point above. Worth confirming: if
+    <code>ACED__</code> has an undocumented auto-dry macro I have not found, a toggle is easy.</dd>
+  </dl>
+
+  <p style="margin-top:1.2rem"><strong>What it takes either way:</strong>
+  <code>AmsBackendMultiAce::get_dryer_info(unit)</code> mapping the parsed
+  <code>dryer_status</code> onto the existing struct, <code>start_drying()</code> emitting
+  <code>ACED__Dry_Start_&lt;n&gt;</code> and <code>stop_drying()</code> emitting
+  <code>ACED__Dry_Stop</code>, plus a <code>supports_fan_control = false</code> and honest
+  min/max from the config cap. The panel itself already exists and needs no new screen.</p>
+</section>
+
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  document.getElementById('themetoggle').addEventListener('click', function () {
+    var now = root.getAttribute('data-theme');
+    if (!now) now = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    root.setAttribute('data-theme', now === 'dark' ? 'light' : 'dark');
+  });
+  document.querySelectorAll('[data-fit]').forEach(function (scr) {
+    var over = scr.scrollWidth > 481 || scr.scrollHeight > 321;
+    scr.querySelectorAll('*').forEach(function (el) {
+      if ((el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1) &&
+          getComputedStyle(el).overflow !== 'visible') over = true;
+    });
+    var tag = document.createElement('span');
+    tag.className = 'fit ' + (over ? 'no' : 'ok');
+    tag.textContent = over ? '480x320 — OVERFLOWS' : '480x320 — fits';
+    var item = scr.closest('.ba-item');
+    if (item) item.appendChild(tag);
+  });
+})();
+</script>
