@@ -225,10 +225,27 @@ static void update_filament_ring_size(AmsSlotData* data) {
  * The single clamp-and-store path for the per-slot fill subject: used by the
  * fill-subject observer and the initial-value apply in setup_slot_observers().
  */
+/// Defined below — an assigned lane keeps its identity after an eject.
+static bool slot_has_retained_identity(int slot_index);
+
 static void apply_slot_fill_pct(AmsSlotData* data, int pct) {
     if (!data)
         return;
     pct = std::clamp(pct, 0, 100);
+
+    // An assigned-but-empty lane keeps a sliver of its filament colour.
+    // display_fill_level() returns 0 for anything not present, and the spool is
+    // a canvas whose coloured ring is SIZED by fill — so a slot you had just
+    // assigned a red spool to drew no red at all, only the grey hub. The 20%
+    // ghost apply_slot_status() puts on it had nothing to tint. Same idea, and
+    // the same shared minimum, that the mini-status strip already uses via
+    // fill_percent_from_slot(slot, min_pct) so one lane cannot read empty on one
+    // surface and assigned on another.
+    if (pct == 0 && data->last_status == SlotStatus::EMPTY &&
+        slot_has_retained_identity(data->slot_index)) {
+        pct = ams_draw::SPOOL_ASSIGNED_MIN_FILL_PCT;
+    }
+
     data->fill_level = static_cast<float>(pct) / 100.0f;
     update_filament_ring_size(data);
 }

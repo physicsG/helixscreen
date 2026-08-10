@@ -46,8 +46,19 @@ SlotError::Severity worst_unit_severity(const AmsUnit& unit);
 // Data Helpers
 // ============================================================================
 
+/**
+ * Minimum rendered fill for a lane that HAS an assigned spool.
+ *
+ * display_fill_level() is 0 for anything not present, and every spool visual
+ * sizes its coloured ring by fill — so without a floor, a lane you just
+ * assigned a spool to renders as bare grey chrome with no hint of its colour.
+ * Shared so the mini-status strip, the overview bars and the slot widget all
+ * agree on what "assigned but empty" looks like.
+ */
+constexpr int SPOOL_ASSIGNED_MIN_FILL_PCT = 5;
+
 /** Calculate fill percentage from SlotInfo weight data (returns min_pct..100, or 100 if unknown) */
-int fill_percent_from_slot(const SlotInfo& slot, int min_pct = 5);
+int fill_percent_from_slot(const SlotInfo& slot, int min_pct = SPOOL_ASSIGNED_MIN_FILL_PCT);
 
 /**
  * Calculate bar width to fit slot_count bars in container_width.
