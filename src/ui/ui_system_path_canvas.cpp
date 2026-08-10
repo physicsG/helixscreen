@@ -510,28 +510,28 @@ static int32_t calc_tool_x(int tool_index, int total_tools, int32_t x_off, int32
 
 // One dispatch point for the user's configured toolhead style.
 static void draw_toolhead_glyph(lv_layer_t* layer, int32_t cx, int32_t cy, lv_color_t color,
-                                int32_t scale) {
+                                int32_t scale, lv_opa_t opa = LV_OPA_COVER) {
     switch (helix::SettingsManager::instance().get_effective_toolhead_style()) {
     case helix::ToolheadStyle::A4T:
-        draw_nozzle_a4t(layer, cx, cy, color, scale);
+        draw_nozzle_a4t(layer, cx, cy, color, scale, opa);
         break;
     case helix::ToolheadStyle::ANTHEAD:
-        draw_nozzle_anthead(layer, cx, cy, color, scale);
+        draw_nozzle_anthead(layer, cx, cy, color, scale, opa);
         break;
     case helix::ToolheadStyle::JABBERWOCKY:
-        draw_nozzle_jabberwocky(layer, cx, cy, color, scale);
+        draw_nozzle_jabberwocky(layer, cx, cy, color, scale, opa);
         break;
     case helix::ToolheadStyle::STEALTHBURNER:
-        draw_nozzle_stealthburner(layer, cx, cy, color, scale);
+        draw_nozzle_stealthburner(layer, cx, cy, color, scale, opa);
         break;
     case helix::ToolheadStyle::CREALITY_K1:
-        draw_nozzle_creality_k1(layer, cx, cy, color, scale);
+        draw_nozzle_creality_k1(layer, cx, cy, color, scale, opa);
         break;
     case helix::ToolheadStyle::CREALITY_K2:
-        draw_nozzle_creality_k2(layer, cx, cy, color, scale);
+        draw_nozzle_creality_k2(layer, cx, cy, color, scale, opa);
         break;
     default:
-        draw_nozzle_bambu(layer, cx, cy, color, scale);
+        draw_nozzle_bambu(layer, cx, cy, color, scale, opa);
         break;
     }
 }
@@ -756,8 +756,33 @@ static int collect_hub_route_and_draw_stem(lv_layer_t* layer, SystemPathData* da
                            /*active=*/is_active);
     }
 
+    // A hub box at the toolhead says "these lanes combine HERE". That is true
+    // for a Box Turtle feeding its own nozzle, and false when the toolhead
+    // belongs to another unit: the combining happens inside this unit, and the
+    // nozzle is simply shared. multiACE is the case — an ACE bound to a U1 head
+    // drew a hub box sitting on E3, as though the U1's own head were a combiner.
+    // Draw a plain route to the shared nozzle instead.
+    bool tool_is_shared = false;
+    for (int u = 0; u < data->unit_count && u < SystemPathData::MAX_UNITS; ++u) {
+        if (u == i) {
+            continue;
+        }
+        const int other_first = data->unit_first_tool[u];
+        const int other_last = other_first + data->unit_tool_count[u];
+        if (first_tool >= other_first && first_tool < other_last) {
+            tool_is_shared = true;
+            break;
+        }
+    }
+
     int32_t dist = unit_x > tool_x ? (unit_x - tool_x) : (tool_x - unit_x);
-    all_routes[total_routes++] = {i, first_tool, unit_x, hub_merge_y, tool_x, end_y_mh, dist, true};
+    all_routes[total_routes++] = {i,      first_tool, unit_x,          hub_merge_y,
+                                  tool_x, tool_is_shared ? L.tools_y : end_y_mh,
+                                  dist,   !tool_is_shared};
+    if (tool_is_shared) {
+        hub_infos[i].valid = false;
+        return total_routes;
+    }
 
     // Save hub info for deferred drawing
     bool hub_has_filament = is_active && data->filament_loaded;
@@ -923,9 +948,17 @@ static void draw_tool_row(lv_layer_t* layer, SystemPathData* data, const SysLayo
     for (int t = 0; t < data->total_tools && t < SystemPathData::MAX_TOOLS; ++t) {
         int32_t tool_x = calc_tool_x(t, data->total_tools, L.x_off, L.width);
         bool is_active_tool = (t == data->active_tool) && data->filament_loaded;
+        // On a toolchanger only ONE head is on the carriage, so drawing all of
+        // them at full strength reads as "all active". Dim the rest, matching
+        // what the per-unit detail canvas already does with is_mounted. The
+        // mounted head stays solid even when nothing is loaded in it -- being
+        // picked up is itself the state worth seeing.
+        const bool is_mounted_tool = (data->current_tool >= 0 && t == data->current_tool);
+        const bool prominent = is_active_tool || is_mounted_tool;
+        const lv_opa_t noz_opa = prominent ? LV_OPA_COVER : LV_OPA_40;
 
         lv_color_t noz_color = is_active_tool ? L.active_color_lv : L.nozzle_color;
-        draw_toolhead_glyph(layer, tool_x, L.tools_y, noz_color, small_scale);
+        draw_toolhead_glyph(layer, tool_x, L.tools_y, noz_color, small_scale, noz_opa);
 
         // Tool badge below nozzle — use pre-formatted label from data
         if (data->label_font && t < SystemPathData::MAX_TOOLS) {
