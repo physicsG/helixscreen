@@ -1,5 +1,44 @@
 # Snapmaker U1 + multiACE — support plan
 
+> ## ▶ START HERE (new session, 2026-08-10)
+>
+> **Branch:** `feat/snapmaker-multiace` — 6 commits, **nothing pushed**. `main` is synced to
+> upstream `c80f0be4e`.
+>
+> **State:** the U1 multi-filament panel is fixed and hardware-verified — four independent
+> toolheads, correct mount election, mounted≠loaded, and the loaded card populated with
+> Unload enabled. The multiACE *backend* has not been started.
+>
+> **Do these in order:**
+> 1. **§10.1 — three failing unit tests.** `./build/bin/helix-tests "[snapmaker]"` is
+>    85/3. A candidate fix is written down but **unverified**; build the test binary and run
+>    `[snapmaker]` + `[ams]` before believing it. Nothing should be pushed until this is green.
+> 2. **§10.2 — ACE-fed unload leaves the UI stuck.** Needs the Phase 2 backend, not a patch.
+> 3. **§10.3 — toolhead context menu.** Design settled, nothing built.
+> 4. **Phase 2 proper** (§4) — `AmsBackendMultiAce`.
+>
+> **Driving the real printer from a dev box** (no deploy, no SSH — this is the whole loop):
+> ```bash
+> export HELIX_SOCK=/tmp/helix-u1.sock HELIX_CONFIG_DIR=/tmp/helix-cfg-u1
+> mkdir -p "$HELIX_CONFIG_DIR" && cp /tmp/helix-seed/settings.json "$HELIX_CONFIG_DIR/"
+> ./build/bin/helix-screen --moonraker 192.168.2.242:7125 -s tiny -vv \
+>     --log-dest file --log-file /tmp/helix-app.log --remote-socket "$HELIX_SOCK" &
+> ./build/bin/helix-screen ctl -s "$HELIX_SOCK" click tour_skip_btn
+> ./build/bin/helix-screen ctl -s "$HELIX_SOCK" navigate filament
+> ./build/bin/helix-screen ctl -s "$HELIX_SOCK" click ams_bars_container   # -> ams_panel
+> ./build/bin/helix-screen ctl -s "$HELIX_SOCK" screenshot /tmp/x.png
+> ```
+> `-s tiny` **is** the U1's 480x320. `--log-dest file` is mandatory — the default routes to
+> journal and stdout looks silent. `navigate ams` does not exist. **It is read-write against
+> the live machine**: navigate and screenshot freely, but any Load/Unload really moves
+> filament.
+>
+> **Seed config caveat:** `/tmp/helix-seed/settings.json` is a completed-wizard config and
+> lives in `/tmp` — it will not survive a reboot. Without it every run hits the first-run
+> wizard plus an 8-step tour. If it is gone, run once without it, click through the wizard by
+> hand, then copy the resulting `settings.json` back to `/tmp/helix-seed/`.
+
+
 > **v2, 2026-08-09 — verified against live hardware** (U1 at `192.168.2.242`, Klipper
 > `1.5.2.13_20260722102206`, multiACE `0.99.6.1b`). v1 of this plan was written from source
 > reading alone and guessed the wrong root cause for the merged-toolhead drawing; §2 is the

@@ -664,6 +664,43 @@ tr.broken td { background: color-mix(in srgb, var(--bad) 9%, transparent); }
   font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.08em;
   text-transform: uppercase; color: #7C7A88; text-align: center;
 }
+
+/* ---------------- Currently Loaded card states ---------------- */
+.cardrow { display: flex; gap: 0.9rem; flex-wrap: wrap; justify-content: center; }
+.cardcase { display: flex; flex-direction: column; gap: 0.5rem; align-items: center; width: 178px; }
+.cardcase.hilite .loadcard { border-color: var(--d-success); }
+.loadcard {
+  width: 100%; background: var(--d-card); border: 1px solid var(--d-border);
+  border-radius: 5px; padding: 9px; display: flex; flex-direction: column; gap: 7px;
+}
+.lc-title {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.11em;
+  text-transform: uppercase; color: var(--d-subtle);
+}
+.lc-body { display: flex; align-items: center; gap: 8px; min-height: 34px; }
+.lc-ring { width: 26px; height: 26px; border-radius: 50%; border: 6px solid var(--sw, var(--d-subtle)); flex: none; box-sizing: border-box; }
+.lc-ring.is-empty { border-style: dotted; border-color: var(--d-border); }
+.lc-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.lc-txt b { font-size: 12px; font-weight: 600; color: var(--d-text); }
+.lc-txt small { font-family: var(--mono); font-size: 9px; color: var(--d-muted); }
+.lc-none { font-size: 12px; color: var(--d-subtle); }
+.lc-state {
+  font-size: 10px; color: var(--d-muted); text-align: center;
+  border-top: 1px solid var(--d-border); padding-top: 6px;
+}
+.lc-state.ok   { color: var(--d-success); }
+.lc-state.warn { color: var(--d-warning); }
+.lc-state.busy { color: var(--d-primary); }
+.lc-btns { display: flex; gap: 5px; }
+.lc-btns .btn { flex: 1; padding: 5px; font-size: 10px; }
+.sig {
+  font-family: var(--mono); font-size: 0.62rem; color: var(--muted);
+  text-align: center; letter-spacing: 0.02em; line-height: 1.5;
+}
+.sig b { font-weight: 700; }
+.sig b.yes  { color: var(--good); }
+.sig b.no   { color: var(--muted); }
+.sig b.busy { color: var(--accent); }
 </style>
 
 <div class="wrap">
@@ -1377,6 +1414,106 @@ HELIX_MOCK_AMS=multiace HELIX_MOCK_ACE_COUNT=1 \
           seeing it on the real panel.</li>
         <li>Keep the AFC shim long-term, or retire it once multiACE is detected natively?</li>
       </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <div class="sec-head"><span class="tick">09</span><h2>The "Currently Loaded" card</h2></div>
+
+  <div class="prose stack" style="margin-bottom:1.5rem">
+    <p>The card has three facts available to it and currently renders only one of them.
+      <strong>Mounted</strong> (which head is on the carriage) comes from the extruder pins.
+      <strong>Present</strong> (filament is in this head) comes from two independent sensors
+      that agree. <strong>Fed</strong> (it reached the nozzle) comes from the
+      <code>channel_state</code> latch — the only one of the three that can be wrong, because
+      it is derived from a transition HelixScreen has to witness.</p>
+    <p>Below: what the card should say in each real state, and the signals behind it.</p>
+  </div>
+
+  <div class="bench dev" id="bench-card">
+    <div class="cardrow">
+
+      <div class="cardcase">
+        <span class="ba-tag">nothing mounted</span>
+        <div class="loadcard">
+          <span class="lc-title">Currently Loaded</span>
+          <div class="lc-body"><span class="lc-none">No tool mounted</span></div>
+          <span class="lc-state">Idle</span>
+          <div class="lc-btns"><span class="btn ghost">Load</span><span class="btn ghost">Unload</span></div>
+        </div>
+        <p class="sig">mounted <b class="no">—</b> · present <b class="no">—</b> · fed <b class="no">—</b></p>
+      </div>
+
+      <div class="cardcase">
+        <span class="ba-tag">mounted, empty</span>
+        <div class="loadcard">
+          <span class="lc-title">Currently Loaded</span>
+          <div class="lc-body">
+            <span class="lc-ring is-empty"></span>
+            <span class="lc-txt"><b>Empty</b><small>T2 mounted</small></span>
+          </div>
+          <span class="lc-state">Idle</span>
+          <div class="lc-btns"><span class="btn pri">Load</span><span class="btn ghost">Unload</span></div>
+        </div>
+        <p class="sig">mounted <b class="yes">T2</b> · present <b class="no">no</b> · fed <b class="no">no</b></p>
+      </div>
+
+      <div class="cardcase hilite">
+        <span class="ba-tag good">today's T3</span>
+        <div class="loadcard">
+          <span class="lc-title">Currently Loaded</span>
+          <div class="lc-body">
+            <span class="lc-ring" style="--sw:#83AFFF"></span>
+            <span class="lc-txt"><b>PETG</b><small>Kingroon · T3</small></span>
+          </div>
+          <span class="lc-state warn">In toolhead · heat to extrude</span>
+          <div class="lc-btns"><span class="btn ghost">Load</span><span class="btn pri">Unload</span></div>
+        </div>
+        <p class="sig">mounted <b class="yes">T3</b> · present <b class="yes">yes</b> · fed <b class="no">latch lost</b></p>
+      </div>
+
+      <div class="cardcase">
+        <span class="ba-tag">loaded &amp; hot</span>
+        <div class="loadcard">
+          <span class="lc-title">Currently Loaded</span>
+          <div class="lc-body">
+            <span class="lc-ring" style="--sw:#83AFFF"></span>
+            <span class="lc-txt"><b>PETG</b><small>Kingroon · T3</small></span>
+          </div>
+          <span class="lc-state ok">Ready · 245 °C</span>
+          <div class="lc-btns"><span class="btn ghost">Load</span><span class="btn pri">Unload</span></div>
+        </div>
+        <p class="sig">mounted <b class="yes">T3</b> · present <b class="yes">yes</b> · fed <b class="yes">yes</b></p>
+      </div>
+
+      <div class="cardcase">
+        <span class="ba-tag">loading</span>
+        <div class="loadcard">
+          <span class="lc-title">Currently Loaded</span>
+          <div class="lc-body">
+            <span class="lc-ring" style="--sw:#1E9E4A"></span>
+            <span class="lc-txt"><b>PLA Basic</b><small>Green · T0</small></span>
+          </div>
+          <span class="lc-state busy">Feeding… 2 of 5</span>
+          <div class="lc-btns"><span class="btn ghost">Load</span><span class="btn ghost">Unload</span></div>
+        </div>
+        <p class="sig">mounted <b class="yes">T0</b> · present <b class="yes">yes</b> · fed <b class="busy">in progress</b></p>
+      </div>
+
+    </div>
+    <p class="bench-caption">the sidebar card at panel scale · buttons shown enabled/disabled as they should gate</p>
+  </div>
+
+  <div class="prose stack" style="margin-top:1.6rem">
+    <div class="claim">
+      <p>The load-bearing change is the third case. <strong>Present</strong> — not
+      <strong>fed</strong> — should decide whether the card names a filament and whether
+      Unload is offered, because presence is what two sensors actually measure. The latch then
+      only refines the <em>state line</em>: "In toolhead · heat to extrude" versus "Ready".
+      That way a latch HelixScreen never witnessed downgrades the wording, not your ability to
+      get the filament out.</p>
     </div>
   </div>
 </section>
