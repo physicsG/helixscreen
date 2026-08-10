@@ -81,7 +81,23 @@ SlotRenderStates compute_slot_render_states(const FilamentPathData* data) {
 
         // Active slot overrides with current load/unload state when present.
         s.is_mounted = (i == data->active_slot);
-        if (s.is_mounted && data->filament_segment > 0) {
+
+        // The aggregate (filament_segment / filament_color) is a SERIAL-topology
+        // idea: one shared route to one nozzle, so "what is in the system" and
+        // "what is in the active slot" are the same sentence. On PARALLEL they
+        // are not — each tool owns its own path, and the backend answers per
+        // slot via get_slot_filament_segment(). Letting the aggregate write
+        // has_filament there invents filament on an empty mounted tool: the
+        // Snapmaker U1's get_filament_segment() never returns NONE (it floors at
+        // SPOOL), so the mounted tool always tripped this branch and drew a full
+        // lane in the aggregate colour — white, on a machine whose empty slots
+        // report filament_color_rgba "FFFFFFFF". T0 looked as loaded as T3.
+        //
+        // So on PARALLEL the aggregate may REFINE a slot that genuinely has
+        // filament (it carries the live segment mid-load) but may never create
+        // one. Other topologies keep the original behaviour.
+        const bool parallel = data->topology == static_cast<int>(PathTopology::PARALLEL);
+        if (s.is_mounted && data->filament_segment > 0 && (!parallel || s.has_filament)) {
             s.has_filament = true;
             s.color = lv_color_hex(data->filament_color);
             s.segment = static_cast<PathSegment>(data->filament_segment);

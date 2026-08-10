@@ -1336,6 +1336,25 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
 
     // Snapmaker U1 SnapSwap — RFID filament, feed modules, task config, extruder states
     if (hw.mmu_type() == AmsType::SNAPMAKER) {
+        // The U1's extruder objects carry custom toolchanger fields
+        // (state/park_pin/active_pin/activating_move) on top of the usual heater
+        // ones. The heaters loop above subscribes every extruder with just
+        // {temperature, target}, so those custom fields never arrived and
+        // AmsBackendSnapmaker::parse_extruder_state() had nothing to read — which
+        // is why the active-tool election fell back to toolhead.extruder, a field
+        // Klipper always populates and which therefore elected T0 even with all
+        // four toolheads parked. Re-subscribe them here (this block runs after the
+        // heaters loop, so it wins) with the union of both sets.
+        static const json snapmaker_extruder_fields =
+            json::array({"temperature", "target", "state", "park_pin", "active_pin",
+                         "activating_move", "extruder_offset"});
+        const auto& all_heaters = hw.heaters();
+        for (int i = 0; i < 4; ++i) {
+            const std::string key = (i == 0) ? "extruder" : fmt::format("extruder{}", i);
+            if (std::find(all_heaters.begin(), all_heaters.end(), key) != all_heaters.end()) {
+                subscription_objects[key] = snapmaker_extruder_fields;
+            }
+        }
         subscription_objects["filament_detect"] = nullptr;
         subscription_objects["filament_feed left"] = nullptr;
         subscription_objects["filament_feed right"] = nullptr;

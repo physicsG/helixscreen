@@ -47,7 +47,12 @@ enum class AmsType {
     AD5X_IFS = 5,     ///< FlashForge AD5X IFS (Intelligent Filament Switching)
     CFS = 6,          ///< Creality Filament System (K2 series, RS-485)
     SNAPMAKER = 7,    ///< Snapmaker U1 SnapSwap toolchanger
-    QIDI_BOX = 8 ///< QIDI Box filament changer (PLUS4, Q2, MAX4 — hub AMS, 4 slots chainable to 16)
+    QIDI_BOX = 8, ///< QIDI Box filament changer (PLUS4, Q2, MAX4 — hub AMS, 4 slots chainable to 16)
+    /// multiACE (decay71/multiACE): 1-4 Anycubic ACE Pro / ACE 2 units bolted onto a
+    /// Snapmaker U1's four toolheads. Registers a Klipper object literally named `ace`,
+    /// which is ALSO the community Anycubic driver's name — see PrinterDiscovery for how
+    /// the two are told apart. Superset of SNAPMAKER: the U1's own heads plus the ACE units.
+    MULTIACE = 9
 };
 
 /**
@@ -73,6 +78,8 @@ inline const char* ams_type_to_string(AmsType type) {
         return "Snapmaker";
     case AmsType::QIDI_BOX:
         return "QIDI Box"; // i18n: do not translate - product name
+    case AmsType::MULTIACE:
+        return "multiACE"; // i18n: do not translate - product name
     default:
         return "None";
     }

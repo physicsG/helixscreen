@@ -238,7 +238,18 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
                                                    const std::map<int, int>& remap) const override;
 
     // Static parsers (public for testing)
-    static ExtruderToolState parse_extruder_state(const nlohmann::json& json);
+    /// Parse one extruder object into tool state.
+    ///
+    /// @param json  The (possibly PARTIAL) extruder object from a status frame.
+    /// @param prev  State to start from. Moonraker sends deltas, and an extruder
+    ///              emits `temperature` constantly, so most frames carry ONLY
+    ///              that — with a default-constructed start those frames erased
+    ///              state/park_pin/active_pin a fraction of a second after a
+    ///              toolchange set them, and the mounted tool stopped being
+    ///              elected. Seed with the previous state so absent keys are
+    ///              preserved rather than reset.
+    static ExtruderToolState parse_extruder_state(const nlohmann::json& json,
+                                                  ExtruderToolState prev = {});
     static SnapmakerRfidInfo parse_rfid_info(const nlohmann::json& json);
 
   protected:

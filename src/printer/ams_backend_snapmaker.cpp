@@ -949,8 +949,11 @@ AmsError AmsBackendSnapmaker::disable_bypass() {
 // Static Parsers
 // ============================================================================
 
-ExtruderToolState AmsBackendSnapmaker::parse_extruder_state(const nlohmann::json& json) {
-    ExtruderToolState state;
+ExtruderToolState AmsBackendSnapmaker::parse_extruder_state(const nlohmann::json& json,
+                                                            ExtruderToolState prev) {
+    // Seeded with the previous state: every field below is written only when the
+    // key is present, so a partial delta leaves the rest intact. See the header.
+    ExtruderToolState state = std::move(prev);
 
     if (json.contains("state") && json["state"].is_string()) {
         state.state = json["state"].get<std::string>();
@@ -1082,7 +1085,7 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
         for (int i = 0; i < NUM_TOOLS; i++) {
             const auto& key = extruder_keys[i];
             if (status.contains(key) && status[key].is_object()) {
-                auto new_state = parse_extruder_state(status[key]);
+                auto new_state = parse_extruder_state(status[key], extruder_states_[i]);
 
                 // Update slot status based on extruder state (only if pin state changed)
                 auto* slot = system_info_.units[0].get_slot(i);
@@ -1105,17 +1108,40 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
         // Only update when we have actual evidence — incremental status updates
         // may omit extruder/toolhead keys, so preserve the current value when
         // no relevant data is present (prevents oscillation between valid and -1).
-        bool has_extruder_data = false;
+        // The per-extruder pins are authoritative, and "every one PARKED" is a
+        // real answer, not an absence of one: the carriage is empty. That is
+        // exactly the state MountState::NONE exists to express — on a
+        // toolchanger every parked head may hold filament while the shuttle
+        // carries none.
+        //
+        // toolhead.extruder cannot say that. Klipper always names some extruder
+        // there (it defaults to "extruder"), so consulting it unconditionally
+        // elected T0 whenever nothing was mounted, forced its slot to LOADED,
+        // and set filament_loaded — the panel drew an empty parked tool as the
+        // active, loaded one, and the sidebar's Unload acted on it. Keep it as a
+        // fallback only for a frame that has never carried extruder objects.
+        bool has_pin_data = false;
         int active = -1;
         for (int i = 0; i < NUM_TOOLS; i++) {
-            if (extruder_states_[i].active_pin ||
-                (!extruder_states_[i].state.empty() && extruder_states_[i].state != "PARKED")) {
+            const auto& st = extruder_states_[i];
+            if (st.active_pin || st.park_pin || !st.state.empty()) {
+                has_pin_data = true;
+            }
+            if (st.active_pin || (!st.state.empty() && st.state != "PARKED")) {
                 active = i;
-                has_extruder_data = true;
                 break;
             }
         }
-        if (status.contains("toolhead") && status["toolhead"].is_object()) {
+        if (spdlog::should_log(spdlog::level::trace)) {
+            for (int i = 0; i < NUM_TOOLS; i++) {
+                const auto& st = extruder_states_[i];
+                spdlog::trace("[AmsBackendSnapmaker] T{} state='{}' park={} active={} -> "
+                              "pin_data={} elected={}",
+                              i, st.state, st.park_pin, st.active_pin, has_pin_data, active);
+            }
+        }
+        bool has_extruder_data = has_pin_data;
+        if (!has_pin_data && status.contains("toolhead") && status["toolhead"].is_object()) {
             const auto& th = status["toolhead"];
             if (th.contains("extruder") && th["extruder"].is_string()) {
                 auto ext_name = th["extruder"].get<std::string>();
@@ -1141,7 +1167,15 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
             }
             system_info_.current_tool = active;
             system_info_.current_slot = active; // 1:1 tool-to-slot on Snapmaker
-            system_info_.filament_loaded = (active >= 0);
+            system_info_.mount_state = (active >= 0) ? MountState::MOUNTED : MountState::NONE;
+            system_info_.mounted_tool = active;
+            // Mounted is not loaded. `active >= 0` said "a tool is on the
+            // carriage", which the sidebar and the Unload gate both read as
+            // "filament is at a nozzle" — so an empty mounted tool offered an
+            // Unload that had nothing to retract. The channel_state latch is the
+            // per-tool answer to the actual question.
+            system_info_.filament_loaded =
+                (active >= 0 && active < NUM_TOOLS) && loaded_at_toolhead_[active];
             // Mark active tool's slot as LOADED
             if (active >= 0 && active < NUM_TOOLS) {
                 auto* slot = system_info_.units[0].get_slot(active);
