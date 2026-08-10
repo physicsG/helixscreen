@@ -313,6 +313,21 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// slot_has_filament_at_toolhead() and can_unload_from_toolhead(). The
     /// motion sensor (sensor_filament_present_) still owns mid-print runout —
     /// a different question ("did the ACTIVE lane run out during extrusion").
+    /// Set when the firmware POSITIVELY reported a retraction for this tool --
+    /// the terminal `unload_finish` / `preload_finish` states, never the idle
+    /// `wait_insert`. Cleared on load_finish and when the port sensor drops.
+    ///
+    /// Exists so the presence sensors can be believed by default while still
+    /// suppressing the old-firmware quirk (captured on U1 20260608) where the
+    /// motion sensor stayed true after an unload. On 20260722+ the sensors clear
+    /// themselves, so this is normally inert.
+    std::array<bool, NUM_TOOLS> retraction_seen_{{false, false, false, false}};
+
+    /// "Filament is in this toolhead" -- the gate for Unload being offered and
+    /// for a slot reading LOADED. The witnessed-load latch OR both presence
+    /// sensors agreeing without a witnessed retraction. Caller must hold mutex_.
+    [[nodiscard]] bool filament_present_at_tool_locked(int slot_index) const;
+
     std::array<bool, NUM_TOOLS> loaded_at_toolhead_{{false, false, false, false}};
 
     /// Validate slot index is within range

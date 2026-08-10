@@ -495,14 +495,33 @@ bool AmsBackendSnapmaker::can_unload_from_toolhead(int slot_index) const {
     if (!slot || !slot->is_present()) {
         return false;
     }
-    // Filament must be AT this toolhead, not merely parked in the buffer. The
-    // channel_state latch reads true only between load_finish and the next
-    // unload_finish/wait_insert/preload_finish. The per-tool motion sensor
-    // (e{N}_filament) is NOT a reliable load signal on current firmware — it
-    // stays true after an unload — so it must not gate Unload. Without the
-    // latch the menu kept offering Unload for an already-unloaded tool. See the
-    // header note + the u1_channel_state_reference.md live capture.
-    return loaded_at_toolhead_[slot_index];
+    return filament_present_at_tool_locked(slot_index);
+}
+
+bool AmsBackendSnapmaker::filament_present_at_tool_locked(int slot_index) const {
+    if (slot_index < 0 || slot_index >= NUM_TOOLS) {
+        return false;
+    }
+    // The witnessed-load latch is sufficient but NOT necessary. It is derived
+    // from a transition, so it only knows about loads this process saw happen:
+    // a Klipper restart, or starting the UI against an already-loaded machine,
+    // leaves it false with filament sitting in the toolhead. Gating Unload on it
+    // alone meant that filament could not be removed from the panel at all.
+    if (loaded_at_toolhead_[slot_index]) {
+        return true;
+    }
+    // Otherwise believe the hardware, but only when BOTH sensors agree. The
+    // motion sensor sits at the toolhead and answers the right question;
+    // requiring the port sensor too neutralises its default-true initialisation
+    // for slots that have no sensor configured.
+    //
+    // retraction_seen_ is the exception that keeps the old-firmware quirk
+    // handled: on U1 20260608 the motion sensor stayed true after an unload, so
+    // a positive unload_finish/preload_finish suppresses the sensors until the
+    // filament is reloaded or physically removed. Newer firmware clears the
+    // sensors itself, making this inert rather than version-gated.
+    return sensor_filament_present_[slot_index] && port_sensor_filament_present_[slot_index] &&
+           !retraction_seen_[slot_index];
 }
 
 bool AmsBackendSnapmaker::slot_has_filament_at_toolhead(int slot_index) const {
@@ -510,8 +529,9 @@ bool AmsBackendSnapmaker::slot_has_filament_at_toolhead(int slot_index) const {
     if (slot_index < 0 || slot_index >= NUM_TOOLS) {
         return false;
     }
-    // channel_state latch, NOT the motion sensor — see can_unload_from_toolhead.
-    return loaded_at_toolhead_[slot_index];
+    // The base contract is "filament present at this slot's toolhead" — see
+    // filament_present_at_tool_locked().
+    return filament_present_at_tool_locked(slot_index);
 }
 
 bool AmsBackendSnapmaker::slot_is_actively_loaded(int slot_index) const {
@@ -1289,6 +1309,12 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                             // is orthogonal to the port sensor reading.
                             if (i >= 0 && i < NUM_TOOLS) {
                                 port_sensor_filament_present_[i] = detected;
+                                // Filament physically gone: any earlier
+                                // retraction claim is spent, so a re-insert is
+                                // judged on the sensors again.
+                                if (!detected) {
+                                    retraction_seen_[i] = false;
+                                }
                             }
                             auto* slot = system_info_.units[0].get_slot(i);
                             if (slot) {
@@ -1346,6 +1372,17 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                             } else if (info.clears_loaded && loaded_at_toolhead_[i]) {
                                 loaded_at_toolhead_[i] = false;
                                 changed = true;
+                            }
+                            // A POSITIVE retraction is a terminal clear
+                            // (unload_finish / preload_finish). `wait_insert`
+                            // also clears the latch but is merely the idle
+                            // state -- treating it as a retraction claim is
+                            // what made a machine that had simply restarted
+                            // look unloaded.
+                            if (info.sets_loaded) {
+                                retraction_seen_[i] = false;
+                            } else if (info.clears_loaded && info.is_terminal) {
+                                retraction_seen_[i] = true;
                             }
                         }
 
@@ -1711,6 +1748,24 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
         if (port_val != last_published_port_present_) {
             last_published_port_present_ = port_val;
             port_present_changed = true;
+        }
+
+        // Recompute "is the mounted tool loaded" from the WHOLE frame.
+        //
+        // This used to live inside the election's `active != current_tool`
+        // guard, so it only ran on a tool CHANGE. Presence arrives from
+        // filament_feed, which is parsed after the extruder objects, so on the
+        // frame that elects a tool the sensors are still from the previous one
+        // -- and with no further tool change the stale answer was never
+        // revisited. A head could hold filament all day and the sidebar would
+        // keep saying nothing was loaded.
+        {
+            const int mounted = system_info_.current_tool;
+            const bool now_loaded = (mounted >= 0) && filament_present_at_tool_locked(mounted);
+            if (system_info_.filament_loaded != now_loaded) {
+                system_info_.filament_loaded = now_loaded;
+                changed = true;
+            }
         }
 
     } // Release mutex_ before emitting event
