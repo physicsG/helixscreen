@@ -520,8 +520,26 @@ bool AmsBackendSnapmaker::filament_present_at_tool_locked(int slot_index) const 
     // a positive unload_finish/preload_finish suppresses the sensors until the
     // filament is reloaded or physically removed. Newer firmware clears the
     // sensors itself, making this inert rather than version-gated.
-    return sensor_filament_present_[slot_index] && port_sensor_filament_present_[slot_index] &&
-           !retraction_seen_[slot_index];
+    if (sensor_filament_present_[slot_index] && port_sensor_filament_present_[slot_index] &&
+        !retraction_seen_[slot_index]) {
+        return true;
+    }
+    // Third signal: the MOUNTED head with a spool in its channel. The port
+    // sensor starts false and stays false until a filament_feed frame mentions
+    // this tool, so a machine that reports print_task_config but has not yet
+    // published filament_feed answers "nothing loaded" on the two sensor terms
+    // alone — the same false negative the latch had, one layer down.
+    //
+    // filament_exist (slot->is_present()) is a channel-level claim, not a
+    // nozzle-level one, so it is deliberately restricted to the tool actually on
+    // the carriage and still yields to a witnessed retraction. That keeps the
+    // case this whole chain exists to fix — a mounted but EMPTY head, where
+    // filament_exist is false — reading empty rather than as a full spool.
+    if (slot_index != system_info_.current_tool || retraction_seen_[slot_index]) {
+        return false;
+    }
+    const auto* slot = system_info_.get_slot_global(slot_index);
+    return slot != nullptr && slot->is_present();
 }
 
 bool AmsBackendSnapmaker::slot_has_filament_at_toolhead(int slot_index) const {
@@ -1652,18 +1670,10 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
             }
         }
 
-        // If the active tool's filament sensor reports runout, the global
-        // filament_loaded flag (used by get_filament_segment) should reflect that.
-        // The pin-state path above sets filament_loaded=(active>=0) — override
-        // here so the canvas's spool→toolhead line breaks on runout even though
-        // the tool itself is still "active".
-        if (system_info_.current_tool >= 0 && system_info_.current_tool < NUM_TOOLS &&
-            !sensor_filament_present_[system_info_.current_tool]) {
-            if (system_info_.filament_loaded) {
-                system_info_.filament_loaded = false;
-                changed = true;
-            }
-        }
+        // The active tool's runout used to clear filament_loaded here. It now
+        // rides in the single per-frame recompute at the tail of this function,
+        // which runs after this block and would otherwise put the flag straight
+        // back on the strength of the loaded latch.
 
         // Per-slot runout demotion: any slot whose motion sensor reports
         // no filament should be AVAILABLE (spool present, ready to feed), not
@@ -1759,12 +1769,40 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
         // -- and with no further tool change the stale answer was never
         // revisited. A head could hold filament all day and the sidebar would
         // keep saying nothing was loaded.
+        //
+        // This is the single owner of filament_loaded. It runs at the tail of
+        // every frame, so any earlier site that also wrote the field would be
+        // silently overruled here -- which is exactly how the motion-sensor
+        // runout clear (once its own block, just above the per-slot demotion
+        // loop) came to be undone by the latch. The runout term is folded in
+        // below instead.
         {
             const int mounted = system_info_.current_tool;
-            const bool now_loaded = (mounted >= 0) && filament_present_at_tool_locked(mounted);
+            const bool at_toolhead = (mounted >= 0) && filament_present_at_tool_locked(mounted);
+            // A runout breaks the path to the nozzle even though filament is
+            // still AT the toolhead for unload purposes -- which is why the
+            // motion sensor gates filament_loaded here and not
+            // filament_present_at_tool_locked(). Unload must stay offered after
+            // a runout; the canvas's spool->toolhead line must still break.
+            const bool now_loaded = at_toolhead && sensor_filament_present_[mounted];
             if (system_info_.filament_loaded != now_loaded) {
                 system_info_.filament_loaded = now_loaded;
                 changed = true;
+            }
+            // The mounted slot's status had the identical staleness: the
+            // election wrote it once, on a tool CHANGE, so a load that completed
+            // while the tool stayed put left the slot reading AVAILABLE forever.
+            // EMPTY is preserved -- that is the presence answer from
+            // filament_exist, a different question from where the filament is.
+            if (mounted >= 0 && mounted < NUM_TOOLS) {
+                auto* slot = system_info_.units[0].get_slot(mounted);
+                if (slot && slot->status != SlotStatus::EMPTY) {
+                    const auto want = now_loaded ? SlotStatus::LOADED : SlotStatus::AVAILABLE;
+                    if (slot->status != want) {
+                        slot->status = want;
+                        changed = true;
+                    }
+                }
             }
         }
 

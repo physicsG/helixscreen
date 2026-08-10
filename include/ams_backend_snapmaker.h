@@ -324,8 +324,10 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     std::array<bool, NUM_TOOLS> retraction_seen_{{false, false, false, false}};
 
     /// "Filament is in this toolhead" -- the gate for Unload being offered and
-    /// for a slot reading LOADED. The witnessed-load latch OR both presence
-    /// sensors agreeing without a witnessed retraction. Caller must hold mutex_.
+    /// for a slot reading LOADED. Any of three signals, in descending strength:
+    /// the witnessed-load latch; both presence sensors agreeing; or, for the
+    /// MOUNTED tool only, a spool in its channel (filament_exist). The last two
+    /// yield to a witnessed retraction. Caller must hold mutex_.
     [[nodiscard]] bool filament_present_at_tool_locked(int slot_index) const;
 
     std::array<bool, NUM_TOOLS> loaded_at_toolhead_{{false, false, false, false}};
