@@ -1087,18 +1087,14 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
             if (status.contains(key) && status[key].is_object()) {
                 auto new_state = parse_extruder_state(status[key], extruder_states_[i]);
 
-                // Update slot status based on extruder state (only if pin state changed)
-                auto* slot = system_info_.units[0].get_slot(i);
-                if (slot) {
-                    SlotStatus prev = slot->status;
-                    if (new_state.active_pin) {
-                        slot->status = SlotStatus::LOADED;
-                    } else if (new_state.park_pin) {
-                        slot->status = SlotStatus::AVAILABLE;
-                    }
-                    if (slot->status != prev)
-                        changed = true;
-                }
+                // Deliberately does NOT touch slot->status. active_pin/park_pin say
+                // which toolhead is on the carriage, not whether it holds
+                // filament, and conflating the two rendered the mounted tool's
+                // spool as full: T2 mounted and empty drew exactly like T3
+                // mounted and loaded. Slot status is owned by filament presence
+                // (print_task_config.filament_exist, below) and by the
+                // channel_state latch for "loaded at this toolhead"; the mount is
+                // carried separately in mount_state / mounted_tool.
 
                 extruder_states_[i] = std::move(new_state);
             }
@@ -1176,11 +1172,15 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
             // per-tool answer to the actual question.
             system_info_.filament_loaded =
                 (active >= 0 && active < NUM_TOOLS) && loaded_at_toolhead_[active];
-            // Mark active tool's slot as LOADED
+            // Mounting a tool does not load it. This used to promote the newly
+            // active slot to LOADED, which is how an empty mounted head came to
+            // render as a full spool. LOADED now means "filament reached THIS
+            // toolhead", which only the channel_state latch can attest.
             if (active >= 0 && active < NUM_TOOLS) {
                 auto* slot = system_info_.units[0].get_slot(active);
                 if (slot && slot->status != SlotStatus::EMPTY) {
-                    slot->status = SlotStatus::LOADED;
+                    slot->status = loaded_at_toolhead_[active] ? SlotStatus::LOADED
+                                                               : SlotStatus::AVAILABLE;
                 }
             }
             changed = true;
