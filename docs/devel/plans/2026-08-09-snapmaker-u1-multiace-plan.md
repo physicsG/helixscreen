@@ -308,3 +308,74 @@ asking you to take the numbers on trust.
 - **`AmsBackendMultiAce : AmsBackendSnapmaker`** means the U1 backend gains a subclass its
   `protected` surface was not designed for. Expect a small refactor and re-run the U1
   regression tests hard.
+
+---
+
+## 10. Handoff — open items (2026-08-10)
+
+Everything below is on `feat/snapmaker-multiace`, nothing pushed.
+
+### 10.1 Three failing unit tests — MUST fix before any PR
+
+`./build/bin/helix-tests "[snapmaker]"` → **85 passed, 3 failed**. All three are
+consequences of `5174f0f91`, and all three share one cause: they establish state with
+`toolhead: {extruder: "extruder"}` + `print_task_config.filament_exist` and expect slot 0 to
+read `LOADED`.
+
+| Test | Line |
+|---|---|
+| `can_unload_from_toolhead offers unload for every loaded toolhead` | `test_ams_backend_snapmaker.cpp:497` |
+| `motion-sensor runout path is independent of the loaded latch` | `test_ams_backend_snapmaker.cpp:1067` |
+| `overrides slot LIVE accessors from sensor + LOADED status` | `test_ams_realtime_filament_state.cpp:113` |
+
+They encode "mounted + spool present ⇒ LOADED". The mounted⇒loaded conflation had to go (an
+empty mounted head rendered as a full spool), but these cases have filament *present*, which
+is a weaker and more defensible claim than the mounted+empty one that was actually broken.
+
+**Candidate fix, unverified** — add a third presence term in
+`filament_present_at_tool_locked()`:
+
+```cpp
+|| (slot_index == system_info_.current_tool && slot->is_present() && !retraction_seen_[slot_index])
+```
+
+Expected: T2 mounted+empty stays empty (`filament_exist=false`), the three tests go green
+again, and the post-unload preload case stays suppressed by `retraction_seen_`. **Build the
+test binary and run `[snapmaker]` and `[ams]` before believing any of that.**
+
+### 10.2 ACE-fed head: unload never terminates in the UI
+
+Live repro on T3 (the only ACE-fed head): Unload from the multi-filament panel **succeeds on
+the printer** — `channel_state` reaches `preload_finish`, the toolhead motion sensor drops to
+false, `print_stats` stays `standby` — but the panel stays on "Unloading" forever.
+
+Two defects, probably one cause:
+
+1. The step list rendered during the unload is the **5-step LOAD model**
+   (Home/Select/Heat nozzle/Feed filament/Purge), not the 4-step unload model.
+2. The operation never terminates, even though `preload_finish` is marked
+   `is_terminal` in the channel-state table.
+
+Hypothesis: HelixScreen dispatches the U1's native unload and waits for `unload_finish`, but
+an ACE-fed head terminates at `preload_finish` because the ACE performs the retract. This is
+the first concrete case of the Phase 2 rule — **an ACE-fed head must be driven with
+`ACE_UNLOAD_HEAD HEAD=n`, not the native path** — and it will not be fixed properly until the
+backend knows which heads the ACE feeds (`ace.head_ace` / `ace.head_feeder`).
+
+### 10.3 Toolhead context menu — not started
+
+Design settled, nothing built. The canvas already hit-tests the nozzle separately from the
+spool (`ui_filament_path_canvas.cpp:174-199`); both regions currently call the same
+`slot_callback`, so the work is a second callback plus a menu.
+
+- **Select** — `T{n}`, shown when this head is not mounted
+- **Park** — `PARK_EXTRUDER` (native, undescribed so absent from `gcode/help`; used bare in
+  `PRINT_END`), shown only when this head IS mounted
+- **Load / Unload** — per-head, gated on presence
+
+### 10.4 Misleading wording in existing tests
+
+Several Snapmaker tests and comments say filament is retracted "to the buffer". The U1 has no
+buffer — that term is borrowed from AFC's TurtleNeck. The U1's own vocabulary is **preload**
+(`preloading` / `preload_finish`). Worth a comment-only pass so the next reader is not sent
+looking for hardware that does not exist.
