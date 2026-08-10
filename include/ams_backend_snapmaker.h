@@ -280,6 +280,14 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// deciding whether the ACE or the native path owns the head.
     AmsError validate_slot_index(int slot_index) const;
 
+    /// Layer the user's configured override over a slot. Protected because
+    /// AmsBackendMultiAce builds its ACE units AFTER this class's convergence
+    /// point has run, so those slots would otherwise never see the override
+    /// layer — a spool assigned to an ACE bay was written and then discarded.
+    void apply_overrides_for(SlotInfo& slot, int slot_index) {
+        apply_overrides(slot, slot_index);
+    }
+
   private:
     friend class ::SnapmakerTestAccess;
     friend class ::SnapmakerRealtimeTestAccess;

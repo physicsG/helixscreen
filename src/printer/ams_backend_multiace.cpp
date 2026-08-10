@@ -253,18 +253,25 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
 
 void AmsBackendMultiAce::rebuild_ace_units_locked() {
     // Unit 0 is the U1 and is owned by the base class — never touched here.
-    // Units 1..device_count_ mirror the ACE hardware. Rebuilt wholesale rather
-    // than patched: device_count can change when a unit is plugged or unplugged,
-    // and a stale trailing unit would keep drawing a device that is gone.
     if (system_info_.units.empty()) {
         return;
     }
-    system_info_.units.resize(1);
+
+    // Grow or shrink ONLY when the hardware count actually changed. This used to
+    // resize(1) and push_back fresh units on every `ace` frame, which arrive
+    // constantly — so a spool the user had just assigned to an ACE bay was
+    // discarded a fraction of a second later ("Slot 5 updated", then nothing),
+    // and the churn reset the panel out of the unit detail it was showing.
+    const size_t want_units = 1 + static_cast<size_t>(device_count_);
+    if (system_info_.units.size() != want_units) {
+        system_info_.units.resize(want_units);
+    }
 
     int next_global = NUM_TOOLS;
     for (int a = 0; a < device_count_; ++a) {
         const auto& st = ace_units_[a];
-        AmsUnit unit;
+        AmsUnit& unit = system_info_.units[static_cast<size_t>(a) + 1];
+
         unit.unit_index = a + 1;
         unit.name = fmt::format("ACE{}", a);
         // With one unit the model is the most useful label. With several, which
@@ -289,10 +296,14 @@ void AmsBackendMultiAce::rebuild_ace_units_locked() {
             unit.environment = env;
         }
 
+        if (unit.slots.size() != static_cast<size_t>(ACE_SLOTS_PER_UNIT)) {
+            unit.slots.assign(static_cast<size_t>(ACE_SLOTS_PER_UNIT), SlotInfo{});
+        }
         for (int s = 0; s < ACE_SLOTS_PER_UNIT; ++s) {
-            SlotInfo slot;
+            SlotInfo& slot = unit.slots[static_cast<size_t>(s)];
+            const int global_index = next_global++;
             slot.slot_index = s;
-            slot.global_index = next_global++;
+            slot.global_index = global_index;
             // gate_status is the ACE's own "is there filament at this bay",
             // which is the only presence signal it publishes for an idle slot —
             // slots[].status reads "unknown" on real hardware even when the
@@ -316,13 +327,18 @@ void AmsBackendMultiAce::rebuild_ace_units_locked() {
             } else if (s < NUM_TOOLS) {
                 slot.mapped_tool = s;
             }
-            unit.slots.push_back(slot);
+
+            // The base class's convergence point has already run by the time we
+            // get here, so these slots would never see the override layer
+            // without this — which is why a spool assigned to an ACE bay was
+            // written and then invisible.
+            apply_overrides_for(slot, global_index);
         }
-        system_info_.units.push_back(std::move(unit));
     }
 
     system_info_.total_slots = next_global;
-    spdlog::info("{} {} ACE unit(s) in {} mode -> {} units, {} slots total", backend_log_tag(),
+    // debug, not info: this runs on every `ace` frame.
+    spdlog::debug("{} {} ACE unit(s) in {} mode -> {} units, {} slots total", backend_log_tag(),
                  device_count_, head_mode_ ? "head" : "multi", system_info_.units.size(),
                  system_info_.total_slots);
 }
