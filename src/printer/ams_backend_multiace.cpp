@@ -77,6 +77,14 @@ AmsBackendMultiAce::AmsBackendMultiAce(MoonrakerAPI* api, helix::MoonrakerClient
 // Queries
 // ============================================================================
 
+PathTopology AmsBackendMultiAce::get_unit_topology(int unit_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (unit_index < 0 || unit_index >= static_cast<int>(system_info_.units.size())) {
+        return PathTopology::PARALLEL; // the U1 itself, and the safe default
+    }
+    return system_info_.units[unit_index].topology;
+}
+
 AmsBackendMultiAce::HeadSource AmsBackendMultiAce::head_source_kind(int head) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (head < 0 || head >= NUM_TOOLS) {

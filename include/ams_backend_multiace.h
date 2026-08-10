@@ -72,6 +72,14 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
      */
     enum class HeadSource { UNKNOWN, FEEDER, ACE, MANUAL };
 
+    /// Per-unit topology. The base falls back to the SYSTEM-wide answer, which
+    /// is PARALLEL here (the U1's four heads) — so without this override an ACE
+    /// unit in head mode drew as a parallel fan instead of the combiner it
+    /// physically is. Note `compute_system_tool_layout()` prefers the backend's
+    /// answer over `AmsUnit::topology`, so populating the struct alone is not
+    /// enough; it has to be answered here too.
+    [[nodiscard]] PathTopology get_unit_topology(int unit_index) const override;
+
     /// How head @p head is fed, per the last `ace` frame.
     [[nodiscard]] HeadSource head_source_kind(int head) const;
 

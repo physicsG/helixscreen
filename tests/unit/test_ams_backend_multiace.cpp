@@ -158,6 +158,21 @@ TEST_CASE_METHOD(HelixTestFixture, "multiACE adds ACE units alongside the U1's h
     CHECK(ace_unit.slots[0].mapped_tool == 3);
 }
 
+TEST_CASE_METHOD(HelixTestFixture, "multiACE answers per-unit topology, not the system one",
+                 "[ams][multiace]") {
+    // compute_system_tool_layout() and the unit detail both prefer the backend's
+    // get_unit_topology() over AmsUnit::topology, and the base implementation
+    // falls back to the SYSTEM answer — PARALLEL here. Populating the struct
+    // alone left the ACE drawing as a parallel fan instead of a combiner.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    CHECK(backend.get_unit_topology(0) == PathTopology::PARALLEL); // the U1's heads
+    CHECK(backend.get_unit_topology(1) == PathTopology::HUB);      // ACE in head mode
+    // Out of range must not read past the vector.
+    CHECK(backend.get_unit_topology(9) == PathTopology::PARALLEL);
+}
+
 TEST_CASE_METHOD(HelixTestFixture, "multiACE multi mode gives each ACE bay its own head",
                  "[ams][multiace]") {
     // In multi mode slot s feeds head s, so the unit is a parallel fan rather

@@ -984,3 +984,129 @@ TEST_CASE("SystemToolLayout: 2 HUB units sharing hub_tool_label=0 merge to 1 noz
     CHECK(layout.units[0].tool_count == 1);
     CHECK(layout.units[1].tool_count == 1);
 }
+
+// ============================================================================
+// Cross-unit head sharing (multiACE: an ACE feeds a head the U1 already owns)
+// ============================================================================
+
+TEST_CASE("SystemToolLayout: a unit feeding an already-owned head shares its nozzle",
+          "[ams][tool_layout][multiace]") {
+    // Snapmaker U1 + multiACE in head mode. Unit 0 is the four toolheads; unit 1
+    // is an ACE whose four bays all feed head 3. The ACE is a SOURCE for T3, not
+    // a fifth head — before this, the overview drew five nozzles and labelled T3
+    // twice on a four-head machine.
+    AmsSystemInfo info;
+    info.type = AmsType::MULTIACE;
+
+    AmsUnit u1;
+    u1.unit_index = 0;
+    u1.slot_count = 4;
+    u1.topology = PathTopology::PARALLEL;
+    for (int s = 0; s < 4; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = s;
+        slot.mapped_tool = s;
+        slot.extruder_name = (s == 0) ? "extruder" : ("extruder" + std::to_string(s));
+        u1.slots.push_back(slot);
+    }
+    info.units.push_back(u1);
+
+    AmsUnit ace;
+    ace.unit_index = 1;
+    ace.slot_count = 4;
+    ace.first_slot_global_index = 4;
+    ace.topology = PathTopology::HUB; // head mode: four bays, one head
+    for (int s = 0; s < 4; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = 4 + s;
+        slot.mapped_tool = 3; // every bay feeds T3
+        ace.slots.push_back(slot);
+    }
+    info.units.push_back(ace);
+    info.total_slots = 8;
+
+    auto layout = compute_system_tool_layout(info, nullptr);
+
+    CHECK(layout.total_physical_tools == 4); // four heads, not five
+    REQUIRE(layout.units.size() == 2);
+    CHECK(layout.units[1].first_physical_tool == 3); // the ACE points AT T3
+    CHECK(layout.units[1].tool_count == 1);
+    CHECK(layout.virtual_to_physical.at(3) == 3);
+}
+
+TEST_CASE("SystemToolLayout: multi mode shares every head with the U1",
+          "[ams][tool_layout][multiace]") {
+    // The same rig with the ACE in multi mode: bay s feeds head s. All four
+    // heads are already owned, so the ACE still adds no nozzles.
+    AmsSystemInfo info;
+    info.type = AmsType::MULTIACE;
+
+    for (int u = 0; u < 2; ++u) {
+        AmsUnit unit;
+        unit.unit_index = u;
+        unit.slot_count = 4;
+        unit.first_slot_global_index = u * 4;
+        unit.topology = PathTopology::PARALLEL;
+        for (int s = 0; s < 4; ++s) {
+            SlotInfo slot;
+            slot.slot_index = s;
+            slot.global_index = u * 4 + s;
+            slot.mapped_tool = s;
+            if (u == 0) {
+                slot.extruder_name = (s == 0) ? "extruder" : ("extruder" + std::to_string(s));
+            }
+            unit.slots.push_back(slot);
+        }
+        info.units.push_back(unit);
+    }
+    info.total_slots = 8;
+
+    auto layout = compute_system_tool_layout(info, nullptr);
+
+    CHECK(layout.total_physical_tools == 4);
+    CHECK(layout.units[1].first_physical_tool == 0);
+    CHECK(layout.units[1].tool_count == 4);
+}
+
+TEST_CASE("SystemToolLayout: a unit adding a new head still allocates",
+          "[ams][tool_layout][multiace]") {
+    // The guard that keeps ordinary multi-unit rigs untouched: unit 1 feeds one
+    // head unit 0 owns AND one it does not, so it is not purely a source and
+    // must allocate for the new head rather than silently sharing.
+    AmsSystemInfo info;
+    info.type = AmsType::AFC;
+
+    AmsUnit a;
+    a.unit_index = 0;
+    a.slot_count = 2;
+    a.topology = PathTopology::PARALLEL;
+    for (int s = 0; s < 2; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = s;
+        slot.mapped_tool = s; // heads 0, 1
+        a.slots.push_back(slot);
+    }
+    info.units.push_back(a);
+
+    AmsUnit b;
+    b.unit_index = 1;
+    b.slot_count = 2;
+    b.first_slot_global_index = 2;
+    b.topology = PathTopology::PARALLEL;
+    for (int s = 0; s < 2; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = 2 + s;
+        slot.mapped_tool = 1 + s; // head 1 (shared) and head 2 (new)
+        b.slots.push_back(slot);
+    }
+    info.units.push_back(b);
+    info.total_slots = 4;
+
+    auto layout = compute_system_tool_layout(info, nullptr);
+
+    CHECK(layout.total_physical_tools == 4); // 2 + 2, allocated as before
+}

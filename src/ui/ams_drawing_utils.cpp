@@ -409,6 +409,62 @@ SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const Ams
         utl.min_virtual_tool = min_tool;
         utl.hub_tool_label = unit.hub_tool_label;
 
+        // Cross-unit head sharing. A unit whose lanes all feed heads that an
+        // EARLIER unit already owns is a *source* for those heads, not a new set
+        // of heads — so it must reuse their physical nozzles instead of
+        // allocating its own. multiACE is the case that forced this: the ACE
+        // unit's bays all map to the U1 head it is bound to, and without this
+        // the overview drew five nozzles on a four-head machine, labelling T3
+        // twice. (The HUB branch below already shares by hub_tool_label; this is
+        // the same idea keyed on mapped_tool, which every unit populates.)
+        //
+        // Guarded three ways, because widening it would redraw existing
+        // multi-unit rigs: every one of this unit's mapped tools must already be
+        // claimed (a unit that adds even one new head allocates normally), the
+        // reused nozzles must form a contiguous ascending run (UnitToolLayout
+        // can only express first+count), and units with no mapped_tool at all
+        // fall through untouched. Two Box Turtles on disjoint tool ranges — the
+        // shape the existing tests pin — match none of this and are unaffected.
+        if (min_tool >= 0) {
+            std::vector<int> phys;
+            bool all_claimed = true;
+            for (const auto& slot : unit.slots) {
+                if (slot.mapped_tool < 0) {
+                    continue;
+                }
+                auto it = result.virtual_to_physical.find(slot.mapped_tool);
+                if (it == result.virtual_to_physical.end()) {
+                    all_claimed = false;
+                    break;
+                }
+                phys.push_back(it->second);
+            }
+            if (all_claimed && !phys.empty()) {
+                std::sort(phys.begin(), phys.end());
+                phys.erase(std::unique(phys.begin(), phys.end()), phys.end());
+                bool contiguous = true;
+                for (size_t k = 1; k < phys.size(); ++k) {
+                    if (phys[k] != phys[k - 1] + 1) {
+                        contiguous = false;
+                        break;
+                    }
+                }
+                if (contiguous) {
+                    utl.first_physical_tool = phys.front();
+                    utl.tool_count = static_cast<int>(phys.size());
+                    for (const auto& slot : unit.slots) {
+                        if (slot.mapped_tool < 0) {
+                            continue; // operator[] would insert a bogus -1 key
+                        }
+                        record_extruder(result.virtual_to_physical[slot.mapped_tool],
+                                        slot.extruder_name);
+                    }
+                    result.units.push_back(utl);
+                    continue;
+                }
+            }
+        }
+
         if (topo == PathTopology::MIXED) {
             // MIXED: direct lanes each get their own nozzle position,
             // hub lanes share one nozzle position regardless of mapped_tool.
