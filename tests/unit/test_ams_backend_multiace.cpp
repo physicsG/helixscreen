@@ -11,6 +11,7 @@
 #include "ams_backend_multiace.h"
 #include "ams_types.h"
 
+#include <algorithm>
 #include <fstream>
 
 #include "../catch_amalgamated.hpp"
@@ -177,6 +178,27 @@ TEST_CASE_METHOD(HelixTestFixture, "multiACE says the ACE owns an ACE-fed head's
     // So does an ACE bay: it IS the source.
     CHECK_FALSE(backend.slot_identity_owner_unit(4).has_value());
     CHECK_FALSE(backend.slot_identity_owner_unit(-1).has_value());
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "multiACE counts spools, not slots", "[ams][multiace]") {
+    // A 4-head U1 with one 4-bay ACE has EIGHT addressable slots but SEVEN
+    // spools: T3 and ACE bay 1 are the same physical spool seen from two sides.
+    // Counting slots advertised 8 on the home widget and 4 on the U1's card.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    const auto owned = backend.owned_spool_slots();
+    CHECK(owned.size() == 7);
+    // The head that is fed from elsewhere is the one dropped — not whichever
+    // slot happens to sit last, which is what a bare count would have removed.
+    CHECK(std::find(owned.begin(), owned.end(), 3) == owned.end());
+    CHECK(std::find(owned.begin(), owned.end(), 7) != owned.end());
+
+    CHECK(backend.unit_spool_slot_count(0) == 3); // U1: four heads, one borrowed
+    CHECK(backend.unit_spool_slot_count(1) == 4); // ACE: all four bays are its own
+    // total_slots is the INDEXING bound and must not move — every slot stays
+    // addressable, loadable and unloadable.
+    CHECK(backend.get_system_info().total_slots == 8);
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "multiACE answers per-unit topology, not the system one",

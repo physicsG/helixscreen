@@ -1137,15 +1137,37 @@ static void sync_from_ams_state(AmsMiniStatusData* data) {
         return;
     }
 
-    int slot_count = lv_subject_get_int(AmsState::instance().get_slot_count_subject());
+    // One bar per SPOOL, not per slot. A slot fed from another unit is a view of
+    // that unit's spool — drawing both shows one physical spool twice, which is
+    // how a 4-head U1 with one 4-bay ACE came to advertise 8 spools instead of 7.
+    // `owned` maps bar index -> global slot index; every read below goes through
+    // it, so the skipped slot is the duplicate rather than whichever happens to
+    // sit last.
+    const std::vector<int> owned = backend->owned_spool_slots();
+    int slot_count = static_cast<int>(owned.size());
     data->slot_count = slot_count;
 
     // Get multi-unit info from system info
     AmsSystemInfo info = backend->get_system_info();
     data->unit_count = static_cast<int>(info.units.size());
-    for (int u = 0; u < data->unit_count && u < 8; ++u) {
-        data->unit_rows[u].first_slot = info.units[u].first_slot_global_index;
-        data->unit_rows[u].slot_count = info.units[u].slot_count;
+    {
+        // Row extents are expressed in BAR indices, so recount per unit against
+        // the filtered list rather than reusing the unit's raw slot span.
+        int bar = 0;
+        for (int u = 0; u < data->unit_count && u < 8; ++u) {
+            const auto& unit = info.units[u];
+            const int first_global = unit.first_slot_global_index;
+            const int last_global = first_global + unit.slot_count;
+            int n = 0;
+            for (int g : owned) {
+                if (g >= first_global && g < last_global) {
+                    ++n;
+                }
+            }
+            data->unit_rows[u].first_slot = bar;
+            data->unit_rows[u].slot_count = n;
+            bar += n;
+        }
     }
     // Clear any stale unit rows beyond current count
     for (int u = data->unit_count; u < 8; ++u) {
@@ -1158,7 +1180,8 @@ static void sync_from_ams_state(AmsMiniStatusData* data) {
     // slot_count) so the wide spool view sees every lane on multi-unit systems.
     data->spool_cells.assign(slot_count, SpoolCellData{});
     for (int i = 0; i < slot_count; ++i) {
-        SlotInfo slot = backend->get_slot_info(i);
+        const int global_slot = owned[static_cast<size_t>(i)];
+        SlotInfo slot = backend->get_slot_info(global_slot);
         // Fill is read from this slots_version snapshot on purpose. This widget
         // rebuilds all bars/cells wholesale on every sync; a per-slot fill
         // subject observer (as in the ams_slot widget) would race that rebuild
@@ -1177,7 +1200,7 @@ static void sync_from_ams_state(AmsMiniStatusData* data) {
         if (p >= 0.0f)
             rem = static_cast<int>(p + 0.5f);
 
-        const bool active = slot_is_active_loaded(i);
+        const bool active = slot_is_active_loaded(global_slot);
         // "Assigned" = the lane still carries identity after an eject — the
         // override is deliberately NOT cleared (#1071). Same predicate as
         // apply_slot_status() in ui_ams_slot.cpp; brand/spool_name cover

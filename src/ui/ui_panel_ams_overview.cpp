@@ -395,7 +395,13 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
             lv_label_set_text(uc.name_label, ams_draw::get_unit_display_name(unit, i).c_str());
         }
 
-        set_slot_count_label(uc.slot_count_label, unit.slot_count);
+        // Not unit.slot_count: a slot fed from another unit is a view of that
+        // unit's spool, not one of this unit's. On multiACE the U1 card reads 3,
+        // because its fourth head shows the ACE's spool.
+        auto* count_backend = AmsState::instance().get_backend();
+        set_slot_count_label(uc.slot_count_label, count_backend
+                                                     ? count_backend->unit_spool_slot_count(i)
+                                                     : unit.slot_count);
 
         // Create the mini bars for this unit (dynamic — slot count varies)
         create_mini_bars(uc, unit);
@@ -443,8 +449,15 @@ void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit) {
         create_mini_bars(card, unit);
     }
 
-    // Update slot count
-    set_slot_count_label(card.slot_count_label, unit.slot_count);
+    // Update slot count — the spools this unit OWNS, not the slots it has. A
+    // slot fed from another unit shows that unit's spool, so counting it here
+    // double-counts one physical spool across two cards.
+    {
+        auto* backend = AmsState::instance().get_backend();
+        set_slot_count_label(card.slot_count_label,
+                             backend ? backend->unit_spool_slot_count(card.unit_index)
+                                     : unit.slot_count);
+    }
 
     // Update error badge visibility and color
     if (card.error_badge) {

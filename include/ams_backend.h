@@ -1142,6 +1142,52 @@ class AmsBackend {
     }
 
     /**
+     * @brief Global indices of the slots that hold a spool of their OWN, in order.
+     *
+     * A slot fed from another unit is not a spool position — it is a view of one.
+     * On multiACE, the U1's ACE-fed head and the ACE bay behind it are a single
+     * physical spool, so counting both double-counts it: a 4-head U1 with one
+     * 4-bay ACE has 7 spool positions, not 8.
+     *
+     * This is what user-facing COUNTS and per-spool rows should iterate.
+     * `total_slots` remains the indexing bound and is unchanged — every slot
+     * here is still addressable, still loadable, still unloadable.
+     *
+     * Derived from slot_identity_owner_unit(), so a backend that answers that
+     * question needs nothing further.
+     */
+    [[nodiscard]] std::vector<int> owned_spool_slots() const {
+        std::vector<int> out;
+        const AmsSystemInfo info = get_system_info();
+        out.reserve(static_cast<size_t>(info.total_slots));
+        for (int i = 0; i < info.total_slots; ++i) {
+            if (!slot_identity_owner_unit(i).has_value()) {
+                out.push_back(i);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * @brief How many slots on @p unit_index hold a spool of their own.
+     * @see owned_spool_slots()
+     */
+    [[nodiscard]] int unit_spool_slot_count(int unit_index) const {
+        const AmsSystemInfo info = get_system_info();
+        if (unit_index < 0 || unit_index >= static_cast<int>(info.units.size())) {
+            return 0;
+        }
+        const auto& unit = info.units[unit_index];
+        int n = 0;
+        for (int s = 0; s < unit.slot_count; ++s) {
+            if (!slot_identity_owner_unit(unit.first_slot_global_index + s).has_value()) {
+                ++n;
+            }
+        }
+        return n;
+    }
+
+    /**
      * @brief Whether the backend can dock the mounted toolhead without unloading.
      * @return true if park_toolhead() is implemented (toolchangers only).
      */
