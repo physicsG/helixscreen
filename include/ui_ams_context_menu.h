@@ -60,6 +60,7 @@ class AmsContextMenu : public ContextMenu {
         EDIT,             ///< Edit slot properties
         CLEAR_SPOOL,      ///< Clear assigned spool from empty slot
         SPOOLMAN,         ///< Assign Spoolman spool
+        OPEN_SOURCE_UNIT, ///< Jump to the unit that owns this slot's spool identity
         SCAN_QR           ///< Scan QR code to assign spool
     };
 
@@ -130,6 +131,13 @@ class AmsContextMenu : public ContextMenu {
     // === Subjects for button enable/disable states ===
     lv_subject_t slot_is_loaded_subject_; ///< 1 = loaded (Unload enabled), 0 = not loaded
     lv_subject_t slot_can_load_subject_;  ///< 1 = has filament (Load enabled), 0 = empty
+    /// 1 = another unit owns this slot's filament identity (multiACE: an
+    /// ACE-fed U1 head). Bound in XML so the edit actions hide and the
+    /// "open the owner" action appears, without adding imperative visibility.
+    lv_subject_t slot_source_external_subject_;
+    /// Unit that owns this slot's identity, or -1. Held so OPEN_SOURCE_UNIT can
+    /// name it without re-querying a backend that may have changed.
+    int source_owner_unit_ = -1;
     bool subject_initialized_ = false;
 
     // === Backend reference for dropdown operations ===
@@ -168,6 +176,8 @@ class AmsContextMenu : public ContextMenu {
     void handle_edit();
     void handle_clear_spool();
     void handle_spoolman();
+    /// "Open in <unit>" — the slot's spool is described by another unit.
+    void handle_open_source();
     void handle_scan_qr();
     void handle_tool_changed();
     void handle_backup_changed();
@@ -267,6 +277,7 @@ class AmsContextMenu : public ContextMenu {
     static void on_edit_cb(lv_event_t* e);
     static void on_clear_spool_cb(lv_event_t* e);
     static void on_spoolman_cb(lv_event_t* e);
+    static void on_open_source_cb(lv_event_t* e);
     static void on_scan_qr_cb(lv_event_t* e);
     static void on_tool_changed_cb(lv_event_t* e);
     static void on_backup_changed_cb(lv_event_t* e);

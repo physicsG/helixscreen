@@ -158,6 +158,27 @@ TEST_CASE_METHOD(HelixTestFixture, "multiACE adds ACE units alongside the U1's h
     CHECK(ace_unit.slots[0].mapped_tool == 3);
 }
 
+TEST_CASE_METHOD(HelixTestFixture, "multiACE says the ACE owns an ACE-fed head's spool identity",
+                 "[ams][multiace]") {
+    // The spool at an ACE-fed head is described by the ACE. Editing it on the
+    // head writes print_task_config, which the ACE overwrites on its next
+    // report — two sources of truth for one spool. The slot menu drops its edit
+    // actions on the strength of this and offers a route to the owner instead.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    auto owner = backend.slot_identity_owner_unit(3);
+    REQUIRE(owner.has_value());
+    CHECK(*owner == 1); // the ACE is global unit 1
+
+    // Feeder heads describe themselves.
+    CHECK_FALSE(backend.slot_identity_owner_unit(0).has_value());
+    CHECK_FALSE(backend.slot_identity_owner_unit(2).has_value());
+    // So does an ACE bay: it IS the source.
+    CHECK_FALSE(backend.slot_identity_owner_unit(4).has_value());
+    CHECK_FALSE(backend.slot_identity_owner_unit(-1).has_value());
+}
+
 TEST_CASE_METHOD(HelixTestFixture, "multiACE answers per-unit topology, not the system one",
                  "[ams][multiace]") {
     // compute_system_tool_layout() and the unit detail both prefer the backend's

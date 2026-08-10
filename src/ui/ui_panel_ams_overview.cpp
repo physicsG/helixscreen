@@ -1257,6 +1257,18 @@ void AmsOverviewPanel::show_detail_context_menu(int slot_index, lv_obj_t* near_w
             show_edit_modal(slot, /*open_on_picker=*/true);
             break;
 
+        case helix::ui::AmsContextMenu::MenuAction::OPEN_SOURCE_UNIT: {
+            // The slot's spool is described by another unit — go there, which is
+            // the whole point of offering this instead of a dead edit button.
+            AmsBackend* b = AmsState::instance().get_backend();
+            if (b) {
+                if (auto owner = b->slot_identity_owner_unit(slot)) {
+                    show_unit_detail(*owner);
+                }
+            }
+            break;
+        }
+
         case helix::ui::AmsContextMenu::MenuAction::RECOVER_POSITION:
             if (!backend) {
                 NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));

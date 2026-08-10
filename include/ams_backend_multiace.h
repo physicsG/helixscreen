@@ -80,6 +80,11 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// enough; it has to be answered here too.
     [[nodiscard]] PathTopology get_unit_topology(int unit_index) const override;
 
+    /// An ACE-fed head's spool is described by the ACE, not by the U1 — see the
+    /// base declaration. Returns the ACE's global unit index for such a head,
+    /// nullopt for a feeder head or any ACE bay (those describe themselves).
+    [[nodiscard]] std::optional<int> slot_identity_owner_unit(int slot_index) const override;
+
     /// How head @p head is fed, per the last `ace` frame.
     [[nodiscard]] HeadSource head_source_kind(int head) const;
 

@@ -107,18 +107,31 @@
           <ui_button name="btn_spoolman"
                      height="#button_height_sm" icon="spoolman" text="Select Spool" translation_tag="Select Spool"
                      variant="ghost" clickable="true" style_flex_main_place="start" hidden="true">
+            <bind_flag_if_eq subject="ams_slot_source_external" flag="hidden" ref_value="1"/>
             <event_cb trigger="clicked" callback="ams_context_spoolman_cb"/>
           </ui_button>
           <!-- Scan QR Code Button (hidden by default, shown when Spoolman enabled) -->
           <ui_button name="btn_scan_qr"
                      height="#button_height_sm" icon="qrcode_scan" text="Scan QR Code" translation_tag="Scan QR Code"
                      variant="ghost" clickable="true" style_flex_main_place="start" hidden="true">
+            <bind_flag_if_eq subject="ams_slot_source_external" flag="hidden" ref_value="1"/>
             <event_cb trigger="clicked" callback="ams_context_scan_qr_cb"/>
+          </ui_button>
+          <!-- Shown only when another unit owns this slot's spool identity
+               (multiACE: an ACE-fed U1 head). Replaces the edit actions above
+               rather than sitting beside them — see AmsContextMenu::on_created. -->
+          <ui_button name="btn_open_source"
+                     height="#button_height_sm" icon="arrow_right" text="Open in ACE"
+                     translation_tag="Open in ACE" variant="ghost" clickable="true"
+                     style_flex_main_place="start">
+            <bind_flag_if_eq subject="ams_slot_source_external" flag="hidden" ref_value="0"/>
+            <event_cb trigger="clicked" callback="ams_context_open_source_cb"/>
           </ui_button>
           <!-- Spool Info Button — always opens edit modal -->
           <ui_button name="btn_edit"
                      height="#button_height_sm" icon="tune" text="Spool Info" translation_tag="Spool Info"
                      variant="ghost" clickable="true" style_flex_main_place="start">
+            <bind_flag_if_eq subject="ams_slot_source_external" flag="hidden" ref_value="1"/>
             <event_cb trigger="clicked" callback="ams_context_edit_cb"/>
           </ui_button>
           <!-- Clear Spool Button — shown only when the slot has a Spoolman assignment -->

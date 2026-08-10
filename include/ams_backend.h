@@ -1120,6 +1120,28 @@ class AmsBackend {
     }
 
     /**
+     * @brief Which unit owns this slot's filament IDENTITY, when not this one.
+     *
+     * On multiACE a U1 head is fed from an ACE bay, so the head's material,
+     * colour and Spoolman link are the ACE's to state. Editing them on the head
+     * would write `print_task_config` and be overwritten the moment the ACE
+     * reports its inventory again — two sources of truth for one spool. The
+     * slot menu uses this to drop its edit actions and offer a route to the
+     * owning unit instead.
+     *
+     * Identity only. Loading and unloading still act on the head and stay
+     * available; this says who describes the filament, not who moves it.
+     *
+     * @param slot_index Global slot index.
+     * @return Owning unit index, or nullopt when the slot describes itself
+     *         (every backend except multiACE, always).
+     */
+    [[nodiscard]] virtual std::optional<int> slot_identity_owner_unit(int slot_index) const {
+        (void)slot_index;
+        return std::nullopt;
+    }
+
+    /**
      * @brief Whether the backend can dock the mounted toolhead without unloading.
      * @return true if park_toolhead() is implemented (toolchangers only).
      */

@@ -37,6 +37,9 @@ AmsContextMenu::AmsContextMenu() {
     lv_subject_init_int(&slot_can_load_subject_, 1);
     lv_xml_register_subject(nullptr, "ams_slot_can_load", &slot_can_load_subject_);
 
+    lv_subject_init_int(&slot_source_external_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_slot_source_external", &slot_source_external_subject_);
+
     subject_initialized_ = true;
     spdlog::debug("[AmsContextMenu] Constructed");
 }
@@ -51,6 +54,7 @@ AmsContextMenu::~AmsContextMenu() {
     if (subject_initialized_ && lv_is_initialized()) {
         lv_subject_deinit(&slot_is_loaded_subject_);
         lv_subject_deinit(&slot_can_load_subject_);
+        lv_subject_deinit(&slot_source_external_subject_);
         subject_initialized_ = false;
     }
     spdlog::trace("[AmsContextMenu] Destroyed");
@@ -65,6 +69,7 @@ AmsContextMenu::AmsContextMenu(AmsContextMenu&& other) noexcept
     if (other.subject_initialized_) {
         slot_is_loaded_subject_ = other.slot_is_loaded_subject_;
         slot_can_load_subject_ = other.slot_can_load_subject_;
+        slot_source_external_subject_ = other.slot_source_external_subject_;
     }
     // Update static instance
     if (s_active_instance_ == &other) {
@@ -98,6 +103,7 @@ AmsContextMenu& AmsContextMenu::operator=(AmsContextMenu&& other) noexcept {
         if (other.subject_initialized_) {
             slot_is_loaded_subject_ = other.slot_is_loaded_subject_;
             slot_can_load_subject_ = other.slot_can_load_subject_;
+            slot_source_external_subject_ = other.slot_source_external_subject_;
         }
         subject_initialized_ = other.subject_initialized_;
 
@@ -180,8 +186,30 @@ bool AmsContextMenu::show_for_external_spool(lv_obj_t* parent, lv_obj_t* anchor_
 // ContextMenu override
 // ============================================================================
 
+void AmsContextMenu::handle_open_source() {
+    spdlog::info("[AmsContextMenu] Open source unit {} for slot {}", source_owner_unit_,
+                 get_item_index());
+    dispatch_ams_action(MenuAction::OPEN_SOURCE_UNIT);
+}
+
 void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     int slot_index = get_item_index();
+
+    // Does another unit own this slot's filament identity? On multiACE an
+    // ACE-fed U1 head's material/colour/spool are the ACE's to state, and
+    // editing them here would write print_task_config only for the ACE to
+    // overwrite it on its next report. The edit actions bind to this subject and
+    // hide themselves; "Open in <unit>" binds to its inverse. Load and Unload
+    // are untouched — they act on the head, which is still the U1's job.
+    source_owner_unit_ = -1;
+    if (!external_spool_mode_ && backend_) {
+        if (auto owner = backend_->slot_identity_owner_unit(slot_index)) {
+            source_owner_unit_ = *owner;
+        }
+    }
+    lv_subject_set_int(&slot_source_external_subject_, source_owner_unit_ >= 0 ? 1 : 0);
+    spdlog::debug("[AmsContextMenu] slot {} identity owner unit = {} (backend={})", slot_index,
+                  source_owner_unit_, backend_ ? "yes" : "null");
 
     // External spool mode: hide backend-related buttons, show only EDIT/CLEAR
     if (external_spool_mode_) {
@@ -388,7 +416,12 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // disappeared the moment a spool went in — exactly when stale metadata does
     // damage, since that is when it gets printed with and when an edit aims a
     // Spoolman write at the previous spool.
-    if (backend_) {
+    // `source_external` gates all three spool-identity actions below. They are
+    // shown imperatively from here, so the XML bind_flag that hides the rest
+    // cannot reach them — a clear_flag after the binding simply wins. Naming the
+    // condition once keeps the three in step.
+    const bool source_external = source_owner_unit_ >= 0;
+    if (backend_ && !source_external) {
         SlotInfo slot_info = backend_->get_slot_info(slot_index);
         lv_obj_t* btn_clear = lv_obj_find_by_name(menu_obj, "btn_clear_spool");
         if (btn_clear && should_show_clear_spool(slot_info)) {
@@ -408,11 +441,11 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     auto* spoolman_subj = lv_xml_get_subject(nullptr, "printer_has_spoolman");
     bool has_spoolman = spoolman_subj && lv_subject_get_int(spoolman_subj) == 1;
     lv_obj_t* btn_spoolman = lv_obj_find_by_name(menu_obj, "btn_spoolman");
-    if (btn_spoolman && has_spoolman) {
+    if (btn_spoolman && has_spoolman && !source_external) {
         lv_obj_clear_flag(btn_spoolman, LV_OBJ_FLAG_HIDDEN);
     }
     lv_obj_t* btn_scan_qr = lv_obj_find_by_name(menu_obj, "btn_scan_qr");
-    if (btn_scan_qr && has_spoolman) {
+    if (btn_scan_qr && has_spoolman && !source_external) {
         lv_obj_clear_flag(btn_scan_qr, LV_OBJ_FLAG_HIDDEN);
     }
 
@@ -587,6 +620,7 @@ void AmsContextMenu::register_callbacks() {
         {"ams_context_edit_cb", on_edit_cb},
         {"ams_context_clear_spool_cb", on_clear_spool_cb},
         {"ams_context_spoolman_cb", on_spoolman_cb},
+        {"ams_context_open_source_cb", on_open_source_cb},
         {"ams_context_scan_qr_cb", on_scan_qr_cb},
         {"ams_context_tool_changed_cb", on_tool_changed_cb},
         {"ams_context_backup_changed_cb", on_backup_changed_cb},
@@ -653,6 +687,13 @@ void AmsContextMenu::on_clear_spool_cb(lv_event_t* /*e*/) {
     auto* self = get_active_instance();
     if (self) {
         self->handle_clear_spool();
+    }
+}
+
+void AmsContextMenu::on_open_source_cb(lv_event_t* /*e*/) {
+    auto* self = get_active_instance();
+    if (self) {
+        self->handle_open_source();
     }
 }
 

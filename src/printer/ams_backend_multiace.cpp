@@ -85,6 +85,19 @@ PathTopology AmsBackendMultiAce::get_unit_topology(int unit_index) const {
     return system_info_.units[unit_index].topology;
 }
 
+std::optional<int> AmsBackendMultiAce::slot_identity_owner_unit(int slot_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Only the U1's own heads (unit 0) can be fed from elsewhere. An ACE bay is
+    // the source, so it always describes itself.
+    if (slot_index < 0 || slot_index >= NUM_TOOLS) {
+        return std::nullopt;
+    }
+    if (head_kind_[slot_index] != HeadSource::ACE || !head_seated_[slot_index]) {
+        return std::nullopt;
+    }
+    return head_seated_[slot_index]->unit_index;
+}
+
 AmsBackendMultiAce::HeadSource AmsBackendMultiAce::head_source_kind(int head) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (head < 0 || head >= NUM_TOOLS) {

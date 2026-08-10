@@ -21,6 +21,7 @@
 #include "ui_nav_manager.h"
 #include "ui_overlay_qr_scanner.h"
 #include "ui_panel_common.h"
+#include "ui_panel_ams_overview.h"
 #include "ui_spool_canvas.h"
 #include "ui_swatch.h"
 #include "ui_utils.h"
@@ -1501,6 +1502,14 @@ void AmsPanel::show_context_menu(int slot_index, lv_obj_t* near_widget, lv_point
 
         case helix::ui::AmsContextMenu::MenuAction::SPOOLMAN:
             show_edit_modal(slot, /*open_on_picker=*/true);
+            break;
+
+        case helix::ui::AmsContextMenu::MenuAction::OPEN_SOURCE_UNIT:
+            // This panel is one unit's view and cannot show another unit's
+            // detail. navigate_to_ams_panel() routes to the multi-unit overview
+            // whenever there is more than one unit, which is exactly the case
+            // that produces this action at all.
+            navigate_to_ams_panel();
             break;
 
         case helix::ui::AmsContextMenu::MenuAction::SCAN_QR: {
