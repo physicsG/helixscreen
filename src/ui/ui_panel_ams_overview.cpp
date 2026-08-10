@@ -1498,9 +1498,17 @@ void AmsOverviewPanel::show_edit_modal(int slot_index, bool open_on_picker) {
             if (result.saved && result.slot_index >= 0) {
                 AmsBackend* backend = AmsState::instance().get_backend();
                 if (backend) {
-                    backend->set_slot_info(result.slot_index, result.slot_info);
+                    // Report what actually happened. This used to toast success
+                    // unconditionally, so a rejected write -- every ACE bay, which
+                    // the Snapmaker backend bounds-checked away -- looked like it
+                    // had been saved.
+                    AmsError err = backend->set_slot_info(result.slot_index, result.slot_info);
                     AmsState::instance().sync_from_backend();
-                    NOTIFY_INFO(lv_tr("Slot {} updated"), result.slot_index + 1);
+                    if (err.result == AmsResult::SUCCESS) {
+                        NOTIFY_INFO(lv_tr("Slot {} updated"), result.slot_index + 1);
+                    } else {
+                        helix::ui::notify_ams_error(err, lv_tr("Could not update slot"));
+                    }
                 }
             }
         },

@@ -781,15 +781,20 @@ void AmsBackendSnapmaker::prepare_for_resume(int slot_index, ResumeReadyCallback
 // ============================================================================
 
 AmsError AmsBackendSnapmaker::set_slot_info(int slot_index, const SlotInfo& info, bool persist) {
-    auto err = validate_slot_index(slot_index);
-    if (err.result != AmsResult::SUCCESS)
-        return err;
-
+    // Deliberately NOT validate_slot_index(): that one bounds against NUM_TOOLS
+    // because the ops it guards (load, unload, select) address a U1 TOOLHEAD.
+    // Editing a spool addresses a SLOT, and a subclass can have more of them --
+    // multiACE's ACE bays are global slots 4..7. Rejecting them here is why
+    // assigning a spool to an ACE bay did nothing while still reporting
+    // "Slot 5 updated": this returned invalid_slot and both call sites ignored
+    // the error. Bound against the real slot count and resolve across units.
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto* slot = system_info_.units[0].get_slot(slot_index);
-        if (!slot)
-            return AmsErrorHelper::invalid_slot(slot_index, NUM_TOOLS - 1);
+        auto* slot = system_info_.get_slot_global(slot_index);
+        if (!slot) {
+            return AmsErrorHelper::invalid_slot(slot_index,
+                                                LV_MAX(0, system_info_.total_slots - 1));
+        }
 
         // Update the in-memory slot directly. Covers every SlotInfo field the
         // caller may set — a persist=false preview must not silently drop
