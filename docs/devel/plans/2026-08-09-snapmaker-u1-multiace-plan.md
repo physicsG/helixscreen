@@ -18,10 +18,16 @@
 > 1. ~~§10.1 — failing unit tests.~~ ✅ **done 2026-08-10.** It was **6** failures, not 3
 >    (three sit outside the `[snapmaker]` tag — always run `"[ams]"`). The recorded candidate
 >    fix was wrong; see §10.1 for what it actually took. `[ams]` is now 1656/0.
-> 2. **§10.2 — ACE-fed unload leaves the UI stuck.** Needs the Phase 2 backend, not a patch.
+> 2. ~~§10.2 — ACE-fed unload leaves the UI stuck.~~ ✅ **addressed 2026-08-10** by Phase 2:
+>    an ACE-fed head now gets `ACE_UNLOAD_HEAD`. The stuck-UI symptom itself has NOT been
+>    re-observed on hardware since — reproduce it on T3 to confirm the fix end to end.
 > 3. ~~§10.3 — toolhead context menu.~~ ✅ **done 2026-08-10**, verified on the U1.
-> 4. **Phase 2 proper** (§4) — `AmsBackendMultiAce`. Step 1 (detection) is half done.
-> 5. **Phase 1's AFC generalisation** (§2 banner) — still open, and no longer claimed as done.
+> 4. ~~Phase 2 proper~~ ✅ **done 2026-08-10** — `AmsBackendMultiAce` is live: detected,
+>    backend created, `ace` parsed, "ACE 2 Pro" card with real temp/RH beside SnapSwap.
+> 5. **Phase 3 — head-major layout.** Now the top UI item, with a concrete symptom to fix:
+>    with 4 ACE bays all mapped to head 3 in head mode, the aggregate canvas draws **five
+>    nozzles, T3 twice**. Backend data is already correct; this is purely the renderer.
+> 6. **Phase 1's AFC generalisation** (§2 banner) — still open, and no longer claimed as done.
 >
 > **Pre-existing failure, not yours:** the full suite (`./build/bin/helix-tests`, no filter)
 > segfaults in `test_clock_widget.cpp:157` — "ClockWidget: timer fires during LVGL
@@ -276,7 +282,23 @@ draws one merger. Needs no printer-side change either way.
    Caught on live hardware, now pinned by a test. Four more sites needed the type too:
    `is_tool_changer()`, `is_filament_system()`, the `AmsBackend::create` factory, and the
    discovery sequence's subscription block (which is where `ace` gets subscribed at all).
-2. **`AmsBackendMultiAce`, deriving from `AmsBackendSnapmaker`.** The U1's four heads stay
+2. ✅ **done 2026-08-10.** `AmsBackendMultiAce` derives from `AmsBackendSnapmaker` as planned;
+   the §7 risk was real but small — `NUM_TOOLS` and `validate_slot_index()` had to move from
+   `private` to `protected`, nothing more. Three payload facts that no doc states and that
+   cost a live debugging round each:
+   - `head_ace` carries an index for **every** head (`{0:0,1:1,2:2,3:0}` while only head 3 is
+     ACE-fed), so it cannot decide *whether* a head is ACE-fed. `head_feeder`/`head_manual`
+     are the authority.
+   - The per-head maps are keyed by **string** (`"0"`..`"3"`). An int-keyed lookup finds
+     nothing and every head silently reads feeder-fed.
+   - `slots[].color` is an `[r,g,b]` **array**, not a hex string.
+
+   And one that cost the most: `handle_status_update` must unwrap `params[0]` exactly as the
+   base does. Reaching for a `"status"` key instead compiles, passes every unit test that
+   feeds the bare object, logs nothing, and leaves the backend behaving exactly like the plain
+   Snapmaker one. There is now a test using the real `notify_status_update` wrapper.
+
+   *Original plan text follows.* The U1's four heads stay
    unit 0 with all the hard-won native behaviour intact (the `channel_state` load latch,
    `is_stuck_motion_sensor_runout`, `prepare_for_resume`, the 5-step load model,
    `print_task_config` parsing). The subclass adds the `ace` subscription, units 1..N for the
@@ -458,7 +480,17 @@ mounted-but-EMPTY is not loaded (the `70ce3345b` case, which shipped with no tes
 a load completing without a tool change promotes the slot, and runout clears `filament_loaded`
 while keeping Unload.
 
-### 10.2 ACE-fed head: unload never terminates in the UI
+### 10.2 ACE-fed head: unload never terminates in the UI — ✅ addressed 2026-08-10
+
+The hypothesis below was right and is now implemented: `AmsBackendMultiAce::do_unload_filament`
+sends `ACE_UNLOAD_HEAD HEAD=n` for a head the ACE feeds, and leaves feeder heads on the
+inherited native path. **Not yet re-observed on hardware** — the fix is unit-tested against the
+live payload, but nobody has run an unload on T3 since. Confirm before closing.
+
+The second defect (the 5-step LOAD model rendered during an unload) is untouched and still
+open; it lives in the step-model selection, not the dispatch.
+
+*Original analysis:*
 
 Live repro on T3 (the only ACE-fed head): Unload from the multi-filament panel **succeeds on
 the printer** — `channel_state` reaches `preload_finish`, the toolhead motion sensor drops to
