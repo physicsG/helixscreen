@@ -135,7 +135,11 @@ inline AmsType ams_type_from_string(std::string_view str) {
  * @return true if this is a physical tool changer
  */
 inline bool is_tool_changer(AmsType type) {
-    return type == AmsType::TOOL_CHANGER || type == AmsType::SNAPMAKER;
+    // MULTIACE is a Snapmaker U1 with ACE units bolted on — still four physical
+    // toolheads, so every tool-changer behaviour applies exactly as it does to
+    // SNAPMAKER.
+    return type == AmsType::TOOL_CHANGER || type == AmsType::SNAPMAKER ||
+           type == AmsType::MULTIACE;
 }
 
 /**
@@ -151,7 +155,7 @@ inline bool is_tool_changer(AmsType type) {
 inline bool is_filament_system(AmsType type) {
     return type == AmsType::HAPPY_HARE || type == AmsType::AFC || type == AmsType::ACE ||
            type == AmsType::AD5X_IFS || type == AmsType::CFS || type == AmsType::SNAPMAKER ||
-           type == AmsType::QIDI_BOX;
+           type == AmsType::QIDI_BOX || type == AmsType::MULTIACE;
 }
 
 /**

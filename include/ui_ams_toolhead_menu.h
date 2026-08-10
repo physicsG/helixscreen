@@ -62,6 +62,12 @@ struct ToolheadMenuModel {
  * @param supports_park Backend answers supports_toolhead_park()
  * @param slot_present  This head's lane holds filament (filament_exist)
  * @param can_unload    Backend answers can_unload_from_toolhead(tool_index)
+ * @param print_blocks_ops A running print refuses toolhead motion
+ *        (helix::ui::print_blocks_filament_op). EVERY entry here moves the
+ *        carriage or the filament, so this empties the menu outright rather
+ *        than offering four buttons that would each answer with a refusal.
+ *        A PAUSED job does not block on this backend — that pause is the
+ *        runout-recovery workflow these actions exist for.
  *
  * Select and Park are mutually exclusive by construction — a head is either on
  * the carriage or it is not. Load and Unload likewise: can_unload is defined as
@@ -72,7 +78,8 @@ struct ToolheadMenuModel {
  */
 [[nodiscard]] ToolheadMenuModel toolhead_menu_model(int tool_index, int mounted_tool,
                                                     bool supports_park, bool slot_present,
-                                                    bool can_unload);
+                                                    bool can_unload,
+                                                    bool print_blocks_ops = false);
 
 /// True when the model has no entries — nothing to show, so show nothing.
 [[nodiscard]] inline bool toolhead_menu_is_empty(const ToolheadMenuModel& m) {

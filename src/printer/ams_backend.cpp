@@ -19,6 +19,7 @@
 #endif
 #include "ams_backend_ace.h"
 #include "ams_backend_qidi.h"
+#include "ams_backend_multiace.h"
 #include "ams_backend_snapmaker.h"
 #include "ams_backend_toolchanger.h"
 #include "filament_database.h"
@@ -294,6 +295,7 @@ bool AmsBackend::sensor_belongs_to_backend(AmsType type, const std::string& bare
     case AmsType::ACE:
     case AmsType::TOOL_CHANGER:
     case AmsType::SNAPMAKER:
+    case AmsType::MULTIACE:
     case AmsType::QIDI_BOX:
     case AmsType::NONE:
     default:
@@ -366,6 +368,7 @@ std::unique_ptr<AmsBackend> AmsBackend::create(AmsType detected_type) {
 #endif
 
     case AmsType::SNAPMAKER:
+    case AmsType::MULTIACE:
 #ifdef HELIX_ENABLE_MOCKS
         spdlog::warn("[AMS Backend] Snapmaker detected but no API/client provided - using mock");
         return std::make_unique<AmsBackendMock>(config->mock_ams_gate_count);
@@ -465,6 +468,14 @@ std::unique_ptr<AmsBackend> AmsBackend::create(AmsType detected_type, MoonrakerA
         }
         spdlog::debug("[AMS Backend] Creating Snapmaker SnapSwap backend");
         return std::make_unique<AmsBackendSnapmaker>(api, client);
+
+    case AmsType::MULTIACE:
+        if (!api || !client) {
+            spdlog::error("[AMS Backend] multiACE requires MoonrakerAPI and MoonrakerClient");
+            return nullptr;
+        }
+        spdlog::debug("[AMS Backend] Creating multiACE backend (U1 SnapSwap + ACE units)");
+        return std::make_unique<AmsBackendMultiAce>(api, client);
 
     case AmsType::QIDI_BOX:
         if (!api || !client) {

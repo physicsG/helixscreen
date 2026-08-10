@@ -8,6 +8,9 @@
 
 #include "ams_backend.h"
 #include "ams_types.h"
+#include "app_globals.h"
+#include "filament_op_slot_resolver.h"
+#include "printer_state.h"
 
 #include <spdlog/spdlog.h>
 
@@ -24,9 +27,15 @@ AmsToolheadMenu* AmsToolheadMenu::s_active_instance_ = nullptr;
 // ============================================================================
 
 ToolheadMenuModel toolhead_menu_model(int tool_index, int mounted_tool, bool supports_park,
-                                      bool slot_present, bool can_unload) {
+                                      bool slot_present, bool can_unload, bool print_blocks_ops) {
     ToolheadMenuModel m;
     if (tool_index < 0) {
+        return m;
+    }
+    // Every entry moves the carriage or the filament, and the backend refuses
+    // all four mid-print. Offering them anyway would be four buttons that each
+    // answer with a toast; an empty model means no menu opens at all.
+    if (print_blocks_ops) {
         return m;
     }
     const bool is_mounted = (tool_index == mounted_tool);
@@ -176,7 +185,20 @@ bool AmsToolheadMenu::show_at(lv_obj_t* parent, lv_obj_t* anchor, lv_point_t cli
         present = backend->get_slot_info(tool_index).is_present();
         can_unload = backend->can_unload_from_toolhead(tool_index);
     }
-    model_ = toolhead_menu_model(tool_index, mounted, supports_park, present, can_unload);
+
+    // Same predicate the per-slot menu greys its buttons with, and the mirror of
+    // the backend's own refusal: PRINTING always blocks, PAUSED only on a
+    // backend whose filament macro homes itself. Reading the raw print_active
+    // subject instead would suppress the menu through the runout pause that is
+    // precisely when these actions are needed.
+    const auto job_state = static_cast<helix::PrintJobState>(
+        lv_subject_get_int(get_printer_state().get_print_state_enum_subject()));
+    const bool print_blocks_ops = helix::ui::print_blocks_filament_op(
+        job_state == helix::PrintJobState::PRINTING, job_state == helix::PrintJobState::PAUSED,
+        backend && backend->filament_ops_self_home());
+
+    model_ = toolhead_menu_model(tool_index, mounted, supports_park, present, can_unload,
+                                 print_blocks_ops);
 
     if (toolhead_menu_is_empty(model_)) {
         // An empty parked head on a backend that cannot park: there is no action

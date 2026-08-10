@@ -267,9 +267,15 @@ draws one merger. Needs no printer-side change either way.
 
 ### Phase 2 — multiACE detection and backend
 
-1. **Detect it** (§3) — ✅ half done. Misdetection-as-Anycubic is fixed and covered by
-   `test_multiace_vs_anycubic_detection.cpp`; `AmsType::MULTIACE` exists but is never
-   assigned. Flip that when the backend lands.
+1. **Detect it** (§3) — ✅ **done 2026-08-10.** `AmsType::MULTIACE` is now claimed outright.
+   **Claiming the type is only half the wiring**, and the missing half is invisible to a
+   type-only assertion: `has_mmu_` skips the `has_snapmaker_` fallback that populated
+   `detected_ams_systems_`, and `AmsState` builds backends by iterating *that list*. With no
+   MULTIACE arm the list came back empty, no backend was built, and the panel logged
+   `navigate_to_ams_panel called with no backend` on a U1 that had worked seconds earlier.
+   Caught on live hardware, now pinned by a test. Four more sites needed the type too:
+   `is_tool_changer()`, `is_filament_system()`, the `AmsBackend::create` factory, and the
+   discovery sequence's subscription block (which is where `ace` gets subscribed at all).
 2. **`AmsBackendMultiAce`, deriving from `AmsBackendSnapmaker`.** The U1's four heads stay
    unit 0 with all the hard-won native behaviour intact (the `channel_state` load latch,
    `is_stuck_motion_sensor_runout`, `prepare_for_resume`, the 5-step load model,

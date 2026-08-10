@@ -568,8 +568,15 @@ class PrinterDiscovery {
         // a schema multiACE does not publish and ends up with nothing at all.
         if (has_bare_ace_object_ && !has_mmu_) {
             if (has_multiace_markers_ || has_snapmaker_) {
-                spdlog::info("[PrinterDiscovery] `ace` object is multiACE, not Anycubic "
-                             "(markers={}, snapmaker={}) — leaving it to the native backend",
+                // AmsBackendMultiAce derives from the Snapmaker backend, so the
+                // U1's four heads keep every bit of their native handling and
+                // the ACE units are added alongside as units 1..N. Claiming the
+                // type here is what routes `ace` into that backend at all; until
+                // it existed the only safe answer was to fall through.
+                has_mmu_ = true;
+                mmu_type_ = AmsType::MULTIACE;
+                spdlog::info("[PrinterDiscovery] Detected multiACE (markers={}, snapmaker={}) — "
+                             "U1 heads plus ACE units",
                              has_multiace_markers_, has_snapmaker_);
             } else {
                 has_mmu_ = true;
@@ -597,6 +604,14 @@ class PrinterDiscovery {
             } else if (mmu_type_ == AmsType::QIDI_BOX) {
                 // i18n: do not translate - product name
                 detected_ams_systems_.push_back({AmsType::QIDI_BOX, "QIDI Box"});
+            } else if (mmu_type_ == AmsType::MULTIACE) {
+                // multiACE claims has_mmu_, which means the has_snapmaker_
+                // fallback below is skipped — so this arm is not optional. Its
+                // absence registered NO system at all and left AmsState with no
+                // backend, i.e. an empty multi-filament panel on a U1 that had
+                // been working a moment earlier.
+                // i18n: do not translate - product name
+                detected_ams_systems_.push_back({AmsType::MULTIACE, "multiACE"});
             }
         } else if (has_snapmaker_) {
             // Native Snapmaker filament system (no aftermarket MMU)

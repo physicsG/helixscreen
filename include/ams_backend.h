@@ -1138,6 +1138,11 @@ class AmsBackend {
      * Only meaningful while a head is actually mounted; with an empty carriage
      * there is nothing to dock. Callers gate on MountState/mounted_tool.
      *
+     * @warning This is a plain virtual — it does NOT pass through the
+     * run_filament_op() gate that load/unload/select get for free. Parking
+     * moves the carriage, so an implementation MUST apply its own print refusal
+     * (check_preconditions(true)) or it will dock the head mid-print.
+     *
      * @return AmsError indicating success or failure.
      */
     virtual AmsError park_toolhead() {

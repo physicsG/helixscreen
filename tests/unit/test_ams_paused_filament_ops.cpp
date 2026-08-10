@@ -283,6 +283,14 @@ TEST_CASE_METHOD(PausedGateFixture, "Snapmaker refuses toolhead-motion filament 
     SECTION("select_slot — on the U1 a slot select IS a physical tool change") {
         expect_refused(backend->select_slot(1));
     }
+
+    SECTION("park_toolhead — PARK_EXTRUDER docks the carriage mid-print") {
+        // Park is NOT a filament op, so it never passes through run_filament_op()
+        // and gets none of that gating for free. It moves the carriage, so it
+        // carries its own copy of the refusal; without it the toolhead menu's
+        // Park button would dock the head in the middle of a running job.
+        expect_refused(backend->park_toolhead());
+    }
 }
 
 TEST_CASE_METHOD(PausedGateFixture, "Snapmaker still allows filament ops while PAUSED",

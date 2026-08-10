@@ -78,3 +78,20 @@ TEST_CASE("Toolhead menu rejects an out-of-range head", "[ams][toolhead_menu]") 
     auto m = toolhead_menu_model(-1, 0, true, true, true);
     CHECK(toolhead_menu_is_empty(m));
 }
+
+TEST_CASE("Toolhead menu offers nothing while a print owns the toolhead",
+          "[ams][toolhead_menu][safety]") {
+    // Select, Park, Load and Unload all move the carriage or the filament, and
+    // the backend refuses every one of them mid-print. A menu of four buttons
+    // that each answer with a refusal is worse than no menu.
+    auto printing = toolhead_menu_model(/*tool_index=*/3, /*mounted_tool=*/3, /*supports_park=*/true,
+                                        /*slot_present=*/true, /*can_unload=*/true,
+                                        /*print_blocks_ops=*/true);
+    CHECK(toolhead_menu_is_empty(printing));
+
+    // The identical head is fully actionable once the print is not blocking —
+    // notably including a PAUSED job, which is the runout-recovery workflow.
+    auto idle = toolhead_menu_model(3, 3, true, true, true, /*print_blocks_ops=*/false);
+    CHECK(idle.show_park);
+    CHECK(idle.show_unload);
+}

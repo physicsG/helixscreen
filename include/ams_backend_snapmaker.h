@@ -269,12 +269,21 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
         return "[AMS Snapmaker]";
     }
 
+    /// The U1's fixed head count. Protected rather than private because
+    /// AmsBackendMultiAce derives from this backend and indexes the same four
+    /// heads; it is a compile-time constant of the hardware, not mutable state.
+    static constexpr int NUM_TOOLS = 4;
+
+    /// Validate slot index is within range. Protected for the same reason as
+    /// NUM_TOOLS — AmsBackendMultiAce overrides do_load_filament/
+    /// do_unload_filament and must apply the identical bounds check before
+    /// deciding whether the ACE or the native path owns the head.
+    AmsError validate_slot_index(int slot_index) const;
+
   private:
     friend class ::SnapmakerTestAccess;
     friend class ::SnapmakerRealtimeTestAccess;
     friend class ::RunoutScopeTestAccess;
-
-    static constexpr int NUM_TOOLS = 4;
 
     /// Per-extruder cached state
     std::array<ExtruderToolState, NUM_TOOLS> extruder_states_;
@@ -341,9 +350,6 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     [[nodiscard]] bool filament_present_at_tool_locked(int slot_index) const;
 
     std::array<bool, NUM_TOOLS> loaded_at_toolhead_{{false, false, false, false}};
-
-    /// Validate slot index is within range
-    AmsError validate_slot_index(int slot_index) const;
 
     /// Layer a configured FilamentSlotOverride for `slot_index` over `slot`,
     /// mutating `slot` in place. Override wins for every non-default field.

@@ -67,10 +67,13 @@ TEST_CASE("multiACE's `ace` object is not mistaken for an Anycubic ACE",
         PrinterDiscovery d;
         d.parse_objects(object_list(with(kU1Base, {"ace", "ace_bg_swap", "ace_tipform"})));
 
-        // Not Anycubic. Until AmsBackendMultiAce lands, the U1's own backend is
-        // the right answer — it reads the same four heads from print_task_config.
+        // Not Anycubic. Now that AmsBackendMultiAce exists, the type is claimed
+        // outright rather than falling through to the bare Snapmaker backend —
+        // that backend is still what handles the four heads, because MultiAce
+        // derives from it, but the ACE units need the `ace` subscription that
+        // only the MULTIACE type turns on.
         CHECK(d.mmu_type() != AmsType::ACE);
-        CHECK(d.mmu_type() == AmsType::SNAPMAKER);
+        CHECK(d.mmu_type() == AmsType::MULTIACE);
     }
 
     SECTION("U1 + multiACE with the optional extras removed") {
@@ -81,7 +84,22 @@ TEST_CASE("multiACE's `ace` object is not mistaken for an Anycubic ACE",
         d.parse_objects(object_list(with(kU1Base, {"ace"})));
 
         CHECK(d.mmu_type() != AmsType::ACE);
-        CHECK(d.mmu_type() == AmsType::SNAPMAKER);
+        CHECK(d.mmu_type() == AmsType::MULTIACE);
+    }
+
+    SECTION("multiACE registers an AMS system, not just a type") {
+        // Claiming the type is only half the job: AmsState builds backends by
+        // iterating detected_ams_systems(), and setting has_mmu_ skips the
+        // has_snapmaker_ fallback that used to populate that list. Without a
+        // MULTIACE arm the list came back EMPTY, so no backend was created and
+        // the panel logged "navigate_to_ams_panel called with no backend" on a
+        // U1 that had been working seconds earlier. Caught on live hardware.
+        PrinterDiscovery d;
+        d.parse_objects(object_list(with(kU1Base, {"ace", "ace_bg_swap", "ace_tipform"})));
+
+        const auto& systems = d.detected_ams_systems();
+        REQUIRE(systems.size() == 1);
+        CHECK(systems[0].type == AmsType::MULTIACE);
     }
 
     SECTION("a genuine Anycubic community ACE is still detected") {
