@@ -19,8 +19,9 @@
 >    (three sit outside the `[snapmaker]` tag — always run `"[ams]"`). The recorded candidate
 >    fix was wrong; see §10.1 for what it actually took. `[ams]` is now 1656/0.
 > 2. **§10.2 — ACE-fed unload leaves the UI stuck.** Needs the Phase 2 backend, not a patch.
-> 3. **§10.3 — toolhead context menu.** Design settled, nothing built.
+> 3. ~~§10.3 — toolhead context menu.~~ ✅ **done 2026-08-10**, verified on the U1.
 > 4. **Phase 2 proper** (§4) — `AmsBackendMultiAce`. Step 1 (detection) is half done.
+> 5. **Phase 1's AFC generalisation** (§2 banner) — still open, and no longer claimed as done.
 >
 > **Pre-existing failure, not yours:** the full suite (`./build/bin/helix-tests`, no filter)
 > segfaults in `test_clock_widget.cpp:157` — "ClockWidget: timer fires during LVGL
@@ -470,16 +471,34 @@ the first concrete case of the Phase 2 rule — **an ACE-fed head must be driven
 `ACE_UNLOAD_HEAD HEAD=n`, not the native path** — and it will not be fixed properly until the
 backend knows which heads the ACE feeds (`ace.head_ace` / `ace.head_feeder`).
 
-### 10.3 Toolhead context menu — not started
+### 10.3 Toolhead context menu — ✅ built and hardware-verified (2026-08-10)
 
-Design settled, nothing built. The canvas already hit-tests the nozzle separately from the
-spool (`ui_filament_path_canvas.cpp:174-199`); both regions currently call the same
-`slot_callback`, so the work is a second callback plus a menu.
+Built as designed: a second canvas callback (`ui_filament_path_canvas_set_toolhead_callback`)
+plus `AmsToolheadMenu`, modelled on `AmsSelectorMenu`. Unregistered, both canvas regions still
+go to `slot_callback`, so no other panel changes behaviour.
 
-- **Select** — `T{n}`, shown when this head is not mounted
-- **Park** — `PARK_EXTRUDER` (native, undescribed so absent from `gcode/help`; used bare in
-  `PRINT_END`), shown only when this head IS mounted
-- **Load / Unload** — per-head, gated on presence
+- **Select** — `select_slot()`, which already emits `T{n}` on this backend. No new gcode.
+- **Park** — new `AmsBackend::park_toolhead()` + `supports_toolhead_park()`, Snapmaker sends
+  `PARK_EXTRUDER`. **Confirmed on the live machine**, since it is absent from `gcode/help`:
+  `configfile.settings['gcode_macro print_end']` calls it bare and parameterless, right after
+  `SM_PRINT_END_AUTO_UNLOAD_FILAMENT`. It is a carriage op — a docked head keeps its filament,
+  so Park must never unload.
+- **Load / Unload** — mutually exclusive on `can_unload_from_toolhead()`.
+
+The rule is a pure function (`toolhead_menu_model()`), tested without LVGL in
+`test_ams_toolhead_menu_model.cpp`. Entry visibility is published as subjects and bound with
+`<bind_flag_if_eq>`; hiding from C++ would have pushed the imperative-UI ratchet above its 384
+baseline. A head with no applicable action shows no menu rather than an empty card.
+
+**Verified against the U1** (T3 mounted, T0–T2 parked): tapping T3 offered **Park + Load**,
+tapping T0 offered **Select T0** alone. Load rather than Unload on T3 is correct and worth
+keeping in mind — `filament_exist[3]` is true but `channel_state` is `preload_finish`, so the
+PETG is staged in the channel and not at the nozzle. `retraction_seen_` catches exactly that,
+and the sidebar agrees ("Currently Loaded: ---", Unload greyed).
+
+The canvas hit-test only reaches this on PARALLEL topology, and `ctl click` cannot reach it at
+all — it sends a widget event with no coordinates. Drive it with the synthetic pointer
+(`ctl press <x> <y>` / `ctl release`); nozzles sit at `canvas.y + canvas.h * 0.55`.
 
 ### 10.4 Misleading wording in existing tests
 

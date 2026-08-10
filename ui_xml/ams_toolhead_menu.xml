@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- Full-screen backdrop overlay - tap to dismiss -->
+  <view name="toolhead_backdrop"
+        extends="lv_obj" width="100%" height="100%" style_bg_opa="128" style_bg_color="0x000000" style_border_width="0"
+        style_pad_all="0" style_radius="0" clickable="true">
+    <event_cb trigger="clicked" callback="ams_toolhead_backdrop_cb"/>
+    <!-- Toolhead context menu card - positioned by C++ -->
+    <lv_obj name="toolhead_menu"
+            width="content" height="content" style_bg_color="#elevated_bg" style_bg_opa="255"
+            style_radius="#border_radius" style_pad_all="#space_sm" style_pad_gap="#space_xs" flex_flow="column"
+            style_flex_main_place="start" scrollable="false" clickable="true">
+      <!-- Header names the head that was tapped, e.g. "Toolhead T3" -->
+      <text_small name="menu_header" bind_text="ams_toolhead_title"/>
+      <!-- Header Divider -->
+      <lv_obj width="100%"
+              height="1" style_bg_color="#text_muted" style_bg_opa="38" style_pad_all="0" scrollable="false"/>
+      <!-- Select: bring this head to the carriage (T{n}). Hidden for the head
+           already mounted — the C++ side rewrites the label to carry its
+           number. Mutually exclusive with Park. -->
+      <ui_button name="btn_select_tool"
+                 height="#button_height_sm" icon="arrow_left_right" text="Select" translation_tag="Select"
+                 variant="ghost" clickable="true" style_flex_main_place="start">
+        <bind_flag_if_eq subject="ams_toolhead_show_select" flag="hidden" ref_value="0"/>
+        <event_cb trigger="clicked" callback="ams_toolhead_select_cb"/>
+      </ui_button>
+      <!-- Park: dock the mounted head, leaving its filament threaded. Shown
+           only while THIS head is the mounted one. -->
+      <ui_button name="btn_park_tool"
+                 height="#button_height_sm" icon="home" text="Park" translation_tag="Park" variant="ghost"
+                 clickable="true" style_flex_main_place="start">
+        <bind_flag_if_eq subject="ams_toolhead_show_park" flag="hidden" ref_value="0"/>
+        <event_cb trigger="clicked" callback="ams_toolhead_park_cb"/>
+      </ui_button>
+      <!-- Load / Unload are per-head and mutually exclusive: the backend's
+           can_unload_from_toolhead() answers "filament is at THIS toolhead". -->
+      <ui_button name="btn_load_tool"
+                 height="#button_height_sm" icon="arrow_down" text="Load" translation_tag="Load" variant="ghost"
+                 clickable="true" style_flex_main_place="start">
+        <bind_flag_if_eq subject="ams_toolhead_show_load" flag="hidden" ref_value="0"/>
+        <event_cb trigger="clicked" callback="ams_toolhead_load_cb"/>
+      </ui_button>
+      <ui_button name="btn_unload_tool"
+                 height="#button_height_sm" icon="arrow_up" text="Unload" translation_tag="Unload" variant="ghost"
+                 clickable="true" style_flex_main_place="start">
+        <bind_flag_if_eq subject="ams_toolhead_show_unload" flag="hidden" ref_value="0"/>
+        <event_cb trigger="clicked" callback="ams_toolhead_unload_cb"/>
+      </ui_button>
+    </lv_obj>
+  </view>
+</component>

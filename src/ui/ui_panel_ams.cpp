@@ -126,6 +126,7 @@ static void ensure_ams_widgets_registered() {
     lv_xml_register_component_from_file("A:ui_xml/ams_panel.xml");
     lv_xml_register_component_from_file("A:ui_xml/ams_context_menu.xml");
     lv_xml_register_component_from_file("A:ui_xml/ams_selector_menu.xml");
+    lv_xml_register_component_from_file("A:ui_xml/ams_toolhead_menu.xml");
     // NOTE: spoolman_spool_item.xml and ams_edit_overlay.xml are registered
     // globally in xml_registration.cpp (needed by FilamentPanel without AMS lazy init)
     lv_xml_register_component_from_file("A:ui_xml/ams_loading_error_modal.xml");
@@ -771,6 +772,11 @@ void AmsPanel::setup_path_canvas() {
     ui_filament_path_canvas_set_hub_callback(path_canvas_, &AmsPanel::on_path_hub_clicked_thunk,
                                              this);
 
+    // Nozzle taps get their own menu (Select / Park / Load / Unload). Registered
+    // unconditionally: the canvas only routes here on PARALLEL topology, and the
+    // menu itself declines to show when the head has no action to offer.
+    ui_filament_path_canvas_set_toolhead_callback(path_canvas_, on_path_toolhead_clicked, this);
+
     // Set bypass spool click callback (opens edit modal for external spool)
     ui_filament_path_canvas_set_bypass_callback(path_canvas_, on_bypass_spool_clicked, this);
     ui_filament_path_canvas_set_buffer_callback(path_canvas_, on_buffer_clicked, this);
@@ -1189,6 +1195,85 @@ void AmsPanel::on_path_slot_clicked(int slot_index, void* user_data) {
     }
 
     self->show_context_menu(slot_index, self->path_canvas_, click_pt);
+}
+
+void AmsPanel::on_path_toolhead_clicked(int tool_index, void* user_data) {
+    auto* self = static_cast<AmsPanel*>(user_data);
+    if (!self || !self->path_canvas_) {
+        return;
+    }
+
+    int slot_count = lv_subject_get_int(AmsState::instance().get_slot_count_subject());
+    if (tool_index < 0 || tool_index >= slot_count) {
+        spdlog::warn("[AmsPanel] Ignoring toolhead click - invalid tool {} (slot_count={})",
+                     tool_index, slot_count);
+        return;
+    }
+
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        return;
+    }
+
+    // Same as the slot path: read the live touch point synchronously, while the
+    // active indev still reports the press coordinates.
+    lv_point_t click_pt = {0, 0};
+    if (lv_indev_t* indev = lv_indev_active()) {
+        lv_indev_get_point(indev, &click_pt);
+    }
+
+    // Created once and reused, like the per-slot menu: the instance owns
+    // lv_subjects registered under fixed names, so building a fresh one per tap
+    // would re-register those names and destroy the previous owner's storage on
+    // every nozzle press.
+    if (!self->toolhead_menu_) {
+        self->toolhead_menu_ = std::make_unique<helix::ui::AmsToolheadMenu>();
+        self->toolhead_menu_->set_action_callback(
+            [self](helix::ui::AmsToolheadMenu::ToolheadAction a, int tool) {
+                self->dispatch_toolhead_action(a, tool);
+            });
+    }
+    // show_at() returns false when the head has no applicable action; that is a
+    // deliberate no-op, not an error worth reporting.
+    self->toolhead_menu_->show_at(self->parent_screen_, self->path_canvas_, click_pt, tool_index,
+                                 backend);
+}
+
+void AmsPanel::dispatch_toolhead_action(helix::ui::AmsToolheadMenu::ToolheadAction a,
+                                        int tool_index) {
+    using TA = helix::ui::AmsToolheadMenu::ToolheadAction;
+    if (a == TA::CANCELLED) {
+        return;
+    }
+
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        return;
+    }
+
+    AmsError err{};
+    switch (a) {
+    case TA::SELECT:
+        // select_slot() on a toolchanger IS the tool change (`T{n}`) — see
+        // AmsBackendSnapmaker::select_slot_moves_toolhead().
+        err = backend->select_slot(tool_index);
+        break;
+    case TA::PARK:
+        err = backend->park_toolhead();
+        break;
+    case TA::LOAD:
+        err = backend->load_filament(tool_index);
+        break;
+    case TA::UNLOAD:
+        err = backend->unload_filament(tool_index);
+        break;
+    case TA::CANCELLED:
+        return;
+    }
+
+    if (err.result != AmsResult::SUCCESS) {
+        helix::ui::notify_ams_error(err, lv_tr("Toolhead command failed"));
+    }
 }
 
 void AmsPanel::on_path_hub_clicked_thunk(lv_point_t click_pt, void* user_data) {

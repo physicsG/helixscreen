@@ -154,6 +154,16 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     // physically loaded (active or parked), preserving the per-tool unload fix.
     [[nodiscard]] bool can_unload_from_toolhead(int slot_index) const override;
 
+    // The U1 is a toolchanger: `PARK_EXTRUDER` returns the mounted head to its
+    // dock and leaves the filament where it is. It is firmware-native and ships
+    // with no description, so it does NOT appear in `gcode/help` — verified
+    // instead by its use in the machine's own `print_end` macro, bare and
+    // parameterless, right after the auto-unload.
+    [[nodiscard]] bool supports_toolhead_park() const override {
+        return true;
+    }
+    AmsError park_toolhead() override;
+
     // Recovery (not supported)
     AmsError recover() override;
     AmsError reset() override;

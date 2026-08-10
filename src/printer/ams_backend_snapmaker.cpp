@@ -573,6 +573,13 @@ AmsError AmsBackendSnapmaker::do_change_tool(int tool_number) {
     return execute_gcode(fmt::format("T{}", tool_number));
 }
 
+AmsError AmsBackendSnapmaker::park_toolhead() {
+    // Bare and parameterless — the firmware parks whichever head is on the
+    // carriage. Nothing to validate, and nothing to unload: a docked head keeps
+    // its filament.
+    return execute_gcode("PARK_EXTRUDER");
+}
+
 // ============================================================================
 // Recovery (not supported)
 // ============================================================================

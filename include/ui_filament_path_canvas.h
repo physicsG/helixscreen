@@ -184,6 +184,22 @@ void ui_filament_path_canvas_set_slot_callback(lv_obj_t* obj, filament_path_slot
                                                void* user_data);
 
 /**
+ * @brief Set callback for taps on a toolhead (PARALLEL topology only)
+ *
+ * The nozzle and the spool above it ask different questions on a toolchanger —
+ * "mount or park this head" versus "what filament is in this lane" — and the
+ * canvas already hit-tests them as separate regions. Registering this splits
+ * them; without it both regions continue to report to the slot callback, which
+ * is what every non-toolchanger panel wants.
+ *
+ * @param obj The filament_path_canvas widget
+ * @param cb Callback function (slot_index, user_data)
+ * @param user_data User data passed to callback
+ */
+void ui_filament_path_canvas_set_toolhead_callback(lv_obj_t* obj, filament_path_slot_cb_t cb,
+                                                   void* user_data);
+
+/**
  * @brief Start segment transition animation
  *
  * Animates the filament tip moving from one segment to another.

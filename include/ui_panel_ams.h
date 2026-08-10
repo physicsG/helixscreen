@@ -8,6 +8,7 @@
 #include "ui_ams_edit_overlay.h"
 #include "ui_ams_loading_error_modal.h"
 #include "ui_ams_selector_menu.h"
+#include "ui_ams_toolhead_menu.h"
 #include "ui_ams_sidebar.h"
 #include "ui_bypass_spool_widget.h"
 #include "ui_observer_guard.h"
@@ -145,6 +146,7 @@ class AmsPanel : public PanelBase {
 
     std::unique_ptr<helix::ui::AmsContextMenu> context_menu_;      ///< Slot context menu
     std::unique_ptr<helix::ui::AmsSelectorMenu> selector_menu_;    ///< Selector/hub context menu
+    std::unique_ptr<helix::ui::AmsToolheadMenu> toolhead_menu_;    ///< Per-nozzle context menu
     std::unique_ptr<helix::ui::AmsLoadingErrorModal> error_modal_; ///< Loading error modal
     std::unique_ptr<helix::ui::AmsOperationSidebar> sidebar_;      ///< Shared sidebar component
 
@@ -272,6 +274,11 @@ class AmsPanel : public PanelBase {
      * @brief Dispatch a selector-menu action to the AMS backend.
      */
     void dispatch_selector_action(helix::ui::AmsSelectorMenu::SelectorAction a);
+
+    /// Nozzle taps on a PARALLEL canvas open the per-toolhead menu instead of
+    /// the per-slot one — mount/park is a carriage question, not a lane one.
+    static void on_path_toolhead_clicked(int tool_index, void* user_data);
+    void dispatch_toolhead_action(helix::ui::AmsToolheadMenu::ToolheadAction a, int tool_index);
 
     /**
      * @brief Handle click on bypass spool box in path canvas

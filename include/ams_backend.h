@@ -1120,6 +1120,31 @@ class AmsBackend {
     }
 
     /**
+     * @brief Whether the backend can dock the mounted toolhead without unloading.
+     * @return true if park_toolhead() is implemented (toolchangers only).
+     */
+    [[nodiscard]] virtual bool supports_toolhead_park() const {
+        return false;
+    }
+
+    /**
+     * @brief Return the mounted toolhead to its dock, leaving filament alone.
+     *
+     * Parking is a carriage operation, not a filament one: on a toolchanger a
+     * head is routinely docked with filament still threaded to its nozzle, and
+     * the next pick-up finds it exactly as it was. So this must NOT unload —
+     * the two are separate actions with separate menu entries.
+     *
+     * Only meaningful while a head is actually mounted; with an empty carriage
+     * there is nothing to dock. Callers gate on MountState/mounted_tool.
+     *
+     * @return AmsError indicating success or failure.
+     */
+    virtual AmsError park_toolhead() {
+        return AmsErrorHelper::not_supported("Toolhead park");
+    }
+
+    /**
      * @brief Whether the backend can position the selector at a gate without loading.
      * @return true if select_gate() is implemented (selector-based systems only).
      */

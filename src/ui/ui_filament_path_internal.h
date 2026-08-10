@@ -284,6 +284,11 @@ struct FilamentPathData {
     // Callbacks
     filament_path_slot_cb_t slot_callback = nullptr;
     void* slot_user_data = nullptr;
+    /// Optional. When set, the toolhead hit region reports here instead of
+    /// slot_callback — the nozzle and the spool are different questions on a
+    /// toolchanger. Unset leaves both regions on slot_callback, as before.
+    filament_path_slot_cb_t toolhead_callback = nullptr;
+    void* toolhead_user_data = nullptr;
     filament_path_bypass_cb_t bypass_callback = nullptr;
     void* bypass_user_data = nullptr;
     filament_path_buffer_cb_t buffer_callback = nullptr;
