@@ -511,6 +511,34 @@ static void apply_current_slot_highlight(AmsSlotData* data, int current_slot) {
         lv_obj_set_style_border_width(highlight_target, 0, LV_PART_MAIN);
         lv_obj_set_style_shadow_width(highlight_target, 0, LV_PART_MAIN);
         lv_obj_set_style_shadow_opa(highlight_target, LV_OPA_TRANSP, LV_PART_MAIN);
+
+    }
+
+    // A slot fed from another unit is showing that unit's spool, not one of its
+    // own — on multiACE the U1's ACE-fed head. Mark it so the borrowed spool is
+    // legible as borrowed, which is also why its edit actions are missing from
+    // the slot menu.
+    //
+    // Deliberately on `container`, not `highlight_target`: the ACE-fed head is
+    // usually ALSO the active one, and the active highlight owns the spool
+    // area's border. Putting both on the same element made the marker invisible
+    // in exactly the state it matters most. Muted and thin so it reads as an
+    // annotation rather than competing with the active glow.
+    if (data->container) {
+        bool external = false;
+        if (auto* backend = AmsState::instance().get_backend()) {
+            external = backend->slot_identity_owner_unit(data->slot_index).has_value();
+        }
+        if (external) {
+            lv_obj_set_style_border_color(data->container, theme_manager_get_color("text_muted"),
+                                          LV_PART_MAIN);
+            lv_obj_set_style_border_opa(data->container, LV_OPA_60, LV_PART_MAIN);
+            lv_obj_set_style_border_width(data->container, 1, LV_PART_MAIN);
+            lv_obj_set_style_radius(data->container, 4, LV_PART_MAIN);
+        } else {
+            lv_obj_set_style_border_opa(data->container, LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_border_width(data->container, 0, LV_PART_MAIN);
+        }
     }
 
     spdlog::debug("[AmsSlot] Slot {} highlight active={} (from slot_active_loaded subject)",
