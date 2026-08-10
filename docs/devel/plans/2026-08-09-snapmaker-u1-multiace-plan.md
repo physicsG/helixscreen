@@ -7,15 +7,26 @@
 >
 > **State:** the U1 multi-filament panel is fixed and hardware-verified — four independent
 > toolheads, correct mount election, mounted≠loaded, and the loaded card populated with
-> Unload enabled. The multiACE *backend* has not been started.
+> Unload enabled. **Tests are green** (§10.1). The multiACE *backend* has not been started.
+>
+> **Read §2's ⚠️ banner and §3 before trusting this doc's "implemented" claims.** Two were
+> wrong: §2's AFC topology fix was never built (the merger was fixed a different way), and
+> §3's shape-based discriminator is impossible and was replaced by a name-based one that
+> shipped. Both corrected in place on 2026-08-10.
 >
 > **Do these in order:**
-> 1. **§10.1 — three failing unit tests.** `./build/bin/helix-tests "[snapmaker]"` is
->    85/3. A candidate fix is written down but **unverified**; build the test binary and run
->    `[snapmaker]` + `[ams]` before believing it. Nothing should be pushed until this is green.
+> 1. ~~§10.1 — failing unit tests.~~ ✅ **done 2026-08-10.** It was **6** failures, not 3
+>    (three sit outside the `[snapmaker]` tag — always run `"[ams]"`). The recorded candidate
+>    fix was wrong; see §10.1 for what it actually took. `[ams]` is now 1656/0.
 > 2. **§10.2 — ACE-fed unload leaves the UI stuck.** Needs the Phase 2 backend, not a patch.
 > 3. **§10.3 — toolhead context menu.** Design settled, nothing built.
-> 4. **Phase 2 proper** (§4) — `AmsBackendMultiAce`.
+> 4. **Phase 2 proper** (§4) — `AmsBackendMultiAce`. Step 1 (detection) is half done.
+>
+> **Pre-existing failure, not yours:** the full suite (`./build/bin/helix-tests`, no filter)
+> segfaults in `test_clock_widget.cpp:157` — "ClockWidget: timer fires during LVGL
+> processing". Deterministic across seeds in the full run, passes under `"[clock_widget]"`
+> alone, and **reproduces with this branch stashed**, so it is inherited from `main`. Full
+> suite = 2757 cases, that 1 failure. Unrelated to filament work; do not chase it here.
 >
 > **Driving the real printer from a dev box** (no deploy, no SSH — this is the whole loop):
 > ```bash
@@ -43,7 +54,11 @@
 > `1.5.2.13_20260722102206`, multiACE `0.99.6.1b`). v1 of this plan was written from source
 > reading alone and guessed the wrong root cause for the merged-toolhead drawing; §2 is the
 > real one, read off the machine. Mockups: `2026-08-09-multiace-mockup.html`.
-> Captured payload: `tests/fixtures/snapmaker_u1/u1-afc-shim-and-multiace-idle.json`.
+> ~~Captured payload: `tests/fixtures/snapmaker_u1/u1-afc-shim-and-multiace-idle.json`.~~
+> **That file does not exist** — never committed, and not on disk anywhere (checked
+> 2026-08-10). The live values quoted in §1 are the only surviving record of the capture.
+> Re-capture from the machine if a fixture is needed:
+> `curl -s '192.168.2.242:7125/printer/objects/query?ace&print_task_config&filament_feed%20left&filament_feed%20right'`.
 
 ---
 
@@ -147,18 +162,35 @@ That constant also fed `AmsBackend::slot_has_independent_path()`, which decides
 load-vs-swap: every lane looked shared, forcing an unload-before-load that a machine with
 four independent toolheads never needs. So this was a behavioural bug, not only a visual one.
 
-`get_topology()` now derives from the parsed units — their common value, `MIXED` when they
-disagree, `HUB` before any unit has been seen (unchanged for a Box Turtle). Because
-`get_unit_topology()` calls it *while holding* `mutex_`, the logic lives in a new
-`topology_locked()` helper and `get_topology()` is the locking wrapper; calling the public
-form from inside the lock would self-deadlock.
+The intended answer — also **not built**, see the banner below — was for `get_topology()` to
+derive from the parsed units: their common value, `MIXED` when they disagree, `HUB` before any
+unit has been seen (unchanged for a Box Turtle). Because `get_unit_topology()` calls it *while
+holding* `mutex_`, the logic would live in a `topology_locked()` helper with `get_topology()`
+as the locking wrapper; calling the public form from inside the lock would self-deadlock.
 
-### The fix (implemented)
+### ⚠️ The fix below was NEVER IMPLEMENTED (verified 2026-08-10)
 
-`parse_afc_unit_object()` now falls back to the unit's own lanes when the unit reports no
-extruders: if every lane's extruder is known and they are **distinct**, that count becomes
-the unit's extruder set, and the existing `extruders.size() > 1 → PARALLEL` arm answers
-correctly. Four distinct extruders → four independent toolheads.
+Everything in this subsection describes an approach that was designed and then **not built**.
+Verified against the tree, not inferred: `AmsBackendAfc::get_topology()` still returns a
+hardcoded `PathTopology::HUB` (`ams_backend_afc.cpp:555-558`), `lane_extruder_` and
+`topology_locked()` do not exist, `tests/unit/test_afc_shim_unit_topology.cpp` does not
+exist, and `git diff main...HEAD` touches no `*afc*` file at all.
+
+**What actually fixed the merger** was `a1a6c33da` (§3): detection stopped claiming the bare
+`ace` object, so the U1 falls through to the **native Snapmaker backend**, which draws its
+four heads correctly — AFC is never selected on this machine, so its HUB constant no longer
+matters *here*. The render half was `01f77654c`'s `compute_slot_render_states()` change in
+`ui_filament_path_topology.cpp`.
+
+**So this is still open, and Phase 1's stated generalisation is not delivered:** any OTHER
+AFC-shim-over-toolchanger machine — one without the U1's `filament_detect` signature to fall
+through on — still hits the `HUB` fallthrough and still draws four heads as one merger. The
+analysis above is sound and worth building; treat it as a design, not a record.
+
+The unbuilt design was: `parse_afc_unit_object()` falls back to the unit's own lanes when the
+unit reports no extruders — if every lane's extruder is known and they are **distinct**, that
+count becomes the unit's extruder set, and the existing `extruders.size() > 1 → PARALLEL` arm
+answers correctly. Four distinct extruders → four independent toolheads.
 
 Deliberately conservative in three ways, because guessing PARALLEL on a genuine hub unit
 de-merges a merger that physically exists:
@@ -168,15 +200,19 @@ de-merges a merger that physically exists:
   trigger it (the same hazard the hub-routing parse already guards against, #1229 defect 4);
 - requires the extruders to be **distinct** — four lanes into one extruder stays a hub.
 
+The files it *would* touch (none of these changes exist — this is the build list, not a
+changelog):
+
 | File | Change |
 |---|---|
 | `include/ams_backend_afc.h` | new `lane_extruder_` map (mirrors `lane_hub_routing_`); `topology_locked()` decl |
 | `src/printer/ams_backend_afc.cpp` | populate `lane_extruder_` in the lane parse; derive-from-lanes fallback in `parse_afc_unit_object()`; `get_topology()` derives from units instead of returning a constant |
 | `tests/unit/test_afc_shim_unit_topology.cpp` | 6 cases: U1 shim frame → PARALLEL (per-unit **and** system-wide); partial delta → unchanged; same-extruder lanes → HUB (both); unit-declared extruders → unchanged |
 
-**Verified on the live printer** (2026-08-09, `192.168.2.242`, run locally at `-s tiny`):
-the panel now draws four independent toolheads with T3 highlighted holding its PETG,
-instead of four lanes fanning into a hub box and one nozzle.
+**What WAS verified on the live printer** (2026-08-09, `192.168.2.242`, run locally at
+`-s tiny`): the panel draws four independent toolheads with T3 highlighted holding its PETG,
+instead of four lanes fanning into a hub box and one nozzle. That is the native Snapmaker
+backend doing it after the §3 fall-through — not AFC, and not the design above.
 
 ---
 
@@ -195,27 +231,44 @@ So the shim is currently load-bearing, and the ACE misdetection is a real latent
 every multiACE user who does *not* have the shim installed. Both need fixing in HelixScreen;
 neither is fixed by changing your printer.
 
-**Fix for the ACE collision** — disambiguate on shape, not name, using the predicate the ACE
-backend already applies:
+**Fix for the ACE collision — ✅ shipped in `a1a6c33da`, but NOT by the mechanism proposed
+here.** Disambiguating on shape is impossible at this point: detection runs off
+`objects.list`, which carries **names only**, so no payload exists to inspect. Do not try to
+rebuild it this way.
+
+What shipped is name-based, in `finalize_ams_detection()` once the whole object list is
+visible (`printer_discovery.h:556-580`). Either signal is sufficient:
 
 ```
-ace with top-level slots[]           → AmsType::ACE       (Anycubic, unchanged)
-ace with aces[] and device_count     → AmsType::MULTIACE  (new)
+ace + (ace_bg_swap | ace_tipform)  → multiACE   (the extras multiACE always ships)
+ace + filament_detect              → multiACE   (U1 firmware signature; no Anycubic has it)
+ace, neither marker                → AmsType::ACE (Anycubic, unchanged)
 ```
+
+On a multiACE match it **leaves the object unclaimed** and falls through to the native
+Snapmaker backend. `AmsType::MULTIACE = 9` exists in `ams_types.h` with its string, but
+**nothing ever assigns it** — deliberately, "until `AmsBackendMultiAce` exists". Regression
+tests both directions: `tests/unit/test_multiace_vs_anycubic_detection.cpp` (121 lines).
+
+So Phase 2 step 1 is half done: the misdetection is fixed and tested; the affirmative
+`MULTIACE` claim is the line to flip when the backend lands.
 
 ---
 
 ## 4. Phase plan
 
-### Phase 1 — draw the U1 as four toolheads ✅ done (§2)
+### Phase 1 — draw the U1 as four toolheads ✅ done for the U1 (§2, §3)
 
-The immediate ask. Fixes the merger for any AFC-shim-over-toolchanger machine, not just the
-U1, and needs no printer-side change.
+The immediate ask, delivered — but by routing the U1 to its native backend, **not** by the
+§2 AFC fix, which was never built. So the stated generalisation to "any AFC-shim-over-
+toolchanger machine" is **not** delivered: a shim machine without the U1 signature still
+draws one merger. Needs no printer-side change either way.
 
 ### Phase 2 — multiACE detection and backend
 
-1. **Detect it** (§3) — `AmsType::MULTIACE`, plus regression tests for both directions using
-   the captured fixture.
+1. **Detect it** (§3) — ✅ half done. Misdetection-as-Anycubic is fixed and covered by
+   `test_multiace_vs_anycubic_detection.cpp`; `AmsType::MULTIACE` exists but is never
+   assigned. Flip that when the backend lands.
 2. **`AmsBackendMultiAce`, deriving from `AmsBackendSnapmaker`.** The U1's four heads stay
    unit 0 with all the hard-won native behaviour intact (the `channel_state` load latch,
    `is_stuck_motion_sensor_runout`, `prepare_for_resume`, the 5-step load model,
@@ -354,33 +407,49 @@ asking you to take the numbers on trust.
 
 Everything below is on `feat/snapmaker-multiace`, nothing pushed.
 
-### 10.1 Three failing unit tests — MUST fix before any PR
+### 10.1 Failing unit tests — ✅ fixed (2026-08-10)
 
-`./build/bin/helix-tests "[snapmaker]"` → **85 passed, 3 failed**. All three are
-consequences of `5174f0f91`, and all three share one cause: they establish state with
-`toolhead: {extruder: "extruder"}` + `print_task_config.filament_exist` and expect slot 0 to
-read `LOADED`.
+**It was 6 failures, not 3.** `[snapmaker]` showed 3; the other three live in
+`test_ams_realtime_filament_state.cpp` under tags that do not include `[snapmaker]`, so only
+`"[ams]"` sees the whole family. Now `[ams]` = **1656 cases, 0 failed** (was 1653 / 6).
 
 | Test | Line |
 |---|---|
 | `can_unload_from_toolhead offers unload for every loaded toolhead` | `test_ams_backend_snapmaker.cpp:497` |
 | `motion-sensor runout path is independent of the loaded latch` | `test_ams_backend_snapmaker.cpp:1067` |
 | `overrides slot LIVE accessors from sensor + LOADED status` | `test_ams_realtime_filament_state.cpp:113` |
+| `AmsState publishes per-slot LIVE subjects on sync` | `test_ams_realtime_filament_state.cpp:186` |
+| `Active-loaded subject is the single highlight source on unload` | `test_ams_realtime_filament_state.cpp:314` |
+| `AMS clears filament_loaded after unload completes` | `test_ams_realtime_filament_state.cpp:483` |
 
-They encode "mounted + spool present ⇒ LOADED". The mounted⇒loaded conflation had to go (an
-empty mounted head rendered as a full spool), but these cases have filament *present*, which
-is a weaker and more defensible claim than the mounted+empty one that was actually broken.
+The diagnosis held: all six encode "mounted + spool present ⇒ LOADED", a weaker and more
+defensible claim than the mounted+empty conflation `70ce3345b` actually removed.
 
-**Candidate fix, unverified** — add a third presence term in
-`filament_present_at_tool_locked()`:
+**The candidate fix recorded here was wrong** — it would have fixed one of the six. Four of
+them assert `get_slot_info(i).status`, a **stored** field that `filament_present_at_tool_locked()`
+does not feed; adding a term to that predicate leaves the status untouched. The real fix is
+three parts:
 
-```cpp
-|| (slot_index == system_info_.current_tool && slot->is_present() && !retraction_seen_[slot_index])
-```
+1. **The third presence term** (as proposed) in `filament_present_at_tool_locked()`. Needed
+   because `port_sensor_filament_present_` starts false and stays false until a
+   `filament_feed` frame names the tool, so a machine publishing only `print_task_config`
+   answers "nothing loaded" on the two sensor terms alone.
+2. **Recompute the mounted slot's `status` per frame**, next to the `filament_loaded`
+   recompute. It was written *only* by the election, which fires on `active != current_tool`,
+   so a load completing while the tool stayed mounted — the normal case — left the slot
+   reading `AVAILABLE` indefinitely. Same staleness `5174f0f91` fixed for `filament_loaded`,
+   left behind on the status.
+3. **Fold the motion-sensor runout clear into that recompute.** It was its own block *above*
+   the recompute, which then put `filament_loaded` straight back on the strength of the loaded
+   latch. Latent since `5174f0f91` and invisible because the test that covers it aborted on an
+   earlier `REQUIRE`. The runout gates `filament_loaded` only, never
+   `filament_present_at_tool_locked()` — after a runout the canvas must break the line to the
+   nozzle while Unload stays offered.
 
-Expected: T2 mounted+empty stays empty (`filament_exist=false`), the three tests go green
-again, and the post-unload preload case stays suppressed by `retraction_seen_`. **Build the
-test binary and run `[snapmaker]` and `[ams]` before believing any of that.**
+Three regression tests added, each verified by mutation (revert the fix → the test goes red):
+mounted-but-EMPTY is not loaded (the `70ce3345b` case, which shipped with no test at all),
+a load completing without a tool change promotes the slot, and runout clears `filament_loaded`
+while keeping Unload.
 
 ### 10.2 ACE-fed head: unload never terminates in the UI
 
