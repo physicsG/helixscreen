@@ -126,7 +126,8 @@ static void ensure_ams_widgets_registered() {
     lv_xml_register_component_from_file("A:ui_xml/ams_panel.xml");
     lv_xml_register_component_from_file("A:ui_xml/ams_context_menu.xml");
     lv_xml_register_component_from_file("A:ui_xml/ams_selector_menu.xml");
-    lv_xml_register_component_from_file("A:ui_xml/ams_toolhead_menu.xml");
+    // ams_toolhead_menu.xml is registered by AmsToolheadMenu itself — the
+    // overview opens it too and is reachable without this panel ever loading.
     // NOTE: spoolman_spool_item.xml and ams_edit_overlay.xml are registered
     // globally in xml_registration.cpp (needed by FilamentPanel without AMS lazy init)
     lv_xml_register_component_from_file("A:ui_xml/ams_loading_error_modal.xml");
@@ -1241,39 +1242,9 @@ void AmsPanel::on_path_toolhead_clicked(int tool_index, void* user_data) {
 
 void AmsPanel::dispatch_toolhead_action(helix::ui::AmsToolheadMenu::ToolheadAction a,
                                         int tool_index) {
-    using TA = helix::ui::AmsToolheadMenu::ToolheadAction;
-    if (a == TA::CANCELLED) {
-        return;
-    }
-
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (!backend) {
-        return;
-    }
-
-    AmsError err{};
-    switch (a) {
-    case TA::SELECT:
-        // select_slot() on a toolchanger IS the tool change (`T{n}`) — see
-        // AmsBackendSnapmaker::select_slot_moves_toolhead().
-        err = backend->select_slot(tool_index);
-        break;
-    case TA::PARK:
-        err = backend->park_toolhead();
-        break;
-    case TA::LOAD:
-        err = backend->load_filament(tool_index);
-        break;
-    case TA::UNLOAD:
-        err = backend->unload_filament(tool_index);
-        break;
-    case TA::CANCELLED:
-        return;
-    }
-
-    if (err.result != AmsResult::SUCCESS) {
-        helix::ui::notify_ams_error(err, lv_tr("Toolhead command failed"));
-    }
+    // Pure backend work, shared with the overview panel — see
+    // helix::ui::dispatch_toolhead_menu_action().
+    helix::ui::dispatch_toolhead_menu_action(a, tool_index);
 }
 
 void AmsPanel::on_path_hub_clicked_thunk(lv_point_t click_pt, void* user_data) {

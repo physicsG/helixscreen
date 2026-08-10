@@ -181,4 +181,15 @@ class AmsToolheadMenu : public ContextMenu {
     static void on_unload_cb(lv_event_t* e);
 };
 
+/**
+ * @brief Run a toolhead menu action against the live backend.
+ *
+ * Shared by every panel that opens the menu — the AMS detail panel and the
+ * overview — because the dispatch is pure backend work with no panel state in
+ * it, and two copies would drift the moment one of them grew a case.
+ * CANCELLED and a missing backend are no-ops; a failure raises the standard AMS
+ * error toast.
+ */
+void dispatch_toolhead_menu_action(AmsToolheadMenu::ToolheadAction action, int tool_index);
+
 } // namespace helix::ui

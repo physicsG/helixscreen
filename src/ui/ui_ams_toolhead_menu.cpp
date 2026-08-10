@@ -5,8 +5,10 @@
 
 #include "ui_button.h"
 #include "ui_callback_helpers.h"
+#include "ui_error_reporting.h"
 
 #include "ams_backend.h"
+#include "ams_state.h"
 #include "ams_types.h"
 #include "app_globals.h"
 #include "filament_op_slot_resolver.h"
@@ -291,6 +293,14 @@ void AmsToolheadMenu::register_callbacks() {
         return;
     }
 
+    // The menu owns its own component registration rather than relying on a
+    // panel to have done it. Two panels open this menu now, and the overview is
+    // reachable without ever visiting the detail panel — which is exactly how
+    // this shipped broken: the XML was registered only in AmsPanel, so a tap on
+    // the overview logged "not a known widget/element/component" and no menu
+    // appeared. Registration is idempotent and this whole function runs once.
+    lv_xml_register_component_from_file("A:ui_xml/ams_toolhead_menu.xml");
+
     register_xml_callbacks({
         {"ams_toolhead_backdrop_cb", on_backdrop_cb},
         {"ams_toolhead_select_cb", on_select_cb},
@@ -346,6 +356,46 @@ void AmsToolheadMenu::on_unload_cb(lv_event_t* /*e*/) {
     auto* self = get_active_instance();
     if (self) {
         self->handle_unload();
+    }
+}
+
+
+// ============================================================================
+// Shared dispatch
+// ============================================================================
+
+void dispatch_toolhead_menu_action(AmsToolheadMenu::ToolheadAction action, int tool_index) {
+    using TA = AmsToolheadMenu::ToolheadAction;
+    if (action == TA::CANCELLED) {
+        return;
+    }
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        return;
+    }
+
+    AmsError err{};
+    switch (action) {
+    case TA::SELECT:
+        // select_slot() on a toolchanger IS the tool change (`T{n}`) -- see
+        // AmsBackendSnapmaker::select_slot_moves_toolhead().
+        err = backend->select_slot(tool_index);
+        break;
+    case TA::PARK:
+        err = backend->park_toolhead();
+        break;
+    case TA::LOAD:
+        err = backend->load_filament(tool_index);
+        break;
+    case TA::UNLOAD:
+        err = backend->unload_filament(tool_index);
+        break;
+    case TA::CANCELLED:
+        return;
+    }
+
+    if (err.result != AmsResult::SUCCESS) {
+        notify_ams_error(err, lv_tr("Toolhead command failed"));
     }
 }
 

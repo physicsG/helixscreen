@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ui_ams_context_menu.h"
+#include "ui_ams_toolhead_menu.h"
 #include "ui_ams_detail.h"
 #include "ui_ams_edit_overlay.h"
 #include "ui_ams_sidebar.h"
@@ -141,6 +142,7 @@ class AmsOverviewPanel : public PanelBase {
 
     // === Slot Interaction ===
     std::unique_ptr<helix::ui::AmsContextMenu> context_menu_; ///< Slot context menu (lazy init)
+    std::unique_ptr<helix::ui::AmsToolheadMenu> toolhead_menu_; ///< Per-nozzle menu (lazy init)
 
     void handle_detail_slot_tap(int global_slot_index, lv_point_t click_pt);
     void show_detail_context_menu(int slot_index, lv_obj_t* near_widget, lv_point_t click_pt);
@@ -150,6 +152,11 @@ class AmsOverviewPanel : public PanelBase {
     void refresh_bypass_display();
     void show_edit_modal(int slot_index, bool open_on_picker = false);
     static void on_bypass_spool_clicked(lv_event_t* e);
+
+    /// Tap on a nozzle in the system path's toolhead row. @p tool_index is the
+    /// virtual tool number on the badge, which is what the backend acts on.
+    static void on_toolhead_clicked(int tool_index, void* user_data);
+    void dispatch_toolhead_action(helix::ui::AmsToolheadMenu::ToolheadAction a, int tool_index);
 
     // === Sidebar ===
     std::unique_ptr<helix::ui::AmsOperationSidebar> sidebar_;

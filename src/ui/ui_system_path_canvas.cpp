@@ -93,6 +93,11 @@ struct SystemPathData {
     // numbering systems disagree, so the letter says which one is on screen.
     char tool_label_prefix = 'T';
     char tool_labels[MAX_TOOLS][8] = {}; // Pre-formatted "<P>n" strings for deferred draw
+
+    /// Optional toolhead-tap callback. Unset leaves the canvas passive, which
+    /// is what every panel except the AMS overview wants.
+    void (*toolhead_callback)(int tool_index, void* user_data) = nullptr;
+    void* toolhead_user_data = nullptr;
     char current_tool_label[8] = {};     // Pre-formatted label for single-nozzle mode
 
     // Theme-derived colors (cached)
@@ -584,6 +589,49 @@ static SysLayout compute_sys_layout(SystemPathData* data, const lv_area_t& obj_c
         L.center_x -= L.width / 10; // Shift hub/toolhead ~10% left
     }
     return L;
+}
+
+// Toolhead row hit-test. Reads its geometry from the same compute_sys_layout()
+// and calc_tool_x() the draw pass uses, so a tap lands on the nozzle that was
+// actually painted rather than on a re-derived guess that can drift.
+static void system_path_click_cb(lv_event_t* e) {
+    lv_obj_t* obj = lv_event_get_target_obj(e);
+    auto* data = get_data(obj);
+    if (!data || !data->toolhead_callback || data->total_tools <= 0) {
+        return;
+    }
+    lv_indev_t* indev = lv_indev_active();
+    if (!indev) {
+        return; // synthetic event with no pointer behind it
+    }
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+
+    lv_area_t coords;
+    lv_obj_get_coords(obj, &coords);
+    SysLayout L = compute_sys_layout(data, coords);
+
+    // Generous vertical band: the nozzle glyph plus its badge underneath, which
+    // is the whole thing a finger aims at.
+    const int32_t band = LV_MAX(18, L.height / 5);
+    if (p.y < L.tools_y - band || p.y > L.tools_y + band) {
+        return;
+    }
+    for (int t = 0; t < data->total_tools; ++t) {
+        int32_t tx = calc_tool_x(t, data->total_tools, L.x_off, L.width);
+        int32_t half = LV_MAX(16, L.width / (data->total_tools * 2 + 1));
+        if (p.x >= tx - half && p.x <= tx + half) {
+            // Report the VIRTUAL tool the badge shows, not the physical column:
+            // callers act on a head number, and with cross-unit sharing the two
+            // are not the same index.
+            int virtual_tool = (t < SystemPathData::MAX_TOOLS && data->has_virtual_numbers)
+                                   ? data->tool_virtual_number[t]
+                                   : t;
+            spdlog::debug("[SystemPath] Toolhead {} clicked (physical {})", virtual_tool, t);
+            data->toolhead_callback(virtual_tool, data->toolhead_user_data);
+            return;
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1156,8 +1204,10 @@ static void* system_path_xml_create(lv_xml_parser_state_t* state, const char** a
     // Register event handlers
     lv_obj_add_event_cb(obj, system_path_draw_cb, LV_EVENT_DRAW_POST, nullptr);
     lv_obj_add_event_cb(obj, system_path_delete_cb, LV_EVENT_DELETE, nullptr);
-    // Click handling on the canvas is no longer needed — bypass clicks are
-    // captured by the BypassSpoolWidgets overlay the panel places on top.
+    // Bypass clicks are captured by the BypassSpoolWidgets overlay the panel
+    // places on top; this one is only for the toolhead row, and no-ops unless a
+    // panel registers a callback.
+    lv_obj_add_event_cb(obj, system_path_click_cb, LV_EVENT_CLICKED, nullptr);
 
     spdlog::debug("[SystemPath] Created widget via XML");
     return obj;
@@ -1240,8 +1290,7 @@ lv_obj_t* ui_system_path_canvas_create(lv_obj_t* parent) {
     // Register event handlers
     lv_obj_add_event_cb(obj, system_path_draw_cb, LV_EVENT_DRAW_POST, nullptr);
     lv_obj_add_event_cb(obj, system_path_delete_cb, LV_EVENT_DELETE, nullptr);
-    // Click handling on the canvas is no longer needed — bypass clicks are
-    // captured by the BypassSpoolWidgets overlay the panel places on top.
+    lv_obj_add_event_cb(obj, system_path_click_cb, LV_EVENT_CLICKED, nullptr);
 
     spdlog::debug("[SystemPath] Created widget programmatically");
     return obj;
@@ -1489,4 +1538,14 @@ bool ui_system_path_canvas_get_bypass_merge_pos(lv_obj_t* obj, int32_t* cx_out, 
 
 void ui_system_path_canvas_refresh(lv_obj_t* obj) {
     lv_obj_invalidate(obj);
+}
+
+void ui_system_path_canvas_set_toolhead_callback(lv_obj_t* obj,
+                                                 void (*cb)(int tool_index, void* user_data),
+                                                 void* user_data) {
+    auto* data = get_data(obj);
+    if (!data)
+        return;
+    data->toolhead_callback = cb;
+    data->toolhead_user_data = user_data;
 }

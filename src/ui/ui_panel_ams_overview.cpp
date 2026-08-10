@@ -218,6 +218,13 @@ void AmsOverviewPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
             lv_obj_set_size(system_path_, LV_PCT(100), LV_PCT(100));
             spdlog::debug("[{}] Created system path canvas", get_name());
 
+            // Tapping a nozzle here asks the same question the detail canvas's
+            // nozzle does, so it opens the same menu. The overview is where you
+            // land whenever there is more than one unit, which on a multiACE
+            // rig is always.
+            ui_system_path_canvas_set_toolhead_callback(
+                system_path_, &AmsOverviewPanel::on_toolhead_clicked, this);
+
             bypass_widgets_ = helix::ui::bypass_spool_create(
                 system_path_area_, &AmsOverviewPanel::on_bypass_spool_clicked, this);
             // SIZE_CHANGED only — listening to DRAW events would invalidate
@@ -1302,6 +1309,44 @@ void AmsOverviewPanel::show_detail_context_menu(int slot_index, lv_obj_t* near_w
 // ============================================================================
 // Bypass Spool Interaction
 // ============================================================================
+
+void AmsOverviewPanel::on_toolhead_clicked(int tool_index, void* user_data) {
+    auto* self = static_cast<AmsOverviewPanel*>(user_data);
+    if (!self || !self->system_path_) {
+        return;
+    }
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        return;
+    }
+
+    // Live touch point, read synchronously while the indev still reports the
+    // press coordinates, so the menu opens where the finger is.
+    lv_point_t click_pt = {0, 0};
+    if (lv_indev_t* indev = lv_indev_active()) {
+        lv_indev_get_point(indev, &click_pt);
+    }
+
+    // Created once and reused: the menu owns lv_subjects registered under fixed
+    // names, so one instance per tap would re-register them and destroy the
+    // previous owner's storage on every press.
+    if (!self->toolhead_menu_) {
+        self->toolhead_menu_ = std::make_unique<helix::ui::AmsToolheadMenu>();
+        self->toolhead_menu_->set_action_callback(
+            [self](helix::ui::AmsToolheadMenu::ToolheadAction a, int tool) {
+                self->dispatch_toolhead_action(a, tool);
+            });
+    }
+    // Returns false when the head has no applicable action — a deliberate
+    // no-op, not an error.
+    self->toolhead_menu_->show_at(self->parent_screen_, self->system_path_, click_pt, tool_index,
+                                  backend);
+}
+
+void AmsOverviewPanel::dispatch_toolhead_action(helix::ui::AmsToolheadMenu::ToolheadAction a,
+                                                int tool_index) {
+    helix::ui::dispatch_toolhead_menu_action(a, tool_index);
+}
 
 void AmsOverviewPanel::on_bypass_spool_clicked(lv_event_t* e) {
     if (auto* self = static_cast<AmsOverviewPanel*>(lv_event_get_user_data(e))) {
