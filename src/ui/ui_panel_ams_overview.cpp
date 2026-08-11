@@ -472,7 +472,19 @@ void AmsOverviewPanel::create_mini_bars(UnitCard& card, const AmsUnit& unit) {
         return;
     }
 
-    int slot_count = static_cast<int>(unit.slots.size());
+    // One bar per spool this unit OWNS — the card's count says the same thing, and
+    // a fourth bar beside "3 slots" reads as a bug. A slot fed from another unit
+    // shows that unit's spool, so it belongs on that unit's card, not this one.
+    auto* bars_backend = AmsState::instance().get_backend();
+    std::vector<int> owned_local;
+    for (int s = 0; s < static_cast<int>(unit.slots.size()); ++s) {
+        const int global_idx = unit.first_slot_global_index + s;
+        if (!bars_backend || !bars_backend->slot_identity_owner_unit(global_idx).has_value()) {
+            owned_local.push_back(s);
+        }
+    }
+
+    int slot_count = static_cast<int>(owned_local.size());
     if (slot_count <= 0) {
         return;
     }
@@ -487,7 +499,8 @@ void AmsOverviewPanel::create_mini_bars(UnitCard& card, const AmsUnit& unit) {
     int32_t bar_width = ams_draw::calc_bar_width(container_width, slot_count, gap,
                                                  MINI_BAR_MIN_WIDTH_PX, MINI_BAR_MAX_WIDTH_PX);
 
-    for (int s = 0; s < slot_count; ++s) {
+    for (int bar = 0; bar < slot_count; ++bar) {
+        const int s = owned_local[static_cast<size_t>(bar)];
         const SlotInfo& slot = unit.slots[s];
         int global_idx = unit.first_slot_global_index + s;
         bool is_loaded = slot_is_active_loaded(global_idx);
@@ -609,6 +622,36 @@ void AmsOverviewPanel::refresh_system_path(const AmsSystemInfo& info, int curren
             const auto& utl = tool_layout.units[i];
             ui_system_path_canvas_set_unit_tools(system_path_, i, utl.tool_count,
                                                  utl.first_physical_tool);
+
+            // Which of those tools does this unit actually FEED? A toolchanger
+            // head fed by an MMU belongs to the U1 but is supplied by the ACE,
+            // and drawing a line from both units to one nozzle says two things
+            // feed it. Clear the bit for any tool whose slot on THIS unit has
+            // its identity owned elsewhere.
+            uint32_t mask = 0;
+            auto* b = AmsState::instance().get_backend();
+            for (int t = 0; t < utl.tool_count && t < 32; ++t) {
+                bool feeds = true;
+                if (b && i < static_cast<int>(info.units.size())) {
+                    const auto& u = info.units[i];
+                    const int phys = utl.first_physical_tool + t;
+                    for (int sl = 0; sl < static_cast<int>(u.slots.size()); ++sl) {
+                        const auto& slot = u.slots[sl];
+                        auto it = tool_layout.virtual_to_physical.find(slot.mapped_tool);
+                        if (it == tool_layout.virtual_to_physical.end() || it->second != phys) {
+                            continue;
+                        }
+                        if (b->slot_identity_owner_unit(u.first_slot_global_index + sl)
+                                .has_value()) {
+                            feeds = false;
+                        }
+                    }
+                }
+                if (feeds) {
+                    mask |= (1u << t);
+                }
+            }
+            ui_system_path_canvas_set_unit_tool_mask(system_path_, i, mask);
         }
     }
 

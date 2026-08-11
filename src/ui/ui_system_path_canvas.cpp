@@ -81,6 +81,11 @@ struct SystemPathData {
 
     // Per-unit tool routing (mixed topology support)
     int unit_tool_count[MAX_UNITS] = {};     // Tools per unit (BT=4, OpenAMS=1)
+    /// Bit t = "this unit actually supplies physical tool first_tool + t".
+    /// Defaults to all-set. Cleared for a tool this unit owns the NOZZLE of but
+    /// does not feed — an MMU-fed toolhead on a toolchanger — so the unit does
+    /// not draw a supply line to filament it is not supplying.
+    uint32_t unit_tool_mask[MAX_UNITS] = {};
     int unit_first_tool[MAX_UNITS] = {};     // First tool index for this unit
     int unit_topology[MAX_UNITS] = {};       // 0=LINEAR, 1=HUB, 2=PARALLEL
     int total_tools = 0;                     // Total tool count across all units
@@ -678,7 +683,14 @@ static int collect_parallel_mixed_routes(SystemPathData* data, const SysLayout& 
     bool is_active = (i == data->active_unit);
 
     int32_t spread = LV_MIN(L.width / 6, tool_count > 1 ? 60 : 0);
+    const uint32_t mask = data->unit_tool_mask[i];
     for (int t = 0; t < tool_count && (first_tool + t) < data->total_tools; ++t) {
+        // A cleared bit means this unit owns the nozzle but does not feed it —
+        // an MMU-fed head on a toolchanger. Drawing the line anyway claims a
+        // supply that does not exist, with two units feeding one nozzle.
+        if (mask != 0 && (mask & (1u << t)) == 0) {
+            continue;
+        }
         int tool_idx = first_tool + t;
         int32_t tool_x = calc_tool_x(tool_idx, data->total_tools, L.x_off, L.width);
         int32_t start_x = unit_x;
@@ -1445,6 +1457,16 @@ void ui_system_path_canvas_set_unit_topology(lv_obj_t* obj, int unit_index, int 
     if (data->unit_topology[unit_index] == topology)
         return;
     data->unit_topology[unit_index] = topology;
+    lv_obj_invalidate(obj);
+}
+
+void ui_system_path_canvas_set_unit_tool_mask(lv_obj_t* obj, int unit_index, uint32_t mask) {
+    auto* data = get_data(obj);
+    if (!data || unit_index < 0 || unit_index >= SystemPathData::MAX_UNITS)
+        return;
+    if (data->unit_tool_mask[unit_index] == mask)
+        return;
+    data->unit_tool_mask[unit_index] = mask;
     lv_obj_invalidate(obj);
 }
 

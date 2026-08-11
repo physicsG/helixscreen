@@ -260,3 +260,18 @@ void ui_system_path_canvas_refresh(lv_obj_t* obj);
 void ui_system_path_canvas_set_toolhead_callback(lv_obj_t* obj,
                                                  void (*cb)(int tool_index, void* user_data),
                                                  void* user_data);
+
+/**
+ * @brief Restrict which of a unit's tools it draws a supply line to
+ *
+ * Bit @c t corresponds to physical tool <tt>first_tool + t</tt>. A cleared bit
+ * means the unit owns that nozzle but does not supply its filament — a
+ * toolchanger head fed by an MMU — so no line is drawn from this unit to it.
+ * A mask of 0 means "unset": every tool is drawn, which is the default and what
+ * every single-source system wants.
+ *
+ * @param obj The system_path_canvas widget
+ * @param unit_index Unit whose mask to set
+ * @param mask Bitmask of tools this unit actually feeds
+ */
+void ui_system_path_canvas_set_unit_tool_mask(lv_obj_t* obj, int unit_index, uint32_t mask);
