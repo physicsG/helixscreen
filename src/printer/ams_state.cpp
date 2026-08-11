@@ -1253,6 +1253,24 @@ void AmsState::update_slot_for_backend(int backend_index, int slot_index) {
     }
 }
 
+namespace {
+/// Does any slot mapped to @p tool actually hold filament?
+///
+/// Guards the tool<-slot spool attribution when several slots share one tool,
+/// which is what an MMU in head mode looks like: every bay maps to the head it
+/// is bound to. Without this the attribution is decided by loop order.
+bool tool_has_present_slot(const AmsSystemInfo& info, int tool) {
+    for (const auto& unit : info.units) {
+        for (const auto& s : unit.slots) {
+            if (s.mapped_tool == tool && s.is_present()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+} // namespace
+
 void AmsState::sync_from_backend() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -1545,6 +1563,16 @@ void AmsState::sync_from_backend() {
     for (int i = 0; i < std::min(info.total_slots, MAX_SLOTS); ++i) {
         const SlotInfo* slot = info.get_slot_global(i);
         if (!slot || slot->mapped_tool < 0) {
+            continue;
+        }
+        // Several slots can map to ONE tool — an MMU in head mode binds all of
+        // its bays to a single head. assign_spool() is keyed by tool, so without
+        // this every one of those bays overwrites the same entry and the last
+        // slot the loop happens to reach wins. Only a slot that actually holds
+        // filament can be what feeds the tool, so an empty one must not claim
+        // it. (A single-slot-per-tool system is unaffected: its one slot either
+        // holds filament or there is nothing to attribute anyway.)
+        if (!slot->is_present() && tool_has_present_slot(info, slot->mapped_tool)) {
             continue;
         }
         if (slot->spoolman_id > 0) {
@@ -1871,8 +1899,12 @@ void AmsState::update_slot(int slot_index) {
             bump_slots_version();
         }
 
-        // Sync spool to ToolState if this slot maps to a tool
-        if (slot.mapped_tool >= 0 && slot.spoolman_id > 0) {
+        // Sync spool to ToolState if this slot maps to a tool. Same guard as the
+        // full sync above: with several slots on one tool (an MMU in head mode)
+        // an empty bay must not claim the tool's spool.
+        if (slot.mapped_tool >= 0 && slot.spoolman_id > 0 &&
+            (slot.is_present() ||
+             !tool_has_present_slot(backend->get_system_info(), slot.mapped_tool))) {
             ToolState::instance().assign_spool(slot.mapped_tool, slot.spoolman_id, slot.spool_name,
                                                slot.remaining_weight_g, slot.total_weight_g);
             if (!backend->has_firmware_spool_persistence()) {
