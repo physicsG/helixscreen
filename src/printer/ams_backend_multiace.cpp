@@ -226,6 +226,16 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
             st.temp = helix::json_util::safe_int(unit, "temp", st.temp);
             st.humidity = helix::json_util::safe_int(unit, "humidity", st.humidity);
 
+            if (unit.contains("dryer_status") && unit["dryer_status"].is_object()) {
+                const auto& ds = unit["dryer_status"];
+                // "stop" is the idle value; anything else is a running programme.
+                const auto status = helix::json_util::safe_string(ds, "status", "stop");
+                st.drying = (status != "stop" && !status.empty());
+                st.dryer_target_c = helix::json_util::safe_int(ds, "target_temp", 0);
+                st.dryer_duration_min = helix::json_util::safe_int(ds, "duration", 0);
+                st.dryer_remaining_min = helix::json_util::safe_int(ds, "remain_time", 0);
+            }
+
             if (unit.contains("gate_status") && unit["gate_status"].is_array()) {
                 const auto& gs = unit["gate_status"];
                 for (int s = 0; s < ACE_SLOTS_PER_UNIT && s < static_cast<int>(gs.size()); ++s) {
@@ -341,6 +351,76 @@ void AmsBackendMultiAce::rebuild_ace_units_locked() {
     spdlog::debug("{} {} ACE unit(s) in {} mode -> {} units, {} slots total", backend_log_tag(),
                  device_count_, head_mode_ ? "head" : "multi", system_info_.units.size(),
                  system_info_.total_slots);
+}
+
+// ============================================================================
+// Dryer
+// ============================================================================
+
+namespace {
+/// HelixScreen unit 0 is the U1 itself, so ACE `a` is global unit `a + 1`.
+/// Returns -1 when the index does not name an ACE.
+int ace_index_for_unit(int unit_index, int device_count) {
+    const int ace = unit_index - 1;
+    return (ace >= 0 && ace < device_count) ? ace : -1;
+}
+} // namespace
+
+DryerInfo AmsBackendMultiAce::get_dryer_info(int unit) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    DryerInfo info;
+    const int ace = ace_index_for_unit(unit, device_count_);
+    if (ace < 0) {
+        return info; // the U1 itself has no dryer
+    }
+    const auto& st = ace_units_[static_cast<size_t>(ace)];
+    info.supported = true;
+    // Drying is a chamber operation on the ACE, not a toolhead one, so it is
+    // safe while the printer prints.
+    info.allows_during_print = true;
+    info.active = st.drying;
+    info.current_temp_c = static_cast<float>(st.temp);
+    info.target_temp_c = static_cast<float>(st.dryer_target_c);
+    info.duration_min = st.dryer_duration_min;
+    info.remaining_min = st.dryer_remaining_min;
+    // The ACE runs its own fan with the heater; there is no independent control.
+    info.supports_fan_control = false;
+    info.min_temp_c = 35.0f;
+    // multiACE's own max_dryer_temperature safety cap.
+    info.max_temp_c = 70.0f;
+    info.max_duration_min = 12 * 60;
+    return info;
+}
+
+AmsError AmsBackendMultiAce::start_drying(float temp_c, int duration_min, int fan_pct, int unit) {
+    (void)fan_pct; // no independent fan control on the ACE
+    int ace = -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ace = ace_index_for_unit(unit, device_count_);
+    }
+    if (ace < 0) {
+        return AmsErrorHelper::not_supported("Dryer");
+    }
+    // ACE_DRY takes TEMP and DURATION directly -- no config edit, no Klipper
+    // restart. (ACED__DRY_START_n, the macro in multiACE's Fluidd table, is the
+    // parameterless form and would ignore whatever the user picked here.)
+    const int temp = std::clamp(static_cast<int>(std::lround(temp_c)), 35, 70);
+    const int mins = std::clamp(duration_min, 1, 12 * 60);
+    spdlog::info("{} ACE {} dry {} C for {} min", backend_log_tag(), ace, temp, mins);
+    return execute_gcode(fmt::format("ACE_DRY ACE={} TEMP={} DURATION={}", ace, temp, mins));
+}
+
+AmsError AmsBackendMultiAce::stop_drying(int unit) {
+    int ace = -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ace = ace_index_for_unit(unit, device_count_);
+    }
+    if (ace < 0) {
+        return AmsErrorHelper::not_supported("Dryer");
+    }
+    return execute_gcode(fmt::format("ACE_STOP_DRYING ACE={}", ace));
 }
 
 // ============================================================================

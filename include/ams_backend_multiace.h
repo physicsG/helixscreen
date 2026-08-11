@@ -88,6 +88,15 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// How head @p head is fed, per the last `ace` frame.
     [[nodiscard]] HeadSource head_source_kind(int head) const;
 
+    // Dryer. multiACE exposes parameterised commands -- ACE_DRY ACE=n [TEMP=]
+    // [DURATION=] and ACE_STOP_DRYING [ACE=n] -- so temperature and duration are
+    // set live, with no config edit and no Klipper restart. (The ACED__DRY_START_n
+    // macros in multiACE's macro table are the parameterless Fluidd buttons and
+    // are NOT what this uses.)
+    [[nodiscard]] DryerInfo get_dryer_info(int unit = 0) const override;
+    AmsError start_drying(float temp_c, int duration_min, int fan_pct = -1, int unit = 0) override;
+    AmsError stop_drying(int unit = 0) override;
+
     /// Which (unit, slot) is seated at head @p head, or nullopt when the head is
     /// not ACE-fed. `unit_index` is the GLOBAL unit index (ace_index + 1), since
     /// unit 0 is the U1 itself.
@@ -132,6 +141,11 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
         std::string protocol;
         int temp = 0;
         int humidity = 0;
+        /// Live dryer state, straight off `aces[].dryer_status`.
+        bool drying = false;
+        int dryer_target_c = 0;
+        int dryer_duration_min = 0;
+        int dryer_remaining_min = 0;
         std::array<bool, ACE_SLOTS_PER_UNIT> gate_present{{false, false, false, false}};
         std::array<std::string, ACE_SLOTS_PER_UNIT> material{};
         /// nullopt = the ACE reported no colour, so keep SlotInfo's default
