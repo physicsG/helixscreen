@@ -104,6 +104,15 @@ table.cmd code { background:none; padding:0; }
 .pill { font-family:var(--mono); font-size:10px; padding:3px 9px; border-radius:11px;
         border:1px solid var(--d-border); color:var(--d-muted); }
 .pill.on { border-color:var(--d-primary); color:#fff; background:rgba(58,124,200,.30); }
+.field { font-family:var(--mono); font-size:11px; padding:2px 6px; border-radius:4px;
+         border:1px solid var(--d-primary); color:var(--d-text); background:var(--d-card);
+         margin-left:auto; min-width:46px; text-align:right; }
+.field .u { font-size:8px; color:var(--d-subtle); margin-left:2px; }
+.field.editing { background:rgba(58,124,200,.22); }
+.keypad { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; }
+.keypad span { border:1px solid var(--d-border); border-radius:4px; padding:5px 0;
+               text-align:center; font-family:var(--mono); font-size:12px; }
+.keypad span.wide { grid-column:span 2; }
 .chip { font-family:var(--mono); font-size:9px; padding:2px 7px; border-radius:9px;
         border:1px solid var(--d-border); color:var(--d-muted); }
 .chip.on { border-color:var(--d-primary); color:var(--d-text); background:rgba(58,124,200,.18); }
@@ -183,10 +192,14 @@ dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
 
 <section>
   <div class="sec-head"><span class="tick">A</span><h2>Idle, and drying</h2></div>
-  <p>Presets as pills rather than free numeric entry — the same shape OrcaSlicer uses, and the
-  right one for a 3.5" panel where a numeric keypad costs a whole screen. The pills write
-  straight into <code>ACE_DRY</code>. Live state comes from <code>dryer_status</code>, so the
-  panel reflects a cycle started anywhere, including from Fluidd or OrcaSlicer.</p>
+  <p>Presets as pills for the common cases — the same three OrcaSlicer offers — with an
+  <strong>editable value beside them</strong> for anything else. The field is the truth and the
+  pills are shortcuts into it: tapping a pill fills the field, typing a value the pills do not
+  offer just deselects them. Both write into <code>ACE_DRY</code>'s <code>TEMP=</code> and
+  <code>DURATION=</code>, and duration is entered in <strong>minutes</strong>, which is the unit
+  the command takes — no conversion between what you type and what is sent.</p>
+  <p>Live state comes from <code>dryer_status</code>, so the panel reflects a cycle started
+  anywhere, including from Fluidd or OrcaSlicer.</p>
 
   <div class="bench">
     <div class="ba-item">
@@ -208,10 +221,12 @@ dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
               <div class="pillrow">
                 <span class="dl">temp</span>
                 <span class="pill">45&deg;</span><span class="pill on">55&deg;</span><span class="pill">65&deg;</span>
+                <span class="field">55<span class="u">&deg;C</span></span>
               </div>
               <div class="pillrow">
                 <span class="dl">for</span>
                 <span class="pill">2 h</span><span class="pill on">4 h</span><span class="pill">6 h</span>
+                <span class="field">240<span class="u">min</span></span>
               </div>
               <div class="btn pri">Start drying</div>
             </div>
@@ -266,6 +281,34 @@ dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
       shows a setting that is not the one in effect. Progress and remaining come from
       <code>remain_time</code> / <code>duration</code>, which
       <code>DryerInfo::get_progress_pct()</code> already computes.</p>
+    </div>
+
+    <div class="ba-item">
+      <span class="ba-tag">typing an exact value</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">ACE 2 Pro &mdash; dry at</span></div>
+          <div class="p-main">
+            <div class="card">
+              <div class="rowsplit">
+                <span class="lab">Temperature</span>
+                <span class="field editing">58<span class="u">&deg;C</span></span>
+              </div>
+              <p class="note">35&ndash;70&nbsp;&deg;C. Above 70 is refused by multiACE.</p>
+            </div>
+            <div class="keypad">
+              <span>1</span><span>2</span><span>3</span>
+              <span>4</span><span>5</span><span>6</span>
+              <span>7</span><span>8</span><span>9</span>
+              <span>&#9003;</span><span>0</span><span>&#10003;</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">Tapping the value field opens the numeric keypad the text_input widget
+      already raises. Typing a value the pills do not offer simply deselects them &mdash; the
+      field is the truth, the pills are shortcuts into it.</p>
     </div>
   </div>
 </section>
@@ -325,8 +368,9 @@ dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
     state, which is why it is not wired yet.</dd>
 
     <dt>Preset values</dt>
-    <dd>45/55/65&nbsp;°C and 2/4/6&nbsp;h follow OrcaSlicer. If your filaments want different
-    ones, they are three numbers in one place.</dd>
+    <dd>45/55/65&nbsp;°C and 2/4/6&nbsp;h follow OrcaSlicer, and are three numbers in one place
+    if your filaments want different ones. Nothing is lost either way now that any value can be
+    typed.</dd>
   </dl>
 
   <p style="margin-top:1.2rem"><strong>Already built:</strong>
