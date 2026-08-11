@@ -1,51 +1,78 @@
 # Snapmaker U1 + multiACE — support plan
 
-> ## ▶ START HERE (new session, 2026-08-10)
+> ## ▶ START HERE (new session, 2026-08-11)
 >
-> **Branch:** `feat/snapmaker-multiace` — 6 commits, **nothing pushed**. `main` is synced to
-> upstream `c80f0be4e`.
+> **Branch:** `feat/snapmaker-multiace`, **31 commits**. It IS pushed —
+> `origin/feat/snapmaker-multiace` is at `5053dd26b`, with the last 6 local only. The plan's
+> older "nothing pushed" note is obsolete.
 >
-> **State:** the U1 multi-filament panel is fixed and hardware-verified — four independent
-> toolheads, correct mount election, mounted≠loaded, and the loaded card populated with
-> Unload enabled. **Tests are green** (§10.1). The multiACE *backend* has not been started.
+> **State: Phases 1-2 are done and hardware-verified, and the ACE dryer works.** The U1 draws
+> four independent toolheads; multiACE is detected as its own `AmsType`; the ACE appears as
+> unit 1 ("ACE 2 Pro") with live temp/RH; ACE-fed heads load and unload through
+> `ACE_LOAD_HEAD`/`ACE_UNLOAD_HEAD`; drying runs from the stock environment panel.
 >
-> **Read §2's ⚠️ banner and §3 before trusting this doc's "implemented" claims.** Two were
-> wrong: §2's AFC topology fix was never built (the merger was fixed a different way), and
-> §3's shape-based discriminator is impossible and was replaced by a name-based one that
-> shipped. Both corrected in place on 2026-08-10.
+> **Read §2's ⚠️ banner and §3 before trusting any "implemented" claim in this doc.** Three
+> were wrong and are corrected in place: §2's AFC topology fix was never built, §3's
+> shape-based discriminator is impossible, and the fixture it cited was never committed (a
+> real one now lives at `tests/fixtures/snapmaker_u1/u1-multiace-head-mode-idle.json`).
 >
-> **Do these in order:**
-> 1. ~~§10.1 — failing unit tests.~~ ✅ **done 2026-08-10.** It was **6** failures, not 3
->    (three sit outside the `[snapmaker]` tag — always run `"[ams]"`). The recorded candidate
->    fix was wrong; see §10.1 for what it actually took. `[ams]` is now 1656/0.
-> 2. ~~§10.2 — ACE-fed unload leaves the UI stuck.~~ ✅ **addressed 2026-08-10** by Phase 2:
->    an ACE-fed head now gets `ACE_UNLOAD_HEAD`. The stuck-UI symptom itself has NOT been
->    re-observed on hardware since — reproduce it on T3 to confirm the fix end to end.
-> 3. ~~§10.3 — toolhead context menu.~~ ✅ **done 2026-08-10**, verified on the U1.
-> 4. ~~Phase 2 proper~~ ✅ **done 2026-08-10** — `AmsBackendMultiAce` is live: detected,
->    backend created, `ace` parsed, "ACE 2 Pro" card with real temp/RH beside SnapSwap.
-> 5. **Phase 3 — head-major layout. PARTLY done 2026-08-10.** The duplicate nozzle is fixed
->    (one nozzle per head, cross-unit sharing in `compute_system_tool_layout`), and the ACE's
->    line now routes through a hub box into E3. **What is NOT built** is the richer part of
->    the mockup: each head's seat showing its source stack inline ("PETG · ACE bay 1"), and
->    the rows-vs-columns switch of §6. Mockups: `2026-08-10-multiace-ui-improvements-mockup.html`.
-> 6. **Phase 1's AFC generalisation** (§2 banner) — still open, and no longer claimed as done.
+> ### Open, in the order I would take them
 >
-> **Also landed 2026-08-10** (same mockup doc): the toolhead menu opens from the overview's
-> nozzle row; an ACE-fed head's spool identity is owned by the ACE, so the slot menu drops
-> Edit/Spoolman/Clear and offers "Open in ACE" while keeping Load/Unload; and the ACE unit
-> detail draws the AFC combiner view — no new renderer, just `get_unit_topology()` answering
-> `HUB` so `render_linear_hub()` is reached.
+> 1. **Auto-dry toggle.** `ACE_SET_AUTO_DRY` exists and is "live + persist", so the toggle is
+>    buildable — but its parameter names are unknown. multiACE's bundled docs predate it and
+>    OrcaSlicer never calls it. **Run `ACE_SET_AUTO_DRY` bare in a Fluidd console once**; the
+>    usage string is the whole blocker. Live shape: `auto_dry {enabled, rh_start, rh_end, temp,
+>    master, add_time}`. Do NOT probe it blind — it persists.
+> 2. **§10.2 stuck unload — fixed but never re-observed.** The dispatch is unit-tested against
+>    the captured payload; nobody has run an actual unload on T3 since. Confirm before closing.
+> 3. **Stale spool duplicates in Moonraker's DB.** `5122216e5` stops an empty MMU bay claiming
+>    a tool's spool, but assignments are cached in Moonraker's database as well as
+>    `tool_spools.json` — deleting the local file restores the old values. Existing duplicates
+>    (tool 0+1 both spool 3, tool 2+3 both spool 6) outlive the fix and need clearing.
+> 4. **Phase 3's richer half.** The duplicate nozzle is gone and each unit only draws lines to
+>    heads it feeds, but the mockup's per-head *source stack* in the seat ("PETG · ACE bay 1")
+>    and the rows-vs-columns switch of §6 are not built.
+>    Mockup: `2026-08-10-multiace-ui-improvements-mockup.html`.
+> 5. **Phase 1's AFC generalisation** (§2 banner) — never built, still open. Your U1 is fine
+>    either way; another AFC-shim-over-toolchanger machine still draws one merger.
 >
-> **Trap worth knowing:** `<bind_flag_if_eq>` does NOT win against an imperative
-> `lv_obj_clear_flag()` that runs later in `on_created()`. Three buttons in the slot menu are
-> shown that way and needed a C++ gate as well as the binding.
+> **Decided against:** replacing the dryer panel's preset dropdown with pills. That panel
+> (`ams_environment_overlay`) is **upstream stock**, added by Preston in `211596fba`
+> (2026-03-25), and is shared with the QIDI Box and CFS dryers; its presets are material-based
+> ("PLA 45 °C/4h"), which carries more than bare temperatures. Per Gordian: keep it as stock as
+> possible. This branch's only change there is a 10-line per-unit humidity fix.
+> Mockup (with pills, NOT built): `2026-08-10-multiace-dryer-mockup.html`.
 >
-> **Pre-existing failure, not yours:** the full suite (`./build/bin/helix-tests`, no filter)
-> segfaults in `test_clock_widget.cpp:157` — "ClockWidget: timer fires during LVGL
-> processing". Deterministic across seeds in the full run, passes under `"[clock_widget]"`
-> alone, and **reproduces with this branch stashed**, so it is inherited from `main`. Full
-> suite = 2757 cases, that 1 failure. Unrelated to filament work; do not chase it here.
+> ### Traps this session cost hours to find — read before debugging anything
+>
+> - **Moonraker sends DELTAS: absent ≠ cleared.** Treating a missing `head_source` as "no
+>   longer seated" wiped the ACE→head binding a second after it arrived, so bays lost their
+>   tool badges and the unit detail fell back to hub-only. Every parse must leave untouched
+>   what the frame does not mention. Invisible to any test that feeds one full frame.
+> - **`<bind_flag_if_eq>` loses to a later imperative `lv_obj_clear_flag()`.** Three buttons in
+>   the slot menu are shown that way and needed a C++ gate as well as the binding.
+> - **`ACED__DRY_START_n` is NOT the dryer API.** Those are multiACE's parameterless Fluidd
+>   macro buttons, and reading only the README's macro table produced a wrong conclusion that
+>   temp/duration need a config edit plus a Klipper restart. The real commands take parameters:
+>   `ACE_DRY ACE=n [TEMP=] [DURATION=]`, `ACE_STOP_DRYING [ACE=n]`. Check `gcode/help` on the
+>   machine, and OrcaSlicer's `resources/web/multiace/index.html`, before believing a doc.
+> - **`ctl click` cannot reach the filament canvas's hit regions** — it sends a widget event
+>   with no coordinates. Use `ctl press <x> <y>` / `ctl release`; nozzles sit at
+>   `canvas.y + canvas.h * 0.55`.
+> - **Run `"[ams]"`, never `"[snapmaker]"`.** Half the relevant tests carry neither tag pair.
+> - **A slot's colour is drawn by FILL.** `display_fill_level()` is 0 when not present, and
+>   every spool visual sizes its coloured ring by fill — so an assigned-but-empty lane renders
+>   as bare grey chrome unless the fill is floored (`SPOOL_ASSIGNED_MIN_FILL_PCT`).
+>
+> **Test state:** `"[ams]"` = 1681/1681. Full suite = 2780 cases with **1 pre-existing
+> failure**: `test_clock_widget.cpp:157` segfaults in the unfiltered run, passes under
+> `"[clock_widget]"` alone, and **reproduces with this branch stashed** — inherited from
+> `main`, do not chase it here. `scripts/quality-checks.sh` also fails pre-existing on
+> "Missing icon codepoints" (needs `./scripts/regen_mdi_fonts.sh`); every gate this branch can
+> affect is clean, with the imperative-UI ratchet held at its 384 baseline.
+>
+> **Not run this session:** `clang-format` is not installed on this box, so nothing here has
+> been formatter-checked. CI enforces clang-format 14 — expect a formatting pass.
 >
 > **Driving the real printer from a dev box** (no deploy, no SSH — this is the whole loop):
 > ```bash
@@ -556,3 +583,61 @@ Several Snapmaker tests and comments say filament is retracted "to the buffer". 
 buffer — that term is borrowed from AFC's TurtleNeck. The U1's own vocabulary is **preload**
 (`preloading` / `preload_finish`). Worth a comment-only pass so the next reader is not sent
 looking for hardware that does not exist.
+
+---
+
+## 11. Session log — 2026-08-10/11
+
+25 commits. Grouped by what they were for, since the order they landed in is not the order
+they make sense in.
+
+### Phase 2 — the backend
+
+| Commit | What |
+|---|---|
+| `2c568b983` | `AmsBackendMultiAce`, deriving from `AmsBackendSnapmaker`. Unit 0 stays the U1; units 1..N are the ACE. ACE-fed heads dispatch `ACE_LOAD_HEAD`/`ACE_UNLOAD_HEAD`. |
+| `29c8e5a46` | Stop rebuilding the ACE units wholesale each frame — it discarded user edits and reset the view. |
+| `910400da2` | **A partial `ace` frame no longer wipes head sources.** The delta bug; see the traps list. |
+| `5053dd26b` | The dryer: `ACE_DRY` / `ACE_STOP_DRYING` + `get_dryer_info()`. |
+
+Three payload facts no document states, all found by reading the live machine:
+
+- `head_ace` carries an index for **every** head (`{0:0,1:1,2:2,3:0}` while only head 3 is
+  ACE-fed), so it cannot decide *whether* a head is ACE-fed. `head_feeder`/`head_manual` can.
+- The per-head maps are keyed by **string** (`"0"`..`"3"`). An int key silently finds nothing.
+- `slots[].color` is an `[r,g,b]` **array**, not a hex string.
+
+And one that cost the most: `handle_status_update` must unwrap `params[0]` exactly as the base
+does. Reaching for a `"status"` key compiles, passes every unit test that feeds a bare object,
+logs nothing, and leaves the backend behaving like the plain Snapmaker one.
+
+### Detection
+
+`AmsType::MULTIACE` needed **five** sites, not one. `has_mmu_` skips the `has_snapmaker_`
+fallback that populates `detected_ams_systems_` — the list `AmsState` iterates to build
+backends — so claiming the type alone produced NO backend and an empty panel. The others:
+`is_tool_changer()`, `is_filament_system()`, the `AmsBackend::create` factory, and the
+subscription block (which is where `ace` gets subscribed at all).
+
+### UI
+
+| Commit | What |
+|---|---|
+| `6f8fcbac0` | Recompute the mounted slot's load state every frame (§10.1's real fix). |
+| `024ac964f`, `1c5a1180d` | Per-toolhead context menu, on both the detail canvas and the overview's nozzle row. |
+| `b83cf6bbd` | An ACE-fed head's spool identity belongs to the ACE: the slot menu drops Edit/Spoolman/Clear and offers "Open in ACE". |
+| `6366ee716`, `e74823a48` | One nozzle per head, and a unit draws lines only to heads it feeds. |
+| `7c0cb0b0e`, `4925782d1` | Count spools rather than slots (7, not 8); the home widget's bar cap is per row. |
+| `64dc47738`, `d6e0aa7d7` | No hub box on a shared toolhead; dim heads that are not active; outline an externally-fed slot. |
+| `5fc8c6024` | A unit feeding one known head draws through to that toolhead. |
+| `65ee32bf9`, `a02bd6fab`, `5122216e5` | Spool assignment on ACE bays; assigned-but-empty lanes show their colour; an empty bay cannot claim a tool's spool. |
+| `be61ed894` | The environment overlay reads the unit it is showing (10 lines; upstream's bug). |
+
+### What was verified how
+
+Everything above was checked against the live U1 at `192.168.2.242`, not just unit tests —
+mostly by driving the running app with `ctl` and reading screenshots. Two findings came from
+**sampling rendered pixels** rather than eyeballing: the assigned-but-empty lane really drew
+zero coloured pixels (not a dim tint), and the fix produced 70. When a screenshot and a theory
+disagree, decode the PNG.
+
