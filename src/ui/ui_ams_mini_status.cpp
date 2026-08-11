@@ -339,6 +339,17 @@ static void rebuild_bars(AmsMiniStatusData* data) {
 
     int max_vis = effective_max_visible(data);
     int visible_count = std::min(data->slot_count, max_vis);
+    if (data->unit_count > 1) {
+        // Stacked rows: the width cap applies to each row, so the number shown
+        // is the sum of the per-row caps -- not one cap across every unit. The
+        // "+N" badge has to agree with what the row loop actually draws or it
+        // claims hidden spools that are on screen.
+        visible_count = 0;
+        for (int u = 0; u < data->unit_count && u < 8; ++u) {
+            visible_count += std::min(data->unit_rows[u].slot_count, max_vis);
+        }
+        visible_count = std::min(visible_count, data->slot_count);
+    }
     int overflow_count = data->slot_count - visible_count;
 
     // Calculate dimensions from container
@@ -439,8 +450,12 @@ static void rebuild_bars(AmsMiniStatusData* data) {
             UnitRowInfo* row_info = &data->unit_rows[u];
             lv_obj_t* row = ensure_unit_row(data, u);
 
-            // Calculate bar width for this row based on its slot count
-            int row_slots = std::min(row_info->slot_count, max_vis - row_info->first_slot);
+            // max_vis is a WIDTH heuristic ("this many bars fit across"), so with
+            // stacked unit rows it belongs to each row, not to their sum.
+            // Subtracting first_slot charged row 2 for row 1's bars: a 3-slot U1
+            // above a 4-bay ACE showed 3 + 3 and a spurious "+1" even though the
+            // seven fit comfortably as two rows.
+            int row_slots = std::min(row_info->slot_count, max_vis);
             if (row_slots < 0)
                 row_slots = 0;
 
@@ -456,7 +471,7 @@ static void rebuild_bars(AmsMiniStatusData* data) {
 
                 SlotBarData* slot = &data->slots[global_idx];
 
-                if (global_idx < visible_count) {
+                if (s < row_slots) {
                     if (!slot->col.container) {
                         // Create new slot column in this row
                         slot->col = ams_draw::create_slot_column(row, bar_width, bar_height,
