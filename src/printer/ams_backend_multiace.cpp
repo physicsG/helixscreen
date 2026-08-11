@@ -174,9 +174,16 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
     const auto& feeder = ace.contains("head_feeder") ? ace["head_feeder"] : nlohmann::json::object();
     const bool have_maps = manual.is_object() || feeder.is_object();
 
+    // Status frames are DELTAS. A frame that says nothing about head sources must
+    // leave them alone -- treating "absent" as "cleared" wiped the seating on
+    // every partial `ace` update, which on hardware meant the ACE's bays lost
+    // their mapped_tool a second after gaining it: no tool badges, and the unit
+    // detail fell back to hub-only because it no longer knew which head it fed.
+    const bool have_source_map = ace.contains("head_source") && ace["head_source"].is_object();
+
     for (int h = 0; h < NUM_TOOLS; ++h) {
-        HeadSource kind = HeadSource::UNKNOWN;
         if (have_maps) {
+            HeadSource kind;
             if (head_keyed<bool>(manual, h).value_or(false)) {
                 kind = HeadSource::MANUAL;
             } else if (head_keyed<bool>(feeder, h).value_or(false)) {
@@ -184,21 +191,22 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
             } else {
                 kind = HeadSource::ACE;
             }
-        }
-        if (kind != head_kind_[h]) {
-            head_kind_[h] = kind;
-            changed = true;
+            if (kind != head_kind_[h]) {
+                head_kind_[h] = kind;
+                changed = true;
+            }
         }
 
+        if (!have_source_map) {
+            continue; // nothing said about seating this frame
+        }
         std::optional<SeatedSource> seated;
-        if (ace.contains("head_source") && ace["head_source"].is_object()) {
-            auto it = ace["head_source"].find(std::to_string(h));
-            if (it != ace["head_source"].end() && it->is_object()) {
-                const int ai = helix::json_util::safe_int(*it, "ace_index", -1);
-                const int sl = helix::json_util::safe_int(*it, "slot", -1);
-                if (ai >= 0 && ai < MAX_ACE_UNITS && sl >= 0) {
-                    seated = SeatedSource{/*unit_index=*/ai + 1, ai, sl};
-                }
+        auto it = ace["head_source"].find(std::to_string(h));
+        if (it != ace["head_source"].end() && it->is_object()) {
+            const int ai = helix::json_util::safe_int(*it, "ace_index", -1);
+            const int sl = helix::json_util::safe_int(*it, "slot", -1);
+            if (ai >= 0 && ai < MAX_ACE_UNITS && sl >= 0) {
+                seated = SeatedSource{/*unit_index=*/ai + 1, ai, sl};
             }
         }
         if (seated.has_value() != head_seated_[h].has_value() ||

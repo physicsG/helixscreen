@@ -287,6 +287,11 @@ struct FilamentPathData {
     /// Optional. When set, the toolhead hit region reports here instead of
     /// slot_callback — the nozzle and the spool are different questions on a
     /// toolchanger. Unset leaves both regions on slot_callback, as before.
+    /// Which physical tool is on the carriage, or -1. Unit-scoped views (the
+    /// HUB detail) draw ONE toolhead and otherwise cannot say whether it is the
+    /// mounted one — on a toolchanger that is most of what you want to know.
+    int mounted_tool = -1;
+
     filament_path_slot_cb_t toolhead_callback = nullptr;
     void* toolhead_user_data = nullptr;
     filament_path_bypass_cb_t bypass_callback = nullptr;

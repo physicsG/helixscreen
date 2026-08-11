@@ -180,6 +180,28 @@ TEST_CASE_METHOD(HelixTestFixture, "multiACE says the ACE owns an ACE-fed head's
     CHECK_FALSE(backend.slot_identity_owner_unit(-1).has_value());
 }
 
+TEST_CASE_METHOD(HelixTestFixture, "multiACE keeps head sources across a partial frame",
+                 "[ams][multiace]") {
+    // Status frames are DELTAS. An `ace` frame that says nothing about head
+    // sources must leave them alone. Treating absent as cleared wiped the
+    // seating a second after it arrived, so the ACE's bays lost mapped_tool --
+    // no tool badges, and the unit detail fell back to hub-only because it no
+    // longer knew which head it fed. Invisible to a full-frame test.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    REQUIRE(backend.seated_source(3).has_value());
+    REQUIRE(backend.get_system_info().units.size() == 2);
+    REQUIRE(backend.get_system_info().units[1].slots[0].mapped_tool == 3);
+
+    // A frame carrying only an environment reading — exactly what Moonraker
+    // sends between full updates.
+    backend.handle_status_update(wrap(json{{"aces", json::array({json{{"idx", 0}, {"temp", 33}}})}}));
+
+    CHECK(backend.seated_source(3).has_value());
+    CHECK(backend.head_source_kind(3) == HeadSource::ACE);
+    CHECK(backend.get_system_info().units[1].slots[0].mapped_tool == 3);
+}
+
 TEST_CASE_METHOD(HelixTestFixture, "multiACE counts spools, not slots", "[ams][multiace]") {
     // A 4-head U1 with one 4-bay ACE has EIGHT addressable slots but SEVEN
     // spools: T3 and ACE bay 1 are the same physical spool seen from two sides.

@@ -618,6 +618,15 @@ void ui_filament_path_canvas_set_slot_callback(lv_obj_t* obj, filament_path_slot
     }
 }
 
+void ui_filament_path_canvas_set_mounted_tool(lv_obj_t* obj, int tool_index) {
+    auto* data = get_data(obj);
+    if (!data || data->mounted_tool == tool_index) {
+        return;
+    }
+    data->mounted_tool = tool_index;
+    layered_mark_dirty(obj, true, true);
+}
+
 void ui_filament_path_canvas_set_toolhead_callback(lv_obj_t* obj, filament_path_slot_cb_t cb,
                                                    void* user_data) {
     auto* data = get_data(obj);

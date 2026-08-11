@@ -511,6 +511,10 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
     }
     ui_filament_path_canvas_set_active_slot(canvas, active_slot);
 
+    // Which head is on the carriage. A unit-scoped HUB view draws one nozzle and
+    // cannot otherwise say whether it is the mounted one.
+    ui_filament_path_canvas_set_mounted_tool(canvas, info.mounted_tool);
+
     // Set filament color from active slot
     int global_active = (unit_index >= 0) ? active_slot + slot_offset : active_slot;
     if (global_active >= 0) {

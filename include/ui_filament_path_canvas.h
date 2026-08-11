@@ -498,3 +498,12 @@ namespace helix::ui {
 bool hub_box_hit(lv_point_t p, int32_t cx, int32_t cy, int32_t w, int32_t h, int32_t margin);
 } // namespace helix::ui
 #endif
+
+/**
+ * @brief Tell the canvas which physical tool is on the carriage (-1 = none)
+ *
+ * Only meaningful on a toolchanger. A unit-scoped HUB view draws a single
+ * toolhead and cannot otherwise say whether that head is the mounted one, which
+ * on a toolchanger is most of what the view is for.
+ */
+void ui_filament_path_canvas_set_mounted_tool(lv_obj_t* obj, int tool_index);
