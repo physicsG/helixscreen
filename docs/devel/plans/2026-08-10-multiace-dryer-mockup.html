@@ -55,6 +55,16 @@ section:last-of-type { border-bottom:0; }
            padding:.85rem 1rem; border-radius:0 5px 5px 0; margin:1rem 0; max-width:var(--measure); }
 .callout p:last-child { margin-bottom:0; }
 .callout .eyebrow { color:var(--bad); }
+.callout.ok { border-left-color:var(--good); }
+.callout.ok .eyebrow { color:var(--good); }
+.strike { text-decoration:line-through; color:var(--muted); }
+
+table.cmd { border-collapse:collapse; margin:1rem 0; font-size:.92rem; width:100%;
+            max-width:var(--measure); }
+table.cmd th, table.cmd td { text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--rule-soft); }
+table.cmd th { font-family:var(--mono); font-size:11px; text-transform:uppercase;
+               letter-spacing:.1em; color:var(--muted); font-weight:400; }
+table.cmd code { background:none; padding:0; }
 
 .bench { background:var(--bench); border-radius:8px; padding:1.3rem; margin:1.2rem 0 .8rem;
          overflow-x:auto; display:flex; gap:1.4rem; align-items:flex-start; }
@@ -89,7 +99,11 @@ section:last-of-type { border-bottom:0; }
 .lab { font-family:var(--mono); font-size:9px; color:var(--d-subtle);
        letter-spacing:.06em; text-transform:uppercase; }
 .big { font-size:19px; font-weight:650; letter-spacing:-.01em; }
-.unitpick { display:flex; gap:4px; }
+.pillrow { display:flex; gap:5px; align-items:center; }
+.pillrow .dl { font-family:var(--mono); font-size:9px; color:var(--d-subtle); width:34px; }
+.pill { font-family:var(--mono); font-size:10px; padding:3px 9px; border-radius:11px;
+        border:1px solid var(--d-border); color:var(--d-muted); }
+.pill.on { border-color:var(--d-primary); color:#fff; background:rgba(58,124,200,.30); }
 .chip { font-family:var(--mono); font-size:9px; padding:2px 7px; border-radius:9px;
         border:1px solid var(--d-border); color:var(--d-muted); }
 .chip.on { border-color:var(--d-primary); color:var(--d-text); background:rgba(58,124,200,.18); }
@@ -99,16 +113,18 @@ section:last-of-type { border-bottom:0; }
        color:var(--d-text); font-size:11px; padding:6px 8px; text-align:center; }
 .btn.pri { background:var(--d-primary); border-color:var(--d-primary); color:#fff; }
 .btn.stop { background:#7a2f2c; border-color:#7a2f2c; color:#fff; }
-.btn.off { color:var(--d-subtle); }
 .ro { font-family:var(--mono); font-size:10px; color:var(--d-muted); }
 .ro b { color:var(--d-text); font-weight:600; }
 .note { font-size:9px; color:var(--d-subtle); line-height:1.35; }
-.two { display:flex; gap:6px; }
-.two > * { flex:1; }
-.pill { font-family:var(--mono); font-size:9px; padding:1px 6px; border-radius:8px;
-        border:1px solid var(--d-success); color:var(--d-success); }
-.pill.idle { border-color:var(--d-subtle); color:var(--d-subtle); }
-.pill.warn { border-color:var(--d-warning); color:var(--d-warning); }
+.statepill { font-family:var(--mono); font-size:9px; padding:1px 6px; border-radius:8px;
+             border:1px solid var(--d-success); color:var(--d-success); }
+.statepill.idle { border-color:var(--d-subtle); color:var(--d-subtle); }
+.sw { width:30px; height:16px; border-radius:9px; background:var(--d-border); position:relative;
+      flex:none; }
+.sw > i { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%;
+          background:var(--d-subtle); }
+.sw.on { background:rgba(58,124,200,.55); }
+.sw.on > i { left:16px; background:#fff; }
 
 dl.q { border-left:2px solid var(--accent-dim); padding-left:1rem; max-width:var(--measure); }
 dl.q dt { font-weight:600; margin-top:.8rem; }
@@ -128,45 +144,49 @@ dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
 <div class="wrap">
 
 <header class="page">
-  <span class="eyebrow">Snapmaker U1 + multiACE — design memo</span>
+  <span class="eyebrow">Snapmaker U1 + multiACE — design memo, revised 2026-08-11</span>
   <h1>Drying the ACE from the environment panel</h1>
-  <p class="lede">HelixScreen already has the whole dryer UI — readout, progress bar, temperature
-  and duration inputs, start/stop — in <code>ams_environment_overlay.xml</code>. It has never
-  appeared on this printer for one reason: no Snapmaker backend reports a dryer, so
-  <code>get_dryer_info()</code> answers <code>supported = false</code> and the panel shows its
-  "no dryer" branch. The ACE has one, and reports it live.</p>
+  <p class="lede">HelixScreen already has the whole dryer UI — readout, progress bar,
+  temperature and duration inputs, start/stop — in <code>ams_environment_overlay.xml</code>.
+  It never appeared on this printer because no Snapmaker backend reported a dryer, so
+  <code>get_dryer_info()</code> answered <code>supported = false</code> and the panel showed
+  its "no dryer" branch. The ACE has one, reports it live, and takes its settings as command
+  parameters.</p>
   <p class="meta">Screens are 1:1 at 480&nbsp;&times;&nbsp;320 and self-measure on load.
-  Live values from the ACE 2 Pro at <code>192.168.2.242</code>: 31&nbsp;°C, 35&nbsp;% RH,
-  <code>dryer_status.status = "stop"</code>.</p>
+  Live values from the ACE&nbsp;2&nbsp;Pro at <code>192.168.2.242</code>.</p>
 </header>
 
 <section>
-  <div class="sec-head"><span class="tick">!</span><h2>The constraint that shapes this</h2></div>
+  <div class="sec-head"><span class="tick">✕</span><h2>Correction to the first version</h2></div>
 
   <div class="callout">
-    <span class="eyebrow">Read this before designing anything</span>
-    <p><code>ACED__Dry_Start_0..3</code> takes <strong>no parameters</strong> — multiACE's own
-    macro table says "uses config settings". Temperature and duration live in
-    <code>dryer_temp</code> / <code>dryer_duration</code> in multiACE's config file, with a
-    <code>max_dryer_temperature</code> safety cap. There is no G-code to set them.</p>
-    <p>So the existing panel's <strong>temperature and duration inputs cannot be honoured</strong>
-    on this backend. Showing them editable and quietly ignoring the values is the one option
-    that must not ship.</p>
+    <span class="eyebrow">The first version of this memo was wrong</span>
+    <p>It claimed <span class="strike">temperature and duration cannot be set without editing
+    multiACE's config and restarting Klipper</span>, and mocked them read-only. That came from
+    reading only multiACE's README macro table, where <code>ACED__DRY_START_0..3</code> are
+    listed as "uses config settings".</p>
+    <p>Those macros are the parameterless Fluidd buttons. The actual commands take parameters,
+    and OrcaSlicer's own multiACE page uses them. <strong>Nothing needs a restart.</strong></p>
   </div>
 
-  <p>Everything else the panel wants <em>is</em> published, per ACE:
-  <code>dryer_status {status, target_temp, duration, remain_time}</code>, plus
-  <code>temp</code> and <code>humidity</code>. multiACE additionally has an
-  <strong>auto-dry</strong> feature HelixScreen's <code>DryerInfo</code> does not model at all:
-  <code>auto_dry {enabled, rh_start, rh_end, temp, master, add_time}</code> — start drying when
-  humidity crosses <code>rh_start</code>, stop at <code>rh_end</code>.</p>
+  <table class="cmd">
+    <tr><th>Command</th><th>What it does</th></tr>
+    <tr><td><code>ACE_DRY ACE=n [TEMP=] [DURATION=]</code></td><td>Start drying, temperature in °C and duration in minutes</td></tr>
+    <tr><td><code>ACE_STOP_DRYING [ACE=n]</code></td><td>Stop</td></tr>
+    <tr><td><code>ACE_SET_AUTO_DRY</code></td><td>Humidity-controlled drying, "live&nbsp;+&nbsp;persist"</td></tr>
+  </table>
+
+  <p>All three confirmed in the live printer's <code>gcode/help</code>. The consequence for this
+  design is simple: <strong>the panel's temperature and duration controls are real</strong>, and
+  auto-dry can be a toggle rather than a readout.</p>
 </section>
 
 <section>
   <div class="sec-head"><span class="tick">A</span><h2>Idle, and drying</h2></div>
-  <p>The proposal: keep the existing panel, drop the two inputs this backend cannot honour, and
-  state the configured values as fact instead. The unit chips at the top pick which ACE — a
-  1-unit rig shows one chip and it is not interactive.</p>
+  <p>Presets as pills rather than free numeric entry — the same shape OrcaSlicer uses, and the
+  right one for a 3.5" panel where a numeric keypad costs a whole screen. The pills write
+  straight into <code>ACE_DRY</code>. Live state comes from <code>dryer_status</code>, so the
+  panel reflects a cycle started anywhere, including from Fluidd or OrcaSlicer.</p>
 
   <div class="bench">
     <div class="ba-item">
@@ -180,29 +200,34 @@ dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
               <div class="rowsplit">
                 <div><span class="lab">Chamber</span><div class="big">31 &deg;C</div></div>
                 <div><span class="lab">Humidity</span><div class="big">35 %</div></div>
-                <span class="pill idle">Not drying</span>
+                <span class="statepill idle">Not drying</span>
               </div>
             </div>
             <div class="card">
-              <div class="rowsplit">
-                <span class="lab">Dryer</span>
-                <span class="ro"><b>55 &deg;C</b> &middot; <b>240 min</b></span>
+              <span class="lab">Dry at</span>
+              <div class="pillrow">
+                <span class="dl">temp</span>
+                <span class="pill">45&deg;</span><span class="pill on">55&deg;</span><span class="pill">65&deg;</span>
               </div>
-              <p class="note">Temperature and duration come from multiACE's config
-                (<code>dryer_temp</code>, <code>dryer_duration</code>). Cap 70&nbsp;&deg;C.</p>
+              <div class="pillrow">
+                <span class="dl">for</span>
+                <span class="pill">2 h</span><span class="pill on">4 h</span><span class="pill">6 h</span>
+              </div>
               <div class="btn pri">Start drying</div>
             </div>
             <div class="card">
               <div class="rowsplit">
-                <span class="lab">Auto-dry</span><span class="chip">off</span>
+                <span class="lab">Auto-dry</span>
+                <span class="sw"><i></i></span>
               </div>
-              <p class="note">Would start at 45&nbsp;% RH and stop at 35&nbsp;%.</p>
+              <p class="note">Start at 45&nbsp;% RH, stop at 35&nbsp;%.</p>
             </div>
           </div>
         </div>
       </div>
-      <p class="ba-note">Nothing editable that the backend cannot act on. The configured
-      values are still visible — you just change them where they actually live.</p>
+      <p class="ba-note">Two taps and Start. 70&nbsp;°C is multiACE's own safety cap, so the
+      pill set stops below it rather than letting a number through that the firmware would
+      clamp anyway.</p>
     </div>
 
     <div class="ba-item">
@@ -216,7 +241,7 @@ dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
               <div class="rowsplit">
                 <div><span class="lab">Chamber</span><div class="big">48 &deg;C</div></div>
                 <div><span class="lab">Humidity</span><div class="big">22 %</div></div>
-                <span class="pill">Drying</span>
+                <span class="statepill">Drying</span>
               </div>
             </div>
             <div class="card">
@@ -229,25 +254,27 @@ dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
             </div>
             <div class="card">
               <div class="rowsplit">
-                <span class="lab">Auto-dry</span><span class="chip on">on &middot; master</span>
+                <span class="lab">Auto-dry</span>
+                <span class="sw on"><i></i></span>
               </div>
               <p class="note">Started automatically at 45&nbsp;% RH. Stops at 35&nbsp;%.</p>
             </div>
           </div>
         </div>
       </div>
-      <p class="ba-note">Progress and remaining come straight from
-      <code>dryer_status.remain_time</code> and <code>duration</code> — the existing
-      <code>DryerInfo::get_progress_pct()</code> already computes exactly this.</p>
+      <p class="ba-note">The pills are replaced by what is actually running, so the card never
+      shows a setting that is not the one in effect. Progress and remaining come from
+      <code>remain_time</code> / <code>duration</code>, which
+      <code>DryerInfo::get_progress_pct()</code> already computes.</p>
     </div>
   </div>
 </section>
 
 <section>
   <div class="sec-head"><span class="tick">B</span><h2>Several ACEs</h2></div>
-  <p>Up to four. The panel is per unit, so the chips select which one and everything below
-  follows. <code>ACED__Dry_Stop</code> stops <em>the current ACE</em>, so selecting a unit has
-  to also make it current — otherwise Stop would act on whichever ACE happened to be active.</p>
+  <p>Up to four. The panel is per unit, so chips select which one and everything below follows.
+  <code>ACE_STOP_DRYING</code> takes an explicit <code>ACE=</code>, so selecting a unit does not
+  have to make it the active one — the stop always names its target.</p>
 
   <div class="bench">
     <div class="ba-item">
@@ -257,14 +284,14 @@ dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
         <div class="pane">
           <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">ACE drying</span></div>
           <div class="p-main">
-            <div class="unitpick">
+            <div class="pillrow">
               <span class="chip">ACE 1</span><span class="chip on">ACE 2</span><span class="chip">ACE 3</span>
             </div>
             <div class="card">
               <div class="rowsplit">
                 <div><span class="lab">Chamber</span><div class="big">48 &deg;C</div></div>
                 <div><span class="lab">Humidity</span><div class="big">22 %</div></div>
-                <span class="pill">Drying</span>
+                <span class="statepill">Drying</span>
               </div>
             </div>
             <div class="card">
@@ -273,43 +300,40 @@ dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
                 <span class="ro"><b>3 h 12 m</b> left</span>
               </div>
               <div class="bar"><i style="width:20%"></i></div>
-              <div class="two">
-                <div class="btn stop">Stop</div>
-                <div class="btn off">Start &mdash; ACE 2 only</div>
-              </div>
+              <div class="btn stop">Stop ACE 2</div>
             </div>
           </div>
         </div>
       </div>
-      <p class="ba-note">Per-ACE temp/duration overrides exist in multiACE's config
-      (<code>dryer_temp_0</code>, <code>dryer_duration_1</code>…), so the read-only line is
-      per unit too, not one global value.</p>
+      <p class="ba-note">The stop button names its unit. With four ACEs on one printer, a bare
+      "Stop" that acts on whichever is current is the kind of button that dries the wrong
+      spools.</p>
     </div>
   </div>
 </section>
 
 <section>
-  <div class="sec-head"><span class="tick">?</span><h2>Two calls I'd like you to make</h2></div>
+  <div class="sec-head"><span class="tick">?</span><h2>What is still open</h2></div>
 
   <dl class="q">
-    <dt>The temp / duration inputs — drop them, or keep them and write config?</dt>
-    <dd>Mocked above as read-only, which is honest and small. The alternative is for
-    HelixScreen to edit multiACE's config file and restart Klipper to apply — a much bigger,
-    much more invasive feature, and one that fights multiACE for ownership of its own config.
-    I would drop them here and leave the config where it is.</dd>
+    <dt>Auto-dry's parameter names</dt>
+    <dd><code>ACE_SET_AUTO_DRY</code> exists and persists, so the toggle above is buildable — but
+    neither multiACE's bundled docs nor OrcaSlicer's page call it, so its arguments are unknown.
+    The live object shows the shape (<code>enabled</code>, <code>rh_start</code>,
+    <code>rh_end</code>, <code>temp</code>, <code>master</code>, <code>add_time</code>). Running
+    it bare in a console would print the usage; probing it blind from here would change machine
+    state, which is why it is not wired yet.</dd>
 
-    <dt>Auto-dry — display only, or a toggle?</dt>
-    <dd>Shown display-only above. multiACE's macro table lists no auto-dry command, so a toggle
-    would need the same config-writing machinery as the point above. Worth confirming: if
-    <code>ACED__</code> has an undocumented auto-dry macro I have not found, a toggle is easy.</dd>
+    <dt>Preset values</dt>
+    <dd>45/55/65&nbsp;°C and 2/4/6&nbsp;h follow OrcaSlicer. If your filaments want different
+    ones, they are three numbers in one place.</dd>
   </dl>
 
-  <p style="margin-top:1.2rem"><strong>What it takes either way:</strong>
-  <code>AmsBackendMultiAce::get_dryer_info(unit)</code> mapping the parsed
-  <code>dryer_status</code> onto the existing struct, <code>start_drying()</code> emitting
-  <code>ACED__Dry_Start_&lt;n&gt;</code> and <code>stop_drying()</code> emitting
-  <code>ACED__Dry_Stop</code>, plus a <code>supports_fan_control = false</code> and honest
-  min/max from the config cap. The panel itself already exists and needs no new screen.</p>
+  <p style="margin-top:1.2rem"><strong>Already built:</strong>
+  <code>get_dryer_info()</code> maps <code>aces[].dryer_status</code> onto the existing
+  <code>DryerInfo</code>; <code>start_drying()</code> emits <code>ACE_DRY</code> and
+  <code>stop_drying()</code> emits <code>ACE_STOP_DRYING</code>. Confirmed working on the
+  machine. What remains is this panel's presentation.</p>
 </section>
 
 </div>
