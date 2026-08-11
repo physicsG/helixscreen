@@ -150,6 +150,7 @@ class AmsEnvironmentOverlay : public OverlayBase {
     lv_subject_t title_text_subject_;
     char title_text_buf_[64] = {};
 
+    lv_subject_t humidity_visible_subject_;
     lv_subject_t dryer_visible_subject_;
     lv_subject_t no_dryer_visible_subject_;
     lv_subject_t drying_active_subject_;

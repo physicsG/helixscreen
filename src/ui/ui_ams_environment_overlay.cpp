@@ -99,6 +99,8 @@ void AmsEnvironmentOverlay::init_subjects() {
                                   "ams_env_overlay_humidity_text", subjects_);
         UI_MANAGED_SUBJECT_STRING(title_text_subject_, title_text_buf_, "",
                                   "ams_env_overlay_title_text", subjects_);
+        UI_MANAGED_SUBJECT_INT(humidity_visible_subject_, 0,
+                               "ams_env_overlay_humidity_visible", subjects_);
         UI_MANAGED_SUBJECT_INT(dryer_visible_subject_, 0, "ams_env_overlay_dryer_visible",
                                subjects_);
         UI_MANAGED_SUBJECT_INT(no_dryer_visible_subject_, 0, "ams_env_overlay_no_dryer_visible",
@@ -387,6 +389,11 @@ void AmsEnvironmentOverlay::update_from_backend() {
         snprintf(humidity_text_buf_, sizeof(humidity_text_buf_), "--");
     }
     lv_subject_copy_string(&humidity_text_subject_, humidity_text_buf_);
+    // Owned by the overlay, not read off unit 0's indicator: this overlay shows
+    // whichever unit was opened, and an ACE reports humidity while the U1 it is
+    // bolted to does not. Binding to unit 0's flag hid the ACE's 35% RH behind
+    // the SnapSwap's lack of a sensor.
+    lv_subject_set_int(&humidity_visible_subject_, (has_env && humidity_pct > 0) ? 1 : 0);
 
     // Dryer visibility
     lv_subject_set_int(&dryer_visible_subject_, dryer.supported ? 1 : 0);
