@@ -165,8 +165,11 @@ TEST_CASE_METHOD(HelixTestFixture, "multiACE adds ACE units alongside the U1's h
     CHECK(ace_unit.first_slot_global_index == 4);
     // head mode: one ACE binds to one head and all four bays feed it — a hub.
     CHECK(ace_unit.topology == PathTopology::HUB);
-    // gate_status was [1,0,0,0] at capture: one spool loaded, three empty bays.
-    CHECK(ace_unit.slots[0].status == SlotStatus::AVAILABLE);
+    // gate_status was [1,0,0,0] at capture: one spool, three empty bays. That
+    // spool is also the one feeding head 3, so it reads LOADED rather than
+    // merely AVAILABLE — the distinction the ACE page needs to show a loaded
+    // bay at all, and to offer Unload on it.
+    CHECK(ace_unit.slots[0].status == SlotStatus::LOADED);
     CHECK(ace_unit.slots[1].status == SlotStatus::EMPTY);
     // In head mode every bay of this ACE reaches the head it is bound to (T3).
     CHECK(ace_unit.slots[0].mapped_tool == 3);
@@ -959,5 +962,73 @@ TEST_CASE_METHOD(HelixTestFixture, "an ACE bay load names the bay", "[ams][multi
     // And it is never a bare tool change.
     for (const auto& g : backend.captured_gcodes) {
         CHECK(g != "T3");
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "the bay feeding a head reads LOADED",
+                 "[ams][multiace][bay_load]") {
+    // Without this a bay the user just loaded looked identical to its three idle
+    // neighbours, and every "is this loaded?" rule the UI asks -- the spool
+    // highlight, the Unload entry -- answered no. The captured frame has head 3
+    // seated on ACE 0 slot 0, i.e. global slot 4.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    auto seated = backend.seated_source(3);
+    REQUIRE(seated.has_value());
+    const int seated_global = 4 + seated->slot;
+
+    const auto info = backend.get_system_info();
+    const SlotInfo* loaded = info.get_slot_global(seated_global);
+    REQUIRE(loaded != nullptr);
+    CHECK(loaded->status == SlotStatus::LOADED);
+
+    // Its neighbours are not, whatever their gate says.
+    for (int g = 4; g < 8; ++g) {
+        if (g == seated_global) {
+            continue;
+        }
+        INFO("bay global " << g);
+        const SlotInfo* other = info.get_slot_global(g);
+        REQUIRE(other != nullptr);
+        CHECK(other->status != SlotStatus::LOADED);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "unloading an ACE bay unloads the head it feeds",
+                 "[ams][multiace][bay_load]") {
+    // The mirror of the load arm. Passing a bay index used to fall through to
+    // the native Snapmaker path, whose validate_slot_index() only knows the four
+    // heads, so it was refused as out of range and the ACE page had no working
+    // Unload at all.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.unload_filament(5).success());
+    REQUIRE(backend.captured_gcodes.size() == 1);
+    // Only the head is named -- the bay is implied by what is seated.
+    CHECK(backend.captured_gcodes[0] == "ACE_UNLOAD_HEAD HEAD=3");
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "the seated bay reads as actively loaded",
+                 "[ams][multiace][bay_load]") {
+    // What the spool highlight binds to. The base rule is
+    // `slot_index == get_current_slot()`, and the current slot is a HEAD, so no
+    // bay ever matched and a loaded bay drew exactly like its idle neighbours.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    auto seated = backend.seated_source(3);
+    REQUIRE(seated.has_value());
+    const int seated_global = 4 + seated->slot;
+
+    CHECK(backend.slot_is_actively_loaded(seated_global));
+    for (int g = 4; g < 8; ++g) {
+        if (g == seated_global) {
+            continue;
+        }
+        INFO("bay global " << g);
+        CHECK_FALSE(backend.slot_is_actively_loaded(g));
     }
 }

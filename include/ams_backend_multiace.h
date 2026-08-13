@@ -126,6 +126,16 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// nullopt when @p slot_index is a head rather than a bay, or out of range.
     [[nodiscard]] std::optional<BaySource> bay_source(int slot_index) const;
 
+    /// A BAY is actively loaded when it is the one currently feeding a head.
+    ///
+    /// The base rule is `slot_index == get_current_slot()`, and the current slot
+    /// is a HEAD (3), so no bay ever matched and a loaded bay drew exactly like
+    /// its idle neighbours. Answered only for bays: the U1's own heads keep the
+    /// inherited rule, which is what the SnapSwap page has always shown.
+    /// Deliberately NOT done by claiming has_per_slot_loaded_authority(), which
+    /// would switch the heads over to a per-slot latch as a side effect.
+    [[nodiscard]] bool slot_is_actively_loaded(int slot_index) const override;
+
     // Every ACE reports temperature and humidity. Answered at the BACKEND level,
     // as the interface asks it: unit 0 is the U1 itself and has no sensor, but
     // the per-unit `ams_env_ind_<n>_visible` subject already hides the indicator

@@ -639,7 +639,21 @@ void AmsBackendMultiAce::rebuild_ace_units_locked() {
             // which is the only presence signal it publishes for an idle slot —
             // slots[].status reads "unknown" on real hardware even when the
             // gate is occupied.
-            slot.status = st.gate_present[s] ? SlotStatus::AVAILABLE : SlotStatus::EMPTY;
+            // LOADED when this exact bay is the one currently feeding a head:
+            // without it a bay the user just loaded looked identical to its
+            // three idle neighbours, and every "is this loaded?" rule the UI
+            // asks -- the spool highlight, the Unload entry -- answered no.
+            // head_seated_ is the right source here (unlike mapped_tool below,
+            // which must survive an unload): "which bay is AT the head" is
+            // exactly what it tracks.
+            bool bay_is_seated = false;
+            for (int h = 0; h < NUM_TOOLS && !bay_is_seated; ++h) {
+                bay_is_seated = head_seated_[h] && head_seated_[h]->ace_index == a &&
+                                head_seated_[h]->slot == s;
+            }
+            slot.status = bay_is_seated        ? SlotStatus::LOADED
+                          : st.gate_present[s] ? SlotStatus::AVAILABLE
+                                               : SlotStatus::EMPTY;
             slot.material = st.material[s];
             if (st.color_rgb[s]) {
                 slot.color_rgb = *st.color_rgb[s];
@@ -916,6 +930,16 @@ std::optional<AmsBackendMultiAce::BaySource> AmsBackendMultiAce::bay_source(int 
     return std::nullopt;
 }
 
+bool AmsBackendMultiAce::slot_is_actively_loaded(int slot_index) const {
+    if (auto bay = bay_source(slot_index)) {
+        // Its own status already carries the answer -- parse_ace_object_locked()
+        // marks exactly the seated bay LOADED -- so this stays a single source
+        // of truth rather than a second reverse lookup that could disagree.
+        return get_slot_info(slot_index).status == SlotStatus::LOADED;
+    }
+    return AmsBackendSnapmaker::slot_is_actively_loaded(slot_index);
+}
+
 AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
     // A BAY, not a head: this is "feed this specific spool to the head its ACE
     // serves". The base validate_slot_index() only knows the U1's four heads, so
@@ -960,6 +984,20 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
 }
 
 AmsError AmsBackendMultiAce::do_unload_filament(int slot_index) {
+    // A BAY: "unload the head this spool is feeding". Same shape as the load
+    // arm in do_load_filament() and for the same reason -- the base
+    // validate_slot_index() only knows the U1's four heads, so a bay index
+    // would fall through to the native path and be refused as out of range.
+    // ACE_UNLOAD_HEAD names only the head; the bay is implied by what is seated.
+    if (auto bay = bay_source(slot_index)) {
+        if (bay->head < 0) {
+            return AmsErrorHelper::invalid_slot(slot_index, get_system_info().total_slots - 1);
+        }
+        spdlog::info("[AmsBackendMultiAce] bay {} -> ACE_UNLOAD_HEAD HEAD={}", slot_index,
+                     bay->head);
+        return execute_gcode(fmt::format("ACE_UNLOAD_HEAD HEAD={}", bay->head));
+    }
+
     // Callers may pass -1 for "whatever is loaded"; resolve it the same way the
     // base does before deciding which path owns the head.
     int head = slot_index;
