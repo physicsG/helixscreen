@@ -7,6 +7,7 @@
 #include "ams_backend_snapmaker.h"
 #include "ams_state.h"
 #include "ams_step_operation.h"
+#include "ams_subscription_backend.h"
 #include "ams_types.h"
 #include "app_globals.h"
 #include "filament_slot_override.h"
@@ -558,10 +559,9 @@ TEST_CASE_METHOD(SnapmakerFixture, "Snapmaker a mounted but empty toolhead is no
 
     // T0 on the carriage, nothing in any channel.
     SnapmakerTestAccess::handle_status(
-        backend,
-        json{{"toolhead", json{{"extruder", "extruder"}}},
-             {"print_task_config",
-              json{{"filament_exist", json::array({false, false, false, false})}}}});
+        backend, json{{"toolhead", json{{"extruder", "extruder"}}},
+                      {"print_task_config",
+                       json{{"filament_exist", json::array({false, false, false, false})}}}});
 
     CHECK(backend.get_slot_info(0).status == SlotStatus::EMPTY);
     CHECK_FALSE(backend.get_system_info().filament_loaded);
@@ -585,10 +585,9 @@ TEST_CASE_METHOD(SnapmakerFixture,
 
     // Mount T0 with an empty channel: nothing is loaded yet.
     SnapmakerTestAccess::handle_status(
-        backend,
-        json{{"toolhead", json{{"extruder", "extruder"}}},
-             {"print_task_config",
-              json{{"filament_exist", json::array({false, false, false, false})}}}});
+        backend, json{{"toolhead", json{{"extruder", "extruder"}}},
+                      {"print_task_config",
+                       json{{"filament_exist", json::array({false, false, false, false})}}}});
     REQUIRE(backend.get_slot_info(0).status == SlotStatus::EMPTY);
 
     // Filament arrives and reaches the toolhead — no tool change anywhere.
@@ -2313,4 +2312,45 @@ TEST_CASE_METHOD(HelixTestFixture, "Snapmaker: binding a spool does not lock a m
         REQUIRE(stored.has_value());
         CHECK(stored->user_locked_material);
     }
+}
+
+// =============================================================================
+// Which backends can emit a G28 for a filament op
+//
+// The "home printer first?" prompt is raised by the UI before it starts a
+// preheat, and it used to be gated on printer state alone -- on the U1 that
+// asked consent for a G28 that never comes, and declining cancelled the load.
+// The answer has to come from the backend, and each class's answer must follow
+// from what its dispatch actually does.
+// =============================================================================
+
+TEST_CASE("Snapmaker filament ops never emit a G28", "[ams][snapmaker][homing]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    // do_load_filament() sends AUTO_FEEDING ... LOAD=1 straight to firmware.
+    // It never reaches ensure_homed_then(), so nothing here can home.
+    CHECK_FALSE(backend.filament_ops_may_home());
+
+    // Not the same question as the firmware burying its own home -- the U1's
+    // FEED_AUTO moves filament, not the toolhead, so this stays false too and
+    // the two flags are not just aliases of each other.
+    CHECK_FALSE(backend.filament_ops_self_home());
+}
+
+TEST_CASE("A backend that routes through ensure_homed_then says so", "[ams][snapmaker][homing]") {
+    // The default has to come from the layer that owns the homing machinery,
+    // not from each backend remembering to opt in. AmsSubscriptionBackend is
+    // where ensure_homed_then() lives, so its subclasses answer true unless
+    // they dispatch around it -- proven here through a subclass that does not
+    // override, so the inherited answer is what is under test.
+    class PlainSubscriptionBackend : public AmsBackendSnapmaker {
+      public:
+        PlainSubscriptionBackend() : AmsBackendSnapmaker(nullptr, nullptr) {}
+        // Undo Snapmaker's override to expose AmsSubscriptionBackend's answer.
+        [[nodiscard]] bool filament_ops_may_home() const override {
+            return AmsSubscriptionBackend::filament_ops_may_home();
+        }
+    };
+    PlainSubscriptionBackend backend;
+    CHECK(backend.filament_ops_may_home());
 }

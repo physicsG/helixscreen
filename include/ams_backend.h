@@ -661,6 +661,37 @@ class AmsBackend {
     }
 
     /**
+     * @brief Can a filament op dispatched by this backend emit a G28 that
+     *        HelixScreen itself sends?
+     *
+     * The inverse question to filament_ops_self_home(), and a different one:
+     * that flag is about a home buried inside FIRMWARE where we cannot see it,
+     * this one is about the home WE send, in
+     * AmsSubscriptionBackend::ensure_homed_then().
+     *
+     * Exists so a UI surface can decide whether to ask "home printer first?"
+     * before it starts a preheat. The prompt is worth moving that early only
+     * when the op it precedes can actually home; asking on a backend that never
+     * emits G28 requests consent for something that will not happen, and a
+     * decline cancels the load outright (Snapmaker U1: do_load_filament()
+     * dispatches `AUTO_FEEDING ... LOAD=1` straight to firmware, which feeds
+     * without moving the toolhead at all).
+     *
+     * False here because a plain AmsBackend has no ensure_homed_then() to route
+     * through — the machinery lives on AmsSubscriptionBackend, which answers
+     * true, and the two subclasses that bypass it answer false again. Every
+     * answer is therefore derivable from what that class's dispatch actually
+     * does, rather than being a fact to remember.
+     *
+     * This does NOT gate the G28 itself. ensure_homed_then() still decides that
+     * from toolhead.homed_axes, and still asks its own confirmation — a backend
+     * that answers false simply never reaches it.
+     */
+    [[nodiscard]] virtual bool filament_ops_may_home() const {
+        return false;
+    }
+
+    /**
      * @brief Record that the user has already agreed to a pre-operation home for
      *        the NEXT dispatch, so ensure_homed_then() does not ask a second
      *        time.

@@ -157,6 +157,16 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     }
 
   public:
+    /// See AmsBackend::filament_ops_may_home(). do_load_filament() dispatches
+    /// `AUTO_FEEDING ... LOAD=1` (firmware's FEED_AUTO) and do_unload_filament()
+    /// its UNLOAD counterpart, both straight to firmware — neither routes
+    /// through ensure_homed_then(), and FEED_AUTO feeds without moving the
+    /// toolhead, so there is no unhomed axis for it to trip over. Inherited by
+    /// AmsBackendMultiAce, whose ACE-fed heads dispatch `ACE_LOAD_HEAD` the
+    /// same way.
+    [[nodiscard]] bool filament_ops_may_home() const override {
+        return false;
+    }
     // The base PARALLEL gate offers Unload for any tool with filament in its
     // buffer (is_present()). On the U1 that keeps offering Unload after a tool
     // is already unloaded — the firmware retracts the filament to the buffer

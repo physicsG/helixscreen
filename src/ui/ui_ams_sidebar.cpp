@@ -1413,7 +1413,12 @@ void AmsOperationSidebar::handle_load_with_preheat(int slot_index) {
     // G28 still fires later, inside AmsSubscriptionBackend::ensure_homed_then()
     // right before the tier-1 dispatch (unchanged) -- only the confirmation
     // moves earlier, so a decline never wastes a preheat cycle.
-    if (!helix::toolhead_is_homed(printer_state_)) {
+    //
+    // Only for backends that can actually emit that G28. On a Snapmaker U1 the
+    // load dispatches straight to firmware and never homes, so the prompt asked
+    // consent for something that would not happen -- and declining it returns
+    // here, cancelling the load outright.
+    if (!helix::toolhead_is_homed(printer_state_) && backend->filament_ops_may_home()) {
         spdlog::info("[AmsSidebar] Toolhead not homed -- asking before starting preheat for "
                      "slot {} load",
                      slot_index);

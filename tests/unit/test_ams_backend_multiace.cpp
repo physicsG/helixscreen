@@ -126,7 +126,8 @@ TEST_CASE_METHOD(HelixTestFixture, "multiACE reads the real notify_status_update
     CHECK(backend.get_system_info().units.size() == 2);
 }
 
-TEST_CASE_METHOD(HelixTestFixture, "multiACE maps the seated ACE slot to a head", "[ams][multiace]") {
+TEST_CASE_METHOD(HelixTestFixture, "multiACE maps the seated ACE slot to a head",
+                 "[ams][multiace]") {
     CapturingMultiAce backend;
     backend.handle_status_update(wrap(live_ace_object()));
 
@@ -207,7 +208,8 @@ TEST_CASE_METHOD(HelixTestFixture, "multiACE keeps head sources across a partial
 
     // A frame carrying only an environment reading — exactly what Moonraker
     // sends between full updates.
-    backend.handle_status_update(wrap(json{{"aces", json::array({json{{"idx", 0}, {"temp", 33}}})}}));
+    backend.handle_status_update(
+        wrap(json{{"aces", json::array({json{{"idx", 0}, {"temp", 33}}})}}));
 
     CHECK(backend.seated_source(3).has_value());
     CHECK(backend.head_source_kind(3) == HeadSource::ACE);
@@ -839,4 +841,15 @@ TEST_CASE_METHOD(HelixTestFixture, "multiACE reports environment sensors", "[ams
     // the first `ace` update, and a false there would hide the badge for good.
     AmsBackendSnapmaker plain(nullptr, nullptr);
     CHECK_FALSE(plain.has_environment_sensors()); // a stock U1 still has none
+}
+
+TEST_CASE("multiACE inherits the U1's no-homing answer", "[ams][multiace][homing]") {
+    // Inherited from AmsBackendSnapmaker rather than restated, and worth a test
+    // precisely because it is inherited: an ACE-fed head loads with
+    // `ACE_LOAD_HEAD`, a feeder head with `AUTO_FEEDING`, and neither routes
+    // through ensure_homed_then(). If a future override on this class forgets
+    // it, the "home printer first?" prompt comes back on a printer that will
+    // never emit the G28 -- and declining it cancels the load.
+    CapturingMultiAce backend;
+    CHECK_FALSE(backend.filament_ops_may_home());
 }

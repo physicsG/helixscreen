@@ -129,6 +129,14 @@ class AmsSubscriptionBackend : public AmsBackend {
         home_preconfirmed_ = false;
     }
 
+    /// See AmsBackend::filament_ops_may_home(). True here because this class is
+    /// where ensure_homed_then() lives and every subclass reaches it by default;
+    /// the two that dispatch their filament ops straight to firmware instead
+    /// (Snapmaker, ACE) override it back to false.
+    [[nodiscard]] bool filament_ops_may_home() const override {
+        return true;
+    }
+
   protected:
     // --- Hooks for derived classes ---
 
