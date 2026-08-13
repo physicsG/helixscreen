@@ -153,8 +153,7 @@ TEST_CASE("SaveRestartLatch: latch survives until reset (the whole point)",
     REQUIRE(should_extend_save_timeout(latch.restart_latched(), 0, 4));
 }
 
-TEST_CASE("SaveRestartLatch: READY after a restart signals save success",
-          "[zoffset][save_latch]") {
+TEST_CASE("SaveRestartLatch: READY after a restart signals save success", "[zoffset][save_latch]") {
     helix::zoffset::SaveRestartLatch latch;
     latch.on_klippy_ready(false); // t=0 restart begins
     REQUIRE_FALSE(latch.restart_completed());
@@ -190,8 +189,7 @@ TEST_CASE("SaveRestartLatch: note_restart_expected folds in the suppression wind
     REQUIRE(latch.restart_latched());
 }
 
-TEST_CASE("SaveRestartLatch: reset clears both flags for a second save",
-          "[zoffset][save_latch]") {
+TEST_CASE("SaveRestartLatch: reset clears both flags for a second save", "[zoffset][save_latch]") {
     helix::zoffset::SaveRestartLatch latch;
     latch.on_klippy_ready(false);
     latch.on_klippy_ready(true);

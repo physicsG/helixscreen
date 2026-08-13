@@ -5,7 +5,7 @@
 #include "ui_observer_guard.h"
 
 // Forward declarations
-class MoonrakerAPI;
+class IMoonrakerAPI;
 
 namespace helix {
 
@@ -27,8 +27,8 @@ ObserverGuard init_print_completion_observer();
  * These are temp files created when modifying G-code for prints.
  * Should be called after Moonraker connection is established.
  *
- * @param api MoonrakerAPI instance to use for file operations
+ * @param api IMoonrakerAPI instance to use for file operations
  */
-void cleanup_stale_helix_temp_files(MoonrakerAPI* api);
+void cleanup_stale_helix_temp_files(IMoonrakerAPI* api);
 
 } // namespace helix

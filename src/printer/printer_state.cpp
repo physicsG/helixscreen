@@ -19,6 +19,7 @@
 #include "async_helpers.h"
 #include "capability_overrides.h"
 #include "color_sensor_manager.h"
+#include "connection_state.h" // For ConnectionState enum
 #include "device_display_name.h"
 #include "filament_sensor_manager.h"
 #include "hardware_validator.h"
@@ -27,7 +28,6 @@
 #include "lvgl.h"
 #include "lvgl/src/display/lv_display_private.h" // For rendering_in_progress check
 #include "lvgl_debug_invalidate.h"
-#include "moonraker_client.h" // For ConnectionState enum
 #include "printer_cache_registry.h"
 #include "probe_sensor_manager.h"
 #include "runtime_config.h"
@@ -943,6 +943,12 @@ void PrinterState::reset_print_start_state() {
 void PrinterState::set_print_thumbnail(const std::string& for_file, const std::string& path) {
     print_domain_.set_print_thumbnail(for_file, path);
 }
+
+#if defined(HELIX_PLATFORM_ESP32)
+void PrinterState::set_print_psram_thumbnail(std::shared_ptr<helix::ui::EspPsramThumbnail> thumb) {
+    print_domain_.set_print_psram_thumbnail(std::move(thumb));
+}
+#endif
 
 void PrinterState::set_print_display_filename(const std::string& name) {
     print_domain_.set_print_display_filename(name);

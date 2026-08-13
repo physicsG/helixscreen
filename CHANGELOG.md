@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.99.111] - 2026-08-12
+
+**Upgrading from 0.99.108?** This is your next release. Neither 0.99.109 nor 0.99.110
+produced downloadable builds: 109 died on a compile error in its own release commit, and
+110's Raspberry Pi build was killed by the runner's OOM killer during the link, which
+blocked the release from publishing. Everything both would have delivered is included
+below, plus the fixes found while tracking those two failures down.
+
+### Added
+
+- **Native ESP32-S3 firmware target - ALPHA, not for daily use (K-Touch and similar panels)** - a first-booting, highly experimental port: HelixScreen now builds and runs as firmware on ESP32-S3 display hardware (e.g. the BTT K-Touch), not only as a Linux/SDL app. A packed, compressed asset container fits all nine languages and every printer image into a 2 MB storage partition; RLE medium-tier fonts fit the 6.875 MB OTA slot; and a real `EspMoonrakerClient` over `esp_websocket_client` drives live discovery, status and bed-mesh callbacks over WiFi, with first-boot SoftAP captive-portal provisioning and A/B OTA. Ships as a v1 Core+AMS cut: home-only boot with heavy panels deferred to first navigation, draw buffers sized to internal DRAM, and a beam-paced presenter for tear-free scan-out. Camera/QR and the 2D-gcode and bed-mesh-3D renderers are compile-gated out. Expect rough edges, missing features and known instability - this is for developers and early testers only. The Linux, Pi and Android targets are unchanged and remain production-quality.
+- **Home-screen edit mode can be disabled (#1245)** - a Touch & Input setting, defaulting on, so a resting finger on a wall-mounted tablet never rearranges widgets. The same global long-press time that gates edit mode is now configurable too.
+- **Minimum toast severity (#1213)** - filter non-critical toasts down to a chosen level.
+- **Reset Endless Spool from the device operations overlay** - a direct action for Happy Hare setups that need a lane-map reset. It asks first, and now tells you when it worked.
+- **AMS says whether the printer will swap spools by itself** - a runout on a multi-lane backend tells you "switching to lane 4" rather than leaving you to discover it.
+- **Temperature graph above its controls in portrait** - the graph stacks on top of the control strip on a tall screen.
+
+### Fixed
+
+- **The Android APK shipped the packager's own configuration** - a working `settings.json` with a real printer address, an active printer and `wizard_completed=true` was being packaged, so a fresh install skipped first-run setup and pointed itself at someone else's network. Crash dumps excluded in the previous release were still shipping too, because the packaging step only ever added files and never removed what an earlier build had left behind. Nothing needs a shipped seed: defaults are synthesized when the file is absent. No private data ever reached the git repository, only built APKs.
+- **Android background network calls silently failed** - debug-bundle uploads and update checks resolved their Java bridge in a way that cannot see the app's own classes from a background thread, so both failed as "HTTP 0" with no diagnosis. A bodyless HTTP error also erased the real status code, making an expired key and a dead network look identical.
+- **AD5X cold-ejected a seated filament the motion sensor mis-read as empty** - the IFS motion sensor reads false while a lane is loaded but idle, so gating ejection on it alone ejected filament that was happily loaded. The gate now requires the head-switch edge that only a real unload raises.
+- **The AMS recovery modal went stale mid-error, and then came back after you dismissed it** - it now re-presents when the underlying fault genuinely changes, but a dialog you have answered stays answered. Previously any later cosmetic update to the same fault re-opened it, and after a recovery tap it put live buttons over an in-flight preheat.
+- **Reset Endless Spool reported success without doing anything** - on a system that had not yet reported its slot count, the confirmation was accepted and nothing was cleared. It now refuses instead.
+- **Closing an overlay could leave two panels on screen at once** - the restored panel was activated before it was made visible again, and by up to three different code paths, so a panel whose activation navigates elsewhere corrupted the panel stack. The double activation also tripped Print Last's retry counter and could start two first-run tours. This also fixes the camera feed staying dead until a tab switch (#1245).
+- **The temperature graph on reconnect** - resuming drew a phantom spike bridging the whole gap, chip toggles reset themselves, and a Klipper restart collapsed a 20 minute graph to a few seconds. Grid lines and time labels now line up. The graph also rebuilds its series when discovery adds an extruder.
+- **The G-code preview dropped its thumbnail too early on every non-GPU device**, leaving a grey gap while "Building preview" was still running.
+- **Two Japanese characters rendered blank** in the new AD5X spool-switchover strings.
+- **Debug bundles dropped the incident itself** from `klipper_log` and `log_tail`.
+- **Android crash reports and update checks could silently do nothing** - the Java bridge they resolve was looked up in a way that cannot see the app's own classes from a background thread, so the call returned nothing and failed as "HTTP 0" with no diagnosis. All five call sites now share one lookup that works from any thread.
+- **One bad value in settings.json could crash the app or refuse to save** - a setting stored with the wrong type (a string where a number or a yes/no belongs, usually from a hand-edit) threw instead of falling back to the default, and writing that setting afterwards failed outright. Bad values are now ignored with a log line naming the setting.
+- **The print-status bar could disagree with the progress text** - one source and one formatter now feed the bar, progress text, filament, duration and layer strings.
+- **The print-status thumbnail could apply during a mid-teardown relayout** - now guarded.
+- **Portrait detection disagreed with the layout override (#1255)**.
+- **The BETA badge overlapped row controls (#1244)** - a gutter is now reserved.
+- **Android (#1245, #1253)** - reconnect WebSocket on display wake, keep user settings across APK upgrades, preload libturbojpeg on API 24+, and close the SDL audio device at idle.
+
+### Changed
+
+- **Splash version label moved to the upper-left**.
+- **Temperatures drop the decimal at 100 °C and above**.
+- **Context menus share one component and gained an explicit close button** - all eleven menus are now one card rather than eleven per-menu copies.
+
+### Internal
+
+- The ESP32 source manifest gate accepted lines the firmware build then silently discarded, so it could pass while the build broke. It now enforces exactly what the build consumes, and detects stale and duplicated entries.
+- The home-screen edit-mode toggle and long-press slider shipped with no tests; deleting either check failed nothing. Both are now covered, along with the reconnect and endless-spool fixes above.
+- Three tests were found asserting the wrong thing or passing only by shard ordering: one encoded the endless-spool bug above, one had been reduced to a tautology that no longer exercised the runout confirm delay, and two depended on state a co-tenant test happened to leave behind. All corrected. No user impact; disclosed for the record.
+- The release pipeline could not build Raspberry Pi at all. The link peak had grown past the runner's memory, so it was OOM-killed; separately, the job that warms the compiler cache was sized for a warm build and so could never complete the cold one it always runs, leaving the cache permanently missing. Both are fixed, and the platform build now degrades to a slow build rather than a failed release when the cache is absent.
+
+## [0.99.110] - 2026-08-11 [WITHDRAWN]
+
+No downloadable build was ever produced: the Raspberry Pi link was OOM-killed on every
+attempt, which blocked the publish steps. Its entire contents ship in 0.99.111 above.
+
+## [0.99.109] - 2026-08-10 [WITHDRAWN]
+
+No downloadable build was ever produced: a compile error in the release commit broke all nine
+device cross-builds and macOS. Its entire contents ship in 0.99.111 above.
+
 ## [0.99.108] - 2026-08-09
 
 Filament systems get the bulk of the attention: CFS and AD5X IFS learn to report a runout
@@ -4942,6 +5002,9 @@ Initial tagged release. Foundation for all subsequent development.
 - Automated GitHub Actions release pipeline
 - One-liner installation script with platform auto-detection
 
+[0.99.111]: https://github.com/prestonbrown/helixscreen/compare/v0.99.108...v0.99.111
+[0.99.110]: https://github.com/prestonbrown/helixscreen/compare/v0.99.109...v0.99.110
+[0.99.109]: https://github.com/prestonbrown/helixscreen/compare/v0.99.108...v0.99.109
 [0.99.108]: https://github.com/prestonbrown/helixscreen/compare/v0.99.107...v0.99.108
 [0.99.107]: https://github.com/prestonbrown/helixscreen/compare/v0.99.106...v0.99.107
 [0.99.106]: https://github.com/prestonbrown/helixscreen/compare/v0.99.105...v0.99.106

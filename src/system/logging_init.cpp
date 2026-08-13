@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "logging_init.h"
 
+#include <spdlog/pattern_formatter.h>
+
 #ifndef HELIX_WATCHDOG
 #include "hv/hlog.h"
 #endif

@@ -12,7 +12,7 @@
 #include "active_material_provider.h"
 #include "ams_state.h"
 #include "app_globals.h"
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "observer_factory.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
@@ -25,12 +25,12 @@ namespace helix {
 
 void register_active_spool_widget() {
     register_widget_factory("active_spool", [](const std::string&) {
-        auto* api = PanelWidgetManager::instance().shared_resource<MoonrakerAPI>();
+        auto* api = PanelWidgetManager::instance().shared_resource<IMoonrakerAPI>();
         return std::make_unique<ActiveSpoolWidget>(api);
     });
 }
 
-ActiveSpoolWidget::ActiveSpoolWidget(MoonrakerAPI* api) : api_(api) {}
+ActiveSpoolWidget::ActiveSpoolWidget(IMoonrakerAPI* api) : api_(api) {}
 
 ActiveSpoolWidget::~ActiveSpoolWidget() {
     detach();

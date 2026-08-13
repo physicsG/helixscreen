@@ -7,8 +7,8 @@
 
 #include "ams_backend.h"
 #include "async_lifetime_guard.h"
-#include "moonraker_api.h"
-#include "moonraker_client.h"
+#include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
 
 #include <spdlog/spdlog.h>
 
@@ -31,7 +31,7 @@
 ///   - validate_slot_index() - if they need custom validation
 class AmsSubscriptionBackend : public AmsBackend {
   public:
-    AmsSubscriptionBackend(MoonrakerAPI* api, helix::MoonrakerClient* client);
+    AmsSubscriptionBackend(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
     ~AmsSubscriptionBackend() override;
 
     // --- Lifecycle (final -- derived classes use hooks instead) ---
@@ -113,7 +113,7 @@ class AmsSubscriptionBackend : public AmsBackend {
     /// synchronously create a confirmation modal.
     AmsError ensure_homed_then(std::string gcode, std::function<void()> on_complete = nullptr,
                                std::function<void(const MoonrakerError&)> on_error = nullptr,
-                               uint32_t timeout_ms = MoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
+                               uint32_t timeout_ms = IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
                                bool skip_homing = false, bool silent = true);
 
     /// See AmsBackend::arm_home_preconfirmed(). Consumed single-shot by the
@@ -236,8 +236,8 @@ class AmsSubscriptionBackend : public AmsBackend {
     AmsError refuse_if_printing() const;
 
     // --- Protected state for derived classes ---
-    MoonrakerAPI* api_;
-    helix::MoonrakerClient* client_;
+    IMoonrakerAPI* api_;
+    helix::IMoonrakerClient* client_;
     mutable std::mutex mutex_;
     AmsSystemInfo system_info_;
     std::atomic<bool> running_{false};
@@ -328,13 +328,13 @@ class AmsSubscriptionBackend : public AmsBackend {
     /// When @p on_error, @p timeout_ms, and @p silent are all left at their
     /// ensure_homed_then() defaults, dispatch stays on the same two virtuals
     /// referenced above — required for fixture compatibility. Any non-default
-    /// combination needs a live @p api_: it talks to MoonrakerAPI directly (the
+    /// combination needs a live @p api_: it talks to IMoonrakerAPI directly (the
     /// hardcoded virtuals can't carry a caller's own error/timeout/toast
     /// policy), the same way AmsBackendCfs::dispatch_action_script used to
     /// before this method existed to replace it.
     AmsError dispatch_payload(std::string gcode, std::function<void()> on_complete,
                               std::function<void(const MoonrakerError&)> on_error = nullptr,
-                              uint32_t timeout_ms = MoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
+                              uint32_t timeout_ms = IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
                               bool silent = true);
 
     /// Report a gcode failure through @p on_error when set, else fall back to

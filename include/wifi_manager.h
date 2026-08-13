@@ -316,7 +316,7 @@ class WiFiManager {
     /// Expires the backend-swap callback deferred out of the NetworkManager init
     /// worker thread. Declared after `backend_` so reverse-order member
     /// destruction expires the guard before the backend that callback touches.
-    /// Like MoonrakerAPI, this class has no deinit_subjects() — it owns no
+    /// Like IMoonrakerAPI, this class has no deinit_subjects() — it owns no
     /// subjects — so the destructor really is the only teardown point, and the
     /// guard's own dtor covers it (#1165).
     helix::AsyncLifetimeGuard async_lifetime_;

@@ -16,13 +16,14 @@
   <view name="print_status_panel"
         extends="lv_obj" width="#overlay_width_transient" height="100%" align="right_mid" style_bg_opa="255"
         style_bg_color="#card_bg" style_pad_all="0" style_border_width="0" flex_flow="column" clickable="true">
-    <!-- Header Bar. The E-stop is NOT a header child: header_height is responsive
-         (28 at MICRO, 32 at TINY) and a 44px circle does not fit inside it — it
-         centred at y=-2 and got clipped top and bottom (prestonbrown/helixscreen#1204). The
-         control that must never be unreachable does not get to depend on the
-         header's height, so it floats over the top-right corner instead, the same
-         way lock_screen.xml positions its estop_fab. -->
-    <header_bar name="overlay_header" title="Print Status" title_tag="Print Status"/>
+    <!-- Header Bar with the dedicated E-Stop slot. The slot floats the e-stop
+         circle (ignore_layout) and reserves a horizontal gutter so any future
+         action button shifts left rather than sitting under it. The circle
+         overflows header_height at micro/tiny (prestonbrown/helixscreen#1204);
+         the slot handles that itself, so this panel no longer needs a standalone
+         floating FAB. estop_visible_subject gates it to active prints. -->
+    <header_bar name="overlay_header"
+                title="Print Status" title_tag="Print Status" estop_visible_subject="estop_visible"/>
     <!-- Content Area (portrait: stacked column, viewer on top, controls below) -->
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="0"
@@ -204,7 +205,7 @@
                   style_pad_left="#space_sm" style_pad_right="#space_sm" style_pad_top="#space_md"
                   style_pad_bottom="#space_md" style_pad_gap="#space_xs" flex_flow="column" scrollable="false">
             <!-- Print Progress Bar (invisible during pre-print operations, but keeps layout space) -->
-            <progress_bar name="print_progress" bind_value="print_progress">
+            <progress_bar name="print_progress" bind_value="print_progress_display">
               <bind_style name="invisible" subject="preparing_visible" ref_value="1"/>
             </progress_bar>
             <!-- Layer Progress (Layer X / Y) + Objects Count -->
@@ -513,17 +514,16 @@
       </lv_obj>
     </lv_obj>
 
-    <!-- E-Stop FAB — floats over the top-right corner, outside the flex column.
-         ignore_layout keeps the column layout from positioning it, so align
-         applies and the button keeps a full 44px touch target at every
-         breakpoint regardless of how short the header is. Declared last so it
-         draws above the content it overlaps. -->
+    <!-- E-Stop FAB — child of the panel ROOT (full-height), not the header, so
+         it never clips and stays fully hit-testable regardless of header_height
+         (prestonbrown/helixscreen#1204). The header_bar above reserves a spacer
+         gutter (estop_visible_subject) so the title never runs under this FAB.
+         estop_visible covers PRINTING + PAUSED + the preparing phase. Declared
+         last so it draws above the content it overlaps. -->
     <lv_button name="estop_fab"
-               width="44" height="44" ignore_layout="true" align="top_right" style_translate_x="-#space_sm"
-               style_translate_y="#space_sm" style_radius="9999" style_bg_color="#danger" style_pad_all="0">
-      <!-- Explicit color, not variant="primary": a variant resolves to the theme
-           primary (blue), which is near-invisible on the danger-red circle. The
-           header_bar this replaced defaulted its icon to #text. -->
+               width="44" height="44" ignore_layout="true" align="top_right" style_translate_y="#space_sm"
+               style_radius="9999" style_bg_color="#danger" style_pad_all="0" hidden="true">
+      <bind_flag_if_eq subject="estop_visible" flag="hidden" ref_value="0"/>
       <icon src="alert_octagon" size="md" color="#text" align="center"/>
       <event_cb trigger="clicked" callback="emergency_stop_clicked"/>
     </lv_button>

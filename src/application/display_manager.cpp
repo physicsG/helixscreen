@@ -61,6 +61,8 @@
 #endif
 
 #ifdef __ANDROID__
+#include "system/android_jni.h"
+
 #include <SDL_system.h>
 #include <jni.h>
 
@@ -68,10 +70,11 @@
 // JNI bridge to HelixActivity's window flags (#1245)
 //
 // Mirrors android_set_navbar_always_visible() in display_settings_manager.cpp —
-// same guard shape, same ExceptionClear() on every failure path, same
-// DeleteLocalRef discipline. It lives HERE rather than being exported from
-// display_settings_manager.h because DisplayManager is the only caller: which
-// mechanism cuts the panel is display-output policy, not a persisted setting.
+// same guard shape, same ExceptionClear() on every failure path, and the same
+// shared helix_activity_class() for class resolution. It lives HERE rather than
+// being exported from display_settings_manager.h because DisplayManager is the
+// only caller: which mechanism cuts the panel is display-output policy, not a
+// persisted setting.
 // Putting an Android-only declaration in the settings header to reach it would
 // file the API under the wrong owner. There is exactly one copy of each helper.
 //
@@ -89,21 +92,18 @@ static void android_set_keep_screen_on(bool keep_on) {
     if (!env)
         return;
 
-    jclass cls = env->FindClass("org/helixscreen/app/HelixActivity");
-    if (!cls) {
-        env->ExceptionClear();
+    // Cached global ref owned by helix_activity_class() — never released here.
+    jclass cls = helix::android::helix_activity_class(env);
+    if (!cls)
         return;
-    }
 
     jmethodID method = env->GetStaticMethodID(cls, "setKeepScreenOn", "(Z)V");
     if (!method) {
-        env->DeleteLocalRef(cls);
         env->ExceptionClear();
         return;
     }
 
     env->CallStaticVoidMethod(cls, method, static_cast<jboolean>(keep_on));
-    env->DeleteLocalRef(cls);
 }
 
 /// Read HelixActivity's onResume counter. Returns 0 when the bridge is
@@ -116,21 +116,17 @@ static int android_get_resume_seq() {
     if (!env)
         return 0;
 
-    jclass cls = env->FindClass("org/helixscreen/app/HelixActivity");
-    if (!cls) {
-        env->ExceptionClear();
+    jclass cls = helix::android::helix_activity_class(env);
+    if (!cls)
         return 0;
-    }
 
     jmethodID method = env->GetStaticMethodID(cls, "getResumeSeq", "()I");
     if (!method) {
-        env->DeleteLocalRef(cls);
         env->ExceptionClear();
         return 0;
     }
 
     jint seq = env->CallStaticIntMethod(cls, method);
-    env->DeleteLocalRef(cls);
     return static_cast<int>(seq);
 }
 #endif // __ANDROID__
@@ -439,10 +435,12 @@ bool DisplayManager::init(const Config& config) {
     // Configure scroll behavior and sleep-aware wrapper
     if (m_pointer) {
         configure_scroll(config.scroll_throw, config.scroll_limit);
-        // Lengthen the long-press timeout from LVGL's 400ms default so
-        // mode-switching holds (home-screen edit mode) are deliberate, not
-        // twitchy. See AppConstants::Input::LONG_PRESS_MS.
-        lv_indev_set_long_press_time(m_pointer, AppConstants::Input::LONG_PRESS_MS);
+        // Long-press threshold — user-configurable global setting (#1245), default
+        // AppConstants::Input::LONG_PRESS_MS. Applied here and on backend swap;
+        // InputSettingsManager::set_long_press_time live-applies changes.
+        const int long_press_ms = helix::Config::get_instance()->get<int>(
+            "/input/long_press_time", static_cast<int>(AppConstants::Input::LONG_PRESS_MS));
+        lv_indev_set_long_press_time(m_pointer, long_press_ms);
 #ifndef HELIX_DISPLAY_SDL
         // Only install on embedded - SDL's event handler identifies the mouse device
         // by checking if read_cb == sdl_mouse_read, which our wrapper breaks.
@@ -749,7 +747,9 @@ void DisplayManager::rebuild_input_after_backend_swap() {
     m_pointer = m_backend->create_input_pointer();
     if (m_pointer) {
         configure_scroll(m_scroll_throw, m_scroll_limit);
-        lv_indev_set_long_press_time(m_pointer, AppConstants::Input::LONG_PRESS_MS);
+        const int long_press_ms = helix::Config::get_instance()->get<int>(
+            "/input/long_press_time", static_cast<int>(AppConstants::Input::LONG_PRESS_MS));
+        lv_indev_set_long_press_time(m_pointer, long_press_ms);
 #ifndef HELIX_DISPLAY_SDL
         install_sleep_aware_input_wrapper();
 #endif
@@ -1394,6 +1394,13 @@ bool DisplayManager::needs_touch_calibration() const {
         return false;
     }
     return m_backend->needs_touch_calibration();
+}
+
+bool DisplayManager::supports_touch_calibration() const {
+    if (!m_backend) {
+        return false;
+    }
+    return m_backend->supports_touch_calibration();
 }
 
 void DisplayManager::disable_affine_calibration() {

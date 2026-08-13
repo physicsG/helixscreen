@@ -31,7 +31,13 @@
 
          CRITICAL: Base constants (space_xxs, space_xs, etc.) are registered at
          runtime by ui_theme.cpp - do NOT define them here or responsive overrides
-         will be silently ignored due to LVGL's lv_xml_register_const() behavior. -->
+         will be silently ignored due to LVGL's lv_xml_register_const() behavior.
+
+         The same ordering applies to <style> elements: globals.xml is parsed
+         BEFORE theme_manager_init() registers the base #space_*/#color consts,
+         so a style here that references one registers EMPTY (property silently
+         skipped). Define such styles in the consuming component's own <styles>
+         block instead - components are parsed after theme init. -->
     <!-- space_xxs: Tiny spacing (keypad rows, compact icon gaps) -->
     <px name="space_xxs_tiny" value="1"/>
     <px name="space_xxs_small" value="2"/>
@@ -805,12 +811,5 @@
     <str name="icon_z_farther" value="󰜷"/>
     <!-- END GENERATED ICON CONSTS -->
   </consts>
-  <styles>
-    <!-- Icon-to-label gap: wider on tiny breakpoint (labels hidden/cramped, icons
-         too close), tighter once the layout has room. Shared across any row that
-         switches gap by breakpoint (controls_panel.xml, temp_card_unified.xml). -->
-    <style name="temp_row_gap_standard" pad_column="#space_xs"/>
-    <style name="temp_row_gap_tiny" pad_column="#space_md"/>
-  </styles>
   <view extends="lv_obj"/>
 </component>

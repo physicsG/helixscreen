@@ -16,4 +16,11 @@ class NavigationManagerTestAccess {
     static lv_obj_t* overlay_backdrop(NavigationManager& nav) {
         return nav.overlay_backdrop_;
     }
+
+    /// Drive the navbar path directly. The production entry point is a static
+    /// LV_EVENT_CLICKED handler on the navbar button, which a test cannot reach
+    /// without a real navbar; this is the body that handler queues.
+    static void switch_to_panel(NavigationManager& nav, helix::PanelId panel_id) {
+        nav.switch_to_panel_impl(static_cast<int>(panel_id));
+    }
 };

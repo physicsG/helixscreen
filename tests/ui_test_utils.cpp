@@ -455,6 +455,9 @@ int count_children_with_marker(lv_obj_t* parent, const char* marker) {
 #include "app_globals.h"
 #include "moonraker_api.h"
 #include "moonraker_client.h"
+#ifdef HELIX_ENABLE_MOCKS
+#include "moonraker_client_mock.h"
+#endif
 #include "panel_widget_manager.h"
 #include "printer_state.h"
 #include "temperature_controller.h"
@@ -463,27 +466,50 @@ int count_children_with_marker(lv_obj_t* parent, const char* marker) {
 // Defaults to nullptr (most UI tests don't touch Moonraker); tests that exercise
 // real callback routing can swap in a MoonrakerClientMock via
 // set_moonraker_client() and restore it in their dtor.
-static helix::MoonrakerClient* g_test_moonraker_client = nullptr;
+static helix::IMoonrakerClient* g_test_moonraker_client = nullptr;
 
-MoonrakerClient* get_moonraker_client() {
+#ifdef HELIX_ENABLE_MOCKS
+// Mirrors app_globals.cpp: the same pointer under its concrete mock type, so
+// consumers reaching for the mock-only API don't have to downcast the
+// interface. A test that hands a MoonrakerClientMock to code which subscribes
+// to simulator notifications must publish it here too.
+static MoonrakerClientMock* g_test_moonraker_client_mock = nullptr;
+#endif
+
+IMoonrakerClient* get_moonraker_client() {
     return g_test_moonraker_client;
 }
 
-void set_moonraker_client(MoonrakerClient* client) {
+void set_moonraker_client(IMoonrakerClient* client) {
     g_test_moonraker_client = client;
+#ifdef HELIX_ENABLE_MOCKS
+    if (static_cast<IMoonrakerClient*>(g_test_moonraker_client_mock) != client) {
+        g_test_moonraker_client_mock = nullptr;
+    }
+#endif
 }
+
+#ifdef HELIX_ENABLE_MOCKS
+MoonrakerClientMock* get_moonraker_client_mock() {
+    return g_test_moonraker_client_mock;
+}
+
+void set_moonraker_client_mock(MoonrakerClientMock* client) {
+    g_test_moonraker_client_mock = client;
+}
+#endif
 
 // Settable for the same reason as the client above: code under test reaches the
 // API through this global, so a test that needs it to answer installs its own and
 // restores the previous value in a dtor. Defaults to nullptr, which is what every
 // test that does not care has always seen.
-static MoonrakerAPI* g_test_moonraker_api = nullptr;
+static IMoonrakerAPI* g_test_moonraker_api = nullptr;
 
-MoonrakerAPI* get_moonraker_api() {
+IMoonrakerAPI* get_moonraker_api() {
     return g_test_moonraker_api;
 }
 
-void set_moonraker_api(MoonrakerAPI* api) {
+void set_moonraker_api(IMoonrakerAPI* api) {
     g_test_moonraker_api = api;
 }
 

@@ -634,6 +634,28 @@ std::string strip_ansi_codes(const std::string& s) {
 } // anonymous namespace
 
 // ============================================================================
+// Channel Version Comparison
+// ============================================================================
+
+// Deliberately at global scope, not in the anonymous namespace above with
+// is_update_available(): this one is declared in the header and exercised
+// directly by tests/unit/test_update_checker.cpp. (is_update_available() has
+// internal linkage, which is why that test file carries its own copy of it.)
+ChannelVersionRelation compare_channel_version(const std::string& installed,
+                                               const std::string& channel_version) {
+    auto current = helix::version::parse_version(installed);
+    auto served = helix::version::parse_version(channel_version);
+
+    if (!current || !served) {
+        return ChannelVersionRelation::Unknown;
+    }
+    if (*served == *current) {
+        return ChannelVersionRelation::Same;
+    }
+    return *served > *current ? ChannelVersionRelation::Newer : ChannelVersionRelation::Older;
+}
+
+// ============================================================================
 // Singleton Instance
 // ============================================================================
 
@@ -2472,6 +2494,26 @@ void UpdateChecker::clear_cache() {
     spdlog::debug("[UpdateChecker] Cache cleared");
 }
 
+void UpdateChecker::on_channel_changed() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cached_info_.reset();
+        error_message_.clear();
+        status_ = Status::Idle;
+        // Clearing the rate-limit clock is what makes the check below actually
+        // go out. "Checked recently" only implies "the answer is still valid"
+        // while the question is unchanged, and the channel IS the question.
+        last_check_time_ = {};
+    }
+
+    // Off-thread readers (the debug bundle's update section) cannot consult
+    // Config themselves; re-snapshot before the worker starts.
+    refresh_config_snapshot();
+
+    spdlog::info("[UpdateChecker] Update channel changed, re-checking");
+    check_for_updates();
+}
+
 // ============================================================================
 // Worker Thread
 // ============================================================================
@@ -2530,14 +2572,34 @@ void UpdateChecker::do_check() {
         std::string current_version = HELIX_VERSION;
         spdlog::debug("[UpdateChecker] Current: {}, Latest: {}", current_version, info.version);
 
-        if (is_update_available(current_version, info.version)) {
+        switch (compare_channel_version(current_version, info.version)) {
+        case ChannelVersionRelation::Newer:
+            info.is_downgrade = false;
             spdlog::info("[UpdateChecker] Update available: {} -> {}", current_version,
                          info.version);
             report_result(Status::UpdateAvailable, info, "");
-        } else {
+            break;
+
+        case ChannelVersionRelation::Older:
+            // The selected channel is behind this install — almost always
+            // because the user just moved from a faster channel back to a
+            // slower one. Offer it, or they are stranded on the old channel's
+            // build with the check reporting "up to date" forever. Flagged so
+            // the auto-check never raises this unprompted and the install path
+            // asks first.
+            info.is_downgrade = true;
+            spdlog::info("[UpdateChecker] Channel is behind: {} -> {} (downgrade offered)",
+                         current_version, info.version);
+            report_result(Status::UpdateAvailable, info, "");
+            break;
+
+        case ChannelVersionRelation::Same:
+        case ChannelVersionRelation::Unknown:
+        default:
             spdlog::info("[UpdateChecker] Already up to date ({})", current_version);
             // Pass info even for UpToDate so callbacks (e.g., --release-notes) can access it
             report_result(Status::UpToDate, info, "");
+            break;
         }
 
         spdlog::debug("[UpdateChecker] Worker thread finished");
@@ -2641,6 +2703,8 @@ std::string UpdateChecker::get_platform_key() {
     return "snapmaker-u1";
 #elif defined(HELIX_PLATFORM_PI32)
     return "pi32";
+#elif defined(HELIX_PLATFORM_ESP32)
+    return "esp32";
 #else
     return "pi";
 #endif
@@ -2667,6 +2731,8 @@ std::string UpdateChecker::get_platform_display_name(const std::string& key) {
         return "Elegoo Centauri Carbon";
     if (key == "snapmaker-u1")
         return "Snapmaker U1";
+    if (key == "esp32")
+        return "BTT K-Touch";
     return key;
 }
 
@@ -2759,6 +2825,16 @@ void UpdateChecker::start_auto_check() {
             // Perform check with notification callback
             self->check_for_updates([self](Status status, std::optional<ReleaseInfo> info) {
                 if (status != Status::UpdateAvailable || !info) {
+                    return;
+                }
+
+                // Never raise a downgrade unprompted. It is only actionable
+                // because the user chose this channel; interrupting them with
+                // "go back to an older build" is noise at best, and a transient
+                // bad manifest would push it to the whole fleet at once.
+                if (info->is_downgrade) {
+                    spdlog::info("[UpdateChecker] Auto-check: {} is a downgrade, not notifying",
+                                 info->version);
                     return;
                 }
 
@@ -3163,7 +3239,11 @@ void UpdateChecker::report_result(Status status, std::optional<ReleaseInfo> info
                 lv_subject_set_int(&status_subject_, static_cast<int>(status));
 
                 if (status == Status::UpdateAvailable && info) {
-                    snprintf(version_text_buf_, sizeof(version_text_buf_), lv_tr("v%s available"),
+                    // A downgrade is not "available" in the usual sense — say
+                    // what it actually does, so the row does not read as a
+                    // routine update when the channel is behind this install.
+                    snprintf(version_text_buf_, sizeof(version_text_buf_),
+                             info->is_downgrade ? lv_tr("Switch to v%s") : lv_tr("v%s available"),
                              info->version.c_str());
                     lv_subject_copy_string(&version_text_subject_, version_text_buf_);
                     lv_subject_copy_string(&new_version_subject_, info->version.c_str());

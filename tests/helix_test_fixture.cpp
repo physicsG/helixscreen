@@ -10,11 +10,14 @@
 
 #include "app_constants.h"
 #include "async_lifetime_guard.h"
+#include "audio_settings_manager.h"
 #include "config.h"
 #include "display_settings_manager.h"
 #include "fault_surface_correlation.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "panel_widget_manager.h"
 #include "runtime_config.h"
+#include "safety_settings_manager.h"
 #include "src/ui/panel_widgets/print_status_widget.h"
 #include "system_settings_manager.h"
 #include "test_helpers/config_test_access.h"
@@ -292,10 +295,54 @@ void HelixTestFixture::reset_all() {
         lv_subject_set_int(anim, 0);
     }
 
+    // Same restore for the other two settings sub-managers a test can tear down.
+    //
+    // SettingsManager::init_subjects() is the only production entry point
+    // (ui_panel_settings.cpp:313) and it delegates to these; but it early-returns
+    // on its own subjects_initialized_ flag, which a sub-manager's
+    // deinit_subjects() does NOT clear. SubjectManager::deinit_all() withdraws
+    // each subject's name from the XML scope on the way out, so once a test tears
+    // one of these down the names stay withdrawn for the REST of the binary:
+    // every later SettingsManager::init_subjects() short-circuits and never
+    // re-registers them. A test that then builds settings_display_sound_overlay.xml
+    // or settings_safety_overlay.xml gets "No subject was found" and silently
+    // unbound toggles — a failure that reads as a broken binding, not as leakage
+    // from a test that ran twenty test cases earlier.
+    //
+    // Teardown happens both inside test bodies (test_audio_settings_manager.cpp,
+    // test_safety_settings_manager.cpp) and inside derived fixtures'
+    // destructors (AbortManagerTestFixture in test_abort_manager.cpp). The base
+    // destructor runs after the derived one, so restoring here covers both.
+    //
+    // Deliberately unconditional and after reset_config_singleton(): the
+    // re-init re-reads a cleared Config, so a value the previous test set (a
+    // volume of 100, min_toast_severity 2 and its notifications cache) returns
+    // to the compiled-in default rather than following the manager forward.
+    // Neither init_subjects() reaches SoundManager — AudioSettingsManager seeds
+    // settings_audio_device_available to 0 and leaves the real value to
+    // refresh_audio_device_available(), which only Application calls.
+    helix::AudioSettingsManager::instance().init_subjects();
+    helix::SafetySettingsManager::instance().init_subjects();
+
     // fault_surface_correlation entries live for 3s of wall clock, which spans
     // dozens of tests in a fast suite. A record left by an error-routing test
     // would silence AmsErrorBridge's fallback toast in an unrelated later one.
     helix::fault_surface_correlation::clear_for_test();
+
+    // PanelWidgetManager's panel_configs_ cache is a process-wide map keyed by
+    // panel_id. Once a test calls get_widget_config("home") — directly or
+    // indirectly (HomePanel::on_home_grid_long_press hits it at line 934 of
+    // ui_panel_home.cpp) — the cached PanelWidgetConfig carries the active
+    // printer's layout with loaded_=true, so later load() calls are no-ops.
+    // When a subsequent test stands up fresh printers and switches to one
+    // WITHOUT first calling clear_all_panel_configs(), get_widget_config()
+    // returns the stale entry and assertions against the new layout fail
+    // (test_panel_widget_manager.cpp:673 — "clear_all_panel_configs reloads
+    // after printer switch" — passed in isolation, failed in the unsharded
+    // suite after the home-grid lock-guard test primed the cache). Marking
+    // every entry dirty here makes the next get_widget_config() reload from
+    // Config::df() regardless of which printer a prior test left active.
+    helix::PanelWidgetManager::instance().clear_all_panel_configs();
 
     // NOTE: NavigationManager has no public reset API (clear_overlay_stack is
     // private; shutdown() is a one-way teardown for app exit). Add a reset

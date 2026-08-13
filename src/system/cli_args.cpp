@@ -125,7 +125,7 @@ static void print_help(const char* program_name) {
     printf("  --debug-subjects     Enable verbose subject debugging with stack traces\n");
     printf("  --debug-touches      Draw ripple effects at each touch point for debugging\n");
     printf("  --no-sound           Disable all sound output (prevents audio backend init)\n");
-    printf("  --moonraker <url>    Override Moonraker URL (e.g., ws://192.168.1.112:7125)\n");
+    printf("  --moonraker <url>    Override Moonraker URL (e.g., ws://192.168.1.100:7125)\n");
     printf("  --detect-printer     Detect printer via Moonraker REST, print JSON, exit\n");
     printf("                       (use with --host/--port; default 127.0.0.1:7125)\n");
     printf("  --remote             Enable remote control server (auto in --test mode)\n");

@@ -237,6 +237,13 @@ void XMLTestFixture::setup_global_xml_registrations_once() {
     // tests register directly (#1184).
     helix::ui::afc_fault_path_register();
 
+    // <context_menu_backdrop> is the root every context menu extends, so it has
+    // to exist before a test registers any of them.
+    lv_xml_register_component_from_file("A:ui_xml/components/context_menu_backdrop.xml");
+    // <context_menu_card> is the card they all nest inside it, so it has to be
+    // here for the same reason.
+    lv_xml_register_component_from_file("A:ui_xml/components/context_menu_card.xml");
+
     s_global_registered = true;
 }
 

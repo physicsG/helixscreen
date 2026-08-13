@@ -1220,7 +1220,7 @@ return std::make_unique<WifiBackendMacOS>();     // Production
 
 Six mock boundaries are protected at compile time against silent drift: `AmsBackend`, `EthernetBackend`, `UsbBackend`, `WifiBackend` (already pure virtual today), plus `IMoonrakerAPI` (`include/i_moonraker_api.h`) and `helix::IMoonrakerClient` (`include/i_moonraker_client.h`) — narrow interfaces that mirror only the currently-virtual methods on the corresponding concrete class. Concrete classes inherit the interfaces; mocks still inherit the concretes (so they continue to reuse non-virtual helpers and sub-API composition). Drift protection is enforced via compile-only tests in `tests/unit/test_interface_drift_*.cpp` (`[compile][drift]` tag) that `static_assert(is_base_of_v<Interface, Mock> && !is_abstract_v<Mock>)`. Adding a pure virtual to an interface breaks the concrete's build first, which cascades into the mock.
 
-Callers continue to use the concrete types. The interfaces exist to enforce mock-parity at build time, not to drive call-site migration.
+For the backend interfaces (`AmsBackend`, `EthernetBackend`, `UsbBackend`, `WifiBackend`), callers continue to use the concrete types — those interfaces exist to enforce mock-parity at build time. The Moonraker interfaces went further: `IMoonrakerAPI`, `helix::IMoonrakerClient`, and the sub-API interfaces are the only types consumers may name; the concretes live behind `MoonrakerManager` and the rule is lint-enforced. See `MOONRAKER_ARCHITECTURE.md` for the full contract.
 
 ### Test-fixture isolation
 

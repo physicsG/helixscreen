@@ -127,8 +127,9 @@ TEST_CASE_METHOD(DeferredHardwareFixture,
     CHECK_FALSE(helix::wizard_hardware_setup_deferred(&config));
 }
 
-TEST_CASE_METHOD(DeferredHardwareFixture, "Deferred hardware: the raw predicate covers all four "
-                                          "input combinations",
+TEST_CASE_METHOD(DeferredHardwareFixture,
+                 "Deferred hardware: the raw predicate covers all four "
+                 "input combinations",
                  "[wizard][hardware][deferred]") {
     // Deferral is the ONE case where discovery failed and nothing was recorded.
     CHECK(helix::wizard_hardware_snapshot_is_deferred(false, false));
@@ -158,11 +159,10 @@ TEST_CASE_METHOD(DeferredHardwareFixture,
     CHECK(helix::wizard_hardware_setup_deferred(&config));
 
     // Storage lives under the printer node, with nothing at the root.
-    CHECK(config.get<bool>(std::string("/printers/printer-a/") +
-                               helix::kWizardHardwareSetupDeferred,
-                           false));
-    CHECK_FALSE(ConfigTestAccess::data(config).contains(
-        std::string(helix::kWizardHardwareSetupDeferred)));
+    CHECK(config.get<bool>(
+        std::string("/printers/printer-a/") + helix::kWizardHardwareSetupDeferred, false));
+    CHECK_FALSE(
+        ConfigTestAccess::data(config).contains(std::string(helix::kWizardHardwareSetupDeferred)));
 }
 
 TEST_CASE_METHOD(DeferredHardwareFixture,
@@ -183,8 +183,7 @@ TEST_CASE_METHOD(DeferredHardwareFixture,
 // (c) A normally-completed wizard sets no marker and is never prompted
 // ============================================================================
 
-TEST_CASE_METHOD(DeferredHardwareFixture,
-                 "Deferred hardware: a normal completion sets no marker",
+TEST_CASE_METHOD(DeferredHardwareFixture, "Deferred hardware: a normal completion sets no marker",
                  "[wizard][hardware][deferred]") {
     const bool deferred = helix::wizard_apply_hardware_snapshot_decision(
         &config, /*discovery_succeeded=*/true, /*snapshot_has_entries=*/true);
@@ -394,9 +393,9 @@ TEST_CASE_METHOD(DeferredHardwareFixture,
     // ctx.preset.skip_hardware marks all of these skipped. The caller settles
     // the debt silently rather than showing a dialog that leads nowhere.
     auto v = all_visible();
-    for (StepId id : {StepId::PrinterIdentify, StepId::HeaterSelect, StepId::FanSelect,
-                      StepId::AmsIdentify, StepId::LedSelect, StepId::FilamentSensor,
-                      StepId::InputShaper}) {
+    for (StepId id :
+         {StepId::PrinterIdentify, StepId::HeaterSelect, StepId::FanSelect, StepId::AmsIdentify,
+          StepId::LedSelect, StepId::FilamentSensor, StepId::InputShaper}) {
         skip(v, id);
     }
 

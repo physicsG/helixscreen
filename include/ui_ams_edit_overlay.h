@@ -20,7 +20,7 @@
 
 #include "hv/json.hpp"
 
-class MoonrakerAPI;
+class IMoonrakerAPI;
 class AmsEditOverlayTestAccess;
 class AmsEditOverlayViewTestAccess;
 
@@ -95,13 +95,13 @@ class AmsEditOverlay : public OverlayBase {
      * @param parent Parent screen (fallback if no active screen)
      * @param slot_index Slot being edited (0-based; -2 = external spool)
      * @param initial_info Initial slot info to populate the overview
-     * @param api MoonrakerAPI for Spoolman sync (may be nullptr)
+     * @param api IMoonrakerAPI for Spoolman sync (may be nullptr)
      * @param on_complete Fired exactly once when the editor closes
      * @param open_on_picker Open directly on the Spoolman picker (#1071)
      * @return true if the overlay was pushed
      */
     bool show_for_slot(lv_obj_t* parent, int slot_index, const SlotInfo& initial_info,
-                       MoonrakerAPI* api, CompletionCallback on_complete,
+                       IMoonrakerAPI* api, CompletionCallback on_complete,
                        bool open_on_picker = false);
 
   private:
@@ -126,7 +126,7 @@ class AmsEditOverlay : public OverlayBase {
     // picker is re-entered the normal way (Change Filament -> switch_to_picker),
     // which restores today's return-to-overview behavior.
     bool opened_on_picker_ = false;
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
     CompletionCallback completion_callback_;
     bool completion_fired_ = false; ///< Guards single-fire completion
 

@@ -1196,6 +1196,9 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
     // Subscribe to specific fields only — nullptr means ALL fields, which causes
     // excessive notifications and Klipper-side serialization cost (#388)
     if (hw.has_mmu()) {
+        // endless_spool_enabled is the ENABLE bit for endless_spool_groups. Happy Hare
+        // ignores a GROUPS= write while it is 0, so an edit sent without reading it first
+        // fails silently.
         subscription_objects["mmu"] = json::array({"gate",
                                                    "tool",
                                                    "filament",
@@ -1217,6 +1220,7 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
                                                    "unit",
                                                    "ttg_map",
                                                    "endless_spool_groups",
+                                                   "endless_spool_enabled",
                                                    "sensors",
                                                    "bowden_progress",
                                                    "clog_detection_enabled",

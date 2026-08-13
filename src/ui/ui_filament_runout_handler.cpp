@@ -12,8 +12,8 @@
 #include "filament_op_dispatch.h"
 #include "filament_op_router.h"
 #include "filament_sensor_manager.h"
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 #include "observer_factory.h"
 #include "print_control_buttons.h"
 #include "print_lifecycle_state.h" // For PrintState enum
@@ -51,7 +51,7 @@ std::string purge_fallback_gcode() {
 // FilamentRunoutHandler Implementation
 // ============================================================================
 
-FilamentRunoutHandler::FilamentRunoutHandler(MoonrakerAPI* api) : api_(api) {
+FilamentRunoutHandler::FilamentRunoutHandler(IMoonrakerAPI* api) : api_(api) {
     spdlog::debug("[FilamentRunoutHandler] Constructed");
 }
 
@@ -418,7 +418,7 @@ void FilamentRunoutHandler::dispatch_load() {
                 spdlog::error("[FilamentRunoutHandler] Load fallback failed: {}", err.message);
                 NOTIFY_ERROR(lv_tr("Failed to load filament: {}"), err.user_message());
             },
-            MoonrakerAPI::EXTRUSION_TIMEOUT_MS);
+            IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
         return;
     }
 }
@@ -515,7 +515,7 @@ void FilamentRunoutHandler::dispatch_unload() {
                 spdlog::error("[FilamentRunoutHandler] Unload fallback failed: {}", err.message);
                 NOTIFY_ERROR(lv_tr("Failed to unload: {}"), err.user_message());
             },
-            MoonrakerAPI::EXTRUSION_TIMEOUT_MS);
+            IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
         return;
     }
 }
@@ -560,7 +560,7 @@ void FilamentRunoutHandler::dispatch_purge() {
             spdlog::error("[FilamentRunoutHandler] Purge fallback failed: {}", err.message);
             NOTIFY_ERROR(lv_tr("Failed to purge: {}"), err.user_message());
         },
-        MoonrakerAPI::EXTRUSION_TIMEOUT_MS);
+        IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
 }
 
 void FilamentRunoutHandler::hide_modal() {

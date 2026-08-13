@@ -8,8 +8,8 @@
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 #include "moonraker_error.h"
 #include "observer_factory.h"
 #include "printer_state.h"
@@ -30,7 +30,8 @@ constexpr uint32_t EXCLUDE_UNDO_WINDOW_MS = 5000;
 // PrintExcludeObjectManager Implementation
 // ============================================================================
 
-PrintExcludeObjectManager::PrintExcludeObjectManager(MoonrakerAPI* api, PrinterState& printer_state,
+PrintExcludeObjectManager::PrintExcludeObjectManager(IMoonrakerAPI* api,
+                                                     PrinterState& printer_state,
                                                      lv_obj_t* gcode_viewer)
     : api_(api), printer_state_(printer_state), gcode_viewer_(gcode_viewer) {
     spdlog::debug("[PrintExcludeObjectManager] Constructed");
@@ -309,7 +310,7 @@ void PrintExcludeObjectManager::exclude_undo_timer_cb(lv_timer_t* timer) {
     // Capture token for async callback safety
     auto token = self->lifetime_.token();
 
-    // Actually send the command to Klipper via MoonrakerAPI.
+    // Actually send the command to Klipper via IMoonrakerAPI.
     //
     // Truth model: the `exclude_object.excluded_objects` status subscription drives
     // `excluded_objects_` via on_excluded_objects_changed(). The RPC success callback is

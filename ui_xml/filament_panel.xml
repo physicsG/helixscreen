@@ -199,6 +199,15 @@
           </lv_obj>
         </lv_obj>
 
+        <!-- No endless-spool status row here, deliberately. This card lives in a
+             left column whose height is a fixed budget (apply_left_column_sizing)
+             with temp_graph_card as the flexible remainder, so any row added to
+             spool_card is paid for entirely by the graph: measured 172 -> 76 px at
+             LARGE and 118 -> 30 px at MEDIUM for a two-line status, and it does not
+             fit at all at MICRO (spool_card is 74 px there, 48 of it ams_manage_row).
+             The status line lives on the AMS panel, next to the arrows it explains,
+             and in the slot context menu, which is where the disabled-or-absent
+             backup dropdown actually is. -->
         <!-- External spool row (visible when no AMS and no multi-tool, managed by C++) -->
         <lv_obj name="external_spool_row" width="100%" height="content"
                 style_pad_all="0" scrollable="false" clickable="true"

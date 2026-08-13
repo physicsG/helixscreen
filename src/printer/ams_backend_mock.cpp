@@ -3,9 +3,8 @@
 
 #include "ams_backend_mock.h"
 
-#include "ams_bypass_policy.h"
-
 #include "afc_defaults.h"
+#include "ams_bypass_policy.h"
 #include "filament_database.h"
 #include "hh_defaults.h"
 #include "runtime_config.h"
@@ -76,7 +75,7 @@ AmsBackendMock::AmsBackendMock(int slot_count) {
     system_info_.total_slots = slot_count;
     // Use shared AFC defaults for capabilities
     auto caps = helix::printer::afc_default_capabilities();
-    system_info_.supports_endless_spool = caps.supports_endless_spool;
+    system_info_.endless_spool_enabled = caps.supports_endless_spool;
     system_info_.supports_tool_mapping = caps.supports_tool_mapping;
     system_info_.supports_bypass = caps.supports_bypass;
     system_info_.supports_purge = caps.supports_purge;
@@ -354,7 +353,7 @@ AmsSystemInfo AmsBackendMock::get_system_info() const {
     info.current_toolchange = system_info_.current_toolchange;
     info.number_of_toolchanges = system_info_.number_of_toolchanges;
     info.filament_loaded = system_info_.filament_loaded;
-    info.supports_endless_spool = system_info_.supports_endless_spool;
+    info.endless_spool_enabled = system_info_.endless_spool_enabled;
     info.supports_tool_mapping = system_info_.supports_tool_mapping;
     info.supports_bypass = system_info_.supports_bypass;
     info.has_hardware_bypass_sensor = system_info_.has_hardware_bypass_sensor;
@@ -1570,7 +1569,11 @@ void AmsBackendMock::set_afc_mode(bool enabled) {
 
         // Use shared AFC defaults for capabilities
         auto afc_caps = helix::printer::afc_default_capabilities();
-        system_info_.supports_endless_spool = afc_caps.supports_endless_spool;
+        system_info_.endless_spool_enabled = afc_caps.supports_endless_spool;
+        // Restore the capability flags: an earlier IFS/Snapmaker scenario on the
+        // same instance clears them, and an AFC scenario has AFC's per-slot edits.
+        endless_spool_supported_ = afc_caps.supports_endless_spool;
+        endless_spool_editable_ = afc_caps.supports_endless_spool;
         system_info_.supports_tool_mapping = afc_caps.supports_tool_mapping;
         system_info_.supports_bypass = afc_caps.supports_bypass;
         system_info_.supports_purge = afc_caps.supports_purge;
@@ -1760,7 +1763,9 @@ void AmsBackendMock::set_multi_unit_mode(bool enabled) {
         system_info_.type_name = "AFC (Mock Multi-Unit)";
         system_info_.version = "1.0.32-mock";
         system_info_.supports_bypass = true;
-        system_info_.supports_endless_spool = true;
+        system_info_.endless_spool_enabled = true;
+        endless_spool_supported_ = true;
+        endless_spool_editable_ = true;
         system_info_.supports_tool_mapping = true;
         system_info_.has_hardware_bypass_sensor = false;
         system_info_.tip_method = TipMethod::CUT;
@@ -1925,7 +1930,11 @@ void AmsBackendMock::set_mixed_topology_mode(bool enabled) {
         system_info_.total_slots = 12;
 
         auto afc_caps = helix::printer::afc_default_capabilities();
-        system_info_.supports_endless_spool = afc_caps.supports_endless_spool;
+        system_info_.endless_spool_enabled = afc_caps.supports_endless_spool;
+        // Restore the capability flags: an earlier IFS/Snapmaker scenario on the
+        // same instance clears them, and an AFC scenario has AFC's per-slot edits.
+        endless_spool_supported_ = afc_caps.supports_endless_spool;
+        endless_spool_editable_ = afc_caps.supports_endless_spool;
         system_info_.supports_tool_mapping = afc_caps.supports_tool_mapping;
         system_info_.supports_bypass = afc_caps.supports_bypass;
         system_info_.supports_purge = afc_caps.supports_purge;
@@ -2113,7 +2122,11 @@ void AmsBackendMock::set_vivid_mixed_mode(bool enabled) {
         system_info_.total_slots = 12;
 
         auto afc_caps = helix::printer::afc_default_capabilities();
-        system_info_.supports_endless_spool = afc_caps.supports_endless_spool;
+        system_info_.endless_spool_enabled = afc_caps.supports_endless_spool;
+        // Restore the capability flags: an earlier IFS/Snapmaker scenario on the
+        // same instance clears them, and an AFC scenario has AFC's per-slot edits.
+        endless_spool_supported_ = afc_caps.supports_endless_spool;
+        endless_spool_editable_ = afc_caps.supports_endless_spool;
         system_info_.supports_tool_mapping = afc_caps.supports_tool_mapping;
         system_info_.supports_bypass = afc_caps.supports_bypass;
         system_info_.supports_purge = afc_caps.supports_purge;
@@ -2303,7 +2316,13 @@ void AmsBackendMock::set_ifs_mode(bool enabled) {
         system_info_.total_slots = 4;
         system_info_.supports_bypass = true;
         system_info_.supports_tool_mapping = true;
-        system_info_.supports_endless_spool = false;
+        system_info_.endless_spool_enabled = false;
+        // Must clear the CAPABILITY flag too, not just this bit: the flag is what
+        // get_endless_spool_capabilities() reads, and leaving it at its default
+        // true gave the mock AD5X an editable backup dropdown and endless-spool
+        // arrows that the real AD5X IFS backend does not have.
+        endless_spool_supported_ = false;
+        endless_spool_editable_ = false;
         system_info_.supports_purge = false;
 
         // Reinitialize registry as single IFS unit with 4 ports
@@ -2376,7 +2395,9 @@ void AmsBackendMock::set_snapmaker_mode(bool enabled) {
     system_info_.type = AmsType::SNAPMAKER;
     system_info_.type_name = "Snapmaker SnapSwap (Mock)";
     system_info_.total_slots = 4;
-    system_info_.supports_endless_spool = false;
+    system_info_.endless_spool_enabled = false;
+    endless_spool_supported_ = false;
+    endless_spool_editable_ = false;
     system_info_.supports_tool_mapping = false;
     system_info_.supports_bypass = false;
     system_info_.has_hardware_bypass_sensor = false;
@@ -2451,7 +2472,7 @@ void AmsBackendMock::set_multiace_mode(bool enabled) {
     system_info_.type = AmsType::MULTIACE;
     system_info_.type_name = "Snapmaker U1 + multiACE (Mock)";
     system_info_.total_slots = 12;
-    system_info_.supports_endless_spool = false;
+    system_info_.endless_spool_enabled = false;
     system_info_.supports_tool_mapping = false;
     system_info_.supports_bypass = false;
     system_info_.has_hardware_bypass_sensor = false;
@@ -2656,7 +2677,11 @@ void AmsBackendMock::set_htlf_toolchanger_mode(bool enabled) {
         system_info_.total_slots = 7;
 
         auto afc_caps = helix::printer::afc_default_capabilities();
-        system_info_.supports_endless_spool = afc_caps.supports_endless_spool;
+        system_info_.endless_spool_enabled = afc_caps.supports_endless_spool;
+        // Restore the capability flags: an earlier IFS/Snapmaker scenario on the
+        // same instance clears them, and an AFC scenario has AFC's per-slot edits.
+        endless_spool_supported_ = afc_caps.supports_endless_spool;
+        endless_spool_editable_ = afc_caps.supports_endless_spool;
         system_info_.supports_tool_mapping = afc_caps.supports_tool_mapping;
         system_info_.supports_bypass = afc_caps.supports_bypass;
         system_info_.supports_purge = afc_caps.supports_purge;
@@ -3125,7 +3150,7 @@ void AmsBackendMock::set_endless_spool_supported(bool supported) {
     std::lock_guard<std::mutex> lock(mutex_);
     endless_spool_supported_ = supported;
     // Update system_info to reflect the new capability
-    system_info_.supports_endless_spool = supported;
+    system_info_.endless_spool_enabled = supported;
     spdlog::debug("[AmsBackendMock] Endless spool supported set to {}", supported);
 }
 
@@ -3137,59 +3162,34 @@ void AmsBackendMock::set_endless_spool_editable(bool editable) {
 
 helix::printer::EndlessSpoolCapabilities AmsBackendMock::get_endless_spool_capabilities() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    using namespace helix::printer;
 
-    helix::printer::EndlessSpoolCapabilities caps;
-    caps.supported = endless_spool_supported_;
-    caps.editable = endless_spool_supported_ && endless_spool_editable_;
-    if (caps.supported) {
-        caps.description =
-            caps.editable ? "Per-slot backup (AFC-style)" : "Group-based (Happy Hare-style)";
+    EndlessSpoolCapabilities caps;
+    if (!endless_spool_supported_) {
+        return caps; // Unsupported / Unknown / ReadOnly
+    }
+    caps.availability = EndlessSpoolAvailability::Available;
+    caps.enabled =
+        system_info_.endless_spool_enabled ? EndlessSpoolEnabled::On : EndlessSpoolEnabled::Off;
+    if (endless_spool_editable_) {
+        caps.editability = EndlessSpoolEditability::PerSlot;
+    } else {
+        // Read-only-but-present, the shape CFS and a multi-unit MMU have.
+        caps.editability = EndlessSpoolEditability::ReadOnly;
+        caps.restriction = EndlessSpoolRestriction::FirmwareManaged;
     }
     return caps;
 }
 
-std::vector<helix::printer::EndlessSpoolConfig> AmsBackendMock::get_endless_spool_config() const {
+helix::printer::EndlessSpoolConfig AmsBackendMock::get_endless_spool_config() const {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    std::vector<helix::printer::EndlessSpoolConfig> configs;
-    configs.reserve(slots_.slot_count());
-    for (int i = 0; i < slots_.slot_count(); ++i) {
-        helix::printer::EndlessSpoolConfig config;
-        config.slot_index = i;
-        config.backup_slot = slots_.backup_for_slot(i);
-        configs.push_back(config);
-    }
-    return configs;
+    return helix::printer::endless_spool_config_from_edges(slots_.backup_edges());
 }
 
-AmsError AmsBackendMock::set_endless_spool_backup(int slot_index, int backup_slot) {
+AmsError AmsBackendMock::apply_endless_spool_backup(int slot_index, int backup_slot) {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    if (!endless_spool_supported_) {
-        return AmsErrorHelper::not_supported("Endless spool");
-    }
-
-    if (!endless_spool_editable_) {
-        return AmsErrorHelper::not_supported("Endless spool configuration");
-    }
-
-    if (!slots_.is_valid_index(slot_index)) {
-        return AmsErrorHelper::invalid_slot(slot_index, slots_.slot_count() - 1);
-    }
-
-    if (backup_slot == slot_index) {
-        return AmsError(AmsResult::INVALID_SLOT,
-                        "Cannot set slot " + std::to_string(slot_index) + " as its own backup",
-                        "Invalid backup configuration", "Select a different slot as backup");
-    }
-
-    if (backup_slot != -1 && !slots_.is_valid_index(backup_slot)) {
-        return AmsErrorHelper::invalid_slot(backup_slot, slots_.slot_count() - 1);
-    }
-
     slots_.set_backup(slot_index, backup_slot);
     spdlog::info("[AmsBackendMock] Set slot {} backup to {}", slot_index, backup_slot);
-
     return AmsErrorHelper::success();
 }
 
@@ -3305,8 +3305,11 @@ AmsError AmsBackendMock::execute_device_action(const std::string& action_id,
             if (!action.enabled) {
                 return AmsErrorHelper::not_supported(action.disable_reason);
             }
-            spdlog::info("[AMS Mock] Executed device action: {} with value type: {}", action_id,
-                         value.has_value() ? value.type().name() : "none");
+            // std::any's type() returns a std::type_info, which needs RTTI; the
+            // firmware builds -fno-rtti. Presence is all the log was really
+            // conveying — the mangled name told nobody anything useful.
+            spdlog::info("[AMS Mock] Executed device action: {} with value: {}", action_id,
+                         value.has_value() ? "set" : "none");
 
             // Surface brief status-display feedback for the selector-context
             // servo / gear-sync commands so --test mirrors real Happy Hare.
@@ -3323,9 +3326,12 @@ AmsError AmsBackendMock::execute_device_action(const std::string& action_id,
             } else if (action_id == "servo_down") {
                 detail = "Servo down";
             } else if (action_id == "gear_sync") {
+                // Pointer-form any_cast: returns null on a type mismatch rather
+                // than throwing, and libstdc++ implements it by comparing the
+                // stored manager function, so it works under -fno-rtti.
                 bool on = false;
-                if (value.has_value() && value.type() == typeid(bool)) {
-                    on = std::any_cast<bool>(value);
+                if (const bool* held = std::any_cast<bool>(&value)) {
+                    on = *held;
                 }
                 detail = on ? "Gear motor synced" : "Gear motor released";
             }

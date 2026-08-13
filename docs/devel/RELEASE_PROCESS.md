@@ -242,12 +242,23 @@ git push origin v1.3.0-rc.1
 
 ### Pre-release Behavior
 
-- Tags containing `-` are automatically marked as **prerelease** on GitHub
-- Not shown as "latest" release
-- Users must explicitly choose to install:
+The GitHub prerelease flag and the R2 upload channels both come from the
+**`RELEASE_CHANNEL` file at the repo root**, on the branch being tagged — not from
+the tag string. See `docs/devel/UPDATE_SYSTEM.md` § "How CI Determines Upload
+Channels" for the full table and the reason.
+
+- `RELEASE_CHANNEL=stable` -> full GitHub release, shown as "latest"
+- `RELEASE_CHANNEL=beta` or `dev` -> marked **prerelease**, not shown as "latest"
+- Users must explicitly choose to install a prerelease:
   ```bash
   curl -sSL .../install.sh | sh -s -- --version v1.3.0-beta
   ```
+
+**Do not use a `-suffix` to mean "devel build".** `helix::version::Version`
+discards prerelease suffixes, so `v1.1.0-dev1` and `v1.1.0-dev2` compare equal and
+the in-app updater stops offering builds. Devel-track releases use plain
+incrementing versions and rely on `RELEASE_CHANNEL` for routing. A suffixed tag on
+a `stable` branch is rejected by `scripts/release-channel.sh`.
 
 ### Graduating Pre-releases
 

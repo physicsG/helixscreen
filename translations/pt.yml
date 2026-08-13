@@ -43,7 +43,17 @@ translations:
   0 = computed: 0 = calculado
   0 events queued: 0 eventos na fila
   0 slots: '{0} Slots'
+  # Source: calibration_pid_panel.xml:368
+  0.0000 J/K: ''
+  # Source: calibration_pid_panel.xml:374
+  0.000000 K/s/K: ''
+  # Source: calibration_pid_panel.xml:380
+  0.000000 W/K: ''
   0.4-2mm direct drive, 4-6mm bowden: 0.4-2mm direct drive, 4-6mm bowden
+  # Source: history_dashboard_panel.xml:83
+  0h: ''
+  # Source: history_dashboard_panel.xml:89, print_status_panel.xml:252, print_status_panel.xml:254
+  0m: ''
   0°: 0°
   1 day ago: há 1 dia
   1 event queued: 1 evento na fila
@@ -95,6 +105,9 @@ translations:
   ACCELEROMETERS: ACELERÔMETROS
   ACE Moonraker bridge not found. Install ace_status.py for full support.: Ponte
     ACE Moonraker não encontrada. Instale ace_status.py para suporte completo.
+  ACE Moonraker bridge not found. Install ace_status.py from ValgACE for full support.: Ponte
+    ACE do Moonraker não encontrada. Instale ace_status.py do ValgACE para suporte
+    completo.
   ACTIONS: AÇÕES
   ADXL: ADXL
   AFC: AFC
@@ -161,6 +174,7 @@ translations:
   All axes homed: Todos os eixos referenciados
   All fields are required: Todos os campos são obrigatórios
   All plugins loaded successfully: Todos os plugins carregados com sucesso
+  Allow Home Screen Editing: ''
   Allow cold load/unload: Permitir carregar/descarregar a frio
   Allow display to sleep during active prints: Permitir suspensão da tela durante
     impressões
@@ -180,6 +194,8 @@ translations:
   An error occurred during measurement.: Ocorreu um erro durante a medição.
   An error occurred during probing.: Ocorreu um erro durante a sondagem.
   An error occurred while loading filament.: Ocorreu um erro ao carregar o filamento.
+  # Source: probe_accuracy_modal.xml:90
+  An error occurred.: ''
   An internal error occurred. The app continues running — please send a debug bundle from Settings > About if it repeats.: Ocorreu
     um erro interno. O aplicativo continua em execução — envie um pacote de depuração
     em Configurações > Sobre se isso se repetir.
@@ -245,6 +261,7 @@ translations:
   Back: Voltar
   Back to Results: Voltar aos resultados
   'Backtrace: {} frames': 'Backtrace: {} quadros'
+  Backup spool switching state unknown: Estado da troca para carretel de reserva desconhecido
   Barcode Scanner: Leitor de Código de Barras
   Base: Referência
   Beacon auto-calibrate sent: Beacon auto-calibração enviada
@@ -381,6 +398,7 @@ translations:
   Cancel Print: Cancelar Impressão
   Cancel macro not configured: Macro de cancelar não configurado
   Cancelled: Cancelado
+  Cannot be changed from here on a multi-unit MMU: Não pode ser alterado aqui em um MMU de várias unidades
   'Cannot control timelapse: printer not connected': 'Não é possível controlar timelapse:
     impressora não conectada'
   'Cannot delete file: printer not connected': 'Não é possível excluir arquivo: impressora
@@ -478,6 +496,7 @@ translations:
   Clear All Events: Limpar Todos os Eventos
   Clear Console?: Limpar Console?
   Clear Spool: Remover bobina
+  Clear all spool failover assignments: ''
   Clear failed: Falha ao limpar
   Cleared from settings — system unpair failed, may need OS Bluetooth: Removido das
     configurações; falha ao desemparelhar no sistema, pode ser necessário o Bluetooth
@@ -530,6 +549,7 @@ translations:
   Configure timelapse recording: Configurar gravação de timelapse
   Configure your printer's cooling fans: Configure as ventoinhas de resfriamento da
     sua impressora
+  Configured in the backup-spool package, not from here: Configurado no plugin de carretel de reserva, não aqui
   Configuring Moonraker...: Configurando Moonraker...
   Confirm PIN: Confirmar PIN
   Confirm before running macros: Confirmar antes de executar macros
@@ -778,6 +798,7 @@ translations:
   Enabled: Habilitado
   Encoder: Encoder
   Ended: Finalizado
+  Endless spool failover cleared for every slot: ''
   Enhanced {} operation in PRINT_START: '{} operação aprimorada no PRINT_START'
   Enhanced {} operations in PRINT_START: '{} operações aprimoradas no PRINT_START'
   Enhancement Complete!: Aprimoramento Concluído!
@@ -815,6 +836,7 @@ translations:
   'Error: Verification failed': 'Erro: Verificação falhou'
   'Error: Wrong architecture': 'Erro: Arquitetura incorreta'
   'Error: `unzip` not installed': 'Erro: `unzip` não instalado'
+  Errors only: ''
   Escalate to emergency stop if cancel doesn't respond: Escalar para parada de emergência
     se cancelar não responder
   Escalation Timeout: Tempo de Escalação
@@ -1156,6 +1178,8 @@ translations:
   How Z-axis movement is displayed: Como o movimento do eixo Z é exibido
   How far filament is pushed back into the box on eject (mm): Quão longe o filamento
     é empurrado de volta para a caixa na ejeção (mm)
+  ? How long to hold before a press counts as a long-press, in ms (raise if edit mode or other long-press actions trigger by accident)
+  : ''
   How many labels to print: Quantas etiquetas imprimir
   How the toolhead icon appears: Como o ícone do cabeçote aparece
   Hub: Hub
@@ -1185,6 +1209,7 @@ translations:
   'Incompatible materials: {} cannot use {} as backup': 'Materiais incompatíveis:
     {} não pode usar {} como reserva'
   Indexing G-code...: Indexando G-code...
+  Infinite Spool Mode: ''
   Info: Info
   Initialized: Inicializado
   Initializing...: Inicializando...
@@ -1204,6 +1229,7 @@ translations:
   Insert filament before resuming: Insira filamento antes de retomar
   Install: Instalar
   Install HelixPrint Plugin: Instalar Plugin HelixPrint
+  Install Older Version?: ''
   Install Plugin: Instalar Plugin
   Install Root: Raiz de Instalação
   Install Update: Instalar Atualização
@@ -1274,6 +1300,8 @@ translations:
   'Klipper: ': 'Klipper: '
   Klippy Errors: Erros do Klippy
   Klippy Shutdowns: Desligamentos do Klippy
+  # Source: led_control_overlay.xml:31
+  LED: ''
   LED SELECTION: SELEÇÃO DE LED
   LED Settings: Configurações de LED
   LED Strip: Fita de LED
@@ -1296,10 +1324,14 @@ translations:
   Language: Idioma
   Language, theme, brightness, and sound: Idioma, tema, brilho e som
   Last: Última
+  # Source: history_dashboard_panel.xml:114
+  Last 7 days: ''
   Last print cancelled: Última impressão cancelada
   Last print failed: Última impressão falhou
   Later: Depois
   Layer: Camada
+  # Source: print_status_panel.xml:234
+  Layer 0 / 0: ''
   Layer Height: Altura da Camada
   Layer Macro captures one frame per layer change. Best for most prints.: A Macro
     de Camada captura um quadro por mudança de camada. Melhor para a maioria das impressões.
@@ -1347,6 +1379,8 @@ translations:
   Locked during print: Bloqueado durante impressão
   Log Level: Nível de log
   Logs: Registros
+  Long Press Time: ''
+  Long-press the home grid to rearrange widgets (turn off if it triggers by accident): ''
   Longest Disconnect: Maior Desconexão
   Loosen Path A belt.: Afrouxar a correia do Caminho A.
   Loosen Path B belt.: Afrouxar a correia do Caminho B.
@@ -1355,6 +1389,7 @@ translations:
   'Lot # (optional)': 'Lote # (opcional)'
   Lot/Batch Nr: Nr. Lote/Batch
   Low Memory: Pouca Memória
+  Lowest notification level that interrupts with a toast: ''
   M to toggle: M para alternar
   'MAC:': 'MAC:'
   MACRO DEVICES: DISPOSITIVOS DE MACRO
@@ -1485,6 +1520,7 @@ translations:
   Named actions in the LED control panel (long-press).: Ações nomeadas no painel de
     controle LED (pressionar e segurar).
   Needs adjustment: Precisa de ajuste
+  Needs the {} package to switch spools: 'Precisa do plugin {} para trocar de carretel'
   Net Weight (g): Peso Líquido (g)
   Network: Rede
   Network Address: Endereço de Rede
@@ -1527,6 +1563,7 @@ translations:
   No USB printers found: Nenhuma impressora USB encontrada
   ? No auto-switchover plugin (lessWaste or bambufy) is installed, so this printer will not change to a backup spool on its own.
   : ''
+  No automatic backup-spool package is installed: Nenhum plugin de carretel de reserva automático instalado
   No buffer data available: Nenhum dado de buffer disponível
   No camera — use USB barcode scanner: Sem câmera — use leitor de código de barras
     USB
@@ -1596,6 +1633,7 @@ translations:
   Not found (use phone app): Não encontrado (use o app do celular)
   Not in your spools? Set it up: Não está nos seus carretéis? Configure aqui
   Not now: Agora não
+  Not yet available on this display: ''
   Not yet calibrated: Ainda não calibrado
   Notes: Notas
   Notes (optional): Notas (opcional)
@@ -1634,6 +1672,8 @@ translations:
   'Off:': 'Desligado:'
   'On': Ligado
   On and Off macros must be different: Macros de Ligar e Desligar devem ser diferentes
+  On your phone or computer, join the WiFi network \"{}\", then open http://{} in a browser to finish setup.: ''
+  On-screen Alerts: ''
   On/Off: Liga/Desliga
   On/Off (state-aware): Ligar/Desligar (com estado)
   'On:': 'Ligado:'
@@ -1875,6 +1915,8 @@ translations:
   Probing Bed...: Sondando Mesa...
   Probing Failed: Sondagem Falhou
   Proceed: Prosseguir
+  # Source: abort_progress_modal.xml:20
+  Processing...: ''
   Profile deleted: Perfil excluído
   Profile name (e.g., default): 'Nome do perfil (ex.: padrão)'
   Profile renamed: Perfil renomeado
@@ -1979,10 +2021,13 @@ translations:
   Resend write failed at chunk {}: Falha ao reenviar a escrita no fragmento {}
   Reset: Resetar
   Reset CFS: Resetar CFS
+  Reset Endless Spool: ''
+  Reset Endless Spool?: ''
   Reset Home Screen?: Redefinir tela inicial?
   Reset Speed & Flow to 100%: Resetar Velocidade & Fluxo para 100%
   Reset all settings and restart wizard: Resetar todas as configurações e reiniciar
     assistente
+  Reset endless spool failed: ''
   Reset failed: Falha ao redefinir
   Reset to Default: Restaurar Padrão
   Reset to defaults: Restaurar padrões
@@ -2185,6 +2230,7 @@ translations:
   'Set ': 'Definir '
   Set Active: Definir Ativo
   Set PIN: Definir PIN
+  Set Up WiFi: ''
   ? 'Set a phone strobe app to %.1f Hz and aim at the belt. Adjust until the belt
     appears stationary.\n\nRecommended apps:\n  Android: Strobily, Strobe Light\n  iOS:
     Strobe Light Tachometer, myStroboscope'
@@ -2228,6 +2274,9 @@ translations:
   Show up/down buttons on long lists: Mostrar botões para cima/baixo em listas longas
   Show whatever curves you last had visible on the full graph.: Mostrar as curvas
     que estavam visíveis por último no gráfico completo.
+  Showing loaded colors: ''
+  Showing sliced colors: ''
+  Showing the 50 newest files. See more in the printer's web UI.: ''
   Shutdown: Desligar
   Shutdown / Reboot: Desligar / Reiniciar
   Shutdown failed: Falha ao desligar
@@ -2358,7 +2407,9 @@ translations:
     tokens de fundo do aplicativo para modos claro e escuro.
   Switch Printer: Trocar Impressora
   Switch between light and dark themes: Alternar entre temas claro e escuro
+  Switch to v%s: ''
   Switched to T{}: Alterado para T{}
+  Switches to a backup spool on runout: Troca para um carretel de reserva ao acabar
   Switching heater control to MPC. Klipper will restart.: Alterando controle do aquecedor
     para MPC. Klipper será reiniciado.
   Switching to MPC requires a config change and Klipper restart.: Mudar para MPC requer
@@ -2375,6 +2426,8 @@ translations:
     — esta impressão vai acabar.
   T%d needs filament in slot %d, which is empty — this print will run out.: T%d precisa
     de filamento no slot %d, que está vazio — esta impressão vai acabar.
+  # Source: ams_current_tool.xml:38
+  T0: ''
   TD-1 filament color detection: Detecção de cor de filamento TD-1
   TEMPERATURE SENSORS: SENSORES DE TEMPERATURA
   THEME COLORS: CORES DO TEMA
@@ -2405,6 +2458,8 @@ translations:
   Temp °C (%d–%d): Temp °C (%d–%d)
   Temperature: Temperatura
   Temperature Graph Config: Config do Gráfico de Temperatura
+  # Source: calibration_pid_panel.xml:333
+  Temperature control has been optimized.: ''
   Temperatures: Temperaturas
   Temperatures saved: Temperaturas salvas
   Template: Modelo
@@ -2423,6 +2478,7 @@ translations:
     anônimos ajudam a melhorar o HelixScreen.
   Thanks! TOTALLY anonymous usage data helps improve HelixScreen.: Obrigado! Dados
     de uso TOTALMENTE anônimos ajudam a melhorar o HelixScreen.
+  That slot cannot stand in for this one: Esse slot não pode substituir este
   That tool is already loaded: Essa ferramenta já está carregada
   ? The HelixPrint plugin enables fast G-code modifications directly on your printer—like
     skipping bed mesh for quick reprints.
@@ -2457,6 +2513,7 @@ translations:
   The printer lost power while printing {}. The resumed layer may not line up exactly.: A impressora perdeu energia ao imprimir {}. A camada retomada pode não se alinhar exatamente.
   The printer rejected the filament configuration. The print was not started.: A impressora
     rejeitou a configuração do filamento. A impressão não foi iniciada.
+  The printer's firmware chooses the backup spool itself: O firmware da impressora escolhe o carretel de reserva
   The runout sensor indicates no filament is loaded. Start print anyway?: O sensor
     de fim de filamento indica que não há filamento carregado. Iniciar a impressão
     mesmo assim?
@@ -2480,6 +2537,8 @@ translations:
   This calibration uses the paper friction method to set your Z-offset.: Esta calibração
     usa o método de fricção de papel para definir seu Z-offset.
   This cannot be undone.: Isso não pode ser desfeito.
+  This channel offers v{}, older than the installed v{}. Anything added since then will be removed.: ''
+  This clears every spool's failover assignment. The print will stop on runout until you set up failover again.: ''
   This device has no wired network connection. If you turn WiFi off, it can only be turned back on from this screen.: Este dispositivo não tem conexão de rede com fio. Se você desligar o WiFi, só será possível ligá-lo novamente nesta tela.
   ? This device has only {} MB of RAM. Resonance calibration is memory-intensive and can make the printer firmware report a \"Timer Too Close\" error or restart mid-test. Continue anyway?
   : 'Este dispositivo tem apenas {} MB de RAM. A calibração de ressonância consome muita
@@ -2671,6 +2730,7 @@ translations:
   Use Android native keyboard for text input: Usar teclado nativo do Android para
     entrada de texto
   Use G10/G11 firmware retraction: Usar retração de firmware G10/G11
+  Use Settings Instead: ''
   Use printer type to select image: Usar tipo de impressora para selecionar imagem
   VM Peak: Pico de VM
   VM Size: Tamanho de VM
@@ -2714,10 +2774,12 @@ translations:
   Waiting for Moonraker...: Aguardando Moonraker...
   Waiting for bed to reach temperature for accurate calibration.: Aguardando a mesa
     atingir a temperatura para calibração precisa.
+  Waiting for the filament system to report its state: Aguardando o sistema de filamento informar seu estado
   Warm Bed: Aquecer Mesa
   Warming Bed...: Aquecendo Mesa...
   Warn: Aviso
   Warning: Aviso
+  Warnings & errors: ''
   Watch the belt under the strobe LED. Adjust frequency until the belt appears stationary — that is the resonant frequency.: Observe
     a correia sob o LED estroboscópico. Ajuste a frequência até que a correia pareça
     parada — essa é a frequência de ressonância.
@@ -2758,6 +2820,7 @@ translations:
   Widget Labels: Rótulos de Widgets
   Width: Largura
   Wifi: Wi-Fi
+  Will not switch spools on runout: Não trocará de carretel ao acabar
   Wizard Error: Erro do assistente
   Working...: Processando...
   Write failed at chunk {}: Falha na escrita no fragmento {}
@@ -2826,6 +2889,8 @@ translations:
   ? backup-spool switching is on. It only switches to a port whose filament type AND colour both match the active spool and whose own port sensor reads filament present.
   : ''
   bed: mesa
+  # Source: print_status_panel.xml:242
+  benchy.gcode: ''
   by Preston Brown: por Preston Brown
   chamber heater: aquecedor da câmara
   complete: concluído
@@ -2901,6 +2966,8 @@ translations:
   v%s available: v%s disponível
   v{} installed! Restarting...: v{} instalado! Reiniciando...
   v{} is available. Tap to update.: v{} disponível. Toque para atualizar.
+  ? will switch to a slot whose filament type AND colour both match the active spool and whose own port sensor reads filament present.
+  : ''
   you have: você tem
   '{} LED strips available': '{} fitas de LED disponíveis'
   '{} axis homed': Eixo {} referenciado

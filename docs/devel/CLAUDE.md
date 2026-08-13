@@ -18,6 +18,7 @@ All developer documentation lives here. When working on features, look up the re
 | `LOGGING.md` | spdlog levels, when to use info vs debug vs trace |
 | `COPYRIGHT_HEADERS.md` | SPDX license headers |
 | `RELEASE_PROCESS.md` | Release workflow, versioning |
+| `RELEASE_1_0_CHECKLIST.md` | Everything blocking `v1.0.0` and the 1.1 devel track — the atomic `release/1.0` branch cut + `RELEASE_CHANNEL` flip, open milestone issues, what is and is not verified. Delete once 1.0 ships |
 | `CI_CD_GUIDE.md` | CI pipeline, GitHub Actions |
 | `ANDROID_PLAY_STORE.md` | Play Store publishing pipeline, one-time setup, promotion flow |
 
@@ -88,6 +89,7 @@ All developer documentation lives here. When working on features, look up the re
 | `YOCTO_BUILD.md` | Building HelixScreen as a Yocto recipe |
 | `SNAPMAKER_U1_PRINT_TASK_CONFIG.md` | Snapmaker U1 native `print_task_config` filament/tool-mapping command API |
 | `AD5M_KMOD_VARIANT.md` | Building HelixScreen as a native variant inside the AD5M Klipper Mod firmware |
+| `ESP32_NATIVE_AUDIT.md` | ESP32-S3 (BTT K-Touch) native-port feasibility audit — memory/flash/render budgets behind the `firmware/` port |
 | `ENVIRONMENT_VARIABLES.md` | All runtime and build env vars |
 
 ## Integration

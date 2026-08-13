@@ -400,12 +400,7 @@ int MoonrakerClient::connect(const char* url, std::function<void()> on_connected
     setPingInterval(static_cast<int>(keepalive_interval_ms_));
 
     // Automatic reconnection with exponential backoff - use configured values
-    reconn_setting_t reconn;
-    reconn_setting_init(&reconn);
-    reconn.min_delay = reconnect_min_delay_ms_;
-    reconn.max_delay = reconnect_max_delay_ms_;
-    reconn.delay_policy = 2; // Exponential backoff
-    setReconnect(&reconn);
+    apply_reconnect_settings();
 
     // Store connection info for force_reconnect() AND for the install-once trampolines,
     // which snapshot these (under reconnect_mutex_) on every invocation rather than
@@ -421,6 +416,23 @@ int MoonrakerClient::connect(const char* url, std::function<void()> on_connected
     http_headers headers;
     headers["User-Agent"] = std::string("HelixScreen/") + HELIX_VERSION;
     return open(url, headers);
+}
+
+void MoonrakerClient::apply_reconnect_settings() {
+    reconn_setting_t reconn;
+    reconn_setting_init(&reconn);
+    reconn.min_delay = reconnect_min_delay_ms_;
+    reconn.max_delay = reconnect_max_delay_ms_;
+    reconn.delay_policy = 2; // Exponential backoff
+    setReconnect(&reconn);
+}
+
+void MoonrakerClient::set_auto_reconnect(bool enabled) {
+    if (enabled) {
+        apply_reconnect_settings();
+    } else {
+        setReconnect(nullptr);
+    }
 }
 
 void MoonrakerClient::install_ws_callbacks() {

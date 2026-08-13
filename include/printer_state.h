@@ -393,6 +393,12 @@ class PrinterState {
     lv_subject_t* get_print_progress_subject() {
         return print_domain_.get_print_progress_subject();
     } // 0-100
+    lv_subject_t* get_print_progress_display_subject() {
+        return print_domain_.get_print_progress_display_subject();
+    } // 0-100, frozen after a print ends
+    lv_subject_t* get_print_progress_text_subject() {
+        return print_domain_.get_print_progress_text_subject();
+    } // "N%" for the display value
     lv_subject_t* get_print_filename_subject() {
         return print_domain_.get_print_filename_subject();
     }
@@ -436,6 +442,38 @@ class PrinterState {
      * @param path LVGL-compatible path (e.g., "A:/tmp/thumbnail_xxx.bin"), "" to clear
      */
     void set_print_thumbnail(const std::string& for_file, const std::string& path);
+
+#if defined(HELIX_PLATFORM_ESP32)
+    /**
+     * @brief Get the PSRAM thumbnail generation subject for UI binding
+     *
+     * Integer subject bumped whenever the current print's PSRAM-resident
+     * thumbnail is replaced. ESP32 has no disk thumbnail cache, so
+     * print_thumbnail_path stays empty there and consumers observe this
+     * counter, then read get_print_psram_thumbnail().
+     */
+    lv_subject_t* get_print_psram_thumb_gen_subject() {
+        return print_domain_.get_print_psram_thumb_gen_subject();
+    }
+
+    /**
+     * @brief Get the current print's PSRAM-resident thumbnail (may be nullptr)
+     *
+     * Main thread only. Hold the returned shared_ptr for as long as a widget's
+     * image src points at its descriptor.
+     */
+    [[nodiscard]] std::shared_ptr<helix::ui::EspPsramThumbnail> get_print_psram_thumbnail() const {
+        return print_domain_.get_print_psram_thumbnail();
+    }
+
+    /**
+     * @brief Install the current print's PSRAM-resident thumbnail
+     *
+     * Main thread only — bumps the generation subject and may destroy the
+     * previous thumbnail (which calls lv_image_cache_drop()).
+     */
+    void set_print_psram_thumbnail(std::shared_ptr<helix::ui::EspPsramThumbnail> thumb);
+#endif
 
     /**
      * @brief Get print job state enum subject
@@ -1855,7 +1893,7 @@ class PrinterState {
     /// App-initiated macro/homing/calibration/filament-op activity tracker.
     ///
     /// Consulted ONLY by the busy-queue toast decision in
-    /// MoonrakerAPI::execute_gcode, which suppresses the "printer is busy"
+    /// IMoonrakerAPI::execute_gcode, which suppresses the "printer is busy"
     /// notification when the blocking op is one the user just started here
     /// (prestonbrown/helixscreen#1206).
     ///

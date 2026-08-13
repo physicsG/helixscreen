@@ -22,8 +22,13 @@
 
 #include "config.h"
 #include "data_root_resolver.h"
-#include "moonraker_api.h"
-#include "moonraker_client.h"
+#include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
+#ifdef HELIX_ENABLE_MOCKS
+// Complete type needed for the derived->base pointer comparison in
+// set_moonraker_client().
+#include "moonraker_client_mock.h"
+#endif
 #include "panel_widget_manager.h"
 #include "printer_state.h"
 #include "static_subject_registry.h"
@@ -54,8 +59,13 @@ using namespace helix;
 
 // Global singleton instances (extern declarations in header, definitions here)
 // These are set by main.cpp during initialization
-static MoonrakerClient* g_moonraker_client = nullptr;
-static MoonrakerAPI* g_moonraker_api = nullptr;
+static IMoonrakerClient* g_moonraker_client = nullptr;
+#ifdef HELIX_ENABLE_MOCKS
+// Alias for g_moonraker_client under the concrete mock type; see
+// get_moonraker_client_mock(). Kept in lockstep with the pointer above.
+static MoonrakerClientMock* g_moonraker_client_mock = nullptr;
+#endif
+static IMoonrakerAPI* g_moonraker_api = nullptr;
 static MoonrakerManager* g_moonraker_manager = nullptr;
 static JobQueueState* g_job_queue_state = nullptr;
 static PrintHistoryManager* g_print_history_manager = nullptr;
@@ -66,6 +76,7 @@ static SubjectManager g_subjects;
 static lv_subject_t g_notification_subject;
 static lv_subject_t g_show_beta_features_subject;
 static lv_subject_t g_home_edit_mode_subject;
+static lv_subject_t g_platform_extras_subject;
 static lv_subject_t g_wizard_active_subject;
 
 // Application quit flag (volatile sig_atomic_t for async-signal-safety)
@@ -85,19 +96,37 @@ static std::function<void()> g_wizard_cancel_cb;
 static std::vector<char*> g_stored_argv;
 static std::string g_executable_path;
 
-MoonrakerClient* get_moonraker_client() {
+IMoonrakerClient* get_moonraker_client() {
     return g_moonraker_client;
 }
 
-void set_moonraker_client(MoonrakerClient* client) {
+void set_moonraker_client(IMoonrakerClient* client) {
     g_moonraker_client = client;
+#ifdef HELIX_ENABLE_MOCKS
+    // The mock alias only stays valid while it names the same object. Anyone
+    // replacing or clearing the client invalidates it; the caller that installs
+    // a mock re-publishes it right after this call.
+    if (static_cast<IMoonrakerClient*>(g_moonraker_client_mock) != client) {
+        g_moonraker_client_mock = nullptr;
+    }
+#endif
 }
 
-MoonrakerAPI* get_moonraker_api() {
+#ifdef HELIX_ENABLE_MOCKS
+MoonrakerClientMock* get_moonraker_client_mock() {
+    return g_moonraker_client_mock;
+}
+
+void set_moonraker_client_mock(MoonrakerClientMock* client) {
+    g_moonraker_client_mock = client;
+}
+#endif
+
+IMoonrakerAPI* get_moonraker_api() {
     return g_moonraker_api;
 }
 
-void set_moonraker_api(MoonrakerAPI* api) {
+void set_moonraker_api(IMoonrakerAPI* api) {
     g_moonraker_api = api;
 }
 
@@ -181,6 +210,24 @@ void app_globals_init_subjects() {
     lv_subject_init_int(&g_home_edit_mode_subject, 0);
     g_subjects.register_subject(&g_home_edit_mode_subject);
     lv_xml_register_subject(nullptr, "home_edit_mode", &g_home_edit_mode_subject);
+
+    // Platform-availability gate for excluded v1 (ESP32 / K-Touch) hardware
+    // features whose affordances are XML-declarative and cannot be hidden from a
+    // compiled TU (their owning overlay is excluded from the app_srcs manifest).
+    // 1 = affordances render exactly as today (every non-ESP32 build); 0 = hidden.
+    // The default of 1 keeps all desktop/embedded builds behaviorally identical —
+    // only the ESP32 v1 cut flips it to 0. XML rows bind via:
+    //   <bind_flag_if_eq subject="platform_extras_available" flag="hidden" ref_value="0"/>
+    // Cleanup is co-located: register_subject() below hands it to g_subjects, which
+    // app_globals_deinit_subjects() (registered with StaticSubjectRegistry above)
+    // deinits before lv_deinit().
+#if defined(HELIX_PLATFORM_ESP32)
+    lv_subject_init_int(&g_platform_extras_subject, 0);
+#else
+    lv_subject_init_int(&g_platform_extras_subject, 1);
+#endif
+    g_subjects.register_subject(&g_platform_extras_subject);
+    lv_xml_register_subject(nullptr, "platform_extras_available", &g_platform_extras_subject);
 
     // Initialize wizard-active subject (observable mirror of is_wizard_active()).
     // Seed from the current flag so it is correct even when set_wizard_active()

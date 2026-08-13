@@ -21,9 +21,9 @@
 #include "config.h"
 #include "display_settings_manager.h"
 #include "gcode_parser.h"
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "memory_utils.h"
-#include "moonraker_api.h"
 #include "observer_factory.h"
 #include "runtime_config.h"
 #include "settings_manager.h"
@@ -135,6 +135,9 @@ void PrintSelectDetailView::init_subjects() {
     UI_MANAGED_SUBJECT_INT(detail_gcode_viewer_mode_, 0, "detail_gcode_viewer_mode", subjects_);
     // G-code loading indicator (0=hidden, 1=visible)
     UI_MANAGED_SUBJECT_INT(detail_gcode_loading_, 0, "detail_gcode_loading", subjects_);
+    // Whether the viewer has rendered its first frame (0=no, 1=yes). The
+    // thumbnail stays on top until this flips to hide the gray gap.
+    UI_MANAGED_SUBJECT_INT(detail_viewer_first_frame_, 0, "detail_viewer_first_frame", subjects_);
 
     // Preview color mode: 0 = actual (loaded slot colors), 1 = sliced (slicer intent)
     UI_MANAGED_SUBJECT_INT(detail_prefer_sliced_colors_, 0, "detail_prefer_sliced_colors",
@@ -335,7 +338,7 @@ lv_obj_t* PrintSelectDetailView::create(lv_obj_t* parent_screen) {
     return overlay_root_;
 }
 
-void PrintSelectDetailView::set_dependencies(MoonrakerAPI* api, PrinterState* printer_state) {
+void PrintSelectDetailView::set_dependencies(IMoonrakerAPI* api, PrinterState* printer_state) {
     api_ = api;
     printer_state_ = printer_state;
 
@@ -540,6 +543,7 @@ void PrintSelectDetailView::on_deactivate() {
 
     // Reset viewer mode to thumbnail so next open starts clean
     show_gcode_viewer(false);
+    lv_subject_set_int(&detail_viewer_first_frame_, 0);
     gcode_loaded_ = false;
 
     // Drop any pending run_when_loaded() callback. If the user tapped Print
@@ -570,9 +574,14 @@ void PrintSelectDetailView::on_deactivate() {
 void PrintSelectDetailView::cleanup() {
     spdlog::debug("[DetailView] cleanup()");
 
-    // Pause viewer before subject cleanup to avoid rendering with freed subjects
+    // Pause viewer before subject cleanup to avoid rendering with freed subjects.
+    // Drop the first-frame callback too: it captures `this` and writes
+    // detail_viewer_first_frame_, which subjects_.deinit_all() below destroys.
+    // The viewer outlives this object on some teardown paths, and paused
+    // rendering is not a guarantee — unpausing anywhere else would resurrect it.
     if (gcode_viewer_) {
         ui_gcode_viewer_set_paused(gcode_viewer_, true);
+        ui_gcode_viewer_set_first_frame_callback(gcode_viewer_, nullptr, nullptr);
     }
 
     // Expire all outstanding async tokens
@@ -923,6 +932,15 @@ void PrintSelectDetailView::show_gcode_viewer(bool show) {
         mode = is_2d ? 2 : 1;
     }
     lv_subject_set_int(&detail_gcode_viewer_mode_, mode);
+
+    // Returning to thumbnail mode must also drop the first-frame latch — that
+    // latch is what keeps the thumbnail hidden once the viewer has painted
+    // (print_file_detail.xml binds detail_viewer_first_frame). Leaving it set
+    // while hiding the viewer (the memory-pressure clear callback does exactly
+    // that, mid-view) hides BOTH layers and the preview goes blank.
+    if (mode == 0) {
+        lv_subject_set_int(&detail_viewer_first_frame_, 0);
+    }
 
     // The 3D render is the preview when the viewer is active, so the
     // no-thumbnail placeholder glyph must not sit on top of it. (When the
@@ -1429,6 +1447,21 @@ void PrintSelectDetailView::load_gcode_for_preview() {
 
     // Clear previous model so stale frames don't flash when viewer becomes visible
     ui_gcode_viewer_clear(gcode_viewer_);
+
+    // Reset first-frame flag: the thumbnail stays on top until the viewer
+    // renders, then the first-frame callback flips this to reveal it.
+    lv_subject_set_int(&detail_viewer_first_frame_, 0);
+
+    // Register one-shot callback: fires after the viewer's first complete
+    // render, at which point we hide the thumbnail (revealing the viewer).
+    ui_gcode_viewer_set_first_frame_callback(
+        gcode_viewer_,
+        [](lv_obj_t* /*viewer*/, void* user_data, bool /*success*/) {
+            auto* self = static_cast<PrintSelectDetailView*>(user_data);
+            spdlog::debug("[DetailView] First frame rendered — revealing viewer");
+            lv_subject_set_int(&self->detail_viewer_first_frame_, 1);
+        },
+        this);
 
     // Show loading spinner over thumbnail
     lv_subject_set_int(&detail_gcode_loading_, 1);

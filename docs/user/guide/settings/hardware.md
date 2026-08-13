@@ -52,6 +52,18 @@ Tap to open a standalone fullscreen camera viewer showing the live feed from you
 
 Tap to open Device Operations for quick actions, calibration, and speed settings for multi-material systems. Supports AFC, Happy Hare, ACE, and other detected filament systems.
 
+Most of what's inside varies by hardware, but three toggles appear here regardless of which system you have:
+
+| Toggle | When it appears | What it does |
+|--------|-----------------|--------------|
+| **Unloads After Print** | AFC systems only | Retract filament back to its lane when a print finishes |
+| **Always Show Bypass Spool** | AFC systems only | Keep the external spool visible on the filament path even while bypass is disengaged. AFC reports a bypass sensor whether or not one is wired, so it's hidden by default until bypass is actually engaged |
+| **Enable Bypass Controls** | Only when your firmware reports **no** bypass | Show the bypass controls and the external spool anyway, for machines where you feed filament straight to the extruder. Applies to Creality CFS, Anycubic ACE Pro, Snapmaker U1, tool changers, QIDI Box, and any Happy Hare config with `has_bypass: 0` |
+
+What **Enable Bypass Controls** does depends on the system. On Happy Hare, `MMU_SELECT_BYPASS` works whether or not `[mmu_machine] has_bypass` is set, so the bypass becomes usable - relevant for `mmu_vendor: Other` setups such as a QIDI Box driven through Happy Hare, and for an uncalibrated type-A selector. On CFS, ACE, Snapmaker, tool changers, and QIDI Box there is no bypass command, so the Bypass toggle reports that the operation is not supported; there the setting only lets you record the material and color you loaded by hand, which keeps filament tracking and temperature presets correct.
+
+See [Filament → When Bypass Doesn't Appear](../filament.md#when-bypass-doesnt-appear).
+
 ---
 
 ## Fans

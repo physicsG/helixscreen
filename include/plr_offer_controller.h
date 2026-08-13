@@ -70,7 +70,7 @@ class PlrOfferController {
 
     /// Fire the Creality probe at most once per connection, and only from
     /// STANDBY. See the header warning on
-    /// MoonrakerAPI::check_continue_print_state — this call has side effects.
+    /// IMoonrakerAPI::check_continue_print_state — this call has side effects.
     void probe_creality_once();
     void on_creality_detect_result(const helix::PlrDetectResult& result);
 

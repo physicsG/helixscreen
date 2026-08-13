@@ -43,12 +43,13 @@ The AD5X's four-color **IFS (Intelligent Filament System)** is fully integrated,
 - **Automatic tool-to-port mapping** for multi-color prints (T0–T15 → physical ports), correct even with slot renumbering enabled
 - **External-spool bypass mode** for feeding a spool directly
 - **[Spoolman](filament-tracking.md) integration** for assigning tracked spools to slots
+- **Infinite Spool Mode** reporting — when a slot runs out, the IFS automatically switches to another slot with the same filament type *and* color, if one is loaded. HelixScreen tells you this plainly on the runout screen and in the AMS panel
 
 **Requirements:** ZMOD firmware v1.7.0 or newer (a community firmware mod, separate from FlashForge stock). See [Installation → Adventurer 5X](../INSTALL.md#flashforge-adventurer-5x).
 
 **Status:** Tested.
 
-> **Good to know:** Endless-spool failover and virtual channels beyond 4 tools aren't surfaced in the UI yet. Some units display a random solid color during sleep — if you see this, set the sleep timeout to Never.
+> **Good to know:** Infinite Spool Mode works out of the box with stock ZMOD (always on, no toggle). The optional [bambufy](https://github.com/function3d/bambufy) / [lessWaste](https://github.com/Hrybmo/lesswaste) plugins add a backup on/off toggle in their own Mainsail/Fluidd dialog; HelixScreen reports which is active but does not expose the toggle itself. Virtual channels beyond 4 tools aren't visualized in the UI yet. Some units display a random solid color during sleep — if you see this, set the sleep timeout to Never.
 
 ---
 

@@ -7,7 +7,7 @@ typedef struct _lv_obj_t lv_obj_t;
 namespace helix {
 class Config;
 }
-class MoonrakerAPI;
+class IMoonrakerAPI;
 
 namespace helix::wizard {
 
@@ -31,7 +31,7 @@ inline constexpr int kStepCount = 13;
 // Plain data needed to decide skips — no LVGL, constructible in tests.
 struct StepContext {
     helix::Config* config = nullptr;
-    MoonrakerAPI* api = nullptr;
+    IMoonrakerAPI* api = nullptr;
     WizardPresetPlan preset{}; // {skip_hardware, first_run}
     bool is_subsequent_printer = false;
     // Note: touch-calibration's fbdev check and language's force-step flag live in

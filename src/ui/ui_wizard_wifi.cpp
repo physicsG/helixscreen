@@ -12,6 +12,7 @@
 #include "ui_utils.h"
 
 #include "config.h"
+#include "data_root_resolver.h"
 #include "ethernet_manager.h"
 #include "log_redact.h"
 #include "lvgl/lvgl.h"
@@ -882,7 +883,8 @@ lv_obj_t* WizardWifiStep::create(lv_obj_t* parent) {
     // Register wifi_network_item component first
     static bool network_item_registered = false;
     if (!network_item_registered) {
-        lv_xml_register_component_from_file("A:ui_xml/wifi_network_item.xml");
+        lv_xml_register_component_from_file(
+            helix::asset_component_uri("ui_xml/wifi_network_item.xml").c_str());
         network_item_registered = true;
         spdlog::debug("[{}] Registered wifi_network_item component", get_name());
     }

@@ -475,7 +475,8 @@ TEST_CASE("CFS backend status parsing", "[ams][cfs]") {
 
     SECTION("system-level fields") {
         REQUIRE(info.type == AmsType::CFS);
-        REQUIRE(info.supports_endless_spool == true);
+        // box.auto_refill=1 -> the ENABLE bit, which caps.enabled derives from.
+        REQUIRE(info.endless_spool_enabled == true);
     }
 
     SECTION("connected unit created, disconnected skipped") {
@@ -2544,5 +2545,66 @@ TEST_CASE("CFS runout: ordinary console chatter is ignored", "[ams][cfs][1250]")
                              "// probe at 10.000,10.000 is z=0.100", ""}) {
         CAPTURE(line);
         CHECK_FALSE(backend.classify_error(line, paused_ctx()).has_value());
+    }
+}
+
+// ============================================================================
+// Endless spool capabilities
+// ============================================================================
+//
+// CFS had no capability test at all, and its old answer was
+// {supported=true, editable=false, description="Auto-refill enabled"|"disabled"} —
+// so auto-refill on and off were indistinguishable to any UI, and the only place
+// the real state lived was an untranslated English string.
+
+TEST_CASE("CFS endless spool: auto-refill on and off are distinguishable",
+          "[ams][cfs][endless_spool]") {
+    SECTION("auto_refill=1 reads as available and ON") {
+        CfsRemapHelper backend;
+        CfsTestAccess::handle_status(backend, make_cfs_notification(make_runout_box(0)));
+
+        auto caps = backend.get_endless_spool_capabilities();
+        CHECK(caps.availability == EndlessSpoolAvailability::Available);
+        CHECK(caps.enabled == EndlessSpoolEnabled::On);
+        // The box picks the refill spool from its own same_material groups.
+        CHECK(caps.editability == EndlessSpoolEditability::ReadOnly);
+        CHECK(caps.restriction == EndlessSpoolRestriction::FirmwareManaged);
+        CHECK_FALSE(caps.editable());
+    }
+
+    SECTION("auto_refill=0 reads as available and OFF") {
+        CfsRemapHelper backend;
+        json box = make_runout_box(0);
+        box["auto_refill"] = 0;
+        CfsTestAccess::handle_status(backend, make_cfs_notification(box));
+
+        auto caps = backend.get_endless_spool_capabilities();
+        CHECK(caps.availability == EndlessSpoolAvailability::Available);
+        CHECK(caps.enabled == EndlessSpoolEnabled::Off);
+        CHECK(caps.restriction == EndlessSpoolRestriction::FirmwareManaged);
+    }
+
+    SECTION("no per-slot relation is reported, so the UI has no dropdown to draw") {
+        // The old shape (available + an empty per-slot config) made the context
+        // menu render a backup dropdown that could only ever read "None", with no
+        // way to tell that apart from "no backup configured".
+        CfsRemapHelper backend;
+        CfsTestAccess::handle_status(backend, make_cfs_notification(make_runout_box(0)));
+
+        CHECK(backend.get_endless_spool_config().empty());
+        CHECK(endless_spool_backup_for(backend.get_endless_spool_config(), 0) == -1);
+    }
+
+    SECTION("writes are refused with the firmware-managed reason") {
+        CfsRemapHelper backend;
+        CfsTestAccess::handle_status(backend, make_cfs_notification(make_runout_box(0)));
+
+        auto result = backend.set_endless_spool_backup(0, 1);
+        CHECK_FALSE(result.success());
+        CHECK(result.result == AmsResult::NOT_SUPPORTED);
+        CHECK(result.user_msg ==
+              endless_spool_restriction_text(EndlessSpoolRestriction::FirmwareManaged));
+
+        CHECK_FALSE(backend.reset_endless_spool().success());
     }
 }

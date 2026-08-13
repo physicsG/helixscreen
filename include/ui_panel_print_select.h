@@ -45,7 +45,7 @@
  * - Sortable columns: filename, size, modified date, print time
  * - Detail overlay with file metadata and action buttons
  * - Delete confirmation dialog
- * - MoonrakerAPI integration for file listing, deletion, and print start
+ * - IMoonrakerAPI integration for file listing, deletion, and print start
  *
  * ## Reactive Subjects (6):
  * - selected_filename - Currently selected file name
@@ -215,9 +215,9 @@ class PrintSelectPanel : public PanelBase {
      * @brief Construct PrintSelectPanel with injected dependencies
      *
      * @param printer_state Reference to helix::PrinterState for mock detection
-     * @param api Pointer to MoonrakerAPI for file operations
+     * @param api Pointer to IMoonrakerAPI for file operations
      */
-    PrintSelectPanel(helix::PrinterState& printer_state, MoonrakerAPI* api);
+    PrintSelectPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
 
     /**
      * @brief Destructor - cleanup observers
@@ -371,13 +371,13 @@ class PrintSelectPanel : public PanelBase {
     }
 
     /**
-     * @brief Set MoonrakerAPI and trigger file refresh
+     * @brief Set IMoonrakerAPI and trigger file refresh
      *
      * Overrides base class to automatically refresh file list when API becomes available.
      *
-     * @param api Pointer to MoonrakerAPI (may be nullptr to disconnect)
+     * @param api Pointer to IMoonrakerAPI (may be nullptr to disconnect)
      */
-    void set_api(MoonrakerAPI* api);
+    void set_api(IMoonrakerAPI* api);
 
     /**
      * @brief Set selected file data and update subjects
@@ -887,10 +887,10 @@ class PrintSelectPanel : public PanelBase {
  * @brief Get or create the global PrintSelectPanel instance
  *
  * @param printer_state Reference to helix::PrinterState
- * @param api Pointer to MoonrakerAPI (may be nullptr)
+ * @param api Pointer to IMoonrakerAPI (may be nullptr)
  * @return Pointer to the global instance
  */
-PrintSelectPanel* get_print_select_panel(helix::PrinterState& printer_state, MoonrakerAPI* api);
+PrintSelectPanel* get_print_select_panel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
 
 /**
  * @brief Get reference to the global PrintSelectPanel instance

@@ -275,8 +275,8 @@ TEST_CASE("MATERIALS - a group's drying preset is safe for the LOWEST-melting me
     }
 
     for (const auto& preset : get_drying_presets_by_group()) {
-        INFO("preset: " << preset.name << " at " << preset.temp_c << " C, group's lowest nozzle_min "
-                        << group_min_nozzle[preset.name]);
+        INFO("preset: " << preset.name << " at " << preset.temp_c
+                        << " C, group's lowest nozzle_min " << group_min_nozzle[preset.name]);
         REQUIRE(group_min_nozzle.count(preset.name) == 1);
         CHECK(preset.temp_c <= group_min_nozzle[preset.name] - 100);
     }
@@ -777,7 +777,8 @@ TEST_CASE_METHOD(HelixTestFixture, "catalog - malformed input yields an empty ca
     }
 
     // A path that does not exist behaves the same way.
-    auto missing = FilamentCatalog::load_from_file((dir / "does_not_exist.json").string(), false, "");
+    auto missing =
+        FilamentCatalog::load_from_file((dir / "does_not_exist.json").string(), false, "");
     CHECK(missing.all_products().empty());
 
     fs::remove_all(dir);

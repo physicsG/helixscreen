@@ -15,9 +15,9 @@
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 
+#include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
-#include "moonraker_client.h"
 #include "post_op_cooldown_manager.h"
 #include "spdlog/spdlog.h"
 
@@ -35,7 +35,7 @@ static constexpr int MAX_INFO_FETCH_FAILURES = 3;
 // Construction / Destruction
 // ============================================================================
 
-AmsBackendAce::AmsBackendAce(MoonrakerAPI* api, MoonrakerClient* client)
+AmsBackendAce::AmsBackendAce(IMoonrakerAPI* api, IMoonrakerClient* client)
     : AmsSubscriptionBackend(api, client) {
     // Initialize system info with ACE defaults
     system_info_.type = AmsType::ACE;
@@ -347,7 +347,7 @@ AmsError AmsBackendAce::do_load_filament(int slot_index) {
                 emit_event(EVENT_STATE_CHANGED);
             });
         },
-        MoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
+        IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
 
     return AmsErrorHelper::success();
 }
@@ -402,7 +402,7 @@ AmsError AmsBackendAce::do_unload_filament(int /*slot_index*/) {
                 emit_event(EVENT_STATE_CHANGED);
             });
         },
-        MoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
+        IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
 
     return AmsErrorHelper::success();
 }

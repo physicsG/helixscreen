@@ -8,10 +8,10 @@
 #include "color_utils.h"
 #include "config.h"
 #include "helix/xml/scoped_subject_registry.h"
+#include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
 #include "led/led_color_utils.h"
 #include "led_wled_json.h"
-#include "moonraker_api.h"
-#include "moonraker_client.h"
 #include "moonraker_error.h"
 #include "observer_factory.h"
 #include "printer_discovery.h"
@@ -54,7 +54,7 @@ LedController& LedController::instance() {
     return s_instance;
 }
 
-void LedController::init(MoonrakerAPI* api, MoonrakerClient* client) {
+void LedController::init(IMoonrakerAPI* api, IMoonrakerClient* client) {
     api_ = api;
     client_ = client;
 
@@ -1963,7 +1963,7 @@ void LedController::toggle_all(bool on) {
     //
     // The third one is not decoration. SET_LED is discretionary, so while an
     // external blocking op (BED_MESH_CALIBRATE, QGL, a manual probe) holds
-    // Klipper's gcode lock, MoonrakerAPI queues the command fire-and-forget and
+    // Klipper's gcode lock, IMoonrakerAPI queues the command fire-and-forget and
     // drops its RPC response — neither of the first two will EVER fire, and the
     // counter would stay pinned, greying both light buttons out for the whole
     // session (#1129). on_queued is the only settle signal on that path.

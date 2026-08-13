@@ -13,6 +13,7 @@
 #include "demo_overlays.h"
 #include "display_settings_manager.h"
 #include "http_executor.h"
+#include "input_settings_manager.h"
 #include "logging_init.h"
 #include "mock_scenarios.h"
 #include "panel_factory.h"
@@ -329,6 +330,9 @@ void RemoteControlServer::register_builtin_handlers() {
         return handle_pointer_press(p);
     };
     handlers_["pointer_move"] = [this](const nlohmann::json& p) { return handle_pointer_move(p); };
+    handlers_["pointer_long_press"] = [this](const nlohmann::json& p) {
+        return handle_pointer_long_press(p);
+    };
     handlers_["pointer_release"] = [this](const nlohmann::json& p) {
         return handle_pointer_release(p);
     };
@@ -1989,6 +1993,45 @@ nlohmann::json RemoteControlServer::handle_pointer_release(const nlohmann::json&
     const int32_t x = params.contains("x") ? params["x"].get<int32_t>() : pointer.x();
     const int32_t y = params.contains("y") ? params["y"].get<int32_t>() : pointer.y();
     return apply_pointer_state(x, y, false, "release");
+}
+
+nlohmann::json RemoteControlServer::handle_pointer_long_press(const nlohmann::json& params) {
+    if (!params.contains("x") || !params.contains("y")) {
+        throw std::invalid_argument("Missing required parameters: x and y");
+    }
+    const int32_t x = params["x"].get<int32_t>();
+    const int32_t y = params["y"].get<int32_t>();
+
+    // Default the hold to comfortably past LVGL's own threshold rather than
+    // hardcoding a duration here: the threshold is a user setting (Touch & Input)
+    // and a hold tuned to the default would silently stop being a long press if
+    // someone raised it.
+    int32_t hold_ms = params.contains("hold_ms") ? params["hold_ms"].get<int32_t>() : 0;
+    if (hold_ms <= 0) {
+        hold_ms = helix::remote::pointer_long_press_hold_ms(
+            helix::InputSettingsManager::instance().get_long_press_time());
+    }
+
+    nlohmann::json result = apply_pointer_state(x, y, true, "long_press");
+
+    // Hold without touching the pointer. The press is already latched in
+    // RemotePointer and LVGL keeps sampling it on its own timer, so the gesture
+    // accumulates here exactly as it does under a resting finger. Doing this
+    // server-side is the whole point: a shell doing press / sleep / release spends
+    // the hold with no client connected, and any command that lands in between
+    // resamples the device and can restart the press.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(hold_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!running_.load()) {
+            throw std::runtime_error("remote server shutting down");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    nlohmann::json release = apply_pointer_state(x, y, false, "long_press");
+    result["held_ms"] = hold_ms;
+    result["reads"] = release["reads"];
+    return result;
 }
 
 nlohmann::json RemoteControlServer::handle_scroll(const nlohmann::json& params) {

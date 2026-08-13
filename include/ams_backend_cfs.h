@@ -117,7 +117,7 @@ enum class CfsSchema {
 /// CFS (Creality Filament System) backend — K1 + K2 series printers with RS-485 CFS units
 class AmsBackendCfs : public AmsSubscriptionBackend {
   public:
-    AmsBackendCfs(MoonrakerAPI* api, helix::MoonrakerClient* client);
+    AmsBackendCfs(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
 
     /**
      * @brief Bare filament-sensor name CFS owns: "filament_sensor".
@@ -211,6 +211,23 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
     }
 
     // Capabilities
+
+    /**
+     * @brief CFS auto-refill: available, firmware-managed, no per-slot relation.
+     *
+     * The box picks the refill spool itself from its own `same_material` groups
+     * and exposes no per-slot mapping, so this backend deliberately does NOT
+     * override get_endless_spool_config() - the base's empty relation is the
+     * truthful answer, and it is what keeps the UI from drawing a backup
+     * dropdown that could only ever read "None".
+     *
+     * `enabled` comes from `box.auto_refill` (stock) / `box.runout_swap_enabled`
+     * (flat fork) via AmsSystemInfo::endless_spool_enabled, so on and off are now
+     * distinguishable; the old struct hardcoded `supported = true` and buried the
+     * real state in an untranslated `description` string.
+     *
+     * @note Takes `mutex_`; callers must NOT hold it.
+     */
     [[nodiscard]] helix::printer::EndlessSpoolCapabilities
     get_endless_spool_capabilities() const override;
     [[nodiscard]] helix::printer::ToolMappingCapabilities

@@ -164,7 +164,7 @@
                               callback="on_screensaver_changed"/>
         <!-- Test Screensaver button (hidden when Off is selected) -->
         <lv_obj name="container_test_screensaver"
-                width="100%" height="content" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="0"
+                width="100%" height="content" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="#space_sm"
                 style_pad_bottom="#space_md" style_pad_gap="0" flex_flow="row" style_flex_main_place="end"
                 scrollable="false">
           <bind_flag_if_eq subject="settings_screensaver_type" flag="hidden" ref_value="0"/>
@@ -222,10 +222,13 @@
                                 label="Sound Theme" label_tag="Sound Theme" icon="tune" description="Choose sound style"
                                 description_tag="Choose sound style" callback="on_sound_theme_changed"/>
         </lv_obj>
-        <!-- Output Device Dropdown (hidden when master sounds off; also hidden in
-           C++ when the active backend is not ALSA) -->
+        <!-- Output Device Dropdown: shown only when sounds are on AND an ALSA
+             backend with device selection is active. The compound cond replaces
+             the old split (XML sounds-enabled gate + C++ imperative hide) whose
+             two mechanisms raced — the binding re-showed the row on ALSA-less
+             backends whenever sounds were enabled. -->
         <lv_obj name="container_audio_device" width="100%" style_pad_all="0" scrollable="false">
-          <bind_flag_if_eq subject="settings_sounds_enabled" flag="hidden" ref_value="0"/>
+          <bind_flag_if cond="settings_sounds_enabled eq 0 or settings_audio_device_available eq 0" flag="hidden"/>
           <setting_dropdown_row name="row_audio_device"
                                 label="Output Device" label_tag="Output Device" icon="volume_high"
                                 description="Where UI sounds play" description_tag="Where UI sounds play"

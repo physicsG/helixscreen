@@ -26,6 +26,7 @@
 
 #include "ui_context_menu.h"
 
+#include "../test_fixtures.h"
 #include "ams_state.h"
 #include "theme_manager.h"
 
@@ -33,7 +34,6 @@
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
-#include "../test_fixtures.h"
 
 using namespace helix;
 
@@ -43,6 +43,8 @@ namespace {
 // used because it has the widest mix of row lengths ("Load" vs "Spool Info") and
 // is the one that overflows a real panel.
 class BareContextMenu : public helix::ui::ContextMenu {
+    HELIX_CONTEXT_MENU_KIND(BareContextMenu)
+
   protected:
     const char* xml_component_name() const override {
         return "ams_context_menu";
@@ -55,6 +57,10 @@ class BareContextMenu : public helix::ui::ContextMenu {
 // Stands in for external-spool mode at the base-class contract: every action in
 // the Filament group is hidden before the card is measured.
 class EmptyFilamentColumnMenu : public BareContextMenu {
+    // Not required to compile — the base already satisfies the pure virtual — but
+    // active_as<> matches on the exact tag, so a derived menu must claim its own.
+    HELIX_CONTEXT_MENU_KIND(EmptyFilamentColumnMenu)
+
   protected:
     void on_created(lv_obj_t* menu) override {
         for (const char* name : {"btn_load", "btn_unload", "btn_gate_select", "btn_gate_check"}) {

@@ -13,9 +13,9 @@
  * @file moonraker_types.h
  * @brief Data structures for Moonraker API operations
  *
- * Contains all request/response types used by MoonrakerAPI, separated
- * from the API class for cleaner dependencies. Code that only needs
- * to work with these types (e.g., ACE backend) can include just
+ * Contains all request/response types used by the Moonraker API layer,
+ * separated from the API class for cleaner dependencies. Code that only
+ * needs to work with these types (e.g., ACE backend) can include just
  * this header without pulling in the full API interface.
  */
 

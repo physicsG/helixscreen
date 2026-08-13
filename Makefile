@@ -946,9 +946,24 @@ CXXFLAGS += $(SOUND_CXXFLAGS) $(TRACKER_CXXFLAGS)
 HELIX_HAS_LABEL_PRINTER ?= 1
 HELIX_HAS_CFS ?= 1
 HELIX_HAS_IFS ?= 1
+# Compile-out gates for the 2D gcode renderer and the bed-mesh 3D renderer —
+# code AND their big runtime buffers (ESP32-class targets set these to 0).
+HELIX_HAS_GCODE_VIEWER ?= 1
+HELIX_HAS_BED_MESH_3D ?= 1
+# Compile-out gate for the dlopen()-based plugin system — no dynamic linking
+# on statically-linked embedded targets (ESP32-class).
+HELIX_HAS_PLUGINS ?= 1
+# Compile-out gate for the timelapse VIEWING UI (video list/download/playback).
+# Capture-control (settings, render, save-frames) is plain JSON-RPC and is NOT
+# gated — printers keep capturing timelapses even where the screen can't view them.
+HELIX_HAS_TIMELAPSE_VIEWER ?= 1
 CXXFLAGS += -DHELIX_HAS_LABEL_PRINTER=$(HELIX_HAS_LABEL_PRINTER) \
             -DHELIX_HAS_CFS=$(HELIX_HAS_CFS) \
-            -DHELIX_HAS_IFS=$(HELIX_HAS_IFS)
+            -DHELIX_HAS_IFS=$(HELIX_HAS_IFS) \
+            -DHELIX_HAS_GCODE_VIEWER=$(HELIX_HAS_GCODE_VIEWER) \
+            -DHELIX_HAS_BED_MESH_3D=$(HELIX_HAS_BED_MESH_3D) \
+            -DHELIX_HAS_PLUGINS=$(HELIX_HAS_PLUGINS) \
+            -DHELIX_HAS_TIMELAPSE_VIEWER=$(HELIX_HAS_TIMELAPSE_VIEWER)
 
 # Parallel build control
 # Auto-parallelizes builds: plain 'make' automatically uses -j$(NPROC).

@@ -8,6 +8,7 @@
 #include "app_globals.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "observer_factory.h"
 #include "panel_widget_registry.h"
 #include "panel_widget_size.h"
 #include "printer_state.h"
@@ -43,6 +44,9 @@ TempGraphWidget::TempGraphWidget(const std::string& instance_id) : instance_id_(
 }
 
 TempGraphWidget::~TempGraphWidget() {
+    // Unconditional: detach() nulls widget_obj_, so gating the cancel on it
+    // would leave a queued async pointing at this object after a detach.
+    cancel_discovery_rebuild();
     if (widget_obj_) {
         detach();
     }
@@ -110,6 +114,26 @@ void TempGraphWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 
     controller_ = std::make_unique<TempGraphController>(widget_obj_, std::move(ctrl_config));
 
+    // Discovery lands after the WebSocket connects, which is later than the
+    // startup attach of a dashboard widget. When it adds extruders this config
+    // has never seen, the series list itself is short a curve — the controller's
+    // own discovery retry only re-resolves series that already exist. Capture
+    // the current version so the immediate registration callback is a no-op.
+    {
+        auto& ps = get_printer_state();
+        if (auto* version_subj = ps.get_extruder_version_subject()) {
+            int initial_version = lv_subject_get_int(version_subj);
+            extruder_version_observer_ = helix::ui::observe_int_sync<TempGraphWidget>(
+                version_subj, this,
+                [initial_version](TempGraphWidget* self, int version) {
+                    if (version == initial_version)
+                        return; // Series were built against this version already
+                    self->schedule_discovery_rebuild();
+                },
+                ps.get_subjects_lifetime());
+        }
+    }
+
     // Match container bg to card (chart styling handled by controller)
     if (controller_ && controller_->is_valid()) {
         lv_obj_set_style_bg_color(widget_obj_, theme_manager_get_color("card_bg"), 0);
@@ -121,6 +145,8 @@ void TempGraphWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 }
 
 void TempGraphWidget::detach() {
+    cancel_discovery_rebuild();
+    extruder_version_observer_.reset();
     controller_.reset();
 
     if (widget_obj_) {
@@ -149,28 +175,69 @@ void TempGraphWidget::on_activate() {
     if (current_visibility_signature() == applied_visibility_signature_)
         return;
 
-    auto* saved_widget = widget_obj_;
-    auto* saved_parent = parent_screen_;
-    detach();
-    attach(saved_widget, saved_parent);
+    rebuild_in_place();
 }
 
 void TempGraphWidget::on_deactivate() {}
 
-void TempGraphWidget::apply_config_save(const nlohmann::json& new_config) {
-    config_ = new_config;
-    save_widget_config(config_);
-    // Snapshot the *current* widget pointers (panel rebuild between modal-open
-    // and save can free the originals; detach() then nulls these members).
+void TempGraphWidget::rebuild_in_place() {
+    // Snapshot the *current* widget pointers before detach() nulls them. They
+    // can also have been freed underneath us (a panel rebuild between
+    // modal-open and save — bundle RP293UCW), hence the validity check.
     auto* current_widget = widget_obj_;
     auto* current_parent = parent_screen_;
     detach();
     if (!current_widget || !lv_obj_is_valid(current_widget)) {
-        spdlog::warn("[TempGraphWidget] '{}' save: widget container gone, skipping reattach",
+        spdlog::warn("[TempGraphWidget] '{}' rebuild: widget container gone, skipping reattach",
                      instance_id_);
         return;
     }
     attach(current_widget, current_parent);
+}
+
+void TempGraphWidget::apply_config_save(const nlohmann::json& new_config) {
+    config_ = new_config;
+    save_widget_config(config_);
+    rebuild_in_place();
+}
+
+void TempGraphWidget::schedule_discovery_rebuild() {
+    if (discovery_rebuild_pending_) {
+        return; // Already queued — collapse the burst into one rebuild
+    }
+    discovery_rebuild_pending_ = true;
+    lv_async_call(discovery_rebuild_async, this);
+}
+
+void TempGraphWidget::cancel_discovery_rebuild() {
+    if (discovery_rebuild_pending_) {
+        if (lv_is_initialized()) {
+            lv_async_call_cancel(discovery_rebuild_async, this);
+        }
+        discovery_rebuild_pending_ = false;
+    }
+}
+
+void TempGraphWidget::discovery_rebuild_async(void* self) {
+    auto* widget = static_cast<TempGraphWidget*>(self);
+    widget->discovery_rebuild_pending_ = false;
+
+    if (!widget->widget_obj_) {
+        return; // Detached while queued
+    }
+
+    // Only rebuild when discovery actually added a curve we do not have. A bare
+    // version bump (rediscovery of the same tools) must not tear the graph down
+    // and throw away its trace — the controller re-resolves those subjects on
+    // its own.
+    if (!merge_discovered_extruders(widget->config_, true)) {
+        return;
+    }
+
+    widget->save_widget_config(widget->config_);
+    spdlog::info("[TempGraphWidget] '{}' rebuilding: discovery added extruders",
+                 widget->instance_id_);
+    widget->rebuild_in_place();
 }
 
 bool TempGraphWidget::on_edit_configure() {

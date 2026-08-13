@@ -514,9 +514,11 @@ Located in the `input` section:
   "input": {
     "scroll_throw": 25,
     "scroll_limit": 10,
+    "long_press_time": 500,
     "jitter_threshold": 5,
     "scroll_guard": false,
     "scroll_guard_cooldown_ms": 80,
+    "home_edit_mode_enabled": true,
     "touch_device": "",
     "device_blacklist": [],
     "force_calibration": false,
@@ -525,7 +527,7 @@ Located in the `input` section:
       "a": 1.0,
       "b": 0.0,
       "c": 0.0,
-      "d": 0.0,
+      "d": 1.0,
       "e": 1.0,
       "f": 0.0
     }
@@ -553,6 +555,17 @@ Located in the `input` section:
 - **Higher** = more deliberate gesture required. Reduces accidental scrolls when you meant to tap, but makes short-travel scrolls feel unresponsive.
 
 Matches LVGL's native default of 10.
+
+### `long_press_time`
+**Type:** integer
+**Default:** `500`
+**Range:** `300` - `1500` (UI-clamped)
+**Description:** How long (in milliseconds) a finger must hold before a press registers as a long-press. Governs every long-press in the app — home-screen Edit Mode entry, file-card delete, macro edit mode, and others. Raise this if long-press actions trigger when a finger simply rests on the glass (common on a tablet lying flat). Applied live — no restart needed.
+
+### `home_edit_mode_enabled`
+**Type:** boolean
+**Default:** `true`
+**Description:** Whether a long-press on the home grid enters Edit Mode (the drag-and-drop layout editor). When `false`, the long-press is suppressed entirely. Turn off if Edit Mode triggers by accident and you don't need to rearrange widgets, or pair with a higher `long_press_time` to make accidental entry harder while keeping the feature available. Applied live — no restart needed.
 
 ### `touch_device`
 **Type:** string
@@ -593,7 +606,7 @@ Can also be overridden with the `HELIX_TOUCH_JITTER` environment variable.
 ### `force_calibration`
 **Type:** boolean
 **Default:** `false`
-**Description:** Force touch calibration on next startup, even if the device doesn't normally require it. After successful calibration, this flag is automatically cleared. Useful when touch input is inaccurate but HelixScreen doesn't show the calibration option in Settings.
+**Description:** Force the calibration wizard to run on next startup, even if the device doesn't normally require it. After successful calibration, this flag is automatically cleared. Mainly useful when touch is too far off to reach Settings at all — the Settings entry point itself is offered for any touchscreen, so you rarely need this just to find the option.
 
 ---
 
@@ -657,7 +670,7 @@ Located in the `printer` section:
   "printer": {
     "name": "Unnamed Printer",
     "type": "Unknown",
-    "moonraker_host": "192.168.1.112",
+    "moonraker_host": "192.168.1.100",
     "moonraker_port": 7125,
     "moonraker_api_key": false,
     "heaters": {
@@ -907,7 +920,7 @@ Connection settings are in the `printer` section:
 ```json
 {
   "printer": {
-    "moonraker_host": "192.168.1.112",
+    "moonraker_host": "192.168.1.100",
     "moonraker_port": 7125,
     "moonraker_api_key": false,
     "moonraker_connection_timeout_ms": 10000,
@@ -922,7 +935,7 @@ Connection settings are in the `printer` section:
 
 ### `moonraker_host`
 **Type:** string
-**Default:** `"192.168.1.112"` (template default, usually `"localhost"`)
+**Default:** `"127.0.0.1"` (the value in `config/settings.json.template`)
 **Description:** Moonraker hostname or IP address.
 
 ### `moonraker_port`
@@ -1080,6 +1093,45 @@ Located in the `ams` section:
 **Description:** Filament spool visualization style:
 - `3d` - Bambu-style pseudo-3D canvas with gradients
 - `flat` - Simple concentric rings
+
+### Per-printer AMS settings
+
+The remaining AMS settings are **per printer**, so they live under the printer's own section rather than the top-level `ams` block:
+
+```json
+{
+  "printers": {
+    "default": {
+      "ams": {
+        "force_bypass_controls": false,
+        "always_show_bypass_spool": false,
+        "afc_unload_after_print": false
+      }
+    }
+  }
+}
+```
+
+All three have UI equivalents in **Settings > Hardware & Devices > Multi-Filament System Management** - edit them there rather than by hand.
+
+#### `force_bypass_controls`
+**Type:** boolean
+**Default:** `false`
+**Description:** Show the bypass controls and the external spool on the filament path even when the firmware reports no bypass position. Applies to Creality CFS, Anycubic ACE Pro, Snapmaker U1, tool changers, QIDI Box, and Happy Hare configs where `[mmu_machine] has_bypass` is `0`. The matching UI row is hidden whenever the firmware *does* report a bypass.
+
+On Happy Hare, `MMU_SELECT_BYPASS` ignores `has_bypass` and works either way, so this setting makes the bypass usable on `mmu_vendor: Other` setups and on uncalibrated type-A selectors. On the other systems there is no bypass command to send: the Bypass toggle reports that the operation is not supported, and the setting controls only whether the external spool is displayed and tracked.
+
+See [Filament → When Bypass Doesn't Appear](guide/filament.md#when-bypass-doesnt-appear).
+
+#### `always_show_bypass_spool`
+**Type:** boolean
+**Default:** `false`
+**Description:** Keep the external spool visible on the filament path while bypass is disengaged. Applies to AFC systems (Box Turtle, OpenAMS) only, which publish a virtual bypass sensor whether or not one is physically wired; without this, the node is drawn only while bypass is actually engaged.
+
+#### `afc_unload_after_print`
+**Type:** boolean
+**Default:** `false`
+**Description:** On AFC systems, retract filament back to its lane when a print finishes.
 
 ---
 
@@ -1676,7 +1728,7 @@ HelixScreen accepts command-line options for overriding configuration and debugg
 
 | Option | Description |
 |--------|-------------|
-| `--moonraker <url>` | Override Moonraker URL (e.g., `ws://192.168.1.112:7125`) |
+| `--moonraker <url>` | Override Moonraker URL (e.g., `ws://192.168.1.100:7125`) |
 
 ### Logging Options
 

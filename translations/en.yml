@@ -41,7 +41,17 @@ translations:
   0 = computed: 0 = computed
   0 events queued: 0 events queued
   0 slots: 0 slots
+  # Source: calibration_pid_panel.xml:368
+  0.0000 J/K: 0.0000 J/K
+  # Source: calibration_pid_panel.xml:374
+  0.000000 K/s/K: 0.000000 K/s/K
+  # Source: calibration_pid_panel.xml:380
+  0.000000 W/K: 0.000000 W/K
   0.4-2mm direct drive, 4-6mm bowden: 0.4-2mm direct drive, 4-6mm bowden
+  # Source: history_dashboard_panel.xml:83
+  0h: 0h
+  # Source: history_dashboard_panel.xml:89, print_status_panel.xml:252, print_status_panel.xml:254
+  0m: 0m
   0°: 0°
   1 day ago: 1 day ago
   1 event queued: 1 event queued
@@ -89,6 +99,8 @@ translations:
   ABS: ABS
   ACCELEROMETERS: ACCELEROMETERS
   ACE Moonraker bridge not found. Install ace_status.py for full support.: ACE Moonraker bridge not found. Install ace_status.py for full support.
+  ACE Moonraker bridge not found. Install ace_status.py from ValgACE for full support.: ACE
+    Moonraker bridge not found. Install ace_status.py from ValgACE for full support.
   ACTIONS: ACTIONS
   ADXL: ADXL
   AFC: AFC
@@ -154,6 +166,7 @@ translations:
   All axes homed: All axes homed
   All fields are required: All fields are required
   All plugins loaded successfully: All plugins loaded successfully
+  Allow Home Screen Editing: Allow Home Screen Editing
   Allow cold load/unload: Allow cold load/unload
   Allow display to sleep during active prints: Allow display to sleep during active
     prints
@@ -172,6 +185,8 @@ translations:
   An error occurred during measurement.: An error occurred during measurement.
   An error occurred during probing.: An error occurred during probing.
   An error occurred while loading filament.: An error occurred while loading filament.
+  # Source: probe_accuracy_modal.xml:90
+  An error occurred.: An error occurred.
   An internal error occurred. The app continues running — please send a debug bundle from Settings > About if it repeats.: An
     internal error occurred. The app continues running — please send a debug bundle
     from Settings > About if it repeats.
@@ -237,6 +252,7 @@ translations:
   Back: Back
   Back to Results: Back to Results
   'Backtrace: {} frames': 'Backtrace: {} frames'
+  Backup spool switching state unknown: Backup spool switching state unknown
   Barcode Scanner: Barcode Scanner
   Base: Base
   Beacon auto-calibrate sent: Beacon auto-calibrate sent
@@ -369,6 +385,7 @@ translations:
   Cancel Print: Cancel Print
   Cancel macro not configured: Cancel macro not configured
   Cancelled: Cancelled
+  Cannot be changed from here on a multi-unit MMU: Cannot be changed from here on a multi-unit MMU
   'Cannot control timelapse: printer not connected': 'Cannot control timelapse: printer
     not connected'
   'Cannot delete file: printer not connected': 'Cannot delete file: printer not connected'
@@ -461,6 +478,7 @@ translations:
   Clear All Events: Clear All Events
   Clear Console?: Clear Console?
   Clear Spool: Clear Spool
+  Clear all spool failover assignments: Clear all spool failover assignments
   Clear failed: Clear failed
   Cleared from settings — system unpair failed, may need OS Bluetooth: Cleared from
     settings — system unpair failed, may need OS Bluetooth
@@ -509,6 +527,7 @@ translations:
     macros
   Configure timelapse recording: Configure timelapse recording
   Configure your printer's cooling fans: Configure your printer's cooling fans
+  Configured in the backup-spool package, not from here: Configured in the backup-spool package, not from here
   Configuring Moonraker...: Configuring Moonraker...
   Confirm PIN: Confirm PIN
   Confirm before running macros: Confirm before running macros
@@ -753,6 +772,7 @@ translations:
   Enabled: Enabled
   Encoder: Encoder
   Ended: Ended
+  Endless spool failover cleared for every slot: Endless spool failover cleared for every slot
   Enhanced {} operation in PRINT_START: Enhanced {} operation in PRINT_START
   Enhanced {} operations in PRINT_START: Enhanced {} operations in PRINT_START
   Enhancement Complete!: Enhancement Complete!
@@ -788,6 +808,7 @@ translations:
   'Error: Verification failed': 'Error: Verification failed'
   'Error: Wrong architecture': 'Error: Wrong architecture'
   'Error: `unzip` not installed': 'Error: `unzip` not installed'
+  Errors only: Errors only
   Escalate to emergency stop if cancel doesn't respond: Escalate to emergency stop
     if cancel doesn't respond
   Escalation Timeout: Escalation Timeout
@@ -1121,6 +1142,8 @@ translations:
   How Z-axis movement is displayed: How Z-axis movement is displayed
   How far filament is pushed back into the box on eject (mm): How far filament is
     pushed back into the box on eject (mm)
+  ? How long to hold before a press counts as a long-press, in ms (raise if edit mode or other long-press actions trigger by accident)
+  : How long to hold before a press counts as a long-press, in ms (raise if edit mode or other long-press actions trigger by accident)
   How many labels to print: How many labels to print
   How the toolhead icon appears: How the toolhead icon appears
   Hub: Hub
@@ -1149,6 +1172,7 @@ translations:
   'Incompatible materials: {} cannot use {} as backup': 'Incompatible materials: {}
     cannot use {} as backup'
   Indexing G-code...: Indexing G-code...
+  Infinite Spool Mode: Infinite Spool Mode
   Info: Info
   Initialized: Initialized
   Initializing...: Initializing...
@@ -1168,6 +1192,7 @@ translations:
   Insert filament before resuming: Insert filament before resuming
   Install: Install
   Install HelixPrint Plugin: Install HelixPrint Plugin
+  Install Older Version?: Install Older Version?
   Install Plugin: Install Plugin
   Install Root: Install Root
   Install Update: Install Update
@@ -1235,6 +1260,8 @@ translations:
   'Klipper: ': 'Klipper: '
   Klippy Errors: Klippy Errors
   Klippy Shutdowns: Klippy Shutdowns
+  # Source: led_control_overlay.xml:31
+  LED: LED
   LED SELECTION: LED SELECTION
   LED Settings: LED Settings
   LED Strip: LED Strip
@@ -1256,10 +1283,14 @@ translations:
   Language: Language
   Language, theme, brightness, and sound: Language, theme, brightness, and sound
   Last: Last
+  # Source: history_dashboard_panel.xml:114
+  Last 7 days: Last 7 days
   Last print cancelled: Last print cancelled
   Last print failed: Last print failed
   Later: Later
   Layer: Layer
+  # Source: print_status_panel.xml:234
+  Layer 0 / 0: Layer 0 / 0
   Layer Height: Layer Height
   Layer Macro captures one frame per layer change. Best for most prints.: Layer Macro
     captures one frame per layer change. Best for most prints.
@@ -1307,6 +1338,8 @@ translations:
   Locked during print: Locked during print
   Log Level: Log Level
   Logs: Logs
+  Long Press Time: Long Press Time
+  Long-press the home grid to rearrange widgets (turn off if it triggers by accident): Long-press the home grid to rearrange widgets (turn off if it triggers by accident)
   Longest Disconnect: Longest Disconnect
   Loosen Path A belt.: Loosen Path A belt.
   Loosen Path B belt.: Loosen Path B belt.
@@ -1314,6 +1347,7 @@ translations:
   'Lot # (optional)': 'Lot # (optional)'
   Lot/Batch Nr: Lot/Batch Nr
   Low Memory: Low Memory
+  Lowest notification level that interrupts with a toast: Lowest notification level that interrupts with a toast
   M to toggle: M to toggle
   'MAC:': 'MAC:'
   MACRO DEVICES: MACRO DEVICES
@@ -1442,6 +1476,7 @@ translations:
   Named actions in the LED control panel (long-press).: Named actions in the LED control
     panel (long-press).
   Needs adjustment: Needs adjustment
+  Needs the {} package to switch spools: Needs the {} package to switch spools
   Net Weight (g): Net Weight (g)
   Network: Network
   Network Address: Network Address
@@ -1483,6 +1518,7 @@ translations:
   No USB printers found: No USB printers found
   ? No auto-switchover plugin (lessWaste or bambufy) is installed, so this printer will not change to a backup spool on its own.
   : No auto-switchover plugin (lessWaste or bambufy) is installed, so this printer will not change to a backup spool on its own.
+  No automatic backup-spool package is installed: No automatic backup-spool package is installed
   No buffer data available: No buffer data available
   No camera — use USB barcode scanner: No camera — use USB barcode scanner
   No changes selected.\n\nClick Cancel to close.: No changes selected.\n\nClick Cancel
@@ -1550,6 +1586,7 @@ translations:
   Not found (use phone app): Not found (use phone app)
   Not in your spools? Set it up: Not in your spools? Set it up
   Not now: Not now
+  Not yet available on this display: Not yet available on this display
   Not yet calibrated: Not yet calibrated
   Notes: Notes
   Notes (optional): Notes (optional)
@@ -1588,6 +1625,8 @@ translations:
   'Off:': 'Off:'
   'On': 'On'
   On and Off macros must be different: On and Off macros must be different
+  On your phone or computer, join the WiFi network \"{}\", then open http://{} in a browser to finish setup.: On your phone or computer, join the WiFi network \"{}\", then open http://{} in a browser to finish setup.
+  On-screen Alerts: On-screen Alerts
   On/Off: On/Off
   On/Off (state-aware): On/Off (state-aware)
   'On:': 'On:'
@@ -1824,6 +1863,8 @@ translations:
   Probing Bed...: Probing Bed...
   Probing Failed: Probing Failed
   Proceed: Proceed
+  # Source: abort_progress_modal.xml:20
+  Processing...: Processing...
   Profile deleted: Profile deleted
   Profile name (e.g., default): Profile name (e.g., default)
   Profile renamed: Profile renamed
@@ -1927,9 +1968,12 @@ translations:
   Resend write failed at chunk {}: Resend write failed at chunk {}
   Reset: Reset
   Reset CFS: Reset CFS
+  Reset Endless Spool: Reset Endless Spool
+  Reset Endless Spool?: Reset Endless Spool?
   Reset Home Screen?: Reset Home Screen?
   Reset Speed & Flow to 100%: Reset Speed & Flow to 100%
   Reset all settings and restart wizard: Reset all settings and restart wizard
+  Reset endless spool failed: Reset endless spool failed
   Reset failed: Reset failed
   Reset to Default: Reset to Default
   Reset to defaults: Reset to defaults
@@ -2128,6 +2172,7 @@ translations:
   'Set ': 'Set '
   Set Active: Set Active
   Set PIN: Set PIN
+  Set Up WiFi: Set Up WiFi
   ? 'Set a phone strobe app to %.1f Hz and aim at the belt. Adjust until the belt
     appears stationary.\n\nRecommended apps:\n  Android: Strobily, Strobe Light\n  iOS:
     Strobe Light Tachometer, myStroboscope'
@@ -2166,6 +2211,10 @@ translations:
   Show up/down buttons on long lists: Show up/down buttons on long lists
   Show whatever curves you last had visible on the full graph.: Show whatever curves
     you last had visible on the full graph.
+  Showing loaded colors: Showing loaded colors
+  Showing sliced colors: Showing sliced colors
+  Showing the 50 newest files. See more in the printer's web UI.: Showing the 50
+    newest files. See more in the printer's web UI.
   Shutdown: Shutdown
   Shutdown / Reboot: Shutdown / Reboot
   Shutdown failed: Shutdown failed
@@ -2291,7 +2340,9 @@ translations:
     app background tokens for light and dark modes.
   Switch Printer: Switch Printer
   Switch between light and dark themes: Switch between light and dark themes
+  Switch to v%s: Switch to v%s
   Switched to T{}: Switched to T{}
+  Switches to a backup spool on runout: Switches to a backup spool on runout
   Switching heater control to MPC. Klipper will restart.: Switching heater control
     to MPC. Klipper will restart.
   Switching to MPC requires a config change and Klipper restart.: Switching to MPC
@@ -2308,6 +2359,8 @@ translations:
     — this print will run out.
   T%d needs filament in slot %d, which is empty — this print will run out.: T%d needs
     filament in slot %d, which is empty — this print will run out.
+  # Source: ams_current_tool.xml:38
+  T0: T0
   TD-1 filament color detection: TD-1 filament color detection
   TEMPERATURE SENSORS: TEMPERATURE SENSORS
   THEME COLORS: THEME COLORS
@@ -2338,6 +2391,8 @@ translations:
   Temp °C (%d–%d): Temp °C (%d–%d)
   Temperature: Temperature
   Temperature Graph Config: Temperature Graph Config
+  # Source: calibration_pid_panel.xml:333
+  Temperature control has been optimized.: Temperature control has been optimized.
   Temperatures: Temperatures
   Temperatures saved: Temperatures saved
   Template: Template
@@ -2356,6 +2411,7 @@ translations:
     data helps improve HelixScreen.
   Thanks! TOTALLY anonymous usage data helps improve HelixScreen.: Thanks! TOTALLY
     anonymous usage data helps improve HelixScreen.
+  That slot cannot stand in for this one: That slot cannot stand in for this one
   That tool is already loaded: That tool is already loaded
   ? The HelixPrint plugin enables fast G-code modifications directly on your printer—like
     skipping bed mesh for quick reprints.
@@ -2387,6 +2443,7 @@ translations:
   The printer lost power while printing {}. The resumed layer may not line up exactly.: The printer lost power while printing {}. The resumed layer may not line up exactly.
   The printer rejected the filament configuration. The print was not started.: The
     printer rejected the filament configuration. The print was not started.
+  The printer's firmware chooses the backup spool itself: The printer's firmware chooses the backup spool itself
   The runout sensor indicates no filament is loaded. Start print anyway?: The runout
     sensor indicates no filament is loaded. Start print anyway?
   The toolhead sensor indicates filament is already loaded. Proceed with load anyway?: The
@@ -2407,6 +2464,8 @@ translations:
   This calibration uses the paper friction method to set your Z-offset.: This calibration
     uses the paper friction method to set your Z-offset.
   This cannot be undone.: This cannot be undone.
+  This channel offers v{}, older than the installed v{}. Anything added since then will be removed.: This channel offers v{}, older than the installed v{}. Anything added since then will be removed.
+  This clears every spool's failover assignment. The print will stop on runout until you set up failover again.: This clears every spool's failover assignment. The print will stop on runout until you set up failover again.
   This device has no wired network connection. If you turn WiFi off, it can only be turned back on from this screen.: This device has no wired network connection. If you turn WiFi off, it can only be turned back on from this screen.
   ? This device has only {} MB of RAM. Resonance calibration is memory-intensive and can make the printer firmware report a \"Timer Too Close\" error or restart mid-test. Continue anyway?
   : This device has only {} MB of RAM. Resonance calibration is memory-intensive and can make the printer firmware report a \"Timer Too Close\" error or restart mid-test. Continue anyway?
@@ -2588,6 +2647,7 @@ translations:
   Use Android native keyboard for text input: Use Android native keyboard for text
     input
   Use G10/G11 firmware retraction: Use G10/G11 firmware retraction
+  Use Settings Instead: Use Settings Instead
   Use printer type to select image: Use printer type to select image
   VM Peak: VM Peak
   VM Size: VM Size
@@ -2631,10 +2691,12 @@ translations:
   Waiting for Moonraker...: Waiting for Moonraker...
   Waiting for bed to reach temperature for accurate calibration.: Waiting for bed
     to reach temperature for accurate calibration.
+  Waiting for the filament system to report its state: Waiting for the filament system to report its state
   Warm Bed: Warm Bed
   Warming Bed...: Warming Bed...
   Warn: Warn
   Warning: Warning
+  Warnings & errors: Warnings & errors
   Watch the belt under the strobe LED. Adjust frequency until the belt appears stationary — that is the resonant frequency.: Watch
     the belt under the strobe LED. Adjust frequency until the belt appears stationary
     — that is the resonant frequency.
@@ -2674,6 +2736,7 @@ translations:
   Widget Labels: Widget Labels
   Width: Width
   Wifi: Wifi
+  Will not switch spools on runout: Will not switch spools on runout
   Wizard Error: Wizard Error
   Working...: Working...
   Write failed at chunk {}: Write failed at chunk {}
@@ -2742,6 +2805,8 @@ translations:
   ? backup-spool switching is on. It only switches to a port whose filament type AND colour both match the active spool and whose own port sensor reads filament present.
   : backup-spool switching is on. It only switches to a port whose filament type AND colour both match the active spool and whose own port sensor reads filament present.
   bed: bed
+  # Source: print_status_panel.xml:242
+  benchy.gcode: benchy.gcode
   by Preston Brown: by Preston Brown
   chamber heater: chamber heater
   complete: complete
@@ -2812,6 +2877,8 @@ translations:
   v%s available: v%s available
   v{} installed! Restarting...: v{} installed! Restarting...
   v{} is available. Tap to update.: v{} is available. Tap to update.
+  ? will switch to a slot whose filament type AND colour both match the active spool and whose own port sensor reads filament present.
+  : will switch to a slot whose filament type AND colour both match the active spool and whose own port sensor reads filament present.
   you have: you have
   '{} LED strips available': '{} LED strips available'
   '{} axis homed': '{} axis homed'

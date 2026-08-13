@@ -390,7 +390,7 @@ void GridEditMode::create_selection_chrome(lv_obj_t* widget) {
         lv_anim_set_exec_cb(&anim, [](void* obj, int32_t val) {
             auto* overlay = static_cast<lv_obj_t*>(obj);
             // Only pulse the first 8 children (corner brackets), skip edge bars
-            uint32_t count = std::min(lv_obj_get_child_count(overlay), 8u);
+            uint32_t count = std::min<uint32_t>(lv_obj_get_child_count(overlay), 8u);
             for (uint32_t i = 0; i < count; ++i) {
                 lv_obj_t* child = lv_obj_get_child(overlay, static_cast<int32_t>(i));
                 lv_obj_set_style_bg_opa(child, static_cast<lv_opa_t>(val), 0);
@@ -1599,16 +1599,16 @@ void GridEditMode::handle_resize_move(lv_event_t* /*e*/) {
 
     switch (resize_edge_) {
     case ResizeEdge::Right:
-        preview_x2 = std::clamp(point.x, preview_x1 + min_w, content_area.x2);
+        preview_x2 = std::clamp<int32_t>(point.x, preview_x1 + min_w, content_area.x2);
         break;
     case ResizeEdge::Left:
-        preview_x1 = std::clamp(point.x, content_area.x1, preview_x2 - min_w);
+        preview_x1 = std::clamp<int32_t>(point.x, content_area.x1, preview_x2 - min_w);
         break;
     case ResizeEdge::Bottom:
-        preview_y2 = std::clamp(point.y, preview_y1 + min_h, content_area.y2);
+        preview_y2 = std::clamp<int32_t>(point.y, preview_y1 + min_h, content_area.y2);
         break;
     case ResizeEdge::Top:
-        preview_y1 = std::clamp(point.y, content_area.y1, preview_y2 - min_h);
+        preview_y1 = std::clamp<int32_t>(point.y, content_area.y1, preview_y2 - min_h);
         break;
     case ResizeEdge::None:
         return;

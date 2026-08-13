@@ -19,6 +19,7 @@
 #include "ui_printer_list_overlay.h"
 #include "ui_settings_display_sound.h"
 #include "ui_settings_led.h"
+#include "ui_toast_manager.h"
 
 #include "app_globals.h"
 #include "config.h"
@@ -129,6 +130,19 @@ lv_obj_t* PrinterManagerOverlay::create(lv_obj_t* parent) {
             LV_EVENT_CLICKED, nullptr);
     }
 
+#if defined(HELIX_PLATFORM_ESP32)
+    // v1 Core+AMS cut has no camera, so timelapse is unavailable. The chip's XML
+    // already hides it when printer_has_timelapse==0; force it hidden here too so
+    // it never renders regardless of printer capability. Imperative (not a stacked
+    // bind_flag) because the chip already carries a printer_has_timelapse binding
+    // and this helix-xml build has no compound-condition (subject_expr/cond) support.
+    // Compiled out on desktop → zero desktop impact.
+    if (auto* timelapse_chip = lv_obj_find_by_name(overlay_root_, "pm_chip_timelapse")) {
+        // DECLARATIVE_OK: compile-time capability (#if), no runtime subject exists
+        lv_obj_add_flag(timelapse_chip, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
+
     return overlay_root_;
 }
 
@@ -166,6 +180,10 @@ void PrinterManagerOverlay::register_callbacks() {
 void PrinterManagerOverlay::on_chip_bed_mesh_clicked(lv_event_t* e) {
     (void)e;
     spdlog::debug("[Printer Manager] Bed Mesh chip clicked");
+#if defined(HELIX_PLATFORM_ESP32)
+    helix::ui::show_feature_unavailable_toast();
+    return;
+#endif
     auto& pm = get_printer_manager_overlay();
     helix::ui::lazy_create_and_push_overlay<BedMeshPanel>(
         get_global_bed_mesh_panel, pm.bed_mesh_panel_, lv_display_get_screen_active(nullptr),
@@ -182,6 +200,10 @@ void PrinterManagerOverlay::on_chip_leds_clicked(lv_event_t* e) {
 void PrinterManagerOverlay::on_chip_adxl_clicked(lv_event_t* e) {
     (void)e;
     spdlog::debug("[Printer Manager] ADXL chip clicked");
+#if defined(HELIX_PLATFORM_ESP32)
+    helix::ui::show_feature_unavailable_toast();
+    return;
+#endif
     auto& pm = get_printer_manager_overlay();
     helix::ui::lazy_create_and_push_overlay<InputShaperPanel>(
         get_global_input_shaper_panel, pm.input_shaper_panel_,
@@ -218,6 +240,10 @@ void PrinterManagerOverlay::on_chip_timelapse_clicked(lv_event_t* e) {
 void PrinterManagerOverlay::on_chip_screws_tilt_clicked(lv_event_t* e) {
     (void)e;
     spdlog::debug("[Printer Manager] Screws Tilt chip clicked");
+#if defined(HELIX_PLATFORM_ESP32)
+    helix::ui::show_feature_unavailable_toast();
+    return;
+#endif
     get_global_screws_tilt_panel().set_client(get_moonraker_client(), get_moonraker_api());
     auto& pm = get_printer_manager_overlay();
     helix::ui::lazy_create_and_push_overlay<ScrewsTiltPanel>(

@@ -257,6 +257,13 @@ target_compile_definitions(main PRIVATE
     HELIX_PLATFORM_ANDROID
     HELIX_HAS_SOUND
     HELIX_HAS_TRACKER
+    # This build bypasses the Makefile, so its `?= 1` feature defaults do not
+    # apply here — an undefined macro in `#if` is 0 and silently selects the
+    # stub implementation.
+    HELIX_HAS_GCODE_VIEWER=1
+    HELIX_HAS_BED_MESH_3D=1
+    HELIX_HAS_PLUGINS=1
+    HELIX_HAS_TIMELAPSE_VIEWER=1
     ENABLE_GLES_3D
     $<$<CONFIG:Debug>:HELIX_ENABLE_MOCKS>
     LV_CONF_INCLUDE_SIMPLE

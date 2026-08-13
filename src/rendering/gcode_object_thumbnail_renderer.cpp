@@ -1,6 +1,8 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#if HELIX_HAS_GCODE_VIEWER
+
 #include "gcode_object_thumbnail_renderer.h"
 
 #include "ui_update_queue.h"
@@ -313,3 +315,5 @@ void GCodeObjectThumbnailRenderer::draw_line(ObjectRenderContext& ctx, int x0, i
 }
 
 } // namespace helix::gcode
+
+#endif // HELIX_HAS_GCODE_VIEWER

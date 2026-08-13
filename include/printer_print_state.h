@@ -6,6 +6,10 @@
 #include "async_lifetime_guard.h"
 #include "subject_managed_panel.h"
 
+#if defined(HELIX_PLATFORM_ESP32)
+#include "esp_psram_thumbnail.h"
+#endif
+
 #include <atomic>
 #include <lvgl.h>
 #include <memory>
@@ -80,9 +84,25 @@ class PrinterPrintState {
     // Subject accessors (18 subjects)
     // ========================================================================
 
-    /// Print progress as 0-100 percent
+    /// Print progress as 0-100 percent, straight from Moonraker.
+    /// Drives time estimates, which key off progress being 0 before a print.
     lv_subject_t* get_print_progress_subject() {
         return &print_progress_;
+    }
+
+    /// Progress for display: tracks print_progress_ until the print reaches a
+    /// terminal state, then holds its final value (100 on completion) until the
+    /// next print starts. Moonraker zeroes print_progress_ in the same batch as
+    /// STANDBY, so a display bound to the raw value drops to 0 the instant a
+    /// print finishes.
+    lv_subject_t* get_print_progress_display_subject() {
+        return &print_progress_display_;
+    }
+
+    /// print_progress_display_ rendered as "N%". Written by the same call that
+    /// writes the int, so a bar and its label can never disagree.
+    lv_subject_t* get_print_progress_text_subject() {
+        return &print_progress_text_;
     }
 
     /// Raw filename from Moonraker
@@ -139,6 +159,22 @@ class PrinterPrintState {
         return &print_thumbnail_path_;
     }
 
+#if defined(HELIX_PLATFORM_ESP32)
+    /// Bumped every time the PSRAM thumbnail below is replaced. ESP32 has no
+    /// disk thumbnail cache, so print_thumbnail_path_ stays empty there and
+    /// consumers observe this counter instead, then pull the shared_ptr.
+    lv_subject_t* get_print_psram_thumb_gen_subject() {
+        return &print_psram_thumb_gen_;
+    }
+
+    /// Current print's PSRAM-resident thumbnail, or nullptr when none is
+    /// loaded. UI thread only — the returned shared_ptr keeps the buffer alive
+    /// for as long as a widget's image src points at its descriptor.
+    [[nodiscard]] std::shared_ptr<helix::ui::EspPsramThumbnail> get_print_psram_thumbnail() const {
+        return print_psram_thumbnail_;
+    }
+#endif
+
     /**
      * @brief Image the print-thumbnail subject carries when there is no thumbnail
      *
@@ -150,11 +186,17 @@ class PrinterPrintState {
      * own guard against that; publishing an explicit placeholder removes the
      * input instead of the guards' need to disagree about it.
      *
-     * Re-exported as ActivePrintMediaManager::kNoThumbnailPlaceholder, which is
-     * the name the sole writer of this subject publishes it under.
+     * Re-exported as ActivePrintMediaManager::no_thumbnail_placeholder(), which
+     * is the name the sole writer of this subject publishes it under.
+     *
+     * Resolved through helix::asset_component_uri() rather than spelled as a
+     * literal: on firmware the bundle mounts at a configured root, so a raw
+     * "A:assets/images/..." misses the mount and lv_image_set_src fails to open
+     * it — LVGL then clears the widget. Identity on desktop (asset root ".").
+     * The resolved string is cached on first call, which is safe because every
+     * caller runs after helix::set_asset_root().
      */
-    static constexpr const char* kNoThumbnailPlaceholder =
-        "A:assets/images/benchy_thumbnail_white.png";
+    static const char* no_thumbnail_placeholder();
 
     /**
      * @brief Gcode filename the current thumbnail path was produced for
@@ -358,6 +400,21 @@ class PrinterPrintState {
      * @param path LVGL-compatible path (e.g., "A:/tmp/thumbnail_xxx.bin"), "" to clear
      */
     void set_print_thumbnail(const std::string& for_file, const std::string& path);
+
+#if defined(HELIX_PLATFORM_ESP32)
+    /**
+     * @brief Install the current print's PSRAM-resident thumbnail
+     *
+     * MAIN THREAD ONLY. Two reasons, both hard: the subject bump notifies
+     * observers that call LVGL widget APIs, and replacing the shared_ptr can
+     * drop the last reference to the previous thumbnail, whose destructor
+     * calls lv_image_cache_drop(). Background callers must marshal via
+     * tok.defer()/ui_queue_update() first.
+     *
+     * @param thumb New thumbnail (may be nullptr to clear)
+     */
+    void set_print_psram_thumbnail(std::shared_ptr<helix::ui::EspPsramThumbnail> thumb);
+#endif
 
     /**
      * @brief Set display-ready print filename for UI binding
@@ -566,6 +623,18 @@ class PrinterPrintState {
      */
     void update_display_message_visible();
 
+    /// Write print_progress_display_ and print_progress_text_ together. The sole
+    /// writer of both, so the int and its rendered string cannot drift apart.
+    /// No-ops while progress_frozen_ is set.
+    void publish_progress_display(int percent);
+
+    /// Hold the current display progress until the next print starts. Called on
+    /// the transition into COMPLETE/CANCELLED/ERROR; completion pins 100 first.
+    void freeze_progress_display(bool complete);
+
+    /// Resume tracking print_progress_ and reset the display to 0.
+    void unfreeze_progress_display();
+
     /**
      * @brief Internal setter for print-in-progress flag
      *
@@ -591,6 +660,8 @@ class PrinterPrintState {
 
     // Print progress subjects
     lv_subject_t print_progress_{};         // Integer 0-100
+    lv_subject_t print_progress_display_{}; // Integer 0-100, frozen after completion
+    lv_subject_t print_progress_text_{};    // String: print_progress_display_ as "N%"
     lv_subject_t print_filename_{};         // String buffer
     lv_subject_t print_state_{};            // String buffer (for UI display)
     lv_subject_t print_state_enum_{};       // Integer: PrintJobState enum
@@ -599,6 +670,14 @@ class PrinterPrintState {
     lv_subject_t print_show_progress_{};    // Integer: 1 when active AND not starting
     lv_subject_t print_display_filename_{}; // String: clean filename
     lv_subject_t print_thumbnail_path_{};   // String: LVGL thumbnail path
+
+#if defined(HELIX_PLATFORM_ESP32)
+    // ESP32 thumbnail route (Task 11 R2): no disk cache on this platform, so
+    // the image lives in PSRAM behind a shared_ptr instead of at a path. The
+    // counter subject is what UI code observes; the pointer is what it reads.
+    lv_subject_t print_psram_thumb_gen_{}; // Integer: bumped on every install
+    std::shared_ptr<helix::ui::EspPsramThumbnail> print_psram_thumbnail_;
+#endif
 
     // Layer tracking subjects
     lv_subject_t print_layer_current_{}; // Current layer (0-based)
@@ -703,6 +782,10 @@ class PrinterPrintState {
     // only, updated from update_from_status.
     bool sdcard_active_ = false;
 
+    /// True between a terminal print state and the start of the next print,
+    /// while print_progress_display_ holds its final value.
+    bool progress_frozen_ = false;
+
     // virtual_sdcard.pl_env_valid — Snapmaker-fork Power-Loss-Recovery flag.
     lv_subject_t pl_env_valid_{}; // Integer: 1 when a validated PLR snapshot exists
     // virtual_sdcard.file_path — companion to pl_env_valid_. Not a subject:
@@ -743,6 +826,7 @@ class PrinterPrintState {
     // Identity for print_thumbnail_path_: the gcode filename that path was
     // produced for. Plain member (no XML binding), written before the subject.
     std::string print_thumbnail_file_;
+    char print_progress_text_buf_[16]{};
     char print_state_buf_[32]{};
     char print_start_message_buf_[64]{};
     char print_start_time_left_buf_[32]{};

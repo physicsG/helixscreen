@@ -72,6 +72,8 @@ The dashboard supports up to **8 pages**. Once you reach the limit, the "+" tile
 
 Edit Mode is how you customize your dashboard layout. While in Edit Mode, all normal widget interactions (tapping to open overlays, etc.) are disabled so you can freely rearrange things.
 
+> **Edit Mode is on by default.** If it triggers accidentally when a finger rests on the screen (common on a tablet lying flat), you have two options: turn it off entirely with **Allow Home Screen Editing** under **Settings → System → Touch & Input**, or raise the **Long Press Time** slider in the same page so a longer hold is required. Both take effect immediately.
+
 **Page swiping in Edit Mode:** Swiping between pages is disabled while in Edit Mode so you can drag widgets without accidentally changing pages. The one exception is swiping past the last page to reach the "+" add-page tile. When you exit Edit Mode, normal page swiping is re-enabled.
 
 ### Entering Edit Mode

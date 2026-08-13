@@ -9,11 +9,11 @@
 #include "audio_settings_manager.h"
 #include "config.h"
 #include "display_settings_manager.h"
+#include "i_moonraker_client.h"
 #include "input_settings_manager.h"
 #include "led/led_controller.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "material_settings_manager.h"
-#include "moonraker_client.h"
 #include "printer_detector.h"
 #include "printer_state.h"
 #include "runtime_config.h"
@@ -267,7 +267,7 @@ void SettingsManager::deinit_subjects() {
     spdlog::trace("[SettingsManager] Subjects deinitialized");
 }
 
-void SettingsManager::set_moonraker_client(MoonrakerClient* client) {
+void SettingsManager::set_moonraker_client(IMoonrakerClient* client) {
     moonraker_client_ = client;
     spdlog::debug("[SettingsManager] Moonraker client set: {}", client ? "connected" : "nullptr");
 }

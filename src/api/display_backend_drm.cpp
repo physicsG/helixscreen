@@ -552,6 +552,7 @@ lv_indev_t* DisplayBackendDRM::create_input_pointer() {
             bool has_abs = helix::input::get_input_touch_capabilities(event_num, &abs_caps);
 
             needs_calibration_ = helix::device_needs_calibration(dev_name, dev_phys, has_abs);
+            supports_calibration_ = helix::device_supports_calibration(dev_name, has_abs);
 
             // Query the touch controller's ABS range and propagate it into LVGL's
             // internal calibration. This runs unconditionally (not gated on

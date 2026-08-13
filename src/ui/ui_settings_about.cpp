@@ -32,9 +32,9 @@ inline constexpr int kContributorCount = sizeof(kContributors) / sizeof(kContrib
 #endif
 #include "format_utils.h"
 #include "helix_version.h"
+#include "i_moonraker_api.h"
 #include "logging_init.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 #include "platform_info.h"
 #include "static_panel_registry.h"
 #include "system/update_checker.h"
@@ -512,10 +512,12 @@ void AboutSettingsOverlay::on_about_update_channel_changed(lv_event_t* e) {
         spdlog::info("[AboutSettings] Update channel changed: {} ({})", index,
                      index == 0 ? "Stable" : (index == 1 ? "Beta" : "Dev"));
         SystemSettingsManager::instance().set_update_channel(index);
-        // Re-snapshot for the debug bundle's update section, which reads it from
-        // a worker thread and so cannot consult Config itself. We are on the
-        // main thread here; nothing on a check worker reads this snapshot.
-        UpdateChecker::instance().refresh_config_snapshot();
+        // Drops the previous channel's cached verdict, re-snapshots the config
+        // for the debug bundle's off-thread reader, and starts a fresh check.
+        // Without the re-check the row keeps showing whatever the old channel
+        // offered, including when the new channel is BEHIND this install and
+        // the only way forward is an explicit switch back.
+        UpdateChecker::instance().on_channel_changed();
     }
     LVGL_SAFE_EVENT_CB_END();
 }
@@ -530,7 +532,33 @@ void AboutSettingsOverlay::on_about_check_updates_clicked(lv_event_t* /*e*/) {
 void AboutSettingsOverlay::on_about_install_update_clicked(lv_event_t* /*e*/) {
     LVGL_SAFE_EVENT_CB_BEGIN("[AboutSettings] on_about_install_update_clicked");
     spdlog::info("[AboutSettings] Install update requested");
-    get_about_settings_overlay().show_update_download_modal();
+
+    // Moving backward is never what someone means by "install update", so it is
+    // never the one-tap path. Settings written by the newer build are not
+    // migrated back either — the older build reads what it recognizes and
+    // leaves the rest alone.
+    // Single if/else, no early return: BEGIN/END are a try/catch pair, so a
+    // return between them leaves the block unclosed.
+    auto cached = UpdateChecker::instance().get_cached_update();
+    if (cached && cached->is_downgrade) {
+        spdlog::info("[AboutSettings] Install target v{} is older than installed v{}, confirming",
+                     cached->version, HELIX_VERSION);
+        std::string msg =
+            fmt::format(lv_tr("This channel offers v{}, older than the installed v{}. "
+                              "Anything added since then will be removed."),
+                        cached->version, HELIX_VERSION);
+        helix::ui::modal_show_confirmation(
+            lv_tr("Install Older Version?"), msg.c_str(), ModalSeverity::Warning, lv_tr("Install"),
+            [](lv_event_t* /*e*/) {
+                LVGL_SAFE_EVENT_CB_BEGIN("[AboutSettings] downgrade_confirm_cb");
+                Modal::hide(Modal::get_top());
+                get_about_settings_overlay().show_update_download_modal();
+                LVGL_SAFE_EVENT_CB_END();
+            },
+            nullptr, nullptr);
+    } else {
+        get_about_settings_overlay().show_update_download_modal();
+    }
     LVGL_SAFE_EVENT_CB_END();
 }
 

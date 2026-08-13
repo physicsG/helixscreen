@@ -1586,7 +1586,7 @@ void AmsOperationSidebar::dispatch_unload_outside_backend(const helix::ui::Filam
 
 void AmsOperationSidebar::send_standard_filament_macro(
     bool is_load, const std::map<std::string, std::string>& params) {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
         return;
@@ -1610,7 +1610,7 @@ void AmsOperationSidebar::send_standard_filament_macro(
 }
 
 void AmsOperationSidebar::send_filament_fallback_gcode(bool is_load) {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
         return;
@@ -1628,7 +1628,7 @@ void AmsOperationSidebar::send_filament_fallback_gcode(bool is_load) {
                 NOTIFY_ERROR(lv_tr("Failed to unload: {}"), err.user_message());
             }
         },
-        MoonrakerAPI::EXTRUSION_TIMEOUT_MS);
+        IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
 }
 
 void AmsOperationSidebar::handle_load_complete() {

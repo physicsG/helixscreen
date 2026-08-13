@@ -534,10 +534,11 @@ void DisplaySoundSettingsOverlay::init_audio_device_dropdown() {
     if (!container)
         return;
 
-    // Only meaningful with the runtime-selectable ALSA backend. Hide the whole
-    // row otherwise (matches the screensaver/tracker capability-gating in this file).
+    // Visibility is driven declaratively by the compound cond on
+    // container_audio_device (sounds_enabled OR audio_device_available). On
+    // non-ALSA backends the row is hidden by the binding, so there is nothing
+    // to populate — just return.
     if (!SoundManager::instance().has_alsa_backend()) {
-        lv_obj_add_flag(container, LV_OBJ_FLAG_HIDDEN);
         return;
     }
 

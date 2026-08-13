@@ -18,8 +18,8 @@
 #include "display_settings_manager.h"
 #include "filament_sensor_manager.h"
 #include "hv/requests.h"
+#include "i_moonraker_api.h"
 #include "json_utils.h"
-#include "moonraker_api.h"
 #include "moonraker_client.h"
 #include "moonraker_types.h"
 #include "panel_widget_config.h"
@@ -1984,7 +1984,7 @@ nlohmann::json TelemetryManager::build_hardware_profile_event() const {
             event["mcus"] = mcus;
 
             // ---- build_volume section ----
-            // Read from MoonrakerAPI (not client) because set_build_volume()
+            // Read from IMoonrakerAPI (not client) because set_build_volume()
             // updates api->hardware(), not the discovery sequence's copy
             auto* api = get_moonraker_api();
             const auto& bv = api ? api->hardware().build_volume() : hw.build_volume();

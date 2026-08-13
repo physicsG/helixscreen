@@ -80,21 +80,98 @@ android {
 
 }
 
+// Files under config/ that belong to whoever ran the build, not to the package.
+// This mirrors the config/ section of the project .gitignore — every entry here
+// is untracked local state:
+//
+//   settings.json / settings-test.json / helixconfig*  a working config carries
+//     a real moonraker_host on the packager's LAN, an active_printer_id, and
+//     wizard_completed=true. Shipping one would skip first-run setup on every
+//     install and point it at a stranger's network. Nothing needs a shipped
+//     seed: Config::init() synthesizes defaults when the file is absent, and
+//     config/settings.json.template is documentation, not an input.
+//   crash*, .crash_restart_count           resurrect a dismissed crash dialog
+//   tool_spools.json, telemetry_*.json     per-device runtime state
+//   .helix-screen.lock, *.corrupt          runtime scratch
+def nonShippableConfig = [
+    'settings.json', 'settings-test.json', 'helixconfig*',
+    'crash*.txt', 'crash_history.json', '.crash_restart_count',
+    'tool_spools.json', 'telemetry_*.json',
+    '.helix-screen.lock', '*.corrupt'
+]
+
+// Same globs as regexes, for the post-copy audit below. Only '*' appears in
+// these patterns; everything around it is quoted literally.
+def nonShippableConfigPatterns = nonShippableConfig.collect {
+    java.util.regex.Pattern.compile('\\Q' + it.replace('*', '\\E.*\\Q') + '\\E')
+}
+
+// Destinations resolved at configuration time so the task actions below never
+// reach back through `project`.
+def stagedAssetRoot = file('src/main/assets')
+def stagedAssetDirs = ['ui_xml', 'assets', 'config'].collect { new File(stagedAssetRoot, it) }
+def stagedConfigDir = new File(stagedAssetRoot, 'config')
+
 // Copy project assets into APK assets directory, preserving directory structure.
 // The asset extractor on Android reads these and copies them to internal storage.
+//
+// The destination trees are deleted first because Gradle's Copy is purely
+// additive: it never removes a file an earlier build left behind, so adding an
+// exclusion does nothing about a destination that already holds the file. Only
+// the three copied trees are wiped — BUILD_STAMP and MANIFEST.txt sit at the
+// assets root and are produced by the tasks below.
 task copyAssets(type: Copy) {
+    doFirst {
+        stagedAssetDirs.each { it.deleteDir() }
+    }
     from('../../ui_xml') { into 'ui_xml' }
     from('../../assets') { into 'assets' }
-    from('../../config') { into 'config' }
+    from('../../config') {
+        into 'config'
+        exclude nonShippableConfig
+    }
     into 'src/main/assets'
 }
+
+// Last line of defense: sweep local state out of the staged assets, whatever
+// the incremental-build state left behind.
+//
+// This cannot live in copyAssets. That task shares its destination with
+// genBuildStamp and genPackagingManifest, so Gradle sees overlapping outputs,
+// stops tracking files it did not itself create, and reports UP-TO-DATE with a
+// stale settings.json sitting in the destination — skipping copyAssets' own
+// doFirst/doLast along with it. A separate never-up-to-date task always runs,
+// and only walks config/, so it costs nothing.
+//
+// It deletes rather than failing the build: a stale staged file is not a
+// mistake the developer can fix in source, and the packaging must be correct
+// either way. The removals are logged at warn so they are not silent.
+task purgeStagedLocalState {
+    outputs.upToDateWhen { false }
+    doLast {
+        if (!stagedConfigDir.isDirectory()) {
+            return
+        }
+        def leaked = []
+        stagedConfigDir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+            if (nonShippableConfigPatterns.any { p -> p.matcher(f.name).matches() }) {
+                leaked << f
+            }
+        }
+        leaked.each {
+            logger.warn("purgeStagedLocalState: removing local state staged into the APK: {}", it)
+            it.delete()
+        }
+    }
+}
+purgeStagedLocalState.dependsOn copyAssets
 
 // Generate MANIFEST.txt listing every source-tree directory shipped in the APK.
 // android_asset_extractor.cpp iterates this at first launch — the Android
 // AAssetDir API can only enumerate files, not subdirs, so without the manifest
 // the extractor has to hardcode the tree (which silently rots when new dirs
 // are added; see bug that motivated this). Regenerated on every build.
-task genPackagingManifest(dependsOn: copyAssets) {
+task genPackagingManifest(dependsOn: purgeStagedLocalState) {
     def manifestOut = file('src/main/assets/MANIFEST.txt')
     def script = file('../../scripts/gen-packaging-manifest.sh')
     def projectRoot = file('../..')
@@ -115,6 +192,24 @@ task genPackagingManifest(dependsOn: copyAssets) {
 }
 
 preBuild.dependsOn genPackagingManifest
+
+// Per-build stamp: written into the APK assets on every build. The native
+// asset extractor compares it to the on-disk stamp and re-extracts on
+// mismatch, so iterating on XML/assets on a connected device always picks
+// up edits. Without this, same-version dev rebuilds silently serve stale
+// extracted assets — the bare version gate cannot tell them apart, and the
+// git hash is regenerated at CMake configure-time only.
+task genBuildStamp {
+    def stampOut = file('src/main/assets/BUILD_STAMP')
+    outputs.file(stampOut)
+    outputs.upToDateWhen { false }
+    doLast {
+        stampOut.parentFile.mkdirs()
+        stampOut.text = String.valueOf(System.currentTimeMillis())
+    }
+}
+
+preBuild.dependsOn genBuildStamp
 
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')

@@ -15,10 +15,10 @@
 #include "config.h"
 #include "format_utils.h"
 #include "host_identity.h"
+#include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "memory_utils.h"
-#include "moonraker_api.h"
-#include "moonraker_client.h"
 #include "platform_capabilities.h"
 #include "static_panel_registry.h"
 #include "static_subject_registry.h"
@@ -60,8 +60,8 @@ static lv_subject_t s_input_shaper_state;
 
 // Forward declarations
 static void on_input_shaper_row_clicked(lv_event_t* e);
-MoonrakerClient* get_moonraker_client();
-MoonrakerAPI* get_moonraker_api();
+IMoonrakerClient* get_moonraker_client();
+IMoonrakerAPI* get_moonraker_api();
 
 InputShaperPanel& get_global_input_shaper_panel() {
     if (!g_input_shaper_panel) {
@@ -109,8 +109,8 @@ static void on_input_shaper_row_clicked(lv_event_t* e) {
         spdlog::debug("[InputShaper] Creating input shaper panel...");
 
         // Set API references before create
-        MoonrakerClient* client = get_moonraker_client();
-        MoonrakerAPI* api = get_moonraker_api();
+        IMoonrakerClient* client = get_moonraker_client();
+        IMoonrakerAPI* api = get_moonraker_api();
         panel.set_api(client, api);
 
         lv_obj_t* screen = lv_display_get_screen_active(nullptr);
@@ -415,7 +415,7 @@ void InputShaperPanel::setup_widgets() {
 // SHOW
 // ============================================================================
 
-void InputShaperPanel::set_api(MoonrakerClient* client, MoonrakerAPI* api) {
+void InputShaperPanel::set_api(IMoonrakerClient* client, IMoonrakerAPI* api) {
     client_ = client;
     api_ = api;
 
@@ -569,7 +569,7 @@ void InputShaperPanel::set_state(State new_state) {
 }
 
 // ============================================================================
-// CALIBRATION COMMANDS (using MoonrakerAPI)
+// CALIBRATION COMMANDS (using IMoonrakerAPI)
 // ============================================================================
 
 void InputShaperPanel::start_with_preflight(char axis) {

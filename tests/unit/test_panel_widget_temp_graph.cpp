@@ -722,6 +722,8 @@ TEST_CASE("TempGraphWidget: follow_overlay on with no snapshot falls back to con
 // sensor_display_name: extruders, bed, chamber
 // ============================================================================
 
+#include "ui_update_queue.h"
+
 #include "app_globals.h"
 #include "printer_state.h"
 
@@ -863,4 +865,97 @@ TEST_CASE_METHOD(TempGraphFeatureFixture,
     // Clean up: detach before the container is destroyed by the fixture.
     w.detach();
     lv_obj_delete(container);
+}
+
+// ============================================================================
+// Regression: widget attached before discovery is short a nozzle series
+// ============================================================================
+//
+// A dashboard widget attaches at app startup, before the WebSocket connects, so
+// merge_discovered_extruders() at attach time finds nothing and the series list
+// is built without any of the extra tools. The controller's discovery retry
+// re-resolves series that EXIST; it cannot conjure a curve the config never
+// listed. The widget therefore watches extruder_version itself and rebuilds.
+
+TEST_CASE_METHOD(TempGraphFeatureFixture,
+                 "Widget grows its series list when discovery adds extruders",
+                 "[ui][temp_graph][multi_tool]") {
+    auto& ps = get_printer_state();
+    ps.init_subjects(false);
+    auto& queue = helix::ui::UpdateQueue::instance();
+
+    // PrinterState is a process-global; clear any tools a previous case
+    // discovered so attach() really does run pre-discovery.
+    ps.init_extruders({});
+    queue.drain();
+
+    // Given: a widget attached while only the legacy single extruder is known
+    TempGraphWidget widget("temp_graph:test_discovery");
+    nlohmann::json cfg;
+    cfg["sensors"] = nlohmann::json::array(
+        {{{"name", "extruder"}, {"enabled", true}}, {{"name", "heater_bed"}, {"enabled", true}}});
+    widget.set_config(cfg);
+
+    lv_obj_t* container = lv_obj_create(screen);
+    widget.attach(container, screen);
+    REQUIRE(TempGraphWidgetTestAccess::has_controller(widget));
+
+    auto before = TempGraphWidgetTestAccess::build_series(widget);
+    REQUIRE(before.size() == 2);
+
+    // When: a 3-tool changer is discovered after the fact
+    ps.init_extruders({"extruder", "extruder1", "extruder2"});
+    queue.drain();
+    lv_timer_handler_safe(); // lv_async_call runs here, outside the queue batch
+
+    // Then: the config picked up the new tools and the series list grew
+    const auto& after_cfg = TempGraphWidgetTestAccess::get_config(widget);
+    std::string names;
+    for (const auto& s : after_cfg["sensors"]) {
+        names += s.value("name", std::string()) + " ";
+    }
+    INFO("config sensors: " << names);
+    REQUIRE(names.find("extruder1") != std::string::npos);
+    REQUIRE(names.find("extruder2") != std::string::npos);
+
+    auto after = TempGraphWidgetTestAccess::build_series(widget);
+    REQUIRE(after.size() == 4); // extruder, extruder1, extruder2, heater_bed
+    REQUIRE(TempGraphWidgetTestAccess::has_controller(widget));
+
+    widget.detach();
+}
+
+TEST_CASE_METHOD(TempGraphFeatureFixture,
+                 "Widget does not rebuild when rediscovery adds no new extruder",
+                 "[ui][temp_graph][multi_tool]") {
+    auto& ps = get_printer_state();
+    ps.init_subjects(false);
+    auto& queue = helix::ui::UpdateQueue::instance();
+
+    ps.init_extruders({"extruder", "extruder1"});
+    queue.drain();
+
+    TempGraphWidget widget("temp_graph:test_no_churn");
+    nlohmann::json cfg;
+    cfg["sensors"] = nlohmann::json::array({{{"name", "extruder"}, {"enabled", true}},
+                                            {{"name", "extruder1"}, {"enabled", true}},
+                                            {{"name", "heater_bed"}, {"enabled", true}}});
+    widget.set_config(cfg);
+
+    lv_obj_t* container = lv_obj_create(screen);
+    widget.attach(container, screen);
+    auto* controller_before = TempGraphWidgetTestAccess::get_widget_obj(widget);
+
+    // When: the same tool set is rediscovered (reconnect bumps the version)
+    ps.init_extruders({"extruder", "extruder1"});
+    queue.drain();
+    lv_timer_handler_safe();
+
+    // Then: no teardown — throwing the graph away on every reconnect would
+    // discard the trace for nothing.
+    REQUIRE(TempGraphWidgetTestAccess::has_controller(widget));
+    REQUIRE(TempGraphWidgetTestAccess::get_widget_obj(widget) == controller_before);
+    REQUIRE(TempGraphWidgetTestAccess::build_series(widget).size() == 3);
+
+    widget.detach();
 }

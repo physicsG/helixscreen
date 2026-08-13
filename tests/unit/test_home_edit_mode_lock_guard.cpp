@@ -21,67 +21,39 @@
  * container list is seeded through HomePanelTestAccess rather than standing up
  * the whole carousel; everything below that — should_suppress_edit_mode(), the
  * drift check, GridEditMode::enter() — is the production path.
+ *
+ * The kill switch that sits ahead of the lock check in should_suppress_edit_mode()
+ * is covered separately in test_home_edit_mode_kill_switch.cpp; ScopedInputSettings
+ * pins it enabled here so this file is testing the lock and nothing else.
  */
 
 #include "ui_panel_home.h"
 
-#include "../test_helpers/home_panel_test_access.h"
+#include "home_edit_mode_test_helpers.h"
 #include "lock_manager.h"
 #include "lvgl_test_fixture.h"
 
 #include "../catch_amalgamated.hpp"
 
-namespace {
-
-/// Restores the LockManager to "no PIN, unlocked" however the test exits — it
-/// is a process-wide singleton that persists its PIN to Config, so a leaked
-/// lock would follow every later test in the binary.
-class ScopedLockState {
-  public:
-    ~ScopedLockState() {
-        helix::LockManager::instance().remove_pin();
-    }
-};
-
-/// Detaches the seeded container and leaves edit mode, so the global HomePanel
-/// does not outlive this test holding a pointer to a fixture-owned widget.
-class ScopedHomePanelPage {
-  public:
-    explicit ScopedHomePanelPage(HomePanel& panel, lv_obj_t* container) : panel_(panel) {
-        HomePanelTestAccess::set_single_page_container(panel_, container);
-    }
-    ~ScopedHomePanelPage() {
-        panel_.exit_grid_edit_mode();
-        HomePanelTestAccess::clear_page_containers(panel_);
-    }
-    ScopedHomePanelPage(const ScopedHomePanelPage&) = delete;
-    ScopedHomePanelPage& operator=(const ScopedHomePanelPage&) = delete;
-
-  private:
-    HomePanel& panel_;
-};
-
-} // namespace
+using helix_test::make_long_press_container;
+using helix_test::ScopedHomePanelPage;
+using helix_test::ScopedInputSettings;
+using helix_test::ScopedLockState;
 
 TEST_CASE_METHOD(LVGLTestFixture, "home-grid long press is ignored while the screen is locked",
                  "[home][grid_edit][edit_mode][lock][1245]") {
+    // Default-flavoured: asserts the persisted key is absent AND that the
+    // documented default (enabled) is what the manager actually loaded, so this
+    // test can never quietly run against a co-tenant's disabled kill switch and
+    // "pass" for the wrong reason.
+    ScopedInputSettings input_settings;
     ScopedLockState lock_state;
     auto& lock = helix::LockManager::instance();
-    lock.remove_pin(); // known-clean starting point
 
     HomePanel& panel = get_global_home_panel();
 
-    // Stand-in for the carousel page container the real handler operates on.
-    lv_obj_t* container = lv_obj_create(test_screen());
-    lv_obj_remove_flag(container, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(container, 400, 300);
-    lv_obj_update_layout(container);
-
+    lv_obj_t* container = make_long_press_container(test_screen());
     ScopedHomePanelPage page(panel, container);
-
-    // The XML wires this exact callback onto carousel_host_ for LONG_PRESSED.
-    lv_obj_add_event_cb(container, HomePanelTestAccess::long_press_cb(), LV_EVENT_LONG_PRESSED,
-                        nullptr);
 
     REQUIRE_FALSE(HomePanelTestAccess::edit_mode_active(panel));
 

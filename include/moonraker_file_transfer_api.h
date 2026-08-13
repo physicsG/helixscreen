@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "i_moonraker_sub_apis.h"
 #include "moonraker_error.h"
 
 #include <functional>
@@ -19,7 +20,7 @@
 
 // Forward declarations
 namespace helix {
-class MoonrakerClient;
+class IMoonrakerClient;
 } // namespace helix
 
 /**
@@ -39,7 +40,7 @@ class MoonrakerClient;
  *       [](const std::string& content) { ... },
  *       [](const auto& err) { ... });
  */
-class MoonrakerFileTransferAPI {
+class MoonrakerFileTransferAPI : public ITransfersAPI {
   public:
     using SuccessCallback = std::function<void()>;
     using ErrorCallback = std::function<void(const MoonrakerError&)>;
@@ -62,7 +63,7 @@ class MoonrakerFileTransferAPI {
      * @param client MoonrakerClient instance (must remain valid during API lifetime)
      * @param http_base_url Reference to HTTP base URL string (owned by MoonrakerAPI)
      */
-    MoonrakerFileTransferAPI(helix::MoonrakerClient& client, const std::string& http_base_url);
+    MoonrakerFileTransferAPI(helix::IMoonrakerClient& client, const std::string& http_base_url);
 
     /**
      * @brief Destructor — joins all pending HTTP threads
@@ -89,8 +90,8 @@ class MoonrakerFileTransferAPI {
      * @param on_success Callback with file content as string
      * @param on_error Error callback
      */
-    virtual void download_file(const std::string& root, const std::string& path,
-                               StringCallback on_success, ErrorCallback on_error);
+    void download_file(const std::string& root, const std::string& path, StringCallback on_success,
+                       ErrorCallback on_error) override;
 
     /**
      * @brief Download only the first N bytes of a file (for scanning preambles)
@@ -104,9 +105,8 @@ class MoonrakerFileTransferAPI {
      * @param on_success Callback with partial file content as string
      * @param on_error Error callback
      */
-    virtual void download_file_partial(const std::string& root, const std::string& path,
-                                       size_t max_bytes, StringCallback on_success,
-                                       ErrorCallback on_error);
+    void download_file_partial(const std::string& root, const std::string& path, size_t max_bytes,
+                               StringCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Download a file directly to disk (streaming, low memory)
@@ -124,10 +124,10 @@ class MoonrakerFileTransferAPI {
      * @param on_error Error callback
      * @param on_progress Optional callback for progress updates (called from HTTP thread)
      */
-    virtual void download_file_to_path(const std::string& root, const std::string& path,
-                                       const std::string& dest_path, StringCallback on_success,
-                                       ErrorCallback on_error,
-                                       ProgressCallback on_progress = nullptr);
+    void download_file_to_path(const std::string& root, const std::string& path,
+                               const std::string& dest_path, StringCallback on_success,
+                               ErrorCallback on_error,
+                               ProgressCallback on_progress = nullptr) override;
 
     /**
      * @brief Download a thumbnail image and cache it locally
@@ -142,9 +142,8 @@ class MoonrakerFileTransferAPI {
      * @param on_success Callback with local cache path
      * @param on_error Error callback
      */
-    virtual void download_thumbnail(const std::string& thumbnail_path,
-                                    const std::string& cache_path, StringCallback on_success,
-                                    ErrorCallback on_error);
+    void download_thumbnail(const std::string& thumbnail_path, const std::string& cache_path,
+                            StringCallback on_success, ErrorCallback on_error) override;
 
     // ========================================================================
     // Upload Operations
@@ -164,9 +163,8 @@ class MoonrakerFileTransferAPI {
      * @param on_success Success callback
      * @param on_error Error callback
      */
-    virtual void upload_file(const std::string& root, const std::string& path,
-                             const std::string& content, SuccessCallback on_success,
-                             ErrorCallback on_error);
+    void upload_file(const std::string& root, const std::string& path, const std::string& content,
+                     SuccessCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Upload file content with custom filename
@@ -187,9 +185,9 @@ class MoonrakerFileTransferAPI {
      * @param on_success Success callback
      * @param on_error Error callback
      */
-    virtual void upload_file_with_name(const std::string& root, const std::string& path,
-                                       const std::string& filename, const std::string& content,
-                                       SuccessCallback on_success, ErrorCallback on_error);
+    void upload_file_with_name(const std::string& root, const std::string& path,
+                               const std::string& filename, const std::string& content,
+                               SuccessCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Upload file from local filesystem path (streaming, low memory)
@@ -207,12 +205,12 @@ class MoonrakerFileTransferAPI {
      * @param on_error Error callback
      * @param on_progress Optional callback for progress updates (called from HTTP thread)
      */
-    virtual void upload_file_from_path(const std::string& root, const std::string& dest_path,
-                                       const std::string& local_path, SuccessCallback on_success,
-                                       ErrorCallback on_error,
-                                       ProgressCallback on_progress = nullptr);
+    void upload_file_from_path(const std::string& root, const std::string& dest_path,
+                               const std::string& local_path, SuccessCallback on_success,
+                               ErrorCallback on_error,
+                               ProgressCallback on_progress = nullptr) override;
 
   protected:
-    helix::MoonrakerClient& client_;
+    helix::IMoonrakerClient& client_;
     const std::string& http_base_url_;
 };

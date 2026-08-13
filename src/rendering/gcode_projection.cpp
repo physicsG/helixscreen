@@ -1,6 +1,8 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#if HELIX_HAS_GCODE_VIEWER
+
 #include "gcode_projection.h"
 
 #include <algorithm>
@@ -147,3 +149,5 @@ AutoFitResult compute_auto_fit(const AABB& bb, ViewMode view_mode, int canvas_wi
 }
 
 } // namespace helix::gcode
+
+#endif // HELIX_HAS_GCODE_VIEWER

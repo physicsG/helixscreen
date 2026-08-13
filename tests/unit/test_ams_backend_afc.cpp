@@ -137,13 +137,9 @@ class AmsBackendAfcTestHelper : public AmsBackendAfc {
         extruder_sensors_[extruder_name].lane_loaded = lane_name;
     }
 
-    // AFC_extruder.is_standalone, as REPORTED. Only v1.2.0+ publishes it, and its
-    // presence is what dates the install — so a test that wants the pre-1.2.0
-    // shape must simply never call this.
+    // AFC_extruder.is_standalone (v1.2.0+ only publishes it).
     void report_extruder_standalone(const std::string& extruder_name, bool standalone) {
-        AfcToolState& ts = tool_states_[extruder_name];
-        ts.is_standalone = standalone;
-        ts.has_is_standalone = true;
+        tool_states_[extruder_name].is_standalone = standalone;
     }
 
     void set_running(bool state) {
@@ -414,8 +410,10 @@ class AmsBackendAfcTestHelper : public AmsBackendAfc {
         return get_system_info().tool_to_slot_map;
     }
 
-    std::vector<helix::printer::EndlessSpoolConfig> get_endless_spool_configs() const {
-        return get_endless_spool_config();
+    /// Per-slot backup edges, via the one shared group-to-edge projection.
+    std::vector<int> get_endless_spool_edges() const {
+        return helix::printer::endless_spool_backup_edges(get_endless_spool_config(),
+                                                          get_system_info().total_slots);
     }
 
     // Get mapped_tool from a slot
@@ -1550,13 +1548,19 @@ TEST_CASE("AFC reset_endless_spool clears all slots", "[ams][afc][endless_spool]
     REQUIRE(helper.has_gcode("SET_RUNOUT LANE=lane4 RUNOUT=NONE"));
 }
 
-TEST_CASE("AFC reset_endless_spool with zero slots is no-op", "[ams][afc][endless_spool][reset]") {
+TEST_CASE("AFC reset_endless_spool with no lanes yet refuses instead of silently succeeding",
+          "[ams][afc][endless_spool][reset]") {
     AmsBackendAfcTestHelper helper;
-    // Don't initialize any lanes or configs
+    // Don't initialize any lanes or configs — AFC always advertises the mapping as
+    // editable, so without a slot-count guard the loop is skipped and the caller is
+    // told the wipe succeeded. The UI confirms a destructive warning before calling
+    // this, so a silent no-op is worse than a refusal.
 
     auto result = helper.reset_endless_spool();
 
-    REQUIRE(result.success());
+    REQUIRE_FALSE(result.success());
+    REQUIRE(result.result == AmsResult::NOT_SUPPORTED);
+    REQUIRE_FALSE(result.user_msg.empty());
     REQUIRE(helper.captured_gcodes.empty());
 }
 
@@ -1750,9 +1754,9 @@ TEST_CASE("AFC endless spool from runout_lane field", "[ams][afc][endless_spool]
     helper.feed_afc_stepper("lane1", {{"runout_lane", "lane2"}});
 
     // runout_lane should update endless spool backup config
-    auto configs = helper.get_endless_spool_configs();
-    REQUIRE(configs.size() == 4);
-    REQUIRE(configs[0].backup_slot == 1); // lane1's backup is lane2 (slot 1)
+    auto edges = helper.get_endless_spool_edges();
+    REQUIRE(edges.size() == 4);
+    REQUIRE(edges[0] == 1); // lane1's backup is lane2 (slot 1)
 }
 
 TEST_CASE("AFC endless spool null runout_lane clears backup", "[ams][afc][endless_spool][phase1]") {
@@ -1770,8 +1774,7 @@ TEST_CASE("AFC endless spool null runout_lane clears backup", "[ams][afc][endles
     helper.feed_afc_stepper("lane1", stepper_data);
 
     // null runout_lane should clear the backup
-    auto configs = helper.get_endless_spool_configs();
-    REQUIRE(configs[0].backup_slot == -1); // Cleared
+    REQUIRE(helper.get_endless_spool_edges()[0] == -1); // Cleared
 }
 
 TEST_CASE("AFC message sets operation detail", "[ams][afc][message][phase1]") {
@@ -3828,225 +3831,64 @@ TEST_CASE("AFC eject_lane sends LANE_UNLOAD command", "[ams][afc][eject]") {
 }
 
 // ============================================================================
-// eject_lane() mirrors upstream LANE_UNLOAD's own refusals
+// eject_lane() sends LANE_UNLOAD unconditionally
 //
-// Every condition upstream refuses on ends in a bare `return` or falls off the
-// end of an if/elif chain. Klipper acks the G-code as success either way, so
-// without these guards eject_lane() reports success and nothing moves — the
-// user sees a button that does nothing and produces no error to explain it.
+// We used to transcribe cmd_LANE_UNLOAD's own if/elif chain here, forked by an
+// inferred AFC version, so a refusal could be reported locally. AFC's maintainer
+// asked us not to gate their macros (prestonbrown/helixscreen#1258), and the
+// fork could not be made correct anyway: there is no reliable AFC version to
+// read, so the era was guessed from whether is_standalone appeared in the
+// status payload.
 //
-// Two shapes are live in the field and they refuse on DIFFERENT conditions:
-// v1.1.0 keys on the global AFC.current plus the lane's hub routing; v1.2.0
-// (2026-07-26) rewrote the body to key on the lane's own extruder and its
-// is_standalone flag, dropping hub routing entirely. is_standalone arrived in
-// that same release, so whether AFC reports it dates the install.
+// These cases pin the absence of that gate. Every one is a state the old mirror
+// refused on; all of them must now dispatch.
 //
-// Mutation check: delete the whole lane_unload_refusal_unlocked() call from
-// eject_lane() and every "refuses" case below fails; swap the v1.2.0 arm order
-// so the toolhead test precedes the standalone one and "standalone extruder
-// holding the lane" fails.
+// Mutation check: re-add any refusal keyed on lane_loaded, hub routing, or
+// is_standalone to eject_lane() and these fail.
 // ============================================================================
 
-TEST_CASE("AFC eject_lane: v1.2.0 shape keys on the lane's own extruder",
-          "[ams][afc][eject][refusal]") {
-    AmsBackendAfcTestHelper helper;
-    helper.initialize_test_lanes_with_slots(4);
-    helper.set_running(true);
-    helper.set_lane_extruder(0, "extruder");
-    helper.set_lane_extruder(1, "extruder");
-
-    SECTION("arm 1: lane-fed extruder not holding this lane — the normal eject") {
-        helper.report_extruder_standalone("extruder", false);
-        helper.set_extruder_lane_loaded("extruder", "lane2");
-
-        REQUIRE(helper.eject_lane(0).success());
-        CHECK(helper.has_gcode("LANE_UNLOAD LANE=lane1"));
-    }
-
-    SECTION("arm 2: standalone extruder IS holding the lane — upstream retracts, so allow") {
-        // The ordering that matters: this lane is at the toolhead, but on a
-        // standalone extruder upstream takes the retract arm BEFORE the
-        // "loaded in toolhead" arm. Refusing here would block a working op.
-        helper.report_extruder_standalone("extruder", true);
+TEST_CASE("AFC eject_lane dispatches regardless of upstream refusal conditions",
+          "[ams][afc][eject]") {
+    SECTION("lane seated at its own extruder") {
+        AmsBackendAfcTestHelper helper;
+        helper.initialize_test_lanes_with_slots(4);
+        helper.set_running(true);
         helper.set_extruder_lane_loaded("extruder", "lane1");
 
         REQUIRE(helper.eject_lane(0).success());
         CHECK(helper.has_gcode("LANE_UNLOAD LANE=lane1"));
     }
 
-    SECTION("arm 3: lane-fed extruder holding this lane — refused, no gcode") {
-        helper.report_extruder_standalone("extruder", false);
-        helper.set_extruder_lane_loaded("extruder", "lane1");
+    SECTION("lane routed direct rather than through a hub") {
+        AmsBackendAfcTestHelper helper;
+        helper.initialize_test_lanes_with_slots(4);
+        helper.set_running(true);
+        helper.set_lane_hub_routing("lane1", "direct");
 
-        auto result = helper.eject_lane(0);
-
-        REQUIRE_FALSE(result.success());
-        CHECK(result.result == AmsResult::WRONG_STATE);
-        CHECK(result.user_msg == "Unload from toolhead first");
-        CHECK(helper.captured_gcodes.empty());
+        REQUIRE(helper.eject_lane(0).success());
+        CHECK(helper.has_gcode("LANE_UNLOAD LANE=lane1"));
     }
 
-    SECTION("fall-through: standalone extruder holding nothing — the silent case") {
-        // Matches no arm at all: not arm 1 (standalone), not arm 2 (lane_loaded
-        // empty), not arm 3 ("lane1" != ""). Upstream returns having logged
-        // nothing whatsoever.
-        //
-        // The empty lane_loaded must be REPORTED, not merely absent: upstream
-        // always has an extruder_obj and reads a falsy lane_loaded off it,
-        // whereas a missing AFC_extruder object on our side means the frame has
-        // not arrived yet. Unknown is not "holding nothing" — see the delta
-        // section below, which pins that distinction from the other direction.
+    SECTION("standalone extruder holding nothing") {
+        AmsBackendAfcTestHelper helper;
+        helper.initialize_test_lanes_with_slots(4);
+        helper.set_running(true);
         helper.report_extruder_standalone("extruder", true);
         helper.set_extruder_lane_loaded("extruder", "");
 
-        auto result = helper.eject_lane(0);
-
-        REQUIRE_FALSE(result.success());
-        CHECK(result.result == AmsResult::WRONG_STATE);
-        CHECK(result.user_msg == "Nothing to eject on this toolhead");
-        CHECK(helper.captured_gcodes.empty());
-    }
-
-    SECTION("hub routing is NOT consulted on v1.2.0") {
-        // v1.1.0 refused a direct lane outright. v1.2.0 dropped hub routing from
-        // the decision, so applying the old rule here would block a working eject.
-        helper.report_extruder_standalone("extruder", false);
-        helper.set_lane_hub_routing("lane1", "direct");
-
         REQUIRE(helper.eject_lane(0).success());
         CHECK(helper.has_gcode("LANE_UNLOAD LANE=lane1"));
     }
 
-    SECTION("an AFC_extruder frame that has not arrived is unknown, not empty") {
-        // Standalone reported, but no AFC_extruder object yet — so lane_loaded is
-        // genuinely unknown. Refusing here would block ejects on every frame that
-        // arrives before the extruder object, which Moonraker's deltas make
-        // routine. Mutation check: treat a missing sensors entry as an empty
-        // lane_loaded and this fails.
-        helper.report_extruder_standalone("extruder", true);
-
-        REQUIRE(helper.eject_lane(0).success());
-        CHECK(helper.has_gcode("LANE_UNLOAD LANE=lane1"));
-    }
-}
-
-TEST_CASE("AFC eject_lane: aggregate state is the last resort, never the first",
-          "[ams][afc][eject][refusal]") {
-    // system_info_.filament_loaded / current_slot are DERIVED — parse_afc_state
-    // computes filament_loaded from `loaded_lane`, which prefers
-    // AFC.current_loading and so reads true across an entire toolchange (see
-    // toolhead_is_free_unlocked). They must never outrank a per-lane answer
-    // (#1199), but before any per-lane object has landed they are the only thing
-    // that knows a lane is at the head — and refusing with a clear message beats
-    // firing a LANE_UNLOAD upstream silently discards.
-    AmsBackendAfcTestHelper helper;
-    helper.initialize_test_lanes_with_slots(4);
-    helper.set_running(true);
-
-    SECTION("used when no per-lane authority has spoken") {
+    SECTION("aggregate state says this slot is the loaded one") {
+        AmsBackendAfcTestHelper helper;
+        helper.initialize_test_lanes_with_slots(4);
+        helper.set_running(true);
         helper.set_filament_loaded(true);
         helper.set_current_slot(1);
-
-        auto result = helper.eject_lane(1);
-
-        REQUIRE_FALSE(result.success());
-        CHECK(result.result == AmsResult::WRONG_STATE);
-        CHECK(helper.captured_gcodes.empty());
-    }
-
-    SECTION("a non-current slot still ejects while the aggregate says loaded") {
-        helper.set_filament_loaded(true);
-        helper.set_current_slot(1);
-
-        REQUIRE(helper.eject_lane(2).success());
-        CHECK(helper.has_gcode("LANE_UNLOAD LANE=lane3"));
-    }
-
-    SECTION("overruled by the per-lane answer — the whole point of #1199") {
-        // The aggregate says slot 1 is loaded; the lane's own extruder says it
-        // holds lane4, not lane2. The per-lane answer wins and the eject runs.
-        helper.set_filament_loaded(true);
-        helper.set_current_slot(1);
-        helper.set_lane_extruder(1, "extruder");
-        helper.report_extruder_standalone("extruder", false);
-        helper.set_extruder_lane_loaded("extruder", "lane4");
 
         REQUIRE(helper.eject_lane(1).success());
         CHECK(helper.has_gcode("LANE_UNLOAD LANE=lane2"));
-    }
-}
-
-TEST_CASE("AFC eject_lane: v1.2.0 attributes per extruder, not globally",
-          "[ams][afc][eject][refusal]") {
-    // A toolchanger is where the v1.1.0 global AFC.current and the v1.2.0
-    // per-extruder lane_loaded actually diverge. lane1 feeds extruder, lane2
-    // feeds extruder1; extruder1 holds lane2. Ejecting lane1 must not be refused
-    // because some OTHER toolhead is loaded.
-    AmsBackendAfcTestHelper helper;
-    helper.initialize_test_lanes_with_slots(4);
-    helper.set_running(true);
-    helper.set_lane_extruder(0, "extruder");
-    helper.set_lane_extruder(1, "extruder1");
-    helper.report_extruder_standalone("extruder", false);
-    helper.report_extruder_standalone("extruder1", false);
-    helper.set_extruder_lane_loaded("extruder1", "lane2");
-
-    SECTION("the idle toolhead's lane still ejects") {
-        REQUIRE(helper.eject_lane(0).success());
-        CHECK(helper.has_gcode("LANE_UNLOAD LANE=lane1"));
-    }
-
-    SECTION("the loaded toolhead's own lane is still refused") {
-        auto result = helper.eject_lane(1);
-
-        REQUIRE_FALSE(result.success());
-        CHECK(result.user_msg == "Unload from toolhead first");
-        CHECK(helper.captured_gcodes.empty());
-    }
-}
-
-TEST_CASE("AFC eject_lane: pre-v1.2.0 shape keys on AFC.current and hub routing",
-          "[ams][afc][eject][refusal]") {
-    // No report_extruder_standalone() call anywhere here — an install that never
-    // publishes is_standalone is how the older shape is recognised.
-    AmsBackendAfcTestHelper helper;
-    helper.initialize_test_lanes_with_slots(4);
-    helper.set_running(true);
-
-    SECTION("hub-routed lane, nothing at the toolhead — ejects") {
-        helper.set_lane_hub_routing("lane1", "Turtle_1");
-
-        REQUIRE(helper.eject_lane(0).success());
-        CHECK(helper.has_gcode("LANE_UNLOAD LANE=lane1"));
-    }
-
-    SECTION("direct-routed lane — refused, no gcode") {
-        helper.set_lane_hub_routing("lane1", "direct");
-
-        auto result = helper.eject_lane(0);
-
-        REQUIRE_FALSE(result.success());
-        CHECK(result.result == AmsResult::WRONG_STATE);
-        CHECK(result.user_msg == "Unload from the toolhead instead");
-        CHECK(helper.captured_gcodes.empty());
-    }
-
-    SECTION("lane named by AFC.current — refused, no gcode") {
-        helper.set_lane_hub_routing("lane1", "Turtle_1");
-        helper.set_toolhead_lane("lane1");
-
-        auto result = helper.eject_lane(0);
-
-        REQUIRE_FALSE(result.success());
-        CHECK(result.user_msg == "Unload from toolhead first");
-        CHECK(helper.captured_gcodes.empty());
-    }
-
-    SECTION("unknown hub routing is not treated as direct") {
-        // Moonraker sends deltas; a lane whose AFC_stepper frame has not arrived
-        // yet must not inherit a refusal it never earned.
-        REQUIRE(helper.eject_lane(0).success());
-        CHECK(helper.has_gcode("LANE_UNLOAD LANE=lane1"));
     }
 }
 
@@ -4059,20 +3901,6 @@ TEST_CASE("AFC eject_lane targets correct lane", "[ams][afc][eject]") {
 
     REQUIRE(result.success());
     REQUIRE(helper.has_gcode("LANE_UNLOAD LANE=lane3"));
-}
-
-TEST_CASE("AFC eject_lane fails when lane is loaded in toolhead", "[ams][afc][eject]") {
-    AmsBackendAfcTestHelper helper;
-    helper.initialize_test_lanes_with_slots(4);
-    helper.set_running(true);
-    helper.set_filament_loaded(true);
-    helper.set_current_slot(1);
-
-    auto result = helper.eject_lane(1);
-
-    REQUIRE_FALSE(result.success());
-    REQUIRE(result.result == AmsResult::WRONG_STATE);
-    REQUIRE(helper.captured_gcodes.empty());
 }
 
 TEST_CASE("AFC eject_lane allows eject of non-current slot even when filament loaded",

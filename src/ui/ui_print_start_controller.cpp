@@ -26,8 +26,9 @@
 #include "data_root_resolver.h"
 #include "filament_database.h"
 #include "filament_sensor_manager.h"
+#include "helix_psram_attr.h"
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 #include "observer_factory.h"
 #include "printer_state.h"
 #include "settings_manager.h"
@@ -47,7 +48,7 @@ namespace helix::ui {
 // Constructor / Destructor
 // ============================================================================
 
-PrintStartController::PrintStartController(PrinterState& printer_state, MoonrakerAPI* api)
+PrintStartController::PrintStartController(PrinterState& printer_state, IMoonrakerAPI* api)
     : printer_state_(printer_state), api_(api) {
     spdlog::debug("[PrintStartController] Created");
 }
@@ -91,7 +92,7 @@ PrintStartController::~PrintStartController() {
 // Setup
 // ============================================================================
 
-void PrintStartController::set_api(MoonrakerAPI* api) {
+void PrintStartController::set_api(IMoonrakerAPI* api) {
     api_ = api;
 }
 
@@ -782,7 +783,7 @@ void PrintStartController::show_color_mismatch_warning(
     // Static buffer for message - must persist during modal lifetime (modal stores pointer).
     // Safe because we always close any existing dialog first above,
     // preventing concurrent access to this buffer.
-    static char message_buffer[1024];
+    static HELIX_PSRAM_BSS char message_buffer[1024];
     snprintf(message_buffer, sizeof(message_buffer), "%s", message.c_str());
 
     color_mismatch_modal_ = helix::ui::modal_show_confirmation(
@@ -1050,7 +1051,7 @@ void PrintStartController::show_material_mismatch_warning(
                      "or failed prints.");
 
     // Static buffer for message — must persist during modal lifetime.
-    static char message_buffer[2048];
+    static HELIX_PSRAM_BSS char message_buffer[2048];
     snprintf(message_buffer, sizeof(message_buffer), "%s", message.c_str());
 
     material_mismatch_modal_ = helix::ui::modal_show_confirmation(

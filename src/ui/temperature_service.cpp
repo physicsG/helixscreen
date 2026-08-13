@@ -18,8 +18,8 @@
 #include "app_constants.h"
 #include "app_globals.h"
 #include "filament_database.h"
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 #include "observer_factory.h"
 #include "printer_state.h"
 #include "temperature_controller.h"
@@ -93,7 +93,7 @@ int preset_button_value(const helix::HeaterPresets& p, int i) {
 // Constructor
 // ============================================================================
 
-TemperatureService::TemperatureService(PrinterState& printer_state, MoonrakerAPI* api)
+TemperatureService::TemperatureService(PrinterState& printer_state, IMoonrakerAPI* api)
     : printer_state_(printer_state), api_(api) {
     // Preset temperatures are derived per user preset slot, not per hardcoded
     // material. TemperatureController owns the derivation (nozzle/bed from the

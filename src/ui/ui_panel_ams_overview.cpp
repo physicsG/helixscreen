@@ -27,10 +27,11 @@
 #include "ams_types.h"
 #include "app_globals.h"
 #include "color_utils.h"
+#include "data_root_resolver.h"
 #include "display_settings_manager.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 #include "observer_factory.h"
 #include "printer_detector.h"
 #include "static_panel_registry.h"
@@ -104,7 +105,7 @@ static void set_slot_count_label(lv_obj_t* label, int slot_count) {
 // Construction
 // ============================================================================
 
-AmsOverviewPanel::AmsOverviewPanel(PrinterState& printer_state, MoonrakerAPI* api)
+AmsOverviewPanel::AmsOverviewPanel(PrinterState& printer_state, IMoonrakerAPI* api)
     : PanelBase(printer_state, api) {
     spdlog::debug("[AMS Overview] Constructed");
 }
@@ -400,8 +401,8 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
         // because its fourth head shows the ACE's spool.
         auto* count_backend = AmsState::instance().get_backend();
         set_slot_count_label(uc.slot_count_label, count_backend
-                                                     ? count_backend->unit_spool_slot_count(i)
-                                                     : unit.slot_count);
+                                                      ? count_backend->unit_spool_slot_count(i)
+                                                      : unit.slot_count);
 
         // Create the mini bars for this unit (dynamic — slot count varies)
         create_mini_bars(uc, unit);
@@ -1167,14 +1168,20 @@ static void ensure_overview_registered() {
     ui_ams_slot_register();
 
     // Register the XML components (dependencies must be registered before overview panel)
-    lv_xml_register_component_from_file("A:ui_xml/components/ams_unit_detail.xml");
-    lv_xml_register_component_from_file("A:ui_xml/components/ams_loaded_card.xml");
-    lv_xml_register_component_from_file("A:ui_xml/ams_context_menu.xml");
+    lv_xml_register_component_from_file(
+        helix::asset_component_uri("ui_xml/components/ams_unit_detail.xml").c_str());
+    lv_xml_register_component_from_file(
+        helix::asset_component_uri("ui_xml/components/ams_loaded_card.xml").c_str());
+    lv_xml_register_component_from_file(
+        helix::asset_component_uri("ui_xml/ams_context_menu.xml").c_str());
     // ams_unit_card.xml nests <ams_environment_indicator>, which is already
     // registered above via ensure_ams_env_indicator_registered().
-    lv_xml_register_component_from_file("A:ui_xml/ams_unit_card.xml");
-    lv_xml_register_component_from_file("A:ui_xml/components/ams_sidebar.xml");
-    lv_xml_register_component_from_file("A:ui_xml/ams_overview_panel.xml");
+    lv_xml_register_component_from_file(
+        helix::asset_component_uri("ui_xml/ams_unit_card.xml").c_str());
+    lv_xml_register_component_from_file(
+        helix::asset_component_uri("ui_xml/components/ams_sidebar.xml").c_str());
+    lv_xml_register_component_from_file(
+        helix::asset_component_uri("ui_xml/ams_overview_panel.xml").c_str());
 
     s_overview_registered = true;
     spdlog::debug("[AMS Overview] XML registration complete");
@@ -1319,6 +1326,12 @@ void AmsOverviewPanel::show_detail_context_menu(int slot_index, lv_obj_t* near_w
                                               int slot) {
         AmsBackend* backend = AmsState::instance().get_backend();
 
+        // EJECT / RECOVER_POSITION / SELECT_GATE / CHECK_GATE / CLEAR_SPOOL are
+        // identical in both AMS panels — see ams_dispatch_backend_action().
+        if (helix::ui::ams_dispatch_backend_action(action, slot, detail_path_canvas_)) {
+            return;
+        }
+
         switch (action) {
         case helix::ui::AmsContextMenu::MenuAction::LOAD:
             if (sidebar_) {
@@ -1362,20 +1375,8 @@ void AmsOverviewPanel::show_detail_context_menu(int slot_index, lv_obj_t* near_w
             break;
         }
 
-        case helix::ui::AmsContextMenu::MenuAction::RECOVER_POSITION:
-            if (!backend) {
-                NOTIFY_WARNING(lv_tr("Multi-Filament System not available"));
-                return;
-            }
-            {
-                AmsError error = backend->recover_lane_position(slot);
-                if (error.result != AmsResult::SUCCESS) {
-                    helix::ui::notify_ams_error(error, lv_tr("Recovery failed"));
-                }
-            }
-            break;
-
         case helix::ui::AmsContextMenu::MenuAction::SCAN_QR: {
+#if HELIX_HAS_CAMERA
             spdlog::info("[AmsOverview] SCAN_QR action for slot {}", slot);
             auto& scanner = helix::ui::get_qr_scanner_overlay();
             scanner.show(parent_screen_, slot, [this, slot](const SpoolInfo& spool) {
@@ -1389,6 +1390,7 @@ void AmsOverviewPanel::show_detail_context_menu(int slot_index, lv_obj_t* near_w
                 AmsState::instance().sync_from_backend();
                 spdlog::info("[AmsOverview] QR scan assigned spool #{} to slot {}", spool.id, slot);
             });
+#endif // HELIX_HAS_CAMERA
             break;
         }
 

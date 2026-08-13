@@ -45,12 +45,12 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     /**
      * @brief Construct Happy Hare backend
      *
-     * @param api Pointer to MoonrakerAPI (for sending G-code commands)
-     * @param client Pointer to helix::MoonrakerClient (for subscribing to updates)
+     * @param api Pointer to IMoonrakerAPI (for sending G-code commands)
+     * @param client Pointer to helix::IMoonrakerClient (for subscribing to updates)
      *
      * @note Both pointers must remain valid for the lifetime of this backend.
      */
-    AmsBackendHappyHare(MoonrakerAPI* api, helix::MoonrakerClient* client);
+    AmsBackendHappyHare(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
     ~AmsBackendHappyHare() override;
 
     /**
@@ -159,12 +159,21 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
         return false;
     }
 
-    // Endless Spool support (read-only - configured in Happy Hare config)
+    // === Endless Spool ===
+    //
+    // Group-based and settable at RUNTIME - not a config-file read. `mmu.
+    // endless_spool_groups` gives one group id per gate and `MMU_ENDLESS_SPOOL
+    // GROUPS=<csv>` rewrites the whole array, so a write is a Group edit that
+    // can move other gates' relations. Editing is refused on a multi-unit rig
+    // because the G-code has no `UNIT=` and acts on the selected unit
+    // (Happy-Hare extras/mmu/mmu.py cmd_MMU_ENDLESS_SPOOL).
+
+    /// @note Takes `mutex_`; callers must NOT hold it.
     [[nodiscard]] helix::printer::EndlessSpoolCapabilities
     get_endless_spool_capabilities() const override;
-    [[nodiscard]] std::vector<helix::printer::EndlessSpoolConfig>
-    get_endless_spool_config() const override;
-    AmsError set_endless_spool_backup(int slot_index, int backup_slot) override;
+
+    /// @note Takes `mutex_`; callers must NOT hold it.
+    [[nodiscard]] helix::printer::EndlessSpoolConfig get_endless_spool_config() const override;
 
     /**
      * @brief Reset all tool mappings to defaults
@@ -177,12 +186,18 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     AmsError reset_tool_mappings() override;
 
     /**
-     * @brief Reset all endless spool backup mappings
+     * @brief Restore the endless-spool groups to their config defaults.
      *
-     * Happy Hare endless spool is read-only (configured in mmu_vars.cfg).
-     * Returns not_supported error.
+     * Overrides the base's clear-every-slot loop because Happy Hare has a real
+     * primitive: `MMU_ENDLESS_SPOOL ENABLE=1 RESET=1 QUIET=1`.
      *
-     * @return AmsError with not_supported result
+     * `ENABLE=1` is required and is NOT the silent side effect the edit path
+     * had: `cmd_MMU_ENDLESS_SPOOL` early-returns before honouring `RESET` while
+     * endless spool is disabled, and `_reset_endless_spool()` then assigns AND
+     * persists `default_endless_spool_enabled`, so the momentary enable is
+     * overwritten by the config default (mmu.py `_persist_endless_spool`).
+     *
+     * @note Holds no lock.
      */
     AmsError reset_endless_spool() override;
 
@@ -243,6 +258,24 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
                                    const std::any& value = {}) override;
 
   protected:
+    /**
+     * @brief Transport for one endless-spool edge: `MMU_ENDLESS_SPOOL GROUPS=`.
+     *
+     * Rebuilds the whole gate->group array and joins @p slot_index to
+     * @p backup_slot's group (or moves it to a fresh standalone group when
+     * @p backup_slot is -1).
+     *
+     * Refuses when endless spool is switched OFF instead of silently switching
+     * it on. `cmd_MMU_ENDLESS_SPOOL` ignores `GROUPS` while disabled, so the old
+     * unconditional `ENABLE=1` was the only thing making the write land - and it
+     * turned the feature on as a side effect of editing one backup, persisting
+     * that through `mmu_state_enable_endless_spool`. Enabling is a separate
+     * decision the user has to make.
+     *
+     * @note Takes `mutex_` to build the CSV, releases it before the G-code send.
+     */
+    AmsError apply_endless_spool_backup(int slot_index, int backup_slot) override;
+
     // Allow test helper access to private members
     friend class AmsBackendHappyHareTestHelper;
     friend class AmsBackendHappyHareEndlessSpoolHelper;

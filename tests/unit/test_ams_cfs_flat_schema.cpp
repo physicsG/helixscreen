@@ -529,5 +529,6 @@ TEST_CASE("CFS stock schema still parses after the flat split", "[ams][cfs][flat
     REQUIRE(info.units[0].environment->humidity_pct == 48.0f);
     REQUIRE(info.units[0].slots[0].color_rgb == 0x000000);
     REQUIRE(info.units[0].slots[1].color_rgb == 0xFFFFFF);
-    REQUIRE(info.supports_endless_spool == true);
+    // The fork spells the ENABLE bit runout_swap_enabled.
+    REQUIRE(info.endless_spool_enabled == true);
 }

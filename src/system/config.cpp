@@ -23,16 +23,14 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <fcntl.h>
 #include <fstream>
 #include <iomanip>
 #include <optional>
+#include <sstream>
 #include <sys/stat.h>
-#include <unistd.h>
 // C++17 filesystem - use std::filesystem if available, fall back to experimental
 #if __cplusplus >= 201703L && __has_include(<filesystem>)
 #include <filesystem>
@@ -1295,6 +1293,24 @@ static void run_versioned_migrations(json& config, const std::string& config_pat
         version = config["config_version"].get<int>();
     }
 
+    // A config written by a NEWER build than this one — reachable as soon as
+    // update channels are user-switchable, since moving from the devel channel
+    // back to stable installs an older binary over a newer config.
+    //
+    // Every gate below is `version < N`, so none of them would fire; the damage
+    // is the unconditional stamp at the end, which would rewrite config_version
+    // DOWN to ours. The newer build would then re-run migrations it had already
+    // applied, against data already in the new shape. Leave the document alone
+    // instead: unknown keys are read-through-default everywhere, and
+    // Config::save() serializes the whole in-memory document, so the newer
+    // build's settings survive a round trip through this one untouched.
+    if (version > CURRENT_CONFIG_VERSION) {
+        spdlog::warn("[Config] config_version {} was written by a newer build (this build "
+                     "understands {}) — leaving the document unmigrated and unstamped",
+                     version, CURRENT_CONFIG_VERSION);
+        return;
+    }
+
     if (version < 1)
         migrate_v0_to_v1(config);
     if (version < 2)
@@ -1359,6 +1375,7 @@ json get_default_config(const std::string& moonraker_host, bool include_user_pre
                    {"input",
                     {{"scroll_throw", 25},
                      {"scroll_limit", 10},
+                     {"long_press_time", 500},
                      {"jitter_threshold", 5},
                      {"touch_device", ""},
                      {"calibration",
@@ -1420,6 +1437,40 @@ static std::vector<std::string> env_backup_search_paths() {
     if (!backups_enabled())
         return {};
     return {env_backup_primary(), env_backup_fallback()};
+}
+
+/// Shared recovery for a document Config::init() could not use as-is (either
+/// a JSON parse failure or a present-but-unreadable file): preserve it for
+/// diagnosis, try the backup chain, and fall back to defaults if nothing
+/// usable is found. Callers are expected to have already logged the
+/// specific cause (parse error vs. read error) before calling this, since
+/// that distinction matters for telemetry but not for the recovery itself.
+static void recover_config_from_backup_or_defaults(json& data, ConfigStorage& storage) {
+    // Preserve the corrupt document for diagnosis
+    storage.preserve_corrupt();
+
+    // Try restoring from backup before falling back to defaults
+    std::string backup_src = find_backup(config_backup_search_paths());
+
+    bool restored = false;
+    if (!backup_src.empty()) {
+        try {
+            // ifstream, not fstream: fstream's default openmode is in|out, so a
+            // read-only backup fails to open and parses as empty input.
+            data = json::parse(std::ifstream(backup_src));
+            restored = true;
+            spdlog::info("[Config] Restored from backup: {}", backup_src);
+            NOTIFY_WARNING("Settings were corrupted — restored from backup");
+        } catch (const json::exception& e2) {
+            spdlog::warn("[Config] Backup also corrupt: {}", e2.what());
+        }
+    }
+
+    if (!restored) {
+        spdlog::warn("[Config] No valid backup — resetting to defaults");
+        data = get_default_config("127.0.0.1", false);
+        NOTIFY_ERROR("Settings were corrupted and could not be recovered — reset to defaults");
+    }
 }
 
 } // namespace
@@ -1565,79 +1616,82 @@ void Config::init(const std::string& config_path) {
         restore_from_backup(env_path, "helixscreen.env", env_backup_search_paths());
     }
 
+    ensure_storage();
     bool config_modified = false;
 
-    if (stat(path.c_str(), &buffer) == 0) {
+    // A thrown load() means the document is present but unreadable (e.g.
+    // permission denied) — distinct from "absent" (nullopt, no throw). Both
+    // cases route into the "load existing config" branch below so a
+    // present-but-unreadable config gets the same corrupt-preserve +
+    // backup-restore recovery as a parse failure, instead of being silently
+    // treated as first-boot and reset to defaults.
+    std::optional<std::string> loaded_doc;
+    bool load_read_failed = false;
+    std::string load_read_error;
+    try {
+        loaded_doc = storage_->load();
+    } catch (const std::exception& e) {
+        load_read_failed = true;
+        load_read_error = e.what();
+    }
+
+    if (loaded_doc || load_read_failed) {
         // Load existing config
         spdlog::info("[Config] Loading config from {}", path);
-        try {
-            // ifstream, not fstream: fstream's default openmode is in|out, so a
-            // read-only settings.json (root-owned, or mode 0444) fails to open,
-            // parses as empty input, and lands in the catch below — which renames
-            // it .corrupt and resets to factory defaults, destroying a config that
-            // was merely unwritable.
-            data = json::parse(std::ifstream(path));
 
-            // Detect tarball default that replaced user config during a Moonraker
-            // web update.  Moonraker type:web does rmtree() on the install dir and
-            // extracts the release tarball fresh — the tarball includes a preset-based
-            // settings.json with wizard_completed=false and no config_version.  If a
-            // rolling backup with real user data exists, prefer it.
-            // safe_int, not .value(): a hand-edited "config_version": null throws
-            // type_error.302, which lands in the catch below and destroys the
-            // user's settings.json (renamed .corrupt, then reset to defaults)
-            // over a single bad field.
-            if (helix::json_util::safe_int(data, "config_version", 0) == 0) {
-                std::string backup_src = find_backup(config_backup_search_paths());
-                if (!backup_src.empty()) {
-                    try {
-                        auto backup_data = json::parse(std::ifstream(backup_src));
-                        if (helix::json_util::safe_int(backup_data, "config_version", 0) > 0) {
-                            spdlog::warn("[Config] Loaded config is a tarball default "
-                                         "(no config_version) — restoring from backup: {}",
-                                         backup_src);
-                            data = std::move(backup_data);
-                            config_modified = true;
-                            NOTIFY_WARNING("Settings restored after update");
+        if (load_read_failed) {
+            // Route directly into the shared recovery path rather than
+            // re-throwing into the json::parse try/catch below — that would
+            // require widening its catch to std::exception, which would
+            // also swallow an unrelated failure (e.g. bad_alloc under
+            // memory pressure on RAM-constrained embedded targets) and
+            // misdiagnose it as document corruption, renaming a perfectly
+            // healthy settings.json to .corrupt.
+            spdlog::error("[Config] Failed to read {}: {}", path, load_read_error);
+            CONFIG_RECORD_ERROR("file_io", "config_read_failed",
+                                fmt::format("read error: {}", load_read_error));
+            recover_config_from_backup_or_defaults(data, *storage_);
+            config_modified = true;
+        } else {
+            try {
+                data = json::parse(*loaded_doc);
+
+                // Detect tarball default that replaced user config during a Moonraker
+                // web update.  Moonraker type:web does rmtree() on the install dir and
+                // extracts the release tarball fresh — the tarball includes a preset-based
+                // settings.json with wizard_completed=false and no config_version.  If a
+                // rolling backup with real user data exists, prefer it.
+                // safe_int, not .value(): a hand-edited "config_version": null throws
+                // type_error.302, which lands in the catch below and destroys the
+                // user's settings.json (renamed .corrupt, then reset to defaults)
+                // over a single bad field.
+                if (helix::json_util::safe_int(data, "config_version", 0) == 0) {
+                    std::string backup_src = find_backup(config_backup_search_paths());
+                    if (!backup_src.empty()) {
+                        try {
+                            auto backup_data = json::parse(std::ifstream(backup_src));
+                            if (helix::json_util::safe_int(backup_data, "config_version", 0) > 0) {
+                                spdlog::warn("[Config] Loaded config is a tarball default "
+                                             "(no config_version) — restoring from backup: {}",
+                                             backup_src);
+                                data = std::move(backup_data);
+                                config_modified = true;
+                                NOTIFY_WARNING("Settings restored after update");
+                            }
+                        } catch (const json::exception& e) {
+                            spdlog::warn(
+                                "[Config] Backup parse failed during tarball detection: {}",
+                                e.what());
                         }
-                    } catch (const json::exception& e) {
-                        spdlog::warn("[Config] Backup parse failed during tarball detection: {}",
-                                     e.what());
                     }
                 }
+            } catch (const json::exception& e) {
+                spdlog::error("[Config] Failed to parse {}: {}", path, e.what());
+                CONFIG_RECORD_ERROR("file_io", "config_read_failed",
+                                    fmt::format("parse error: {}", e.what()));
+                recover_config_from_backup_or_defaults(data, *storage_);
+                config_modified = true;
             }
-        } catch (const json::exception& e) {
-            spdlog::error("[Config] Failed to parse {}: {}", path, e.what());
-            CONFIG_RECORD_ERROR("file_io", "config_read_failed",
-                                fmt::format("parse error: {}", e.what()));
-
-            // Preserve the corrupt file for diagnosis
-            std::string corrupt_path = path + ".corrupt";
-            std::rename(path.c_str(), corrupt_path.c_str());
-            spdlog::info("[Config] Corrupt config saved to {}", corrupt_path);
-
-            // Try restoring from backup before falling back to defaults
-            std::string backup_src = find_backup(config_backup_search_paths());
-
-            bool restored = false;
-            if (!backup_src.empty()) {
-                try {
-                    data = json::parse(std::ifstream(backup_src));
-                    restored = true;
-                    spdlog::info("[Config] Restored from backup: {}", backup_src);
-                    NOTIFY_WARNING("Settings were corrupted — restored from backup");
-                } catch (const json::exception& e2) {
-                    spdlog::warn("[Config] Backup also corrupt: {}", e2.what());
-                }
-            }
-
-            if (!restored) {
-                spdlog::warn("[Config] No valid backup — resetting to defaults");
-                data = get_default_config("127.0.0.1", false);
-                NOTIFY_ERROR(
-                    "Settings were corrupted and could not be recovered — reset to defaults");
-            }
-            config_modified = true;
         }
 
         // The migrations below get their own try/catch, deliberately separate
@@ -1808,6 +1862,7 @@ void Config::init(const std::string& config_path) {
     if (!data.contains("input")) {
         data["input"] = {{"scroll_throw", 25},
                          {"scroll_limit", 10},
+                         {"long_press_time", 500},
                          {"jitter_threshold", 5},
                          {"touch_device", ""},
                          {"calibration",
@@ -1860,25 +1915,11 @@ void Config::init(const std::string& config_path) {
         }
     }
 
-    // Probe for read-only filesystem before attempting any writes.
-    // Try creating a small test file in the config directory — if it fails
-    // with EROFS or EACCES, enable read-only mode and skip all future saves.
-    {
-        fs::path config_dir = fs::path(path).parent_path();
-        std::string probe_path = (config_dir / ".helix-write-probe").string();
-        std::ofstream probe(probe_path);
-        if (!probe.is_open()) {
-            int err = errno;
-            if (err == EROFS || err == EACCES) {
-                read_only_mode_ = true;
-                spdlog::warn("[Config] Read-only filesystem detected ({}): "
-                             "config changes will not be persisted",
-                             strerror(err));
-            }
-        } else {
-            probe.close();
-            std::remove(probe_path.c_str());
-        }
+    // Probe for read-only storage before attempting any writes.
+    read_only_mode_ = storage_->read_only();
+    if (read_only_mode_) {
+        spdlog::warn("[Config] Read-only storage ({}): config changes will not be persisted",
+                     storage_->describe());
     }
 
     // Save updated config with any new defaults or migrations.
@@ -2132,6 +2173,20 @@ std::string Config::get_path() {
     return path;
 }
 
+void Config::log_type_mismatch(const std::string& json_ptr, const char* stored_type,
+                               const char* expected_type, const char* detail) {
+    // warn, not debug: the user's setting was silently discarded, and the only
+    // way they can act on it is by seeing which key and which type to correct.
+    spdlog::warn("[Config] '{}' is stored as {} but must be a {} - ignoring it and using the "
+                 "built-in default ({})",
+                 json_ptr, stored_type, expected_type, detail);
+}
+
+void Config::log_set_failed(const std::string& json_ptr, const char* detail) {
+    spdlog::warn("[Config] Could not store '{}' - the setting will not persist ({})", json_ptr,
+                 detail);
+}
+
 json& Config::get_json(const std::string& json_path) {
     return data[json::json_pointer(json_path)];
 }
@@ -2159,18 +2214,16 @@ std::vector<std::string> Config::get_string_array(const std::string& json_path) 
     return out;
 }
 
-/// Map common errno values to user-friendly descriptions
-static std::string errno_reason(int err) {
-    switch (err) {
-    case ENOSPC:
-        return "disk full";
-    case EROFS:
-        return "read-only filesystem";
-    case EACCES:
-        return "permission denied";
-    default:
-        return strerror(err);
+void Config::ensure_storage() {
+    // An injected backend (set_storage) is the caller's and is never rebuilt.
+    // An auto-created one is a FileConfigStorage over `path`, so describe() is
+    // that path — when they diverge, `path` has moved and the old backend would
+    // keep writing to the file it was built for.
+    if (storage_ && !(storage_is_default_ && storage_->describe() != path)) {
+        return;
     }
+    storage_ = make_file_config_storage(path);
+    storage_is_default_ = true;
 }
 
 bool Config::save() {
@@ -2184,96 +2237,26 @@ bool Config::save() {
         return false;
     }
 
-    spdlog::trace("[Config] Saving config to {}", path);
+    spdlog::trace("[Config] Saving config to {}", storage_ ? storage_->describe() : path);
 
+    ensure_storage();
+
+    // Serialization is inside the handler: operator<< dumps with
+    // error_handler_t::strict, which throws json::type_error 316 on invalid
+    // UTF-8 in any stored string, and the stream buffer can throw bad_alloc on
+    // a RAM-constrained target. save() has 133 call sites, many inside LVGL
+    // event callbacks, where an escaping exception unwinds through a C frame.
     try {
-        // Resolve symlinks so atomic rename targets the real file, not the symlink
-        std::string target_path = path;
-        {
-            std::error_code ec;
-            if (fs::is_symlink(path, ec)) {
-                auto real = fs::canonical(path, ec);
-                if (!ec) {
-                    spdlog::debug("[Config] Resolved symlink {} -> {}", path, real.string());
-                    target_path = real.string();
-                }
-            }
-        }
-
-        // Atomic save: write to temp file, then rename to avoid partial writes on crash/power loss
-        std::string tmp_path = target_path + ".tmp";
-        {
-            std::ofstream o(tmp_path);
-            if (!o.is_open()) {
-                std::string reason = errno_reason(errno);
-                NOTIFY_ERROR("Could not save settings: {}", reason);
-                LOG_ERROR_INTERNAL("Failed to open temp file for writing: {} ({})", tmp_path,
-                                   reason);
-                CONFIG_RECORD_ERROR("file_io", "config_write_failed",
-                                    fmt::format("open failed: {}", reason));
-                return false;
-            }
-
-            o << std::setw(2) << data << std::endl;
-            o.flush();
-
-            if (!o.good()) {
-                std::string reason = errno_reason(errno);
-                NOTIFY_ERROR("Failed to save settings: {}", reason);
-                LOG_ERROR_INTERNAL("Failed to write config to {}: {}", tmp_path, reason);
-                CONFIG_RECORD_ERROR("file_io", "config_write_failed",
-                                    fmt::format("write error: {}", reason));
-                std::remove(tmp_path.c_str());
-                return false;
-            }
-        }
-
-        // fsync the temp file so data is durable before the rename, then fsync
-        // the parent directory so the rename itself is durable. Required on
-        // flash-backed filesystems (#943, Qidi Q2): without this, a clean
-        // shutdown / power cycle can leave settings.json empty even though
-        // userspace-level rename() returned success.
-        {
-            int fd = ::open(tmp_path.c_str(), O_RDONLY);
-            if (fd >= 0) {
-                (void)::fsync(fd);
-                ::close(fd);
-            }
-        }
-
-        if (std::rename(tmp_path.c_str(), target_path.c_str()) != 0) {
-            NOTIFY_ERROR("Failed to save configuration file");
-            LOG_ERROR_INTERNAL("Failed to rename temp file '{}' to '{}': {}", tmp_path, target_path,
-                               strerror(errno));
-            CONFIG_RECORD_ERROR("file_io", "config_write_failed",
-                                fmt::format("rename failed: {}", strerror(errno)));
-            std::remove(tmp_path.c_str());
+        std::ostringstream oss;
+        oss << std::setw(2) << data << std::endl;
+        if (!storage_->store(oss.str())) {
+            // FileConfigStorage (the default backend) already reports the specific
+            // failure via NOTIFY_ERROR + CONFIG_RECORD_ERROR at the failing phase
+            // (open/write/rename/exception) — don't double-toast here. Non-file
+            // backends get at least this log line.
+            spdlog::error("[Config] Failed to save via {}", storage_->describe());
             return false;
         }
-
-        {
-            std::string dir = fs::path(target_path).parent_path().string();
-            if (!dir.empty()) {
-                int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
-                if (dfd >= 0) {
-                    (void)::fsync(dfd);
-                    ::close(dfd);
-                }
-            }
-        }
-
-        spdlog::trace("[Config] saved successfully to {}", path);
-
-        // Maintain rolling backup outside install dir (survives Moonraker wipes).
-        // Same guard as the startup backup in init(): a wizard-incomplete config
-        // holds preset defaults, not user data, and must never overwrite the one
-        // good recovery copy.
-        if (backups_enabled() && !is_wizard_required()) {
-            write_rolling_backup(path, config_backup_primary(), config_backup_fallback());
-        }
-
-        return true;
-
     } catch (const std::exception& e) {
         NOTIFY_ERROR("Failed to save configuration: {}", e.what());
         LOG_ERROR_INTERNAL("Exception while saving config to {}: {}", path, e.what());
@@ -2281,6 +2264,19 @@ bool Config::save() {
                             fmt::format("exception: {}", e.what()));
         return false;
     }
+    spdlog::trace("[Config] saved successfully to {}", storage_->describe());
+
+    // Rolling backup outside the install dir (survives Moonraker wipes). Kept
+    // here rather than inside the storage backend: which tiers are writable and
+    // whether this document is worth preserving are Config-level policy, and
+    // the backend's contract is only to move bytes durably. Same guard as the
+    // startup backup in init() — a wizard-incomplete config holds preset
+    // defaults, not user data, and must never overwrite the one good recovery
+    // copy.
+    if (backups_enabled() && !is_wizard_required()) {
+        write_rolling_backup(path, config_backup_primary(), config_backup_fallback());
+    }
+    return true;
 }
 
 bool Config::is_read_only() const {

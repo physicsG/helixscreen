@@ -167,7 +167,7 @@ void PlrOfferController::probe_creality_once() {
 
     auto* api = get_moonraker_api();
     if (!api) {
-        spdlog::warn("[PLR] Creality probe skipped: no MoonrakerAPI");
+        spdlog::warn("[PLR] Creality probe skipped: no IMoonrakerAPI");
         return;
     }
 

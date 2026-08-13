@@ -13,6 +13,7 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -115,6 +116,15 @@ public class HelixActivity extends SDLActivity {
     protected String[] getLibraries() {
         return new String[]{
             "SDL2",
+            // Preloaded so the native side can dlopen("libturbojpeg.so")
+            // (prestonbrown/helixscreen#1245). From API 24 the linker namespace
+            // model no longer resolves a bare dlopen() against an APK-bundled
+            // .so by basename, so libturbojpeg must be entered through the
+            // framework load list (SDLActivity calls System.loadLibrary for each
+            // entry here). Without it the camera silently falls back to scalar
+            // stb_image decode. Listed before "main" because CameraStream
+            // constructs on the native thread after libmain loads.
+            "turbojpeg",
             "main"
         };
     }
@@ -539,6 +549,49 @@ public class HelixActivity extends SDLActivity {
     // =========================================================================
 
     /**
+     * Describe a failure for the "0\nERROR" transport-failure contract.
+     * getMessage() is null on several common IOExceptions, and "HTTP 0: null"
+     * tells the reader nothing; the exception type at least names the failure.
+     */
+    private static String errorText(Exception e) {
+        String msg = e.getMessage();
+        return (msg != null && !msg.isEmpty()) ? msg : e.getClass().getName();
+    }
+
+    /**
+     * Read a response body for a status code that has already been obtained.
+     *
+     * getErrorStream() returns null whenever an error response carries no body,
+     * and getInputStream() throws for most 4xx/5xx. Either one reaching the
+     * caller collapses a real status code into the "0" transport-failure path,
+     * so a rejected API key (401/403) and an oversized payload (413) become
+     * indistinguishable from having no network at all. Every body-read failure
+     * is absorbed here and reported as an empty body, leaving the status intact.
+     *
+     * @param conn    Connection whose response has already been read
+     * @param status  Status code from conn.getResponseCode()
+     * @return        Response body, or "" when there is none to read
+     */
+    private static String readResponseBody(HttpURLConnection conn, int status) {
+        InputStream in = null;
+        try {
+            in = (status >= 200 && status < 400) ? conn.getInputStream() : conn.getErrorStream();
+        } catch (Exception e) {
+            Log.w("HelixHTTPS", "no response stream for status " + status + ": " + e.getMessage());
+        }
+        if (in == null) {
+            return "";
+        }
+        try (Scanner s = new Scanner(in, "UTF-8")) {
+            s.useDelimiter("\\A");
+            return s.hasNext() ? s.next() : "";
+        } catch (Exception e) {
+            Log.w("HelixHTTPS", "response body read failed: " + e.getMessage());
+            return "";
+        }
+    }
+
+    /**
      * Perform an HTTP(S) GET using Android's built-in TLS stack.
      * Called from native code via JNI when libhv lacks SSL support.
      *
@@ -562,18 +615,10 @@ public class HelixActivity extends SDLActivity {
             }
 
             int status = conn.getResponseCode();
-            String responseBody = "";
-            try (Scanner s = new Scanner(
-                    status >= 200 && status < 400
-                        ? conn.getInputStream() : conn.getErrorStream(),
-                    "UTF-8")) {
-                s.useDelimiter("\\A");
-                if (s.hasNext()) responseBody = s.next();
-            }
-            return status + "\n" + responseBody;
+            return status + "\n" + readResponseBody(conn, status);
         } catch (Exception e) {
-            Log.w("HelixHTTPS", "GET failed: " + e.getMessage());
-            return "0\n" + e.getMessage();
+            Log.w("HelixHTTPS", "GET failed: " + errorText(e));
+            return "0\n" + errorText(e);
         } finally {
             if (conn != null) conn.disconnect();
         }
@@ -612,18 +657,44 @@ public class HelixActivity extends SDLActivity {
             }
 
             int status = conn.getResponseCode();
-            String responseBody = "";
-            try (Scanner s = new Scanner(
-                    status >= 200 && status < 400
-                        ? conn.getInputStream() : conn.getErrorStream(),
-                    "UTF-8")) {
-                s.useDelimiter("\\A");
-                if (s.hasNext()) responseBody = s.next();
-            }
-            return status + "\n" + responseBody;
+            return status + "\n" + readResponseBody(conn, status);
         } catch (Exception e) {
-            Log.w("HelixHTTPS", "POST failed: " + e.getMessage());
-            return "0\n" + e.getMessage();
+            Log.w("HelixHTTPS", "POST failed: " + errorText(e));
+            return "0\n" + errorText(e);
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    /**
+     * HTTPS POST with a raw binary body — for gzip-compressed payloads where
+     * round-tripping bytes through a Java String would corrupt them (debug
+     * bundle upload). Same STATUS\nBODY / 0\nERROR contract as httpsPost.
+     */
+    public static String httpsPostBinary(String url, byte[] body, String contentType,
+                                         String contentEncoding, String userAgent,
+                                         String apiKey, int timeoutSec) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(timeoutSec * 1000);
+            conn.setReadTimeout(timeoutSec * 1000);
+            conn.setRequestProperty("Content-Type", contentType);
+            if (contentEncoding != null && !contentEncoding.isEmpty())
+                conn.setRequestProperty("Content-Encoding", contentEncoding);
+            conn.setRequestProperty("User-Agent", userAgent);
+            conn.setRequestProperty("X-API-Key", apiKey);
+            conn.setFixedLengthStreamingMode(body.length);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(body);
+            }
+            int status = conn.getResponseCode();
+            return status + "\n" + readResponseBody(conn, status);
+        } catch (Exception e) {
+            Log.w("HelixHTTPS", "POST binary failed: " + errorText(e));
+            return "0\n" + errorText(e);
         } finally {
             if (conn != null) conn.disconnect();
         }

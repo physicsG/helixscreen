@@ -208,6 +208,22 @@ class NavigationManager {
     lv_obj_t* get_panel_widget(helix::PanelId id) const;
 
     /**
+     * @brief Register a builder for panels that are instantiated lazily.
+     *
+     * On the ESP32 firmware only the home panel is built at boot (app_layout
+     * defers the rest — see build_deferred_panel). When navigation targets a
+     * panel whose widget slot is still null, switch_to_panel_impl() invokes this
+     * builder to construct it on first use. The builder must create the panel,
+     * call setup(), and register it via replace_panel_widget() +
+     * register_panel_instance() so the slot is filled before the switch shows it.
+     * Never set on desktop (all panels are resident), so the deferred path is
+     * inert there.
+     *
+     * @param builder Callable taking the panel id (int); empty to disable.
+     */
+    void set_deferred_panel_builder(std::function<void(int)> builder);
+
+    /**
      * @brief Re-key overlay maps: swap old_widget → new_widget for the same lifecycle.
      *
      * Used by hot-reload overlay rebuild. Touches overlay_instances_,
@@ -450,6 +466,17 @@ class NavigationManager {
     bool take_backdrop_keyboard_dismiss();
 
     /**
+     * @brief Mark that the next DISCONNECTED is expected (e.g. app backgrounding)
+     *
+     * Arms a one-shot consumed by the next CONNECTED→DISCONNECTED transition, so
+     * the disconnect queued by disconnect() (drained on resume) does not clear
+     * the overlay stack and bounce to Home (#1245). Immune to callback ordering:
+     * a still-undrained CONNECTED apply cannot clear it, because it is not
+     * carried in previous_connection_state_.
+     */
+    void mark_disconnect_expected();
+
+    /**
      * @brief Shutdown navigation system during application exit
      *
      * Deactivates current overlay/panel and clears all registries.
@@ -545,6 +572,13 @@ class NavigationManager {
     void overlay_animate_zoom_in(lv_obj_t* panel, lv_area_t source_rect);
     void overlay_animate_zoom_out(lv_obj_t* panel, lv_area_t source_rect);
 
+    // Activate the panel/overlay an overlay close restored, at most once per
+    // close. go_back() arms restore_activation_pending_ and consumes it after
+    // un-hiding the restored panel; the animation-completion callback consumes
+    // it only if that never happened. Clears the latch before dispatching, so a
+    // re-entrant navigation from on_activate() can arm a fresh close cleanly.
+    void activate_restored_target();
+
     // Observer handlers (used by factory-created observers)
     void handle_active_panel_change(int32_t new_active_panel);
     void handle_connection_state_change(int state);
@@ -605,6 +639,22 @@ class NavigationManager {
 
     // C++ panel instances for lifecycle dispatch (on_activate/on_deactivate)
     std::array<PanelBase*, UI_PANEL_COUNT> panel_instances_ = {};
+
+    // Lazy panel builder (ESP32 deferred-panel bring-up). Empty on desktop.
+    // Invoked by switch_to_panel_impl() when a target panel's widget slot is
+    // still null, to build it on first navigation. See set_deferred_panel_builder().
+    std::function<void(int)> deferred_panel_builder_;
+    bool building_deferred_panel_ = false; // re-entrancy guard for the builder
+    // Outermost-transition guard for the ESP32 nav busy scrim (NavTransitionScrim
+    // in ui_nav_manager.cpp): switch_to_panel_impl can cascade into
+    // handle_active_panel_change, and only the outer one owns/tears down a scrim.
+    bool nav_scrim_active_ = false;
+
+    // If panel_id has no widget yet and a deferred builder is set, build it now
+    // (first-navigation lazy bring-up). No-op on desktop (builder unset) and for
+    // already-built panels. Guarded against re-entrancy. Called from both
+    // navigation choke points (switch_to_panel_impl + handle_active_panel_change).
+    void ensure_panel_built(int panel_id);
 
     // C++ overlay instances for lifecycle dispatch (on_activate/on_deactivate)
     std::unordered_map<lv_obj_t*, IPanelLifecycle*> overlay_instances_;
@@ -669,6 +719,23 @@ class NavigationManager {
     // Track previous states for detecting transitions
     int previous_connection_state_ = -1;
     int previous_klippy_state_ = -1;
+
+    // One-shot: the next CONNECTED→DISCONNECTED transition is expected and must
+    // not clear the overlay stack. Set by mark_disconnect_expected().
+    bool disconnect_expected_ = false;
+
+    // Exactly-once latch for the restored panel/overlay activation of one
+    // overlay close. See activate_restored_target().
+    bool restore_activation_pending_ = false;
+
+    // True while the active main panel sits deactivated underneath an overlay.
+    // Set when the first overlay covers it, cleared by whoever activates a main
+    // panel next. switch_to_panel_impl() needs it because a navbar tap onto the
+    // panel you are already on makes set_active() a no-op, leaving nothing else
+    // to re-activate it; the flag says whether that re-activation is owed, so a
+    // panel that set_active() already activated under the overlay (the
+    // connection-change path) is not activated a second time.
+    bool main_panel_deactivated_for_overlay_ = false;
 
     // Animation constants
     static constexpr uint32_t OVERLAY_ANIM_DURATION_MS = 200;

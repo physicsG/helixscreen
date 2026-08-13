@@ -76,6 +76,17 @@
                               description="Notify when print finishes" description_tag="Notify when print finishes"
                               options="Off&#10;Notification&#10;Alert" options_tag="Off&#10;Notification&#10;Alert"
                               callback="on_completion_alert_changed"/>
+        <!-- ================================================================== -->
+        <!-- MINIMUM TOAST SEVERITY (#1213) -->
+        <!-- ================================================================== -->
+        <setting_dropdown_row name="row_min_toast_severity"
+                              label="On-screen Alerts" label_tag="On-screen Alerts" icon="message"
+                              description="Lowest notification level that interrupts with a toast"
+                              description_tag="Lowest notification level that interrupts with a toast"
+                              options="All&#10;Warnings &amp; errors&#10;Errors only"
+                              options_tag="All&#10;Warnings &amp; errors&#10;Errors only"
+                              bind_selected="settings_min_toast_severity"
+                              callback="on_min_toast_severity_changed"/>
       </setting_group>
     </lv_obj>
   </view>

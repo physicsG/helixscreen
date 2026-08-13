@@ -12,6 +12,7 @@
 #include "ui_fan_control_overlay.h"
 #include "ui_filament_mapping_card.h"
 #include "ui_filename_utils.h"
+#include "ui_format_utils.h"
 #include "ui_gcode_viewer.h"
 #include "ui_modal.h"
 #include "ui_nav_manager.h"
@@ -23,6 +24,7 @@
 #include "ui_temperature_utils.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
+#include "ui_utils.h"
 
 #include "ams_state.h"
 #include "app_constants.h"
@@ -35,13 +37,13 @@
 #include "format_utils.h"
 #include "gcode_parser.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "i_moonraker_api.h"
 #include "injection_point_manager.h"
 #include "layout_manager.h"
 #include "led/led_controller.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "memory_monitor.h"
 #include "memory_utils.h"
-#include "moonraker_api.h"
 #include "observer_factory.h"
 #include "preprint_predictor.h"
 #include "print_status_layout_decision.h"
@@ -134,7 +136,7 @@ static void try_reclaim_cached_print_status() {
     });
 }
 
-PrintStatusPanel::PrintStatusPanel(PrinterState& printer_state, MoonrakerAPI* api)
+PrintStatusPanel::PrintStatusPanel(PrinterState& printer_state, IMoonrakerAPI* api)
     : printer_state_(printer_state), api_(api) {
     // Pre-init local subject used by observer callback below (fires immediately on subscribe)
     lv_subject_init_int(&exclude_objects_available_subject_, 0);
@@ -280,7 +282,7 @@ PrintStatusPanel::PrintStatusPanel(PrinterState& printer_state, MoonrakerAPI* ap
         printer_state_.get_print_thumbnail_path_subject(), this,
         [](PrintStatusPanel* self, const char* path) {
             // No empty-path branch: ActivePrintMediaManager publishes
-            // kNoThumbnailPlaceholder for a file with no thumbnail and the
+            // no_thumbnail_placeholder() for a file with no thumbnail and the
             // subject is seeded with it, so the value is always an image.
             // The subject carries the file the path was produced FOR
             // (set_print_thumbnail writes it before publishing the path), so
@@ -309,6 +311,20 @@ PrintStatusPanel::PrintStatusPanel(PrinterState& printer_state, MoonrakerAPI* ap
             }
         },
         ps_subjects);
+
+#if defined(HELIX_PLATFORM_ESP32)
+    // ESP32 has no disk thumbnail cache, so print_thumbnail_path stays empty and
+    // the image arrives as a PSRAM buffer instead. Observe the generation counter
+    // ActivePrintMediaManager bumps when it installs one. observe_int_immediate
+    // for the same reason as the path observer above: the handler only does
+    // lv_image_set_src plus a shared_ptr swap (no observer lifecycle changes, no
+    // widget destruction), and the setter always runs on the UI thread — so the
+    // extra deferral would only add a frame and a stale-read window.
+    print_psram_thumb_observer_ = ui::observe_int_immediate<PrintStatusPanel>(
+        printer_state_.get_print_psram_thumb_gen_subject(), this,
+        [](PrintStatusPanel* self, int /*gen*/) { self->apply_esp_psram_thumbnail(); },
+        ps_subjects);
+#endif
 
     spdlog::debug("[{}] Subscribed to PrinterState subjects", get_name());
 
@@ -416,8 +432,6 @@ void PrintStatusPanel::init_subjects() {
 
     // Initialize all subjects with default values
     // Note: Display filename is now handled by ActivePrintMediaManager via print_display_filename
-    UI_MANAGED_SUBJECT_STRING(progress_text_subject_, progress_text_buf_, "0%",
-                              "print_progress_text", subjects_);
     UI_MANAGED_SUBJECT_STRING(layer_text_subject_, layer_text_buf_, "Layer 0 / 0",
                               "print_layer_text", subjects_);
     UI_MANAGED_SUBJECT_STRING(filament_used_text_subject_, filament_used_text_buf_, "",
@@ -958,10 +972,16 @@ lv_obj_t* PrintStatusPanel::create(lv_obj_t* parent) {
 
     // Restore cached thumbnail if a print was already in progress before panel was displayed
     // This handles the case where a print was started from Mainsail while on the Home panel
+#if defined(HELIX_PLATFORM_ESP32)
+    // cached_thumbnail_path_ is always empty here (no disk cache) — restore from
+    // the PSRAM buffer PrinterState is holding instead.
+    apply_esp_psram_thumbnail();
+#else
     if (print_thumbnail_ && !cached_thumbnail_path_.empty()) {
         lv_image_set_src(print_thumbnail_, cached_thumbnail_path_.c_str());
         spdlog::info("[{}] Restored cached thumbnail: {}", get_name(), cached_thumbnail_path_);
     }
+#endif
 
     // Register plugin injection point for print status widgets
     lv_obj_t* extras_container = lv_obj_find_by_name(overlay_root_, "print_status_extras");
@@ -1346,12 +1366,21 @@ void PrintStatusPanel::show_gcode_viewer(bool show) {
     // When falling back to thumbnail mode, ensure the image source is applied.
     // During async gcode reload the gradient covers the area — the user should
     // at least see the cached thumbnail underneath.
+#if defined(HELIX_PLATFORM_ESP32)
+    if (mode == 0 && print_thumbnail_ && esp_thumbnail_) {
+        const void* current_src = lv_image_get_src(print_thumbnail_);
+        if (!current_src) {
+            lv_image_set_src(print_thumbnail_, esp_thumbnail_->dsc());
+        }
+    }
+#else
     if (mode == 0 && print_thumbnail_ && !cached_thumbnail_path_.empty()) {
         const void* current_src = lv_image_get_src(print_thumbnail_);
         if (!current_src) {
             lv_image_set_src(print_thumbnail_, cached_thumbnail_path_.c_str());
         }
     }
+#endif
 
     // Pause/resume rendering based on visibility mode (CPU optimization)
     if (gcode_viewer_) {
@@ -1628,25 +1657,15 @@ void PrintStatusPanel::load_gcode_file(const char* file_path) {
     ui_gcode_viewer_load_file(gcode_viewer_, file_path);
 }
 
-void PrintStatusPanel::update_all_displays() {
-    // Guard: don't update if subjects aren't initialized yet
-    if (!subjects_initialized_) {
-        return;
-    }
-
-    // Progress text
-    helix::format::format_percent(lifecycle_.progress(), progress_text_buf_,
-                                  sizeof(progress_text_buf_));
-    lv_subject_copy_string(&progress_text_subject_, progress_text_buf_);
-
-    // Layer text (prefix with ~ when estimated from progress)
-    const char* layer_fmt =
-        printer_state_.has_real_layer_data() ? "Layer %d / %d" : "Layer ~%d / %d";
-    std::snprintf(layer_text_buf_, sizeof(layer_text_buf_), layer_fmt, lifecycle_.current_layer(),
-                  lifecycle_.total_layers());
+void PrintStatusPanel::update_layer_text() {
+    std::string text = helix::ui::format_layer_progress(
+        lifecycle_.current_layer(), lifecycle_.total_layers(), printer_state_.layer_is_accurate(),
+        lv_subject_get_int(printer_state_.get_gcode_position_z_subject()));
+    std::snprintf(layer_text_buf_, sizeof(layer_text_buf_), "%s", text.c_str());
     lv_subject_copy_string(&layer_text_subject_, layer_text_buf_);
+}
 
-    // Filament used text
+void PrintStatusPanel::update_filament_used_text() {
     int filament_mm = lv_subject_get_int(get_printer_state().get_print_filament_used_subject());
     if (filament_mm > 0) {
         std::string fil_str =
@@ -1658,6 +1677,20 @@ void PrintStatusPanel::update_all_displays() {
         filament_used_text_buf_[0] = '\0';
     }
     lv_subject_copy_string(&filament_used_text_subject_, filament_used_text_buf_);
+}
+
+void PrintStatusPanel::update_all_displays() {
+    // Guard: don't update if subjects aren't initialized yet
+    if (!subjects_initialized_) {
+        return;
+    }
+
+    // Progress text
+
+    update_layer_text();
+
+    // Filament used text
+    update_filament_used_text();
 
     // Time displays - Preparing: preprint observers own these.
     // Complete: on_print_state_changed sets frozen final values, don't overwrite.
@@ -2668,9 +2701,6 @@ void PrintStatusPanel::on_print_progress_changed(int progress) {
     }
 
     // Update progress text
-    helix::format::format_percent(lifecycle_.progress(), progress_text_buf_,
-                                  sizeof(progress_text_buf_));
-    lv_subject_copy_string(&progress_text_subject_, progress_text_buf_);
 
     // Update progress bar with smooth animation (300ms ease-out) if animations enabled
     // This complements the subject binding with animated transitions
@@ -2681,17 +2711,7 @@ void PrintStatusPanel::on_print_progress_changed(int progress) {
     }
 
     // Update filament used text (evolves during active printing)
-    int filament_mm = lv_subject_get_int(get_printer_state().get_print_filament_used_subject());
-    if (filament_mm > 0) {
-        std::string fil_str =
-            helix::format::format_filament_length(static_cast<double>(filament_mm)) + " " +
-            lv_tr("used");
-        std::strncpy(filament_used_text_buf_, fil_str.c_str(), sizeof(filament_used_text_buf_) - 1);
-        filament_used_text_buf_[sizeof(filament_used_text_buf_) - 1] = '\0';
-    } else {
-        filament_used_text_buf_[0] = '\0';
-    }
-    lv_subject_copy_string(&filament_used_text_subject_, filament_used_text_buf_);
+    update_filament_used_text();
 
     spdlog::trace("[{}] Progress updated: {}%", get_name(), lifecycle_.progress());
 }
@@ -2739,6 +2759,24 @@ void PrintStatusPanel::on_print_state_changed(PrintJobState job_state) {
             }
             thumbnail_source_filename_.clear();
             cached_thumbnail_path_.clear();
+#if defined(HELIX_PLATFORM_ESP32)
+            // Release our reference to the PSRAM buffer. Main thread (job-state
+            // handler), as EspPsramThumbnail's destructor requires.
+            //
+            // The src must stop naming the descriptor BEFORE the release: for a
+            // variable source lv_image stores the raw pointer (it only strdups
+            // paths), and ours can be the last reference — PrinterState drops
+            // its own the moment the filename changes, and no replacement
+            // arrives at all when the next file has no thumbnail or the fetch
+            // fails. The placeholder is what the shared path subject publishes
+            // for a file with no thumbnail, so it is a valid src here.
+            if (esp_thumbnail_ && print_thumbnail_ &&
+                lv_image_get_src(print_thumbnail_) == esp_thumbnail_->dsc()) {
+                lv_image_set_src(print_thumbnail_,
+                                 helix::PrinterPrintState::no_thumbnail_placeholder());
+            }
+            esp_thumbnail_.reset();
+#endif
             pending_gcode_filename_.clear();
             // The print is over. lifecycle_ already reset its own gcode_loaded
             // flag inside on_job_state_changed() (result.clear_gcode_loaded). The
@@ -2831,16 +2869,12 @@ void PrintStatusPanel::on_print_state_changed(PrintJobState job_state) {
 
     // Freeze display values on Complete (lifecycle already froze the state values)
     if (result.should_freeze_complete) {
-        std::snprintf(progress_text_buf_, sizeof(progress_text_buf_), "100%%");
-        lv_subject_copy_string(&progress_text_subject_, progress_text_buf_);
         if (progress_bar_) {
             lv_bar_set_value(progress_bar_, 100, LV_ANIM_OFF);
         }
 
         if (lifecycle_.total_layers() > 0) {
-            std::snprintf(layer_text_buf_, sizeof(layer_text_buf_), "Layer %d / %d",
-                          lifecycle_.current_layer(), lifecycle_.total_layers());
-            lv_subject_copy_string(&layer_text_subject_, layer_text_buf_);
+            update_layer_text();
         }
 
         format_time(lifecycle_.elapsed_seconds(), elapsed_buf_, sizeof(elapsed_buf_));
@@ -2960,22 +2994,7 @@ void PrintStatusPanel::on_print_layer_changed(int current_layer) {
         return;
     }
 
-    // Prefix "~" only for the progress-fraction guess. Real slicer/Moonraker
-    // fields AND Z-height-derived layers are accurate (Mainsail parity), so
-    // layer_is_accurate() — not the narrower has_real_data — drives the prefix.
-    // Include Z height in centimillimeters when available.
-    bool layer_accurate = printer_state_.layer_is_accurate();
-    int z_centimm = lv_subject_get_int(printer_state_.get_gcode_position_z_subject());
-    if (z_centimm > 0) {
-        const char* fmt = layer_accurate ? "Layer %d / %d (%.1fmm)" : "Layer ~%d / %d (%.1fmm)";
-        std::snprintf(layer_text_buf_, sizeof(layer_text_buf_), fmt, lifecycle_.current_layer(),
-                      lifecycle_.total_layers(), z_centimm / 100.0);
-    } else {
-        const char* fmt = layer_accurate ? "Layer %d / %d" : "Layer ~%d / %d";
-        std::snprintf(layer_text_buf_, sizeof(layer_text_buf_), fmt, lifecycle_.current_layer(),
-                      lifecycle_.total_layers());
-    }
-    lv_subject_copy_string(&layer_text_subject_, layer_text_buf_);
+    update_layer_text();
 
     // Update G-code viewer ghost layer if panel is active and viewer is visible
     if (is_active_ && gcode_viewer_ && !lv_obj_has_flag(gcode_viewer_, LV_OBJ_FLAG_HIDDEN) &&
@@ -3083,8 +3102,6 @@ void PrintStatusPanel::on_print_start_phase_changed(int phase) {
         if (progress_bar_) {
             lv_bar_set_value(progress_bar_, 0, LV_ANIM_OFF);
         }
-        std::snprintf(progress_text_buf_, sizeof(progress_text_buf_), "0%%");
-        lv_subject_copy_string(&progress_text_subject_, progress_text_buf_);
         std::snprintf(layer_text_buf_, sizeof(layer_text_buf_), " ");
         lv_subject_copy_string(&layer_text_subject_, layer_text_buf_);
 
@@ -3312,6 +3329,40 @@ void PrintStatusPanel::animate_print_error() {
 // Tune panel handlers delegated to PrintTuneOverlay singleton:
 // See get_print_tune_overlay() and handle_*() methods in ui_print_tune_overlay.cpp
 // XML callbacks are registered in ui_print_tune_overlay.cpp on first show()
+
+// ============================================================================
+// THUMBNAIL LOADING
+// ============================================================================
+
+#if defined(HELIX_PLATFORM_ESP32)
+void PrintStatusPanel::apply_esp_psram_thumbnail() {
+    auto thumb = printer_state_.get_print_psram_thumbnail();
+    if (!thumb) {
+        return;
+    }
+    // Hold the reference for as long as print_thumbnail_'s src points at the
+    // descriptor. `previous` keeps the outgoing buffer alive until after the
+    // widget stops pointing at it — otherwise the last release could free the
+    // descriptor the widget's src still names. Both releases happen here, on
+    // the main thread, which is what EspPsramThumbnail's destructor requires.
+    auto previous = std::move(esp_thumbnail_);
+    esp_thumbnail_ = std::move(thumb);
+    if (!print_thumbnail_) {
+        spdlog::info("[{}] PSRAM thumbnail held (panel not yet displayed)", get_name());
+        return;
+    }
+    lv_image_set_src(print_thumbnail_, esp_thumbnail_->dsc());
+    spdlog::info("[{}] PSRAM thumbnail displayed", get_name());
+    // Fallback content for the current print is now on screen; record it so
+    // ensure_preview_current() treats the thumbnail as current (mirrors the
+    // print_thumbnail_path observer on other platforms).
+    std::string effective =
+        thumbnail_source_filename_.empty() ? current_print_filename_ : thumbnail_source_filename_;
+    if (!effective.empty()) {
+        displayed_file_ = effective;
+    }
+}
+#endif
 
 // ============================================================================
 // G-CODE VIEWER LOADING
@@ -3755,7 +3806,15 @@ void PrintStatusPanel::ensure_preview_current() {
         return; // Nothing to show.
     }
 
-    if (action.load_thumbnail && print_thumbnail_) {
+    if (action.load_thumbnail && print_thumbnail_ &&
+        helix::ui::is_on_active_screen(print_thumbnail_)) {
+        // The overlay root is parented under the active screen, so a thumbnail
+        // that no longer roots there has been reparented onto lv_layer_top() to
+        // await deletion. Setting its image src would cascade lv_image_set_src →
+        // update_align → lv_obj_update_layout across the layer and recurse into
+        // sibling condemned grid subtrees whose children may already be freed
+        // (#1001). Same guard the home-panel widget applies to its own thumbs.
+        //
         // Nothing here fetches: that belongs to ActivePrintMediaManager, the
         // single writer of the shared subject. The only two sources are our own
         // cache and that subject's current value.
@@ -3821,51 +3880,6 @@ void PrintStatusPanel::set_thumbnail_source(const std::string& filename) {
             "[{}] Source set before WebSocket, cleared displayed file for deferred reload",
             get_name());
     }
-}
-
-void PrintStatusPanel::set_progress(int percent) {
-    lifecycle_.on_progress_changed(percent);
-    if (!subjects_initialized_)
-        return;
-    helix::format::format_percent(lifecycle_.progress(), progress_text_buf_,
-                                  sizeof(progress_text_buf_));
-    lv_subject_copy_string(&progress_text_subject_, progress_text_buf_);
-}
-
-void PrintStatusPanel::set_layer(int current, int total) {
-    lifecycle_.on_layer_changed(current, total, printer_state_.has_real_layer_data());
-    if (!subjects_initialized_)
-        return;
-    const char* layer_fmt =
-        printer_state_.has_real_layer_data() ? "Layer %d / %d" : "Layer ~%d / %d";
-    std::snprintf(layer_text_buf_, sizeof(layer_text_buf_), layer_fmt, lifecycle_.current_layer(),
-                  lifecycle_.total_layers());
-    lv_subject_copy_string(&layer_text_subject_, layer_text_buf_);
-}
-
-void PrintStatusPanel::set_times(int elapsed_secs, int remaining_secs) {
-    // Use NONE outcome so lifecycle doesn't guard against it
-    lifecycle_.on_duration_changed(elapsed_secs, PrintOutcome::NONE);
-    lifecycle_.on_time_left_changed(remaining_secs, PrintOutcome::NONE);
-    if (!subjects_initialized_)
-        return;
-    if (lifecycle_.state() != PrintState::Preparing && lifecycle_.state() != PrintState::Complete) {
-        format_time(lifecycle_.elapsed_seconds(), elapsed_buf_, sizeof(elapsed_buf_));
-        lv_subject_copy_string(&elapsed_subject_, elapsed_buf_);
-        format_time(lifecycle_.remaining_seconds(), remaining_buf_, sizeof(remaining_buf_));
-        lv_subject_copy_string(&remaining_subject_, remaining_buf_);
-    }
-}
-
-void PrintStatusPanel::set_speeds(int speed_pct, int flow_pct) {
-    lifecycle_.on_speed_changed(speed_pct);
-    lifecycle_.on_flow_changed(flow_pct);
-    if (!subjects_initialized_)
-        return;
-    helix::format::format_percent(lifecycle_.speed_percent(), speed_buf_, sizeof(speed_buf_));
-    lv_subject_copy_string(&speed_subject_, speed_buf_);
-    helix::format::format_percent(lifecycle_.flow_percent(), flow_buf_, sizeof(flow_buf_));
-    lv_subject_copy_string(&flow_subject_, flow_buf_);
 }
 
 void PrintStatusPanel::set_state(PrintState state) {

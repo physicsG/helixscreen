@@ -27,7 +27,7 @@ class PerformanceState {
     static PerformanceState& instance();
 
     /// Register subjects and self-register cleanup. Idempotent.
-    /// Called from Application::init_subsystems() after MoonrakerAPI is up.
+    /// Called from Application::init_subsystems() after IMoonrakerAPI is up.
     void init_subjects();
 
     /// Tear down subjects. Called from StaticSubjectRegistry on shutdown.

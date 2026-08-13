@@ -456,7 +456,7 @@ void ZOffsetCalibrationPanel::arm_saving_timeout() {
 
 void ZOffsetCalibrationPanel::start_calibration() {
     if (!api_) {
-        spdlog::error("[ZOffsetCal] No MoonrakerAPI");
+        spdlog::error("[ZOffsetCal] No IMoonrakerAPI");
         on_calibration_result(false, "No printer connection");
         return;
     }
@@ -708,7 +708,7 @@ void ZOffsetCalibrationPanel::send_accept() {
 
         // Token + api captured on the main thread so the bg-thread ACCEPT callback never
         // touches `this` members (no bg-thread lifetime_.token()/api_ access). api_ (the
-        // MoonrakerAPI) outlives the panel; all `this` work is deferred to the main thread (L081).
+        // IMoonrakerAPI) outlives the panel; all `this` work is deferred to the main thread (L081).
         auto accept_token = lifetime_.token();
         api_->execute_gcode(
             "ACCEPT",

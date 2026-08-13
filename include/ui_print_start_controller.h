@@ -22,7 +22,7 @@
 namespace helix {
 class PrinterState;
 }
-class MoonrakerAPI;
+class IMoonrakerAPI;
 struct PrintFileData;
 class PrintStartControllerTestAccess; // test-only friend (global scope)
 
@@ -58,9 +58,9 @@ class PrintStartController {
      * @brief Construct controller with required dependencies
      *
      * @param printer_state Reference to PrinterState for capability queries
-     * @param api Pointer to MoonrakerAPI (may be nullptr initially)
+     * @param api Pointer to IMoonrakerAPI (may be nullptr initially)
      */
-    PrintStartController(PrinterState& printer_state, MoonrakerAPI* api);
+    PrintStartController(PrinterState& printer_state, IMoonrakerAPI* api);
     ~PrintStartController();
 
     // Non-copyable
@@ -70,7 +70,7 @@ class PrintStartController {
     /**
      * @brief Set the API (can be null initially, set later)
      */
-    void set_api(MoonrakerAPI* api);
+    void set_api(IMoonrakerAPI* api);
 
     /**
      * @brief Set the detail view for prep manager access
@@ -287,7 +287,7 @@ class PrintStartController {
 
     // === Dependencies ===
     PrinterState& printer_state_;
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
     PrintSelectDetailView* detail_view_ = nullptr;
     lv_subject_t* can_print_subject_ = nullptr;
 

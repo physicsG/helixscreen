@@ -30,7 +30,7 @@ using namespace helix;
 // MoonrakerAdvancedAPI Implementation
 // ============================================================================
 
-MoonrakerAdvancedAPI::MoonrakerAdvancedAPI(MoonrakerClient& client, MoonrakerAPI& api)
+MoonrakerAdvancedAPI::MoonrakerAdvancedAPI(IMoonrakerClient& client, MoonrakerAPI& api)
     : client_(client), api_(api) {}
 
 // ============================================================================
@@ -314,7 +314,7 @@ class PIDCalibrateCollector : public std::enable_shared_from_this<PIDCalibrateCo
     using PIDCallback = std::function<void(float kp, float ki, float kd)>;
     using PIDProgressCallback = std::function<void(int sample, float tolerance)>;
 
-    PIDCalibrateCollector(MoonrakerClient& client, PIDCallback on_success,
+    PIDCalibrateCollector(IMoonrakerClient& client, PIDCallback on_success,
                           MoonrakerAdvancedAPI::ErrorCallback on_error,
                           PIDProgressCallback on_progress = nullptr)
         : client_(client), on_success_(std::move(on_success)), on_error_(std::move(on_error)),
@@ -424,7 +424,7 @@ class PIDCalibrateCollector : public std::enable_shared_from_this<PIDCalibrateCo
         }
     }
 
-    MoonrakerClient& client_;
+    IMoonrakerClient& client_;
     PIDCallback on_success_;
     MoonrakerAdvancedAPI::ErrorCallback on_error_;
     PIDProgressCallback on_progress_;
@@ -456,7 +456,7 @@ class MPCCalibrateCollector : public std::enable_shared_from_this<MPCCalibrateCo
     using MPCProgressCB = MoonrakerAdvancedAPI::MPCProgressCallback;
     using MPCResult = MoonrakerAdvancedAPI::MPCResult;
 
-    MPCCalibrateCollector(MoonrakerClient& client, MPCCallback on_success,
+    MPCCalibrateCollector(IMoonrakerClient& client, MPCCallback on_success,
                           MoonrakerAdvancedAPI::ErrorCallback on_error,
                           MPCProgressCB on_progress = nullptr, bool expect_fan_data = false)
         : client_(client), on_success_(std::move(on_success)), on_error_(std::move(on_error)),
@@ -649,7 +649,7 @@ class MPCCalibrateCollector : public std::enable_shared_from_this<MPCCalibrateCo
         }
     }
 
-    MoonrakerClient& client_;
+    IMoonrakerClient& client_;
     MPCCallback on_success_;
     MoonrakerAdvancedAPI::ErrorCallback on_error_;
     MPCProgressCB on_progress_;
@@ -692,7 +692,7 @@ class MPCCalibrateCollector : public std::enable_shared_from_this<MPCCalibrateCo
  */
 class ScrewsTiltCollector : public std::enable_shared_from_this<ScrewsTiltCollector> {
   public:
-    ScrewsTiltCollector(MoonrakerClient& client, ScrewTiltCallback on_success,
+    ScrewsTiltCollector(IMoonrakerClient& client, ScrewTiltCallback on_success,
                         MoonrakerAdvancedAPI::ErrorCallback on_error)
         : client_(client), on_success_(std::move(on_success)), on_error_(std::move(on_error)) {}
 
@@ -827,7 +827,7 @@ class ScrewsTiltCollector : public std::enable_shared_from_this<ScrewsTiltCollec
         }
     }
 
-    MoonrakerClient& client_;
+    IMoonrakerClient& client_;
     ScrewTiltCallback on_success_;
     MoonrakerAdvancedAPI::ErrorCallback on_error_;
     std::string handler_name_;
@@ -857,7 +857,7 @@ class ScrewsTiltCollector : public std::enable_shared_from_this<ScrewsTiltCollec
  */
 class InputShaperCollector : public std::enable_shared_from_this<InputShaperCollector> {
   public:
-    InputShaperCollector(MoonrakerClient& client, char axis, AdvancedProgressCallback on_progress,
+    InputShaperCollector(IMoonrakerClient& client, char axis, AdvancedProgressCallback on_progress,
                          InputShaperCallback on_success,
                          MoonrakerAdvancedAPI::ErrorCallback on_error)
         : client_(client), axis_(axis), on_progress_(std::move(on_progress)),
@@ -1199,7 +1199,7 @@ class InputShaperCollector : public std::enable_shared_from_this<InputShaperColl
         float max_accel = 0.0f;
     };
 
-    MoonrakerClient& client_;
+    IMoonrakerClient& client_;
     char axis_;
     AdvancedProgressCallback on_progress_;
     InputShaperCallback on_success_;
@@ -1235,7 +1235,7 @@ class InputShaperCollector : public std::enable_shared_from_this<InputShaperColl
  */
 class NoiseCheckCollector : public std::enable_shared_from_this<NoiseCheckCollector> {
   public:
-    NoiseCheckCollector(MoonrakerClient& client,
+    NoiseCheckCollector(IMoonrakerClient& client,
                         MoonrakerAdvancedAPI::NoiseCheckCallback on_success,
                         MoonrakerAdvancedAPI::ErrorCallback on_error)
         : client_(client), on_success_(std::move(on_success)), on_error_(std::move(on_error)) {}
@@ -1372,7 +1372,7 @@ class NoiseCheckCollector : public std::enable_shared_from_this<NoiseCheckCollec
         }
     }
 
-    MoonrakerClient& client_;
+    IMoonrakerClient& client_;
     MoonrakerAdvancedAPI::NoiseCheckCallback on_success_;
     MoonrakerAdvancedAPI::ErrorCallback on_error_;
     std::string handler_name_;
@@ -1403,7 +1403,7 @@ class BedMeshProgressCollector : public std::enable_shared_from_this<BedMeshProg
   public:
     using ProgressCallback = std::function<void(int current, int total)>;
 
-    BedMeshProgressCollector(MoonrakerClient& client, ProgressCallback on_progress,
+    BedMeshProgressCollector(IMoonrakerClient& client, ProgressCallback on_progress,
                              MoonrakerAdvancedAPI::SuccessCallback on_complete,
                              MoonrakerAdvancedAPI::ErrorCallback on_error, int expected_probes = 0,
                              int probe_samples = 1)
@@ -1546,7 +1546,7 @@ class BedMeshProgressCollector : public std::enable_shared_from_this<BedMeshProg
         }
     }
 
-    MoonrakerClient& client_;
+    IMoonrakerClient& client_;
     ProgressCallback on_progress_;
     MoonrakerAdvancedAPI::SuccessCallback on_complete_;
     MoonrakerAdvancedAPI::ErrorCallback on_error_;

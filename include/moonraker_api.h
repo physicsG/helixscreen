@@ -85,15 +85,9 @@ struct PlrDetectResult; // plr_backend.h — check_continue_print_state() result
  */
 class MoonrakerAPI : public IMoonrakerAPI {
   public:
-    // ========== G-code execute_gcode timeout constants ==========
-    // Default is 30s (in MoonrakerClient). These are for long-running commands.
-    // Advanced calibration timeouts are in MoonrakerAdvancedAPI.
-    static constexpr uint32_t HOMING_TIMEOUT_MS = 300000;        // 5 min — G28 on large printers
-    static constexpr uint32_t AMS_OPERATION_TIMEOUT_MS = 300000; // 5 min — MMU/AFC/tool change ops
-    static constexpr uint32_t EXTRUSION_TIMEOUT_MS =
-        120000; // 2 min — filament purge/load at slow feedrate
-    static constexpr uint32_t MACRO_TIMEOUT_MS =
-        300000; // 5 min — user macros can do anything (homing, leveling, filament ops)
+    // G-code execute_gcode timeout constants (HOMING_TIMEOUT_MS,
+    // AMS_OPERATION_TIMEOUT_MS, EXTRUSION_TIMEOUT_MS, MACRO_TIMEOUT_MS) and
+    // MOONRAKER_DEFAULT_PORT are inherited from IMoonrakerAPI.
 
     // Callback typedefs (SuccessCallback, ErrorCallback, BoolCallback,
     // StringCallback, JsonCallback, PowerDevicesCallback, SensorsCallback)
@@ -105,7 +99,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param client MoonrakerClient instance (must remain valid during API lifetime)
      * @param state PrinterState instance (must remain valid during API lifetime)
      */
-    MoonrakerAPI(helix::MoonrakerClient& client, helix::PrinterState& state);
+    MoonrakerAPI(helix::IMoonrakerClient& client, helix::PrinterState& state);
     virtual ~MoonrakerAPI();
 
     // ========================================================================
@@ -121,7 +115,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_error Error callback
      */
     void set_temperature(const std::string& heater, double temperature, SuccessCallback on_success,
-                         ErrorCallback on_error);
+                         ErrorCallback on_error) override;
 
     /**
      * @brief Set fan speed
@@ -132,7 +126,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_error Error callback
      */
     void set_fan_speed(const std::string& fan, double speed, SuccessCallback on_success,
-                       ErrorCallback on_error);
+                       ErrorCallback on_error) override;
 
     /**
      * @brief Set LED color/brightness
@@ -154,7 +148,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      */
     void set_led(const std::string& led, double red, double green, double blue, double white,
                  SuccessCallback on_success, ErrorCallback on_error,
-                 SuccessCallback on_queued = nullptr);
+                 SuccessCallback on_queued = nullptr) override;
 
     // ========================================================================
     // Power Device Control Operations
@@ -232,18 +226,10 @@ class MoonrakerAPI : public IMoonrakerAPI {
      */
     void execute_gcode(const std::string& gcode, SuccessCallback on_success, ErrorCallback on_error,
                        uint32_t timeout_ms = 0, bool silent = false,
-                       SuccessCallback on_queued = nullptr);
+                       SuccessCallback on_queued = nullptr) override;
 
-    /**
-     * @brief Check if a string is safe to use as a G-code parameter
-     *
-     * Allows alphanumeric, underscore, and space. Rejects newlines, semicolons,
-     * and other characters that could enable G-code injection.
-     *
-     * @param str String to validate
-     * @return true if safe for G-code parameter use, false otherwise
-     */
-    static bool is_safe_gcode_param(const std::string& str);
+    // is_safe_gcode_param() is a static utility declared on IMoonrakerAPI
+    // (inherited here) so consumers can validate without the concrete type.
 
     // ========================================================================
     // Object Exclusion Operations
@@ -261,7 +247,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_error Error callback
      */
     void exclude_object(const std::string& object_name, SuccessCallback on_success,
-                        ErrorCallback on_error);
+                        ErrorCallback on_error) override;
 
     /**
      * @brief Emergency stop
@@ -269,7 +255,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_success Success callback
      * @param on_error Error callback
      */
-    void emergency_stop(SuccessCallback on_success, ErrorCallback on_error);
+    void emergency_stop(SuccessCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Restart Klipper firmware
@@ -277,7 +263,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_success Success callback
      * @param on_error Error callback
      */
-    void restart_firmware(SuccessCallback on_success, ErrorCallback on_error);
+    void restart_firmware(SuccessCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Restart Klipper host process
@@ -285,7 +271,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_success Success callback
      * @param on_error Error callback
      */
-    void restart_klipper(SuccessCallback on_success, ErrorCallback on_error);
+    void restart_klipper(SuccessCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Restart a system service via Moonraker's `machine.services.restart`.
@@ -306,7 +292,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_error     Error callback
      */
     void restart_service(const std::string& service_name, SuccessCallback on_success,
-                         ErrorCallback on_error);
+                         ErrorCallback on_error) override;
 
     /**
      * @brief Restart the Moonraker service
@@ -317,21 +303,21 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_success Success callback (called before disconnect)
      * @param on_error Error callback
      */
-    void restart_moonraker(SuccessCallback on_success, ErrorCallback on_error);
+    void restart_moonraker(SuccessCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Shut down the host machine
      * @param on_success Success callback
      * @param on_error Error callback
      */
-    void machine_shutdown(SuccessCallback on_success, ErrorCallback on_error);
+    void machine_shutdown(SuccessCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Reboot the host machine
      * @param on_success Success callback
      * @param on_error Error callback
      */
-    void machine_reboot(SuccessCallback on_success, ErrorCallback on_error);
+    void machine_reboot(SuccessCallback on_success, ErrorCallback on_error) override;
 
     // ========================================================================
     // Query Operations
@@ -343,7 +329,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_result Callback with ready state
      * @param on_error Error callback
      */
-    void is_printer_ready(BoolCallback on_result, ErrorCallback on_error);
+    void is_printer_ready(BoolCallback on_result, ErrorCallback on_error) override;
 
     /**
      * @brief Get current print state
@@ -351,7 +337,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_result Callback with state ("standby", "printing", "paused", "complete", "error")
      * @param on_error Error callback
      */
-    void get_print_state(StringCallback on_result, ErrorCallback on_error);
+    void get_print_state(StringCallback on_result, ErrorCallback on_error) override;
 
     // ========================================================================
     // Power-Loss Recovery — Creality Klipper fork
@@ -379,7 +365,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_error  Transport/RPC error callback
      */
     void check_continue_print_state(std::function<void(const helix::PlrDetectResult&)> on_result,
-                                    ErrorCallback on_error);
+                                    ErrorCallback on_error) override;
 
     /**
      * @brief Discard the Creality power-loss recovery snapshot.
@@ -387,7 +373,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * JSON-RPC `printer.pause_resume.cancel_continue_print`. Touches no motion,
      * so it is safe to expose regardless of the probe outcome.
      */
-    void cancel_continue_print(SuccessCallback on_success, ErrorCallback on_error);
+    void cancel_continue_print(SuccessCallback on_success, ErrorCallback on_error) override;
 
     // ========================================================================
     // Safety Limits Configuration
@@ -401,7 +387,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @param limits Safety limits to apply
      */
-    void set_safety_limits(const SafetyLimits& limits) {
+    void set_safety_limits(const SafetyLimits& limits) override {
         safety_limits_ = limits;
         limits_explicitly_set_ = true;
     }
@@ -411,7 +397,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Current safety limits (explicit, auto-detected, or defaults)
      */
-    const SafetyLimits& get_safety_limits() const {
+    const SafetyLimits& get_safety_limits() const override {
         return safety_limits_;
     }
 
@@ -429,7 +415,8 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_success Success callback
      * @param on_error Error callback
      */
-    void update_safety_limits_from_printer(SuccessCallback on_success, ErrorCallback on_error);
+    void update_safety_limits_from_printer(SuccessCallback on_success,
+                                           ErrorCallback on_error) override;
 
     /**
      * @brief Query the printer's configfile object
@@ -445,7 +432,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param on_success Callback with parsed JSON config object
      * @param on_error Error callback
      */
-    void query_configfile(JsonCallback on_success, ErrorCallback on_error);
+    void query_configfile(JsonCallback on_success, ErrorCallback on_error) override;
 
     // ========================================================================
     // HTTP Base URL Configuration
@@ -459,21 +446,16 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @param base_url HTTP base URL (e.g., "http://192.168.1.100:7125")
      */
-    void set_http_base_url(const std::string& base_url) {
+    void set_http_base_url(const std::string& base_url) override {
         http_base_url_ = base_url;
     }
 
     /**
      * @brief Get the current HTTP base URL
      */
-    const std::string& get_http_base_url() const {
+    const std::string& get_http_base_url() const override {
         return http_base_url_;
     }
-
-    /// Moonraker's default API port. When the HTTP base points here we assume a
-    /// "direct to Moonraker" connection, where the webcam is served by a separate
-    /// reverse proxy (conventionally nginx on :80) rather than the API port.
-    static constexpr int MOONRAKER_DEFAULT_PORT = 7125;
 
     /**
      * @brief Resolve a relative webcam URL against the web frontend base.
@@ -494,7 +476,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @param url The URL to resolve (modified in place). Absolute URLs are unchanged.
      */
-    void resolve_webcam_url(std::string& url) {
+    void resolve_webcam_url(std::string& url) override {
         if (url.empty() || url[0] != '/')
             return;
         ensure_http_base_url();
@@ -538,7 +520,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return true if HTTP base URL is available, false if derivation failed
      */
-    bool ensure_http_base_url();
+    bool ensure_http_base_url() override;
 
     // ========================================================================
     // Connection and Subscription Proxies
@@ -561,7 +543,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
     bool unsubscribe_notifications(helix::SubscriptionId id) override;
 
     /// Get client lifetime guard (for SubscriptionGuard safety)
-    std::weak_ptr<bool> client_lifetime_weak() const;
+    std::weak_ptr<bool> client_lifetime_weak() const override;
 
     /// Register a persistent callback for a specific notification method
     void register_method_callback(const std::string& method, const std::string& name,
@@ -620,14 +602,14 @@ class MoonrakerAPI : public IMoonrakerAPI {
     // ========================================================================
 
     /**
-     * @brief Get reference to underlying MoonrakerClient
+     * @brief Get reference to underlying client transport
      *
-     * Provides direct access to the WebSocket client for advanced operations
+     * Provides direct access to the transport client for advanced operations
      * requiring direct G-code execution or state observation.
      *
-     * @return Reference to MoonrakerClient
+     * @return Reference to IMoonrakerClient
      */
-    helix::MoonrakerClient& get_client() {
+    helix::IMoonrakerClient& get_client() override {
         return client_;
     }
 
@@ -640,7 +622,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Const reference to PrinterDiscovery
      */
-    [[nodiscard]] const helix::PrinterDiscovery& hardware() const {
+    [[nodiscard]] const helix::PrinterDiscovery& hardware() const override {
         return hardware_;
     }
 
@@ -652,7 +634,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Reference to PrinterDiscovery
      */
-    helix::PrinterDiscovery& hardware() {
+    helix::PrinterDiscovery& hardware() override {
         return hardware_;
     }
 
@@ -665,7 +647,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Pointer to the version subject
      */
-    lv_subject_t* get_build_volume_version_subject() {
+    lv_subject_t* get_build_volume_version_subject() override {
         return &build_volume_version_;
     }
 
@@ -676,7 +658,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * observers that they should refresh any cached build volume data.
      * Increments the build_volume_version_ subject.
      */
-    void notify_build_volume_changed();
+    void notify_build_volume_changed() override;
 
     // ========================================================================
     // Sub-API Accessors (Delegated)
@@ -690,7 +672,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Reference to MoonrakerAdvancedAPI
      */
-    MoonrakerAdvancedAPI& advanced() {
+    MoonrakerAdvancedAPI& advanced() override {
         return *advanced_api_;
     }
 
@@ -702,7 +684,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Reference to MoonrakerFileTransferAPI
      */
-    MoonrakerFileTransferAPI& transfers() {
+    MoonrakerFileTransferAPI& transfers() override {
         return *file_transfer_api_;
     }
 
@@ -714,7 +696,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Reference to MoonrakerHistoryAPI
      */
-    MoonrakerHistoryAPI& history() {
+    MoonrakerHistoryAPI& history() override {
         return *history_api_;
     }
 
@@ -726,7 +708,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Reference to MoonrakerJobAPI
      */
-    MoonrakerJobAPI& job() {
+    MoonrakerJobAPI& job() override {
         return *job_api_;
     }
 
@@ -738,7 +720,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Reference to MoonrakerTimelapseAPI
      */
-    MoonrakerTimelapseAPI& timelapse() {
+    MoonrakerTimelapseAPI& timelapse() override {
         return *timelapse_api_;
     }
 
@@ -750,7 +732,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Reference to MoonrakerMotionAPI
      */
-    MoonrakerMotionAPI& motion() {
+    MoonrakerMotionAPI& motion() override {
         return *motion_api_;
     }
 
@@ -762,7 +744,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * motion filament ops while a print is active. The reference is valid for the
      * API's lifetime.
      */
-    helix::PrinterState& printer_state() {
+    helix::PrinterState& printer_state() override {
         return state_;
     }
 
@@ -775,7 +757,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Reference to MoonrakerRestAPI
      */
-    MoonrakerRestAPI& rest() {
+    MoonrakerRestAPI& rest() override {
         return *rest_api_;
     }
 
@@ -787,7 +769,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Reference to MoonrakerSpoolmanAPI
      */
-    MoonrakerSpoolmanAPI& spoolman() {
+    MoonrakerSpoolmanAPI& spoolman() override {
         return *spoolman_api_;
     }
 
@@ -800,7 +782,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Reference to MoonrakerFileAPI
      */
-    MoonrakerFileAPI& files() {
+    MoonrakerFileAPI& files() override {
         return *file_api_;
     }
 
@@ -812,7 +794,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *
      * @return Reference to MoonrakerQueueAPI
      */
-    MoonrakerQueueAPI& queue() {
+    MoonrakerQueueAPI& queue() override {
         return *queue_api_;
     }
 
@@ -821,7 +803,7 @@ class MoonrakerAPI : public IMoonrakerAPI {
     // C++ destroys members in reverse declaration order, so data members
     // (declared first) are destroyed LAST, after sub-APIs that reference them.
     std::string http_base_url_; ///< HTTP base URL for file transfers
-    helix::MoonrakerClient& client_;
+    helix::IMoonrakerClient& client_;
     helix::PrinterState& state_;
 
     /// Discovered printer hardware (heaters, fans, sensors, LEDs, capabilities)

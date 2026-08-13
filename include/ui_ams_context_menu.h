@@ -46,6 +46,24 @@ namespace helix::ui {
  * @endcode
  */
 class AmsContextMenu : public ContextMenu {
+    HELIX_CONTEXT_MENU_KIND(AmsContextMenu)
+
+  public:
+    /// Answers "may slot `candidate` stand in for slot `slot`?"
+    ///
+    /// Always AmsBackend::is_endless_spool_backup_eligible() in production. Taken
+    /// as a parameter by the two pure functions below purely so they are testable
+    /// without a backend; the production call sites bind it to the virtual and to
+    /// nothing else.
+    using BackupEligibleFn = std::function<bool(int slot, int candidate)>;
+
+    /// The spool number a slot's badge shows, which is not slot+1 once a unit
+    /// re-uses another's identity: on multiACE an ACE-fed head and the ACE bay
+    /// behind it share one number. Injected for the same reason as
+    /// BackupEligibleFn — always AmsBackend::spool_display_number() in
+    /// production, a parameter only so the builder stays testable.
+    using SlotDisplayNumberFn = std::function<int(int slot)>;
+
     friend class ::AmsContextMenuTestAccess;
 
   public:
@@ -118,13 +136,16 @@ class AmsContextMenu : public ContextMenu {
         return "ams_context_menu";
     }
     void on_created(lv_obj_t* menu_obj) override;
+    /// A tap outside a single-select action menu chooses nothing, so it reports
+    /// CANCELLED through this menu's own callback rather than the base's.
+    void on_backdrop_clicked() override;
 
   private:
     // === AMS-specific state ===
     ActionCallback action_callback_;
 
     /**
-     * @brief Common pattern: clear static instance, hide, invoke callback
+     * @brief Common pattern: hide, then invoke the callback with the slot index
      */
     void dispatch_ams_action(MenuAction action);
 
@@ -168,7 +189,6 @@ class AmsContextMenu : public ContextMenu {
     bool external_spool_mode_ = false; ///< True when showing menu for external spool (bypass)
 
     // === Event Handlers ===
-    void handle_backdrop_clicked();
     void handle_load();
     void handle_unload();
     void handle_gate_select();
@@ -188,6 +208,12 @@ class AmsContextMenu : public ContextMenu {
     void populate_backup_dropdown();
     std::string build_tool_options() const;
     std::string build_backup_options() const;
+    /// backend_->is_endless_spool_backup_eligible() as a callable, or an
+    /// always-eligible stub when there is no backend (matching the old code,
+    /// which skipped every compatibility check in that case).
+    BackupEligibleFn backend_eligible_fn() const;
+    /// backend_->spool_display_number() as a callable, or slot+1 with no backend.
+    SlotDisplayNumberFn backend_display_number_fn() const;
     int get_current_tool_for_slot() const;
     int get_current_backup_for_slot() const;
 
@@ -201,6 +227,47 @@ class AmsContextMenu : public ContextMenu {
     // is when the wrong metadata is printed with and when an edit aims a Spoolman
     // write at the previous spool. An empty lane's stale metadata is cosmetic.
     static bool should_show_clear_spool(const SlotInfo& slot);
+
+    // Pure: should the endless-spool backup row be shown at all?
+    //
+    // Availability alone is not enough. A read-only backend still earns the row
+    // (greyed out) so the user can SEE the backup the firmware is using - but
+    // only when the backend actually reports a per-slot relation to show. CFS is
+    // available and read-only with no per-slot mapping whatsoever (the box picks
+    // the refill spool from its own material groups), and it used to reach here
+    // with an empty config: the dropdown then read "None" forever, which is
+    // indistinguishable from "no backup configured".
+    //
+    // @param caps         The backend's capabilities.
+    // @param has_relation Whether get_endless_spool_config() reported anything.
+    static bool decide_show_backup_row(const helix::printer::EndlessSpoolCapabilities& caps,
+                                       bool has_relation);
+
+    // Pure: the backup dropdown's option list, "(incompatible)"-tagged.
+    //
+    // The eligibility rule is the BACKEND's, reached through
+    // AmsBackend::is_endless_spool_backup_eligible(). This used to call
+    // filament::are_materials_compatible() directly, which meant AD5X IFS's
+    // stricter firmware rule (exact material AND exact colour AND port present)
+    // could never reach the label, and no backend had any say. The base virtual
+    // IS the old material-compatibility rule, so AFC / Happy Hare / CFS options
+    // are byte-identical to before.
+    //
+    // @param total_slots Number of slots to offer.
+    // @param item_index  The slot the menu is open on; skipped in the list.
+    // @param eligible    The backend's rule.
+    // @return Newline-separated dropdown options, starting with "None".
+    static std::string build_backup_options_for(int total_slots, int item_index,
+                                                const BackupEligibleFn& eligible,
+                                                const SlotDisplayNumberFn& display_number = {});
+
+    // Pure: should the change-handler refuse this selection?
+    //
+    // Same rule as the option label, so a tagged option and a refused write can
+    // never disagree. "None" (backup < 0) is always allowed - clearing a backup
+    // needs no compatibility.
+    static bool decide_backup_refused(int item_index, int backup_slot,
+                                      const BackupEligibleFn& eligible);
 
     // Pure: selects the Unload button's operation for the open slot.
     //
@@ -274,9 +341,9 @@ class AmsContextMenu : public ContextMenu {
     static bool callbacks_registered_;
 
     // === Static Callbacks ===
-    static AmsContextMenu* s_active_instance_;
+    /// The menu on screen as an AmsContextMenu, or nullptr. Thin wrapper over
+    /// ContextMenu::active_as() that also logs the unexpected empty case.
     static AmsContextMenu* get_active_instance();
-    static void on_backdrop_cb(lv_event_t* e);
     static void on_load_cb(lv_event_t* e);
     static void on_unload_cb(lv_event_t* e);
     static void on_gate_select_cb(lv_event_t* e);

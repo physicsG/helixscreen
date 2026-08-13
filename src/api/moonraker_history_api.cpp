@@ -155,7 +155,7 @@ PrintHistoryJob parse_history_job(const json& job_json) {
 // MoonrakerHistoryAPI Implementation
 // ============================================================================
 
-MoonrakerHistoryAPI::MoonrakerHistoryAPI(MoonrakerClient& client) : client_(client) {}
+MoonrakerHistoryAPI::MoonrakerHistoryAPI(IMoonrakerClient& client) : client_(client) {}
 
 void MoonrakerHistoryAPI::get_history_list(int limit, int start, double since, double before,
                                            HistoryListCallback on_success, ErrorCallback on_error) {

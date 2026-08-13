@@ -4,8 +4,13 @@
 #pragma once
 
 #include <ctime>
+#include <memory>
 #include <string>
 #include <vector>
+
+#if defined(HELIX_PLATFORM_ESP32)
+#include "esp_psram_thumbnail.h"
+#endif
 
 // Forward declarations for factory methods (avoid header coupling)
 struct FileInfo;
@@ -72,6 +77,14 @@ struct PrintFileData {
     // Print history status (from PrintHistoryManager)
     FileHistoryStatus history_status = FileHistoryStatus::NEVER_PRINTED;
     int success_count = 0; ///< Number of successful prints (shown as "N ✓")
+
+#if defined(HELIX_PLATFORM_ESP32)
+    // PSRAM-resident thumbnail (Task 11 R2). ESP32 has no disk thumbnail
+    // cache (Task 10 R6), so a fetched thumbnail lives here instead of at
+    // thumbnail_path. shared_ptr so list sort/merge copies share one PSRAM
+    // allocation rather than re-copying image bytes.
+    std::shared_ptr<helix::ui::EspPsramThumbnail> esp_thumbnail;
+#endif
 
     // ========================================================================
     // FACTORY METHODS
@@ -153,4 +166,42 @@ inline bool should_carry_forward_print_file_metadata(const PrintFileData& old_en
         return false;
     }
     return true;
+}
+
+/**
+ * @brief Truncate a sorted print-file list to the newest max_files entries
+ *        (ESP32 print-select cap, Task 11 R1).
+ *
+ * Assumes the list has already been sorted directories-first with newest
+ * files first (see PrintSelectFileSorter::apply_sort — the is_dir tiebreak
+ * there is checked before the sort-direction flip, so std::sort always
+ * groups every directory entry ahead of every file entry, regardless of
+ * which column/direction the user picked). Under that invariant, walking
+ * the list and counting only non-directory entries finds the exact index
+ * where the (max_files+1)-th file starts; every directory a user could
+ * still navigate into precedes that index, so resizing there drops only
+ * older files, never a directory.
+ *
+ * Pure function — kept in this lightweight header (not ui_panel_print_select.cpp)
+ * so tests can inject the cap value instead of relying on the compiled-in
+ * ESP32 constant.
+ *
+ * @param files Sorted file list (dirs first, then files newest-first)
+ * @param max_files Maximum non-directory entries to keep
+ * @return true if any files were dropped (caller may surface a "more files
+ *         on the printer" affordance)
+ */
+inline bool cap_print_file_list_to_newest(std::vector<PrintFileData>& files, size_t max_files) {
+    size_t files_seen = 0;
+    for (size_t i = 0; i < files.size(); ++i) {
+        if (files[i].is_dir) {
+            continue;
+        }
+        if (files_seen == max_files) {
+            files.resize(i);
+            return true;
+        }
+        ++files_seen;
+    }
+    return false;
 }

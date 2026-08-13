@@ -30,9 +30,9 @@
 #include "bed_mesh_portrait_layout.h"
 #include "display_settings_manager.h"
 #include "format_utils.h"
+#include "i_moonraker_api.h"
 #include "layout_manager.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 #include "observer_factory.h"
 #include "printer_detector.h"
 #include "printer_state.h"
@@ -290,8 +290,8 @@ lv_obj_t* BedMeshPanel::create(lv_obj_t* parent) {
     // Setup observer for build_volume changes (to refresh bounds when stepper config loads)
     setup_build_volume_observer();
 
-    // Load initial mesh data from MoonrakerAPI
-    MoonrakerAPI* api = get_moonraker_api();
+    // Load initial mesh data from IMoonrakerAPI
+    IMoonrakerAPI* api = get_moonraker_api();
     if (api && api->advanced().has_bed_mesh()) {
         const BedMeshProfile* mesh = api->advanced().get_active_bed_mesh();
         if (mesh) {
@@ -493,7 +493,7 @@ void BedMeshPanel::rewire_after_orientation_flip() {
     // instance carrying no mesh data — reload the current one so the panel
     // does not go blank after a flip. Mirrors on_activate()'s deferred
     // reload lambda.
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (api && api->advanced().has_bed_mesh()) {
         const BedMeshProfile* mesh = api->advanced().get_active_bed_mesh();
         if (mesh) {
@@ -538,9 +538,9 @@ void BedMeshPanel::apply_portrait_canvas_height() {
         return;
     }
 
-    lv_obj_t* screen = lv_obj_get_screen(overlay_root_);
-    if (!helix::is_portrait_layout(
-            helix::detect_layout_type(lv_obj_get_width(screen), lv_obj_get_height(screen)))) {
+    // Visual decision: canvas height follows the effective layout so a
+    // --layout override reshapes this the same way it reshapes the XML. #1255.
+    if (!helix::is_portrait_layout(helix::LayoutManager::instance().type())) {
         return;
     }
 
@@ -697,7 +697,7 @@ void BedMeshPanel::on_activate() {
             lv_obj_update_layout(canvas_);
         }
 
-        MoonrakerAPI* api = get_moonraker_api();
+        IMoonrakerAPI* api = get_moonraker_api();
         if (api && api->advanced().has_bed_mesh()) {
             const BedMeshProfile* mesh = api->advanced().get_active_bed_mesh();
             if (mesh) {
@@ -763,7 +763,7 @@ void BedMeshPanel::on_ui_destroyed() {
 // ============================================================================
 
 void BedMeshPanel::update_profile_list_subjects() {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         lv_subject_set_int(&bed_mesh_profile_count_, 0);
         return;
@@ -816,7 +816,7 @@ void BedMeshPanel::update_profile_list_subjects() {
 }
 
 float BedMeshPanel::calculate_profile_range(const std::string& profile_name) {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api)
         return 0.0f;
 
@@ -879,7 +879,7 @@ void BedMeshPanel::redraw() {
 }
 
 void BedMeshPanel::setup_moonraker_subscription() {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         spdlog::warn("[{}] Cannot subscribe to Moonraker - API is null", get_name());
         return;
@@ -915,7 +915,7 @@ void BedMeshPanel::setup_moonraker_subscription() {
 }
 
 void BedMeshPanel::setup_build_volume_observer() {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         spdlog::warn("[{}] Cannot observe build_volume - API is null", get_name());
         return;
@@ -934,7 +934,7 @@ void BedMeshPanel::refresh_bed_bounds() {
         return;
     }
 
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     const auto& bed = api ? api->hardware().build_volume() : BuildVolume{};
     double bed_x_min = bed.x_min;
     double bed_x_max = bed.x_max;
@@ -1087,7 +1087,7 @@ void BedMeshPanel::on_mesh_update_internal(const BedMeshProfile& mesh) {
     }
 
     // Check if build_volume is available
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     const auto& bed = api ? api->hardware().build_volume() : BuildVolume{};
     bool has_valid_build_volume = (bed.x_max > bed.x_min && bed.y_max > bed.y_min);
 
@@ -1152,7 +1152,7 @@ void BedMeshPanel::load_profile(int index) {
     const std::string& name = profile_names_[static_cast<size_t>(index)];
     spdlog::info("[{}] Loading profile: {}", get_name(), name);
 
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (api) {
         operation_guard_.begin(SLOW_OPERATION_TIMEOUT_MS, [this] {
             hide_all_modals();
@@ -1286,7 +1286,7 @@ void BedMeshPanel::start_calibration() {
     spdlog::debug("[BedMeshPanel] Starting calibration, modal shown");
 
     // Get API
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         on_calibration_error("API not available");
         return;
@@ -1337,7 +1337,7 @@ void BedMeshPanel::start_calibration() {
 }
 
 void BedMeshPanel::start_home_and_probe() {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         on_calibration_error("API not available");
         return;
@@ -1367,7 +1367,7 @@ void BedMeshPanel::start_home_and_probe() {
 }
 
 void BedMeshPanel::start_calibration_probing() {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         on_calibration_error("API not available");
         return;
@@ -1433,7 +1433,7 @@ void BedMeshPanel::start_calibration_probing() {
         });
 }
 
-void BedMeshPanel::launch_calibration(MoonrakerAPI* api, int expected_probes, int probe_samples) {
+void BedMeshPanel::launch_calibration(IMoonrakerAPI* api, int expected_probes, int probe_samples) {
     // Start calibration with progress tracking. All three callbacks fire on the
     // WebSocket thread; bg_cb defers the body to main and re-checks the lifetime
     // generation atomically before invoking.
@@ -1551,7 +1551,7 @@ void BedMeshPanel::confirm_rename(const std::string& new_name) {
 // ============================================================================
 
 void BedMeshPanel::execute_delete_profile(const std::string& name) {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api)
         return;
 
@@ -1583,7 +1583,7 @@ void BedMeshPanel::execute_delete_profile(const std::string& name) {
 
 void BedMeshPanel::execute_rename_profile(const std::string& old_name,
                                           const std::string& new_name) {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api)
         return;
 
@@ -1605,7 +1605,7 @@ void BedMeshPanel::execute_rename_profile(const std::string& old_name,
             "BedMeshPanel::rename_load_done",
             [this, old_name, new_name]() {
                 // Step 2: Save with new name
-                MoonrakerAPI* api2 = get_moonraker_api();
+                IMoonrakerAPI* api2 = get_moonraker_api();
                 if (!api2) {
                     operation_guard_.end();
                     return;
@@ -1617,7 +1617,7 @@ void BedMeshPanel::execute_rename_profile(const std::string& old_name,
                         "BedMeshPanel::rename_save_done",
                         [this, old_name, new_name]() {
                             // Step 3: Remove old name
-                            MoonrakerAPI* api3 = get_moonraker_api();
+                            IMoonrakerAPI* api3 = get_moonraker_api();
                             if (!api3) {
                                 operation_guard_.end();
                                 return;
@@ -1659,7 +1659,7 @@ void BedMeshPanel::execute_rename_profile(const std::string& old_name,
 }
 
 void BedMeshPanel::execute_calibration(const std::string& /*profile_name*/) {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api)
         return;
 
@@ -1723,7 +1723,7 @@ void BedMeshPanel::execute_calibration(const std::string& /*profile_name*/) {
 }
 
 void BedMeshPanel::execute_save_config() {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api)
         return;
 
@@ -1843,7 +1843,7 @@ void BedMeshPanel::handle_emergency_stop() {
     // Suppress recovery dialog — user intentionally triggered E-Stop from this modal
     EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::LONG);
 
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (api) {
         api->emergency_stop([]() { spdlog::info("[BedMeshPanel] Emergency stop sent"); },
                             [](const MoonrakerError& err) {
@@ -1860,7 +1860,7 @@ void BedMeshPanel::handle_emergency_stop() {
 void BedMeshPanel::save_profile_with_name(const std::string& name) {
     spdlog::info("[BedMeshPanel] Saving mesh profile: {}", name);
 
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         hide_all_modals();
         return;

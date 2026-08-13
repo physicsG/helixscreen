@@ -132,7 +132,7 @@ class IdleRunoutDispatchFixture : public LVGLTestFixture {
     MacroExecuteCallback pending_execute;
 
   private:
-    MoonrakerAPI* previous_api_ = nullptr;
+    IMoonrakerAPI* previous_api_ = nullptr;
 };
 
 } // namespace

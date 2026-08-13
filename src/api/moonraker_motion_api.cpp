@@ -94,7 +94,7 @@ bool reject_non_finite(std::initializer_list<double> values, const char* method,
 // MoonrakerMotionAPI Implementation
 // ============================================================================
 
-MoonrakerMotionAPI::MoonrakerMotionAPI(helix::MoonrakerClient& client, helix::PrinterState& state,
+MoonrakerMotionAPI::MoonrakerMotionAPI(helix::IMoonrakerClient& client, helix::PrinterState& state,
                                        const SafetyLimits& safety_limits)
     : client_(client), state_(state), safety_limits_(safety_limits) {}
 

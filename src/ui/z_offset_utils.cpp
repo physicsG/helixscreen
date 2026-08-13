@@ -5,7 +5,7 @@
 #include "ui_emergency_stop.h"
 #include "ui_toast_manager.h"
 
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -54,7 +54,7 @@ void format_offset_compact(int microns, char* buf, size_t buf_size) {
     }
 }
 
-void apply_and_save(MoonrakerAPI* api, ZOffsetCalibrationStrategy strategy,
+void apply_and_save(IMoonrakerAPI* api, ZOffsetCalibrationStrategy strategy,
                     std::function<void()> on_success,
                     std::function<void(const std::string& error)> on_error) {
     if (!api) {

@@ -18,7 +18,7 @@
 
 #include "hv/json.hpp"
 
-class MoonrakerAPI;
+class IMoonrakerAPI;
 
 namespace helix {
 
@@ -137,7 +137,7 @@ class ToolState {
 
     /// Request a tool change, delegating to AMS backend or falling back to Tn gcode.
     /// Callbacks are invoked asynchronously from the API response.
-    void request_tool_change(int tool_index, MoonrakerAPI* api,
+    void request_tool_change(int tool_index, IMoonrakerAPI* api,
                              std::function<void()> on_success = nullptr,
                              std::function<void(const std::string&)> on_error = nullptr);
 
@@ -156,13 +156,13 @@ class ToolState {
     [[nodiscard]] std::set<int> assigned_spool_ids(int exclude_tool = -1) const;
 
     /// Load persisted spool assignments (Moonraker DB → local JSON → empty)
-    void load_spool_assignments(MoonrakerAPI* api);
+    void load_spool_assignments(IMoonrakerAPI* api);
 
     /// Save all spool assignments (local JSON + Moonraker DB fire-and-forget)
-    void save_spool_assignments(MoonrakerAPI* api);
+    void save_spool_assignments(IMoonrakerAPI* api);
 
     /// Save spool assignments only if data has changed since last save
-    void save_spool_assignments_if_dirty(MoonrakerAPI* api);
+    void save_spool_assignments_if_dirty(IMoonrakerAPI* api);
 
     /// True after load_spool_assignments() has completed (success or fallback).
     [[nodiscard]] bool spool_assignments_loaded() const {

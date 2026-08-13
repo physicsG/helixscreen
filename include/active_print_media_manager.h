@@ -7,7 +7,7 @@
 #include "ui_timer_guard.h"
 
 #include "async_lifetime_guard.h"
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "printer_state.h"
 
 #include <atomic>
@@ -59,27 +59,28 @@ class ActivePrintMediaManager {
      *
      * This manager is the sole writer of print_thumbnail_path, and it never
      * publishes the empty string — "there is no thumbnail" is said with an
-     * explicit image. See PrinterPrintState::kNoThumbnailPlaceholder for why
+     * explicit image. See PrinterPrintState::no_thumbnail_placeholder() for why
      * the empty string is not merely untidy but unsafe to hand a consumer.
      */
-    static constexpr const char* kNoThumbnailPlaceholder =
-        PrinterPrintState::kNoThumbnailPlaceholder;
+    static const char* no_thumbnail_placeholder() {
+        return PrinterPrintState::no_thumbnail_placeholder();
+    }
 
     // Non-copyable
     ActivePrintMediaManager(const ActivePrintMediaManager&) = delete;
     ActivePrintMediaManager& operator=(const ActivePrintMediaManager&) = delete;
 
     /**
-     * @brief Set the MoonrakerAPI instance for thumbnail downloads
+     * @brief Set the IMoonrakerAPI instance for thumbnail downloads
      *
      * Must be called before thumbnail loading will work. Also registers the
      * persistent Moonraker method callbacks (notify_filelist_changed /
      * notify_klippy_ready) used to re-trigger thumbnail loads that failed
      * because Moonraker hadn't finished scanning the file yet.
      *
-     * @param api Pointer to MoonrakerAPI (can be nullptr to disable)
+     * @param api Pointer to IMoonrakerAPI (can be nullptr to disable)
      */
-    void set_api(MoonrakerAPI* api);
+    void set_api(IMoonrakerAPI* api);
 
     /**
      * @brief Set the original filename for thumbnail lookup
@@ -168,7 +169,7 @@ class ActivePrintMediaManager {
     [[nodiscard]] bool has_thumbnail_for(const std::string& filename);
 
     PrinterState& printer_state_;
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
     ObserverGuard print_filename_observer_;
     std::string thumbnail_source_filename_;
     std::string last_effective_filename_;
@@ -195,7 +196,7 @@ class ActivePrintMediaManager {
     /// re-triggers; a PreSet path skips the fetch with recovery still armed.
     ThumbnailOrigin thumbnail_origin_ = ThumbnailOrigin::None;
 
-    MoonrakerAPI* listener_api_ = nullptr; ///< API the method callbacks are registered on
+    IMoonrakerAPI* listener_api_ = nullptr; ///< API the method callbacks are registered on
     std::string filelist_handler_name_;
     std::string klippy_ready_handler_name_;
 

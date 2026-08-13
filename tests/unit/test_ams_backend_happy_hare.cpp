@@ -47,6 +47,9 @@ class AmsBackendHappyHareTestHelper : public AmsBackendHappyHare {
 
     void initialize_test_gates(int count) {
         system_info_.units.clear();
+        // Real backend reads this from mmu.endless_spool_enabled; GROUPS= writes
+        // are refused while it is off.
+        system_info_.endless_spool_enabled = true;
 
         AmsUnit unit;
         unit.unit_index = 0;
@@ -119,6 +122,7 @@ class AmsBackendHappyHareTestHelper : public AmsBackendHappyHare {
      */
     void initialize_test_gates_multi(const std::vector<int>& gates_per_unit) {
         system_info_.units.clear();
+        system_info_.endless_spool_enabled = true;
         int total = 0;
         int global = 0;
         for (size_t u = 0; u < gates_per_unit.size(); ++u) {
@@ -659,8 +663,9 @@ TEST_CASE("Happy Hare endless spool is editable on single-unit",
     helper.initialize_test_gates(4);
 
     auto caps = helper.get_endless_spool_capabilities();
-    CHECK(caps.supported);
-    CHECK(caps.editable);
+    CHECK(caps.available());
+    CHECK(caps.editable());
+    CHECK(caps.editability == helix::printer::EndlessSpoolEditability::Group);
 }
 
 TEST_CASE("Happy Hare set_endless_spool_backup sends MMU_ENDLESS_SPOOL GROUPS",
@@ -672,8 +677,9 @@ TEST_CASE("Happy Hare set_endless_spool_backup sends MMU_ENDLESS_SPOOL GROUPS",
 
     CHECK(result.success());
     // All gates start ungrouped -> assigned standalone ids 0,1,2,3; joining gate 0
-    // to gate 2's group yields 2,1,2,3. ENABLE=1 is required for HH to apply GROUPS.
-    REQUIRE(helper.has_gcode("MMU_ENDLESS_SPOOL ENABLE=1 QUIET=1 GROUPS=2,1,2,3"));
+    // to gate 2's group yields 2,1,2,3. No ENABLE= on an edit: it would persist a
+    // state change the user did not ask for.
+    REQUIRE(helper.has_gcode("MMU_ENDLESS_SPOOL QUIET=1 GROUPS=2,1,2,3"));
 }
 
 TEST_CASE("Happy Hare set_endless_spool_backup removal makes gate standalone",
@@ -690,7 +696,7 @@ TEST_CASE("Happy Hare set_endless_spool_backup removal makes gate standalone",
 
     CHECK(result.success());
     // Gate 0 moves to a fresh standalone group (max+1 = 2): 2,0,1,1.
-    REQUIRE(helper.has_gcode("MMU_ENDLESS_SPOOL ENABLE=1 QUIET=1 GROUPS=2,0,1,1"));
+    REQUIRE(helper.has_gcode("MMU_ENDLESS_SPOOL QUIET=1 GROUPS=2,0,1,1"));
 }
 
 TEST_CASE("Happy Hare endless spool is read-only on multi-unit",
@@ -699,8 +705,9 @@ TEST_CASE("Happy Hare endless spool is read-only on multi-unit",
     helper.initialize_test_gates_multi({4, 4});
 
     auto caps = helper.get_endless_spool_capabilities();
-    CHECK(caps.supported);
-    CHECK_FALSE(caps.editable);
+    CHECK(caps.available());
+    CHECK_FALSE(caps.editable());
+    CHECK(caps.restriction == helix::printer::EndlessSpoolRestriction::MultiUnit);
 
     // MMU_ENDLESS_SPOOL has no UNIT= param, so editing is refused on multi-unit.
     auto result = helper.set_endless_spool_backup(0, 1);

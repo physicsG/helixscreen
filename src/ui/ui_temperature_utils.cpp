@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 namespace helix {
 namespace ui {
@@ -66,16 +67,29 @@ char* format_temperature_pair(int current, int target, char* buffer, size_t buff
     return buffer;
 }
 
+// Format a temperature number with one decimal place, dropping the decimal when
+// the integer portion is 3 digits or more (>= 100) to keep wide values compact.
+char* format_temp_number(float temp, char* buffer, size_t buffer_size) {
+    snprintf(buffer, buffer_size, temp >= 100.0f ? "%.0f" : "%.1f", temp);
+    return buffer;
+}
+
 char* format_temperature_f(float temp, char* buffer, size_t buffer_size) {
-    snprintf(buffer, buffer_size, "%.1f°C", temp);
+    format_temp_number(temp, buffer, buffer_size);
+    size_t len = strlen(buffer);
+    snprintf(buffer + len, buffer_size - len, "°C");
     return buffer;
 }
 
 char* format_temperature_pair_f(float current, float target, char* buffer, size_t buffer_size) {
+    char current_buf[16];
+    format_temp_number(current, current_buf, sizeof(current_buf));
     if (target == 0.0f) {
-        snprintf(buffer, buffer_size, "%.1f / —°C", current);
+        snprintf(buffer, buffer_size, "%s / —°C", current_buf);
     } else {
-        snprintf(buffer, buffer_size, "%.1f / %.1f°C", current, target);
+        char target_buf[16];
+        format_temp_number(target, target_buf, sizeof(target_buf));
+        snprintf(buffer, buffer_size, "%s / %s°C", current_buf, target_buf);
     }
     return buffer;
 }
@@ -205,7 +219,7 @@ HeaterDisplayResult heater_display(int current_deci, int target_deci) {
     return result;
 }
 
-// Used by cooldown's multi-line gcode batch and MoonrakerAPI::set_temperature().
+// Used by cooldown's multi-line gcode batch and IMoonrakerAPI::set_temperature().
 const char* build_heater_gcode(const std::string& heater_full_name, int target_deci, char* buffer,
                                size_t buffer_size, bool use_m141) {
     if (heater_full_name.empty()) {

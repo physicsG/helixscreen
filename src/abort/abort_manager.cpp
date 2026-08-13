@@ -8,7 +8,8 @@
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
-#include "moonraker_api.h"
+#include "data_root_resolver.h"
+#include "i_moonraker_api.h"
 #include "observer_factory.h"
 #include "printer_recovery_service.h"
 #include "printer_state.h"
@@ -34,7 +35,7 @@ AbortManager& AbortManager::instance() {
 // Initialization
 // ============================================================================
 
-void AbortManager::init(MoonrakerAPI* api, PrinterState* state) {
+void AbortManager::init(IMoonrakerAPI* api, PrinterState* state) {
     api_ = api;
     printer_state_ = state;
     spdlog::debug("[AbortManager] Initialized with dependencies");
@@ -46,7 +47,8 @@ void AbortManager::init_subjects() {
     }
 
     // Register XML component for the modal
-    lv_xml_register_component_from_file("A:ui_xml/abort_progress_modal.xml");
+    lv_xml_register_component_from_file(
+        helix::asset_component_uri("ui_xml/abort_progress_modal.xml").c_str());
 
     // Register E-Stop button callback (unique name per L039)
     register_xml_callbacks({

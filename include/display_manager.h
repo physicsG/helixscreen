@@ -479,6 +479,18 @@ class DisplayManager : public helix::ICalibrationSink {
     bool needs_touch_calibration() const;
 
     /**
+     * @brief Check whether the manual calibration entry point should be offered
+     *
+     * True for any real touch panel. needs_touch_calibration() answers a
+     * narrower question — "auto-fire the wizard on first boot" — and its
+     * name/range heuristic cannot see an orientation mismatch, so it must not
+     * gate the manual path (prestonbrown/helixscreen#1259).
+     *
+     * @return true if the Settings entry point should be reachable
+     */
+    bool supports_touch_calibration() const;
+
+    /**
      * @brief Temporarily disable affine calibration for recalibration
      *
      * During recalibration, touch coordinates must be raw (pre-affine) to avoid

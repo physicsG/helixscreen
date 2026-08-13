@@ -4,8 +4,8 @@
 #include "helix_plugin_installer.h"
 
 #include "config.h"
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 
 #include <spdlog/spdlog.h>
 
@@ -167,7 +167,7 @@ static WaitResult wait_for_child_with_timeout(pid_t pid, int timeout_seconds,
 // HelixPluginInstaller Implementation
 // ============================================================================
 
-void HelixPluginInstaller::set_api(MoonrakerAPI* api) {
+void HelixPluginInstaller::set_api(IMoonrakerAPI* api) {
     api_ = api;
 
     // Try to get WebSocket URL from API's client

@@ -133,10 +133,33 @@ Some steps only apply to how your machine is set up. A step your system never re
 
 | Button | Action |
 |--------|--------|
-| **Bypass** (toggle) | Feed filament directly to the extruder, bypassing the AMS. Only shown if your hardware supports bypass. |
+| **Bypass** (toggle) | Feed filament directly to the extruder, bypassing the AMS. Only shown if your hardware supports bypass - see [When Bypass Doesn't Appear](#when-bypass-doesnt-appear). |
 | **Unload** | Retract the currently loaded filament back to its slot |
 | **Reset** | Reset the AMS system state (useful after jams or errors) |
 | **Settings** | Open the AMS Management overlay for advanced controls |
+
+### When Bypass Doesn't Appear
+
+Some filament systems do not report a bypass position. On those, the Bypass toggle is hidden and no external spool appears on the filament path:
+
+| System | Reason |
+|--------|--------|
+| Creality CFS | Firmware reports no bypass, on stock K1/K2 and on community builds |
+| Anycubic ACE Pro | The ACE protocol has no bypass |
+| Snapmaker U1 | Each toolhead has its own path, so there is nothing to bypass |
+| Tool changers (generic Klipper) | Each tool has its own path |
+| QIDI Box | Not implemented in the QIDI backend yet |
+| Happy Hare | Only when `[mmu_machine] has_bypass` is `0` |
+
+To show the controls anyway, turn on **Enable Bypass Controls** in Settings > Hardware & Devices > Multi-Filament System Management. The setting appears only when your firmware reports no bypass.
+
+With it on, the external spool appears on the filament path beside your slots. Tap it to set material, color, and brand, or to link a Spoolman spool.
+
+**On Happy Hare, the bypass itself also works.** `MMU_SELECT_BYPASS` does not check `has_bypass` - it deselects the gear steppers and reports gate -2 either way. Turn the setting on if your MMU has a bypass but reports `has_bypass: 0`. That happens with `mmu_vendor: Other` (which includes a QIDI Box driven through Happy Hare) and with a type-A selector whose bypass offset is not calibrated yet.
+
+**On the other systems, the setting changes only what HelixScreen displays.** There is no bypass command to send, so the Bypass toggle reports that the operation is not supported. Use the external spool to record the material and color you loaded by hand: [filament tracking](filament-tracking.md), spool presets, and purge temperatures all read from it. Load and unload with your own macros or from the Extrusion panel.
+
+**Always Show Bypass Spool**, in the same place, keeps the external spool on the filament path while bypass is disengaged. It applies to AFC systems only (Box Turtle, OpenAMS), which report a bypass sensor whether or not one is wired, so the spool is otherwise hidden until bypass is engaged.
 
 ### Slot Context Menu
 
@@ -157,6 +180,8 @@ On systems that support **Endless Spool**, the context menu also includes:
 - **Backup Slot** — Choose a backup slot to automatically switch to if this spool runs out mid-print. The backup must hold a compatible material; the menu warns you if you pick an incompatible one. This picker appears on **AFC (Box Turtle)** and on **single-unit Happy Hare** setups; a multi-unit Happy Hare shows its groups read-only, because the command that edits them acts on whichever unit is selected.
 
 **The Creality CFS is different: there is nothing to pick.** Its auto-refill is managed entirely by the box's firmware, so the Backup Slot row appears **greyed out** and no backup arrows are drawn between the slots. The box decides for itself which slot can stand in, and it only accepts one holding the **exact same material and the exact same colour**. If nothing matches, or auto-refill is switched off, it does not swap at all: the print stays paused and HelixScreen tells you which of the two it was. Auto-refill itself can be turned on or off from the CFS device actions.
+
+> **Clearing every backup at once:** To remove all failover assignments in one step — back to "a runout just stops the print" — open the AMS Management overlay and tap **Reset Endless Spool**. See [AMS Management (Settings Overlay)](#ams-management-settings-overlay) below.
 
 > **Assigning tools:** Tool-to-slot mapping isn't set from the slot context menu — it's done from the **filament mapping card** that appears when you select a file to print. See [Tool Mapping](#tool-mapping) below.
 
@@ -224,7 +249,9 @@ Tap **Settings** in the sidebar to open the AMS Management overlay with advanced
 - **Home** — Return the AMS to its home position
 - **Recover** — Attempt to recover from an error state
 - **Abort** — Cancel the current operation immediately
-- **Bypass Mode** — Toggle direct-feed mode (if supported by hardware)
+- **Bypass Mode** — Toggle direct-feed mode (if supported by hardware). If your machine has no bypass according to its firmware, an **Enable Bypass Controls** toggle appears here instead - see [When Bypass Doesn't Appear](#when-bypass-doesnt-appear)
+- **Always Show Bypass Spool** — Keep the external spool visible on the filament path even while bypass is disengaged (AFC systems only)
+- **Reset Endless Spool** — Wipe every slot's backup assignment at once, so a runout stops the print until you set up failover again. Only appears on systems whose failover you can edit here (AFC, single-unit Happy Hare); hidden on CFS and AD5X, which manage it in firmware. Asks you to confirm before clearing. See [Endless Spool / Backup Slot](#slot-context-menu) above.
 - **System status** — Current system state and firmware version
 
 Below the top-level controls, **device-specific settings appear as expandable sections** that vary by hardware. Tap a section to open it; inside you'll find buttons, on/off toggles, and sliders for that group, and changes apply immediately.
@@ -321,6 +348,12 @@ Tap the menu icon on the CFS panel to access device actions:
 | **Refresh** | Re-read all RFID tags across all units — useful after swapping spools while the printer was off |
 | **Auto-Refill** | Toggle automatic backup spool switching. A runout pauses the print either way; with this on, the box then swaps in another slot **only** if one holds the exact same material and colour, and resumes. With it off, or with no match, the print stays paused |
 | **Nozzle Clean** | Trigger the nozzle cleaning routine using the CFS's built-in silicone strip |
+
+### CFS and the External Spool
+
+CFS reports no bypass position, so the Bypass toggle and the external spool are hidden. This applies to every CFS firmware: stock K2, the official K1 upgrade, and the community K2 Plus builds. The community builds do report an external spool holder in their status data, but no documented command loads filament from it, so HelixScreen does not offer the control.
+
+To record a spool you feed directly, turn on **Enable Bypass Controls** - see [When Bypass Doesn't Appear](#when-bypass-doesnt-appear).
 
 ---
 

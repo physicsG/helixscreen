@@ -5,14 +5,14 @@
 
 #include "ui_observer_guard.h"
 
+#include "helix_type_tag.h"
 #include "panel_widget_config.h"
 
-#include <any>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
-#include <typeindex>
 #include <unordered_map>
 #include <vector>
 
@@ -35,24 +35,32 @@ class PanelWidgetManager {
     static PanelWidgetManager& instance();
 
     // -- Shared resources --
-    // Type-erased storage. Widgets request shared objects by type.
+    // Type-erased storage keyed by helix::type_tag<T>() rather than typeid, so this
+    // header compiles under -fno-rtti (ESP32 firmware). The stored void* is always
+    // the T* the caller named at registration: the tag is the key, so a slot can only
+    // ever be written by register_shared_resource<T> and read by shared_resource<T>
+    // for the same T. That makes the static_cast<T*> on retrieval exact - it is the
+    // reverse of the static_pointer_cast<void> below, not a cross-hierarchy guess.
+    // Registration under a base/interface type is still the caller's choice (see
+    // subject_initializer.cpp registering IMoonrakerAPI); the pointer is converted to
+    // the base at the call site, before erasure, so both ends agree on T.
     template <typename T> void register_shared_resource(std::shared_ptr<T> resource) {
-        shared_resources_[std::type_index(typeid(T))] = std::move(resource);
+        shared_resources_[type_tag<T>()] = std::static_pointer_cast<void>(std::move(resource));
     }
 
     /// Register a non-owning raw pointer as a shared resource.
     /// The caller is responsible for ensuring the pointed-to object outlives usage.
     template <typename T> void register_shared_resource(T* raw) {
         // Wrap in a no-op-deleter shared_ptr so retrieval path stays uniform.
-        shared_resources_[std::type_index(typeid(T))] = std::shared_ptr<T>(raw, [](T*) {});
+        shared_resources_[type_tag<T>()] =
+            std::shared_ptr<void>(static_cast<void*>(raw), [](void*) {});
     }
 
     template <typename T> T* shared_resource() const {
-        auto it = shared_resources_.find(std::type_index(typeid(T)));
+        auto it = shared_resources_.find(type_tag<T>());
         if (it == shared_resources_.end())
             return nullptr;
-        auto ptr = std::any_cast<std::shared_ptr<T>>(&it->second);
-        return ptr ? ptr->get() : nullptr;
+        return static_cast<T*>(it->second.get());
     }
 
     void clear_shared_resources();
@@ -121,7 +129,8 @@ class PanelWidgetManager {
 
     bool widget_subjects_initialized_ = false;
     bool populating_ = false;
-    std::unordered_map<std::type_index, std::any> shared_resources_;
+    /// Keyed by helix::type_tag<T>(); values are the erased T* (see the accessors above).
+    std::unordered_map<std::size_t, std::shared_ptr<void>> shared_resources_;
     std::unordered_map<std::string, RebuildCallback> rebuild_callbacks_;
 
     /// Per-panel gate observers that trigger widget rebuilds on hardware changes

@@ -21,8 +21,9 @@ namespace helix {
 class Config;
 }
 namespace helix {
+class IMoonrakerClient;
 class MoonrakerClient;
-}
+} // namespace helix
 class MoonrakerAPI;
 namespace helix {
 class PrinterState;
@@ -117,7 +118,7 @@ class MoonrakerManager {
     /**
      * @brief Get the Moonraker client
      */
-    helix::MoonrakerClient* client() const {
+    helix::IMoonrakerClient* client() const {
         return m_client.get();
     }
 
@@ -323,7 +324,7 @@ class MoonrakerManager {
     void present_event(const MoonrakerEvent& evt);
 
     // Owned resources
-    std::unique_ptr<helix::MoonrakerClient> m_client;
+    std::unique_ptr<helix::IMoonrakerClient> m_client;
     std::unique_ptr<MoonrakerAPI> m_api;
 
     // Thread-safe notification queue
@@ -356,6 +357,14 @@ class MoonrakerManager {
     /// Owned here because its lifetime must match the mock client's, and the
     /// HTTP base URL it publishes is consumed by connect().
     std::unique_ptr<helix::MockHttpFileServer> m_mock_http;
+
+    /// Non-owning alias for m_client under its concrete type, recorded by
+    /// create_client(). MoonrakerAPIMock still takes a concrete
+    /// helix::MoonrakerClient&, and this is how create_api() gets one without a
+    /// dynamic_cast (the firmware builds -fno-rtti). Only meaningful on non-ESP
+    /// builds, which is the only place HELIX_ENABLE_MOCKS is ever defined, and
+    /// there m_client is always a helix::MoonrakerClient or a subclass of one.
+    helix::MoonrakerClient* m_concrete_client = nullptr;
 #endif
 
     // Destruction flag for async callback safety [L012]

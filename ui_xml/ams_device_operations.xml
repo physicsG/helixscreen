@@ -219,6 +219,22 @@
           </lv_obj>
         </lv_obj>
 
+        <!-- Reset Endless Spool failover (shown only on backends whose
+             endless-spool mapping the UI may write — AFC per-slot edges,
+             single-unit Happy Hare groups, and the mock. Read-only systems
+             like CFS and AD5X IFS hide the row). The base reset_endless_spool()
+             loops set_endless_spool_backup(slot, -1) over every slot; Happy
+             Hare overrides it with MMU_ENDLESS_SPOOL RESET=1. Wipes ALL failover
+             config, so the tap opens a confirmation modal rather than firing
+             immediately. -->
+        <setting_action_row name="row_reset_endless_spool"
+                            label="Reset Endless Spool" label_tag="Reset Endless Spool" icon="restart"
+                            description="Clear all spool failover assignments"
+                            description_tag="Clear all spool failover assignments"
+                            callback="on_ams_reset_endless_spool_clicked">
+          <bind_flag_if_eq subject="ams_device_ops_can_reset_endless_spool" flag="hidden" ref_value="0"/>
+        </setting_action_row>
+
         <!-- Status Row -->
         <lv_obj name="status_row"
                 width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_main_place="start"

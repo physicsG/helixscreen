@@ -69,7 +69,7 @@ const std::regex PrintStartCollector::respond_completion_pattern_(
 // CONSTRUCTOR / DESTRUCTOR
 // ============================================================================
 
-PrintStartCollector::PrintStartCollector(MoonrakerClient& client, PrinterState& state)
+PrintStartCollector::PrintStartCollector(IMoonrakerClient& client, PrinterState& state)
     : client_(client), state_(state) {
     spdlog::debug("[PrintStartCollector] Constructed");
 }

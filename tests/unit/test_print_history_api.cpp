@@ -80,8 +80,7 @@ class PrintHistoryTestFixture {
 // get_history_list Tests
 // ============================================================================
 
-TEST_CASE_METHOD(PrintHistoryTestFixture, "get_history_list returns mock jobs",
-                 "[history][api]") {
+TEST_CASE_METHOD(PrintHistoryTestFixture, "get_history_list returns mock jobs", "[history][api]") {
     std::atomic<bool> success_called{false};
     std::atomic<bool> error_called{false};
     std::vector<PrintHistoryJob> captured_jobs;

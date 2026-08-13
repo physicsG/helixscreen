@@ -191,14 +191,28 @@ Two major IFS macro packages exist for ZMOD. Both use the same `save_variables` 
 | | **bambufy** | **lessWaste** |
 |---|-----------|-------------|
 | **Repo** | [function3d/bambufy](https://github.com/function3d/bambufy) | [Hrybmo/lessWaste](https://github.com/Hrybmo/lesswaste) |
-| **Status** | Original, widely used | Fork of bambufy with enhancements |
+| **Status** | Original, widely used | Fork of bambufy V1.2.10 with enhancements |
 | **Tool macros** | T0-T3 (4 tools) | T0-T15 (16 virtual tools) |
-| **Backup/failover** | No | Yes — auto-switch to matching color/type slot on runout |
+| **Backup/failover** | Yes (`variable_backup`, **default on**) | Yes (`variable_backup`, default off) |
 | **Virtual channels** | No | Yes — map >4 slicer tools to 4 physical ports |
 | **Purge control** | Basic | Advanced — in-tower or out-the-back, per-material feedrates |
 | **Same-filament purge** | Always purges | Configurable skip (`same_filament_purge`) |
 | **Recovery** | Basic | Auto-recovery (head sensor, consume leftover, filament check) |
 | **Start UI** | No | Dialog-based tool-to-port assignment at print start |
+
+**Backup/failover** in both plugins (and in stock zMod — see below) requires a candidate slot
+whose material type AND colour both exactly match the spent slot's, and whose own port sensor
+reads filament present. In a typical multicolor print each slicer tool maps to a distinct
+colour, so switchover silently falls through to "no match → pause" unless the user has loaded
+a same-colour duplicate spool. That is the user-config outcome ninjamida's report described as
+"bambufy does not support multicolor" — no plugin (nor stock zMod) disables switchover in
+multicolor by code.
+
+> **Stock zMod has its own switchover.** Before any plugin is installed, `ANALOG_PRUTOK`
+> (`zmod_ifs.py:cmd_ANALOG_PRUTOK`) is wired to `head_switch_sensor`'s `runout_gcode`
+> (`ad5x_display_off.cfg:39-44`). zmod's user-facing name for this is **"Infinite Spool
+> Mode"**. Same type+colour+present match rule as the plugins. Always on, no toggle.
+> Confirmed from zmod 1.7.1 source and on-device by raza616.
 
 Both packages use **1-based port numbering** for hardware (ports 1-4) and define the same G-code commands (`IFS_F10`, `IFS_F11`, `IFS_F24`, `IFS_F39`, `SET_EXTRUDER_SLOT`).
 
@@ -208,14 +222,13 @@ Mostly unused by HelixScreen; `variable_backup` is the exception.
 
 | Variable | Purpose |
 |----------|---------|
-| `variable_backup` | Enable/disable automatic filament backup on runout. **Read by HelixScreen** (#1250): surfaced on the `ams_ifs_backup_enabled` subject and quoted in the runout dialog, so a user is told plainly whether the printer will switch spools by itself. Absent key = unknown, never reported as off. See `docs/devel/FILAMENT_MANAGEMENT.md` § "Auto-switchover plugin visibility" |
-| `variable_backup_filament_spent` | `[0,0,0,0]` — marks consumed backup slots |
+| `variable_backup` | Enable/disable automatic filament backup on runout (bambufy defaults it **on**, lessWaste defaults it **off**). **Read by HelixScreen** (#1250): quoted in the runout dialog (`build_runout_detail_locked()`) and mapped onto `EndlessSpoolCapabilities::enabled`, which reaches the AMS panel and slot context menu as the backend-neutral `ams_endless_state` / `ams_endless_text` subjects — so a user is told plainly whether the printer will switch spools by itself. Absent key = unknown, never reported as off. There is no AD5X-specific subject for this; the short-lived `ams_ifs_backup_enabled` was retired in favour of the cross-backend pair. See `docs/devel/FILAMENT_MANAGEMENT.md` § "Auto-switchover plugin visibility" and § "The status line" |
 | `variable_is_virtual_mode` | Virtual channel mode active (>4 tools mapped to 4 ports) |
 | `variable_same_filament_purge` | Skip start purge if same filament in hotend |
 | `variable_e_feedrates` | Per-tool extrusion feedrates |
 | `variable_kamp` | KAMP (adaptive bed mesh) enabled |
 | `variable_line_purge` | Purge line at print start |
-| `PAUSE REASON=` values | `jam`, `broken`, `runout`, `empty`, `backup`, `loading` |
+| `PAUSE REASON=` values | `jam`, `broken`, `runout`, `empty`, `backup`, `nobackup`, `loading` (the `nobackup` reason is bambufy-only, emitted on a backup-enabled runout with no same-type+colour match — `bambufy.cfg:149`) |
 
 ### Known Issue: Zmod Slot Renumbering
 
@@ -225,8 +238,7 @@ Zmod has an option to rename slots from 0-indexed (0,1,2,3) to 1-indexed (1,2,3,
 
 ### Future Enhancements
 
-- Parse `PAUSE REASON=` for specific filament error UI (jam, runout, empty). Would let the plugin path skip the sensor-derived runout detector's confirm dwell entirely — see `docs/devel/FILAMENT_MANAGEMENT.md` § "Unattended runout detection"
-- Display which slot lessWaste's `backup_filament_spent` has already consumed (`variable_backup` itself is read as of #1250)
+- Parse `PAUSE REASON=` for specific filament error UI (jam, runout, empty, nobackup). Would let the plugin path skip the sensor-derived runout detector's confirm dwell entirely — see `docs/devel/FILAMENT_MANAGEMENT.md` § "Unattended runout detection"
 - Support virtual channel visualization (>4 tools mapped to 4 physical ports)
 - Expose `same_filament_purge` toggle in settings
 

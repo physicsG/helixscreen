@@ -68,7 +68,7 @@ EmergencyStopOverlay& EmergencyStopOverlay::instance() {
     return instance;
 }
 
-void EmergencyStopOverlay::init(PrinterState& printer_state, MoonrakerAPI* api) {
+void EmergencyStopOverlay::init(PrinterState& printer_state, IMoonrakerAPI* api) {
     printer_state_ = &printer_state;
     api_ = api;
     spdlog::debug("[EmergencyStop] Initialized with dependencies");
@@ -158,6 +158,15 @@ void EmergencyStopOverlay::create() {
         printer_state_->get_print_state_enum_subject(), this,
         [](EmergencyStopOverlay* self, int /*state*/) { self->update_visibility(); });
 
+    // The pre-print preparing phase (homing, heating, leveling) is physical
+    // movement during which Moonraker still reports STANDBY — so the job-state
+    // observer above does not fire. print_start_phase is non-zero throughout
+    // preparing; treating it as active keeps the contextual e-stop reachable
+    // from the moment motion starts, not just after PRINTING begins.
+    print_start_phase_observer_ = observe_int_sync<EmergencyStopOverlay>(
+        printer_state_->get_print_start_phase_subject(), this,
+        [](EmergencyStopOverlay* self, int /*phase*/) { self->update_visibility(); });
+
     // Reset the initial-fire guard so each (re)subscription — including
     // soft-restart after Add Printer — drops the subject's placeholder
     // SHUTDOWN before Moonraker reports the new printer's real state.
@@ -227,18 +236,21 @@ void EmergencyStopOverlay::update_visibility() {
         return;
     }
 
-    // Check if print is active (PRINTING or PAUSED)
-    // The estop_visible subject drives XML bindings in each panel
+    // Check if print is active (PRINTING, PAUSED, or in the pre-print preparing
+    // phase). The estop_visible subject drives XML bindings in each panel.
     PrintJobState state = printer_state_->get_print_job_state();
     bool is_printing = (state == PrintJobState::PRINTING || state == PrintJobState::PAUSED);
+    const int start_phase = lv_subject_get_int(printer_state_->get_print_start_phase_subject());
+    const bool preparing = (start_phase != 0);
+    const bool is_active = is_printing || preparing;
 
-    int new_value = is_printing ? 1 : 0;
+    int new_value = is_active ? 1 : 0;
     int current_value = lv_subject_get_int(&estop_visible_);
 
     if (new_value != current_value) {
         lv_subject_set_int(&estop_visible_, new_value);
-        spdlog::debug("[EmergencyStop] Visibility changed: {} (state={})", is_printing,
-                      static_cast<int>(state));
+        spdlog::debug("[EmergencyStop] Visibility changed: {} (state={}, phase={})", is_active,
+                      static_cast<int>(state), start_phase);
     }
 }
 

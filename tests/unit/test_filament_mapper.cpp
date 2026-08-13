@@ -892,8 +892,7 @@ TEST_CASE("find_unresolved_tools", "[filament_mapper]") {
     }
 }
 
-TEST_CASE("compute_defaults all slots empty leaves tool unmatched",
-          "[filament_mapper][compute]") {
+TEST_CASE("compute_defaults all slots empty leaves tool unmatched", "[filament_mapper][compute]") {
     std::vector<GcodeToolInfo> tools = {{0, 0xFF0000, "PLA"}};
     std::vector<AvailableSlot> slots = {
         {0, 0, 0x000000, "", true, -1},
@@ -1210,7 +1209,7 @@ ToolMapping unresolved(int tool_idx) {
 } // namespace
 
 TEST_CASE("resolve_display_colors uses loaded slot color for mapped tools", "[filament]") {
-    std::vector<GcodeToolInfo> tools = {tool(0, 0xFFFF00)};   // slicer yellow
+    std::vector<GcodeToolInfo> tools = {tool(0, 0xFFFF00)};    // slicer yellow
     std::vector<AvailableSlot> slots = {slot(3, 0, 0x0000FF)}; // slot 3 loaded blue
     std::vector<ToolMapping> mappings = {mapped(0, 3, 0)};     // T0 -> slot 3
 

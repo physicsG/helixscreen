@@ -9,7 +9,7 @@
 #include "capability_matrix.h"
 #include "gcode_file_modifier.h"
 #include "gcode_ops_detector.h"
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "preprint_predictor.h"
 #include "print_start_analyzer.h"
 #include "printer_detector.h"
@@ -137,7 +137,7 @@ class PrintPreparationManager {
     /**
      * @brief Set API and printer state dependencies
      */
-    void set_dependencies(MoonrakerAPI* api, PrinterState* printer_state);
+    void set_dependencies(IMoonrakerAPI* api, PrinterState* printer_state);
 
     /**
      * @brief Set callback for when PRINT_START macro analysis completes
@@ -472,7 +472,7 @@ class PrintPreparationManager {
     friend class ::PrintPreparationManagerTestAccess;
 
     // === Dependencies ===
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
     PrinterState* printer_state_ = nullptr;
 
     // === Checkbox State Subjects (LT2 - from PrintSelectDetailView) ===

@@ -23,7 +23,7 @@
 #include <string>
 
 // Forward declarations
-class MoonrakerAPI;
+class IMoonrakerAPI;
 namespace helix {
 class PrinterState;
 }
@@ -138,10 +138,10 @@ class PrintSelectDetailView : public OverlayBase {
     /**
      * @brief Set dependencies for print preparation
      *
-     * @param api MoonrakerAPI for file operations
+     * @param api IMoonrakerAPI for file operations
      * @param printer_state PrinterState for capability detection
      */
-    void set_dependencies(MoonrakerAPI* api, PrinterState* printer_state);
+    void set_dependencies(IMoonrakerAPI* api, PrinterState* printer_state);
 
     /**
      * @brief Set callback for delete confirmation
@@ -504,7 +504,7 @@ class PrintSelectDetailView : public OverlayBase {
 
   private:
     // === Dependencies ===
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
     PrinterState* printer_state_ = nullptr;
     lv_subject_t* visible_subject_ = nullptr;
 
@@ -540,6 +540,10 @@ class PrintSelectDetailView : public OverlayBase {
     lv_subject_t detail_gcode_viewer_mode_{};
     // G-code loading indicator (0=hidden, 1=visible)
     lv_subject_t detail_gcode_loading_{};
+    // 1 = the gcode viewer has rendered its first real frame. The thumbnail
+    // (which sits on top of the viewer in z-order) stays visible until this
+    // flips, covering the gray viewer during the load-to-render gap.
+    lv_subject_t detail_viewer_first_frame_{};
     // 1 = show slicer-intended colors instead of loaded AMS slot colors.
     // View-local, resets to 0 (actual) on every show().
     lv_subject_t detail_prefer_sliced_colors_{};

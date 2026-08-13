@@ -11,7 +11,7 @@
 #include "subject_managed_panel.h"
 
 // Forward declarations
-class MoonrakerAPI;
+class IMoonrakerAPI;
 namespace helix {
 class PrinterState;
 }
@@ -51,10 +51,10 @@ class PrintTuneOverlay : public OverlayBase {
      * - Pushes onto navigation stack
      *
      * @param parent_screen The parent screen for the overlay
-     * @param api MoonrakerAPI for sending G-code commands
+     * @param api IMoonrakerAPI for sending G-code commands
      * @param printer_state Reference to helix::PrinterState for kinematics/values
      */
-    void show(lv_obj_t* parent_screen, MoonrakerAPI* api, helix::PrinterState& printer_state);
+    void show(lv_obj_t* parent_screen, IMoonrakerAPI* api, helix::PrinterState& printer_state);
 
     /**
      * @brief Handle reset button click - resets speed/flow to 100%
@@ -189,7 +189,7 @@ class PrintTuneOverlay : public OverlayBase {
     // === Dependencies ===
     //
 
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
     helix::PrinterState* printer_state_ = nullptr;
     lv_obj_t* tune_panel_ = nullptr;
 

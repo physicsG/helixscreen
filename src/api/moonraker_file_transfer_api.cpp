@@ -24,7 +24,7 @@ using namespace moonraker_internal;
 // MoonrakerFileTransferAPI — Constructor / Destructor
 // ============================================================================
 
-MoonrakerFileTransferAPI::MoonrakerFileTransferAPI(helix::MoonrakerClient& client,
+MoonrakerFileTransferAPI::MoonrakerFileTransferAPI(helix::IMoonrakerClient& client,
                                                    const std::string& http_base_url)
     : client_(client), http_base_url_(http_base_url) {}
 

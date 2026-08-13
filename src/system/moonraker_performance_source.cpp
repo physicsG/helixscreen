@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "moonraker_performance_source.h"
 
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "moonraker_types.h"
 
 #include <spdlog/spdlog.h>
@@ -19,7 +19,7 @@ using nlohmann::json;
 // Handler name used when registering/unregistering persistent method callbacks.
 static constexpr char kHandlerName[] = "MoonrakerPerformanceSource";
 
-MoonrakerPerformanceSource::MoonrakerPerformanceSource(MoonrakerAPI* api) : api_(api) {}
+MoonrakerPerformanceSource::MoonrakerPerformanceSource(IMoonrakerAPI* api) : api_(api) {}
 
 MoonrakerPerformanceSource::~MoonrakerPerformanceSource() {
     stop();

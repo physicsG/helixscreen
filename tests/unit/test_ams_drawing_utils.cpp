@@ -172,8 +172,7 @@ TEST_CASE("ams_draw::fill_percent_from_slot returns -1 for no-data slot", "[ams_
     REQUIRE(ams_draw::fill_percent_from_slot(slot) == -1);
 }
 
-TEST_CASE("ams_draw::fill_percent_from_slot metadata-only falls back to 50",
-          "[ams_draw][fill]") {
+TEST_CASE("ams_draw::fill_percent_from_slot metadata-only falls back to 50", "[ams_draw][fill]") {
     // Present + material set but no usable weights → 50% fallback (#1071).
     SlotInfo slot;
     slot.status = SlotStatus::AVAILABLE;
@@ -181,8 +180,7 @@ TEST_CASE("ams_draw::fill_percent_from_slot metadata-only falls back to 50",
     REQUIRE(ams_draw::fill_percent_from_slot(slot) == 50);
 }
 
-TEST_CASE("ams_draw::fill_percent_from_slot empty lane renders empty",
-          "[ams_draw][fill]") {
+TEST_CASE("ams_draw::fill_percent_from_slot empty lane renders empty", "[ams_draw][fill]") {
     // Not-present lane → 0 ratio, clamped up to min_pct (matches prior behavior
     // for a 0% present slot; style_slot_bar gates the bar on is_present anyway).
     SlotInfo slot;

@@ -151,6 +151,11 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
     /// Callback for section row click — pushes detail overlay
     static void on_section_row_clicked(lv_event_t* e);
 
+    /// Callback for the "Reset Endless Spool" action row. Opens a confirmation
+    /// dialog (the reset wipes ALL failover config) and, on confirm, calls the
+    /// backend's reset_endless_spool().
+    static void on_reset_endless_spool_clicked(lv_event_t* e);
+
     //
     // === State ===
     //
@@ -210,6 +215,13 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
     /// Display string subject for the QIDI eject velocity value (e.g. "100 mm/s")
     lv_subject_t qidi_eject_velocity_display_subject_;
     char qidi_eject_velocity_buf_[32] = {};
+
+    /// Subject gating the "Reset Endless Spool" row (0=hidden, 1=shown).
+    /// Set from EndlessSpoolCapabilities::editable(), so the row lights up for
+    /// any backend whose endless-spool mapping the UI may write — AFC (per-slot
+    /// edges), single-unit Happy Hare (groups) and the mock — and stays hidden
+    /// for read-only systems (CFS, AD5X IFS) and backends with no endless spool.
+    lv_subject_t can_reset_endless_spool_subject_;
 
     /// Cached section metadata for row click dispatch
     std::vector<helix::printer::DeviceSection> cached_sections_;

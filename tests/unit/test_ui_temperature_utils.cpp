@@ -443,22 +443,76 @@ TEST_CASE("Temperature Utils: format_temperature_pair - basic formatting", "[tem
 // format_temperature_f() Tests (NEW - float formatting)
 // ============================================================================
 
+TEST_CASE("Temperature Utils: format_temp_number - compact-wide rule", "[temp_utils][format]") {
+    char buf[16];
+
+    SECTION("Under 100 keeps one decimal") {
+        format_temp_number(60.5f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "60.5");
+    }
+
+    SECTION("100 and above drops the decimal") {
+        format_temp_number(210.4f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "210");
+    }
+
+    SECTION("Boundary: 99.9 keeps decimal") {
+        format_temp_number(99.9f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "99.9");
+    }
+
+    SECTION("Boundary: 100 drops decimal") {
+        format_temp_number(100.4f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "100");
+    }
+
+    // Pins the rounding RULE: printf %.0f rounds half-to-even (banker's),
+    // not half-up. 210.5 -> "210" (even), 211.5 -> "212" (even). If this is
+    // ever switched to round-half-up these assertions go red.
+    SECTION("Rounding is half-to-even at the .5 boundary") {
+        format_temp_number(210.5f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "210");
+        format_temp_number(211.5f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "212");
+    }
+
+    SECTION("Negative (sub-100) keeps decimal") {
+        format_temp_number(-10.0f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "-10.0");
+    }
+}
+
 TEST_CASE("Temperature Utils: format_temperature_f - float formatting", "[temp_utils][format]") {
     char buf[16];
 
     SECTION("Whole number") {
         format_temperature_f(210.0f, buf, sizeof(buf));
-        REQUIRE(std::string(buf) == "210.0°C");
+        REQUIRE(std::string(buf) == "210°C");
     }
 
     SECTION("One decimal place") {
-        format_temperature_f(210.5f, buf, sizeof(buf));
-        REQUIRE(std::string(buf) == "210.5°C");
+        format_temperature_f(60.5f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "60.5°C");
     }
 
-    SECTION("Rounding") {
-        format_temperature_f(210.99f, buf, sizeof(buf));
-        REQUIRE(std::string(buf) == "211.0°C");
+    SECTION("Rounding under 100 keeps decimal") {
+        format_temperature_f(60.99f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "61.0°C");
+    }
+
+    SECTION("Three-digit drops decimal") {
+        format_temperature_f(254.7f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "255°C");
+    }
+
+    SECTION("Boundary: 99.9 keeps decimal") {
+        format_temperature_f(99.9f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "99.9°C");
+    }
+
+    SECTION("Boundary: 100 drops decimal") {
+        format_temperature_f(100.4f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "100°C");
     }
 
     SECTION("Zero") {
@@ -475,17 +529,27 @@ TEST_CASE("Temperature Utils: format_temperature_pair_f - float pair formatting"
           "[temp_utils][format]") {
     char buf[32];
 
-    SECTION("Both floats") {
-        format_temperature_pair_f(210.5f, 215.0f, buf, sizeof(buf));
-        REQUIRE(std::string(buf) == "210.5 / 215.0°C");
+    SECTION("Both floats under 100 keep decimals") {
+        format_temperature_pair_f(60.5f, 65.0f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "60.5 / 65.0°C");
+    }
+
+    SECTION("Three-digit values drop decimals") {
+        format_temperature_pair_f(254.7f, 215.0f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "255 / 215°C");
+    }
+
+    SECTION("Mixed: current >= 100, target under 100") {
+        format_temperature_pair_f(254.7f, 60.5f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "255 / 60.5°C");
     }
 
     SECTION("Target zero (heater off)") {
-        format_temperature_pair_f(180.5f, 0.0f, buf, sizeof(buf));
-        REQUIRE(std::string(buf) == "180.5 / —°C"); // em-dash for unknown
+        format_temperature_pair_f(180.6f, 0.0f, buf, sizeof(buf));
+        REQUIRE(std::string(buf) == "181 / —°C"); // em-dash for unknown
     }
 
-    SECTION("At target") {
+    SECTION("At target, under 100") {
         format_temperature_pair_f(60.0f, 60.0f, buf, sizeof(buf));
         REQUIRE(std::string(buf) == "60.0 / 60.0°C");
     }

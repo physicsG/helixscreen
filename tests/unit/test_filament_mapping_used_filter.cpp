@@ -23,11 +23,11 @@
 
 #include "ui_filament_mapping_card.h"
 
-#include "../catch_amalgamated.hpp"
-
 #include <optional>
 #include <set>
 #include <vector>
+
+#include "../catch_amalgamated.hpp"
 
 using helix::GcodeToolInfo;
 using helix::ToolMapping;

@@ -12,7 +12,7 @@
 #include <vector>
 
 namespace helix {
-class MoonrakerClient;
+class IMoonrakerClient;
 
 /** @brief Z movement style override (Auto=detect from kinematics, or force) */
 enum class ZMovementStyle { AUTO = 0, BED_MOVES = 1, NOZZLE_MOVES = 2 };
@@ -98,7 +98,7 @@ class SettingsManager {
      *
      * @param client Pointer to active MoonrakerClient (can be nullptr to disable)
      */
-    void set_moonraker_client(MoonrakerClient* client);
+    void set_moonraker_client(IMoonrakerClient* client);
 
     // =========================================================================
     // PRINTER SETTINGS (owned by SettingsManager — MoonrakerClient dependency)
@@ -550,7 +550,7 @@ class SettingsManager {
     lv_subject_t detection_policy_u1_subject_;
 
     // External references
-    MoonrakerClient* moonraker_client_ = nullptr;
+    IMoonrakerClient* moonraker_client_ = nullptr;
 
     // Chamber assignment settings (plain strings, no LVGL subjects needed)
     std::string chamber_heater_assignment_{"auto"};

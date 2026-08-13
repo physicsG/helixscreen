@@ -9,9 +9,9 @@
 #include "app_globals.h"
 #include "config.h"
 #include "host_identity.h"
+#include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
 #include "lvgl/lvgl.h"
-#include "moonraker_api.h"
-#include "moonraker_client.h"
 #include "moonraker_manager.h"
 #include "theme_manager.h"
 #include "utils/network_validation.h"
@@ -179,7 +179,7 @@ void ChangeHostModal::handle_test_connection() {
         return;
     }
 
-    MoonrakerClient* client = get_moonraker_client();
+    IMoonrakerClient* client = get_moonraker_client();
     if (!client) {
         set_status("icon_close_circle", "danger", "Client not available");
         return;
@@ -205,7 +205,7 @@ void ChangeHostModal::handle_test_connection() {
     // soon as the WS opens. Without this, every test connection logs a burst of
     // "HTTP base URL not configured" errors until the subsequent Save triggers
     // manager->connect() (which sets it again). See bundle TV95LJGN.
-    if (MoonrakerAPI* api = get_moonraker_api()) {
+    if (IMoonrakerAPI* api = get_moonraker_api()) {
         api->set_http_base_url(http_url);
     }
 
@@ -218,7 +218,7 @@ void ChangeHostModal::handle_test_connection() {
             token.defer("ChangeHostModal::dispatch_test_failure", [this]() { on_test_failure(); });
         });
 
-    client->setReconnect(nullptr);
+    client->set_auto_reconnect(false);
 
     if (result != 0) {
         spdlog::error("[ChangeHostModal] Failed to initiate test connection: {}", result);
@@ -413,7 +413,7 @@ void show_change_host_modal(std::function<void(bool changed)> extra_on_complete)
             extra(true);
         }
 
-        MoonrakerClient* client = get_moonraker_client();
+        IMoonrakerClient* client = get_moonraker_client();
         MoonrakerManager* manager = get_moonraker_manager();
         if (!client || !manager) {
             spdlog::error("[ChangeHostModal] Cannot reconnect - client or manager unavailable");

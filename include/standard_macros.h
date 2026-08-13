@@ -25,7 +25,7 @@
 #include <vector>
 
 // Forward declarations
-class MoonrakerAPI;
+class IMoonrakerAPI;
 struct MoonrakerError;
 
 namespace helix {
@@ -259,20 +259,20 @@ class StandardMacros {
      * If slot is empty, returns false immediately without calling callbacks.
      *
      * @param slot The slot to execute
-     * @param api MoonrakerAPI instance for execution
+     * @param api IMoonrakerAPI instance for execution
      * @param on_success Called when macro execution starts
      * @param on_error Called on execution failure
      * @return true if macro was found and execution attempted,
      *         false if slot is empty (no callbacks called)
      */
-    bool execute(StandardMacroSlot slot, MoonrakerAPI* api, SuccessCallback on_success,
+    bool execute(StandardMacroSlot slot, IMoonrakerAPI* api, SuccessCallback on_success,
                  ErrorCallback on_error, uint32_t timeout_ms = 0, bool suppress_auto_toast = false);
 
     /**
      * @brief Execute macro with parameters
      *
      * @param slot The slot to execute
-     * @param api MoonrakerAPI instance for execution
+     * @param api IMoonrakerAPI instance for execution
      * @param params Parameters to pass to macro
      * @param on_success Called when macro execution starts
      * @param on_error Called on execution failure
@@ -285,7 +285,7 @@ class StandardMacros {
      *        the same root cause (see rpc_error_correlation.h).
      * @return true if macro was found and execution attempted
      */
-    bool execute(StandardMacroSlot slot, MoonrakerAPI* api,
+    bool execute(StandardMacroSlot slot, IMoonrakerAPI* api,
                  const std::map<std::string, std::string>& params, SuccessCallback on_success,
                  ErrorCallback on_error, uint32_t timeout_ms = 0, bool suppress_auto_toast = false);
 

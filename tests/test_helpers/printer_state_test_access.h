@@ -33,6 +33,12 @@ class PrinterPrintStateTestAccess {
         pps.has_smoothed_remaining_ = false;
         pps.sdcard_active_ = false;
     }
+
+    /// Mark the layer counters as coming from real slicer/Moonraker fields
+    /// rather than being derived from the progress fraction.
+    static void set_has_real_layer_data(PrinterPrintState& pps, bool value) {
+        pps.has_real_layer_data_ = value;
+    }
 };
 
 // PrinterStateTestAccess must be in namespace helix to match friend declaration in PrinterState
@@ -58,6 +64,10 @@ class PrinterStateTestAccess {
 
     static PrinterFanState& get_fan_state(PrinterState& ps) {
         return ps.fan_state_;
+    }
+
+    static PrinterPrintState& get_print_state(PrinterState& ps) {
+        return ps.print_domain_;
     }
 
     /// Inject a synthetic pre-print option set (bypasses the printer DB) so tests

@@ -8,12 +8,13 @@
 // These tests pin that structure — a reordered or dropped swatch breaks the
 // contract the theme editor's users navigate by.
 
-#include "../catch_amalgamated.hpp"
 #include "../lvgl_test_fixture.h"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
+
+#include "../catch_amalgamated.hpp"
 
 extern "C" {
 #include "helix-xml/src/xml/lv_xml.h"
@@ -74,14 +75,14 @@ std::vector<uint32_t> swatch_colors(lv_obj_t* grid) {
 struct GridFixture : public LVGLTestFixture {
     GridFixture() {
         REQUIRE(lv_xml_register_component_from_file("A:ui_xml/globals.xml") == LV_RESULT_OK);
-        REQUIRE(lv_xml_register_component_from_file(
-                    "A:ui_xml/components/theme_swatch_grid.xml") == LV_RESULT_OK);
+        REQUIRE(lv_xml_register_component_from_file("A:ui_xml/components/theme_swatch_grid.xml") ==
+                LV_RESULT_OK);
     }
 
     lv_obj_t* create() {
         const char* attrs[] = {"swatch_callback", "theme_swatch_clicked_cb", nullptr};
-        auto* grid = static_cast<lv_obj_t*>(
-            lv_xml_create(lv_screen_active(), "theme_swatch_grid", attrs));
+        auto* grid =
+            static_cast<lv_obj_t*>(lv_xml_create(lv_screen_active(), "theme_swatch_grid", attrs));
         REQUIRE(grid != nullptr);
         return grid;
     }
@@ -191,10 +192,10 @@ struct PaletteSwitchFixture : public LVGLTestFixture {
 
     PaletteSwitchFixture() {
         REQUIRE(lv_xml_register_component_from_file("A:ui_xml/globals.xml") == LV_RESULT_OK);
-        REQUIRE(lv_xml_register_component_from_file(
-                    "A:ui_xml/components/color_swatch_grid.xml") == LV_RESULT_OK);
-        REQUIRE(lv_xml_register_component_from_file(
-                    "A:ui_xml/components/theme_swatch_grid.xml") == LV_RESULT_OK);
+        REQUIRE(lv_xml_register_component_from_file("A:ui_xml/components/color_swatch_grid.xml") ==
+                LV_RESULT_OK);
+        REQUIRE(lv_xml_register_component_from_file("A:ui_xml/components/theme_swatch_grid.xml") ==
+                LV_RESULT_OK);
         lv_subject_init_int(&palette_subject, 0);
         lv_xml_register_subject(nullptr, "color_picker_palette", &palette_subject);
         REQUIRE(lv_xml_register_component_from_data("palette_switch_probe",

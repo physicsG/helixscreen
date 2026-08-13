@@ -27,20 +27,21 @@
 #include "ui_print_select_history.h"
 #include "ui_print_select_path_navigator.h"
 #include "ui_subject_registry.h"
+#include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 
 #include "ams_backend.h"
 #include "ams_state.h"
 #include "app_globals.h"
 #include "config.h"
+#include "connection_state.h" // For ConnectionState enum
 #include "display_manager.h"
 #include "display_settings_manager.h"
 #include "format_utils.h"
 #include "gcode_parser.h" // For extract_thumbnails_from_content (USB thumbnail fallback)
 #include "helix-xml/src/xml/lv_xml.h"
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
-#include "moonraker_client.h" // For ConnectionState enum
 #include "observer_factory.h"
 #include "preprint_predictor.h"
 #include "print_history_manager.h"
@@ -99,7 +100,7 @@ static std::vector<uint8_t> read_file_bytes(const std::string& path) {
 
 static std::unique_ptr<PrintSelectPanel> g_print_select_panel;
 
-PrintSelectPanel* get_print_select_panel(PrinterState& printer_state, MoonrakerAPI* api) {
+PrintSelectPanel* get_print_select_panel(PrinterState& printer_state, IMoonrakerAPI* api) {
     if (!g_print_select_panel) {
         g_print_select_panel = std::make_unique<PrintSelectPanel>(printer_state, api);
         // Register both deinit AND destruction in one callback (consistent with other panels)
@@ -194,7 +195,7 @@ static void on_print_detail_back_clicked(lv_event_t* e) {
 // Constructor / Destructor
 // ============================================================================
 
-PrintSelectPanel::PrintSelectPanel(PrinterState& printer_state, MoonrakerAPI* api)
+PrintSelectPanel::PrintSelectPanel(PrinterState& printer_state, IMoonrakerAPI* api)
     : PanelBase(printer_state, api) {
     spdlog::trace("[{}] Constructed", get_name());
 }
@@ -559,6 +560,25 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
             }
 
             panel->apply_sort();
+
+#if defined(HELIX_PLATFORM_ESP32)
+            // Task 11 R1: cap the browsable list to the newest N files. No
+            // local disk/pagination UI on this platform — an unbounded list
+            // from a printer with years of prints would be an unusable
+            // scroll and a PSRAM/RAM cost for card recycling metadata.
+            // apply_sort() above has just guaranteed dirs-first + newest-
+            // files-first, so a straight tail-truncate keeps the newest N.
+            // Cap runs every refresh (needed for correctness even when
+            // nothing else changed), but the toast is deferred until we know
+            // below whether the list actually changed — this poll fires
+            // every 5s and frequently returns identical data, and
+            // ToastManager has no dedup, so toasting here unconditionally
+            // would spam the same message on every poll (review finding).
+            constexpr size_t kEsp32MaxFileCount = 50;
+            bool esp32_list_capped =
+                cap_print_file_list_to_newest(panel->file_list_, kEsp32MaxFileCount);
+#endif
+
             panel->merge_history_into_file_list(); // Populate history status for each file
             panel->update_sort_indicators();
 
@@ -581,6 +601,13 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
 
             if (list_changed) {
                 spdlog::debug("[{}] File list changed, repopulating", panel->get_name());
+#if defined(HELIX_PLATFORM_ESP32)
+                if (esp32_list_capped) {
+                    ToastManager::instance().show(
+                        ToastSeverity::INFO,
+                        lv_tr("Showing the 50 newest files. See more in the printer's web UI."));
+                }
+#endif
                 if (panel->current_view_mode_ == PrintSelectViewMode::CARD) {
                     panel->populate_card_view(same_dir);
                 } else {
@@ -679,7 +706,7 @@ void PrintSelectPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     if (api_) {
         refresh_files();
     } else {
-        spdlog::debug("[{}] MoonrakerAPI not available yet, waiting for set_api()", get_name());
+        spdlog::debug("[{}] IMoonrakerAPI not available yet, waiting for set_api()", get_name());
         update_empty_state();
     }
 
@@ -1360,6 +1387,7 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
                             });
                     }
                 } else {
+#if !defined(HELIX_PLATFORM_ESP32)
                     // Remote path - use semantic API for card view thumbnails
                     spdlog::debug("[{}] Fetching card thumbnail for {}: {}", self->get_name(),
                                   d->filename, d->thumb_path);
@@ -1443,6 +1471,56 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
                             spdlog::warn("[{}] Failed to fetch thumbnail for {}: {}",
                                          self->get_name(), filename_copy, error);
                         });
+#else
+                    // ESP32 (Task 11 R2): no disk thumbnail cache on this platform
+                    // (Task 10 R6), so bypass ThumbnailCache/ThumbnailProcessor
+                    // entirely and fetch the PNG bytes directly via the HTTP lane,
+                    // decoding into a PSRAM-backed lv_image_dsc_t instead of a
+                    // cache file (see esp_psram_thumbnail.h).
+                    //
+                    // MANDATORY threading: EspHttpLane invokes on_success/on_error
+                    // directly on its own worker thread with no built-in
+                    // marshaling. This callback therefore does only local
+                    // byte-copy/PSRAM work on the worker thread and defers every
+                    // `self`/file_list_ touch via panel_tok.defer() — `self` is
+                    // captured here only to pass into that deferred lambda, never
+                    // dereferenced on this thread.
+                    spdlog::debug("[{}] Fetching PSRAM thumbnail for {}: {}", self->get_name(),
+                                  d->filename, d->thumb_path);
+
+                    size_t file_idx = d->index;
+                    std::string filename_copy = d->filename;
+                    constexpr size_t kEsp32ThumbnailMaxBytes = 512 * 1024;
+
+                    self->api_->transfers().download_file_partial(
+                        "gcodes", d->thumb_path, kEsp32ThumbnailMaxBytes,
+                        // Success callback — runs on the EspHttpLane worker thread.
+                        [self, panel_tok, file_idx, filename_copy](const std::string& png_bytes) {
+                            auto thumb = helix::ui::EspPsramThumbnail::create(png_bytes);
+                            if (!thumb) {
+                                spdlog::warn("[PrintSelectPanel] PSRAM alloc failed for "
+                                             "thumbnail: {}",
+                                             filename_copy);
+                                return;
+                            }
+                            panel_tok.defer(
+                                "PrintSelectPanel::on_psram_thumbnail_fetched",
+                                [self, file_idx, filename_copy,
+                                 thumb = std::move(thumb)]() mutable {
+                                    if (file_idx < self->file_list_.size() &&
+                                        self->file_list_[file_idx].filename == filename_copy) {
+                                        self->file_list_[file_idx].esp_thumbnail = std::move(thumb);
+                                        self->schedule_view_refresh();
+                                    }
+                                });
+                        },
+                        // Error callback — bg thread, log only, no member access.
+                        [filename_copy](const MoonrakerError& error) {
+                            spdlog::debug(
+                                "[PrintSelectPanel] PSRAM thumbnail fetch failed for {}: {}",
+                                filename_copy, error.message);
+                        });
+#endif
                 }
             } else if (self->api_) {
                 // No thumbnail from metadata - try extracting from gcode file directly
@@ -1593,7 +1671,7 @@ void PrintSelectPanel::process_metadata_result(size_t i, const std::string& file
     }
 }
 
-void PrintSelectPanel::set_api(MoonrakerAPI* api) {
+void PrintSelectPanel::set_api(IMoonrakerAPI* api) {
     api_ = api;
 
     // Update file provider's API reference (it was created with nullptr in setup())

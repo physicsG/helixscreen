@@ -54,11 +54,23 @@ echo -n "📝 Checking copyright headers..."
 
 if [ "$STAGED_ONLY" = true ]; then
   # Pre-commit mode: check only staged files (git-ignored files can't be staged)
+  # The firmware/ exclusions mirror the ones above it, which exist because a
+  # generated or vendored file is not ours to license. Under firmware/ the same
+  # three categories just sit at a different prefix: LVGL font-converter output
+  # (as in assets/fonts/), vendored lv_conf.h, and files vendored from
+  # espressif/esp-bsp that carry their own Apache-2.0 SPDX line. Stamping
+  # GPL-3.0 on any of those would be a false licence claim on third-party code.
+  # firmware/native-audit is the Phase 0 feasibility audit, self-described
+  # throwaway scaffolding committed only for reproducibility.
   FILES=$(git diff --cached --name-only --diff-filter=ACM | \
     grep -E '\.(cpp|c|h|mm)$' | \
     grep -v '^lib/' | \
     grep -v '^assets/fonts/' | \
+    grep -v '/fonts/' | \
     grep -v '^lv_conf\.h$' | \
+    grep -v '/lv_conf\.h$' | \
+    grep -v '/simd/esp_lvgl_port_' | \
+    grep -v '^firmware/native-audit/' | \
     grep -v '^node_modules/' | \
     grep -v '^build/' | \
     grep -v '/\.' || true)
@@ -286,18 +298,24 @@ echo ""
 # locally — three times now (#1204 most recently).
 #
 # Kept cheap (~0.7s) three ways, because this runs on every commit:
-#   - Triggers on staged ui_xml/ and tools/xml-linter/ only. src/ui/,
-#     lib/helix-xml/ and the theme JSON reach the linter ONLY through the
-#     schema, which the fast path does not regenerate — so for a commit that
-#     touches none of the XML, re-linting would just replay the previous
-#     result. CI's XML Lint job still covers the wider path set.
-#   - Lints against the COMMITTED snapshot first. That is precisely what CI
-#     does, so a pass here means CI passes and no regen is owed. It also stops
-#     schema.json churning on commits where staleness changes no outcome.
+#   - Triggers on staged paths for the XML half (ui_xml/, tools/xml-linter/)
+#     and on staged diff CONTENT for the rest of the schema's inputs. The
+#     extractor (mk/tools.mk regen-xml-schema) also reads src/ui/ widget
+#     registrations, src/ lv_xml_register_const() calls, lib/helix-xml/src/xml
+#     and the theme defaults, and none of those reach the linter except through
+#     the schema. A path trigger on src/ would fire on nearly every commit and
+#     pay make's startup for nothing, so the schema-input signals below match
+#     the added/removed lines instead — the same technique XML_CONST_DELETED
+#     uses. CI's XML Lint job still covers the wider path set.
+#   - Lints against the snapshot on disk first. That is what CI does with the
+#     committed copy, so on a clean tree a pass here means CI passes and no
+#     regen is owed. It also stops schema.json churning on commits where
+#     staleness changes no outcome.
 #   - Regenerates only on the paths where the snapshot can actually be at
-#     fault: a failing lint, or a staged edit that deletes a const definition
+#     fault: a failing lint, a staged edit that deletes a const definition
 #     (which would otherwise leave dangling refs resolving against a stale
-#     snapshot). Only that rare path pays the 0.5s `make` startup.
+#     snapshot), or a staged change to a schema input the linter cannot see.
+#     Only those rare paths pay the 0.5s `make` startup.
 echo "🧩 Running helix-xml-linter..."
 
 XML_LINTER_SCHEMA_PATH="tools/xml-linter/schema/schema.json"
@@ -311,9 +329,42 @@ run_xml_linter() {
     --schema "$XML_LINTER_SCHEMA_PATH" --severity error ui_xml/
 }
 
+# True when the staged diff adds or removes a C++ schema input. Both patterns
+# mirror extract_schema.py exactly:
+#   - _REGISTER_WIDGET_RE / _auto_discover_cpp_widgets() rglob *.cpp under
+#     --cpp-src src/ui for lv_xml_register_widget("name", …)
+#   - _CPP_REGISTER_CONST_RE / extract_cpp_registered_constants() rglob *.cpp
+#     under --cpp-const-dirs src for lv_xml_register_const(scope, "name")
+# .cpp only, because that is all the extractor globs — a registration moved to a
+# header is invisible to the schema either way. `-U0` leaves only changed lines,
+# and no ---/+++ file header can contain either call, so `^[-+]` is enough.
+schema_cpp_input_changed() {
+  if git diff --cached -U0 -- 'src/ui/*.cpp' | \
+     grep -qE '^[-+].*lv_xml_register_widget[[:space:]]*\('; then
+    return 0
+  fi
+  if git diff --cached -U0 -- 'src/*.cpp' | \
+     grep -qE '^[-+].*lv_xml_register_const[[:space:]]*\('; then
+    return 0
+  fi
+  return 1
+}
+
+# Staged schema inputs the linter cannot see through the current snapshot, so
+# they force a regen below rather than trusting the first lint. lib/helix-xml is
+# a gitlink: its files never appear in this index, only the pointer bump does.
+# mk/tools.mk is in the set because it owns the extractor's argument list.
+SCHEMA_INPUT_STAGED=false
+
 if [ "$STAGED_ONLY" = true ]; then
   XML_LINT_TRIGGERS=$(git diff --cached --name-only --diff-filter=ACM | \
     grep -E '^(ui_xml/.*\.xml$|tools/xml-linter/)' || true)
+  if git diff --cached --name-only --diff-filter=ACMD | \
+     grep -qE '^(lib/helix-xml$|mk/tools\.mk$|assets/config/themes/defaults/)' || \
+     schema_cpp_input_changed; then
+    SCHEMA_INPUT_STAGED=true
+    XML_LINT_TRIGGERS="$XML_LINT_TRIGGERS schema-inputs"
+  fi
 else
   XML_LINT_TRIGGERS="all"
 fi
@@ -333,22 +384,49 @@ else
     fi
   fi
 
-  if [ "$XML_CONST_DELETED" = false ] && run_xml_linter >/tmp/lint_xml.out 2>&1; then
+  if [ "$XML_CONST_DELETED" = false ] && [ "$SCHEMA_INPUT_STAGED" = false ] && \
+     run_xml_linter >/tmp/lint_xml.out 2>&1; then
     echo "✅ helix-xml-linter passed ($(tail -1 /tmp/lint_xml.out))"
   else
-    # Either the lint failed or a const was deleted. Refresh the snapshot and
-    # retry — `make` here (not the raw extractor) keeps mk/tools.mk the single
-    # source of truth for the extractor's argument list.
+    # The lint failed, a const was deleted, or a schema input the lint cannot
+    # see is staged. Refresh the snapshot and retry — `make` here (not the raw
+    # extractor) keeps mk/tools.mk the single source of truth for the
+    # extractor's argument list.
+    #
+    # SCHEMA_DIRTY_BEFORE is worktree-vs-index: true means the snapshot carries
+    # unstaged edits, which may belong to a change that is not this commit's.
     SCHEMA_DIRTY_BEFORE=false
     git diff --quiet -- "$XML_LINTER_SCHEMA_PATH" || SCHEMA_DIRTY_BEFORE=true
 
+    # Stale means REGENERATION CHANGED THE BYTES, which is a different question
+    # from "differs from the index". On a tree where the snapshot has already
+    # been regenerated and not staged, the bytes on disk are correct yet still
+    # differ from the index — comparing against the index there calls a correct
+    # file stale and blocks the commit on a diagnosis nobody can act on. So keep
+    # the pre-regen bytes and compare the regen output against those.
+    SCHEMA_BEFORE_REGEN=$(mktemp "${TMPDIR:-/tmp}/helix_schema_before.XXXXXX")
+    cp "$XML_LINTER_SCHEMA_PATH" "$SCHEMA_BEFORE_REGEN"
+
     if make regen-xml-schema >/tmp/regen_xml_schema.out 2>&1; then
       SCHEMA_WAS_STALE=false
-      git diff --quiet -- "$XML_LINTER_SCHEMA_PATH" || SCHEMA_WAS_STALE=true
+      cmp -s "$SCHEMA_BEFORE_REGEN" "$XML_LINTER_SCHEMA_PATH" || SCHEMA_WAS_STALE=true
+      rm -f "$SCHEMA_BEFORE_REGEN"
 
       if run_xml_linter >/tmp/lint_xml.out 2>&1; then
-        if [ "$SCHEMA_WAS_STALE" = false ]; then
+        if [ "$SCHEMA_WAS_STALE" = false ] && [ "$SCHEMA_DIRTY_BEFORE" = false ]; then
           echo "✅ helix-xml-linter passed ($(tail -1 /tmp/lint_xml.out))"
+        elif [ "$SCHEMA_WAS_STALE" = false ]; then
+          # Regeneration changed nothing: the snapshot is already correct and
+          # merely unstaged. Nothing to fix, and nothing this hook may stage —
+          # those bytes belong to whichever change regenerated them, which is
+          # the same reason the stale branch below refuses to stage a dirty
+          # file. Not a commit blocker: the committer cannot resolve it from
+          # inside this commit without absorbing someone else's content. Say it
+          # plainly instead, because CI lints the COMMITTED copy.
+          echo "✅ helix-xml-linter passed ($(tail -1 /tmp/lint_xml.out))"
+          echo "ℹ️  $XML_LINTER_SCHEMA_PATH is already up to date but unstaged"
+          echo "   CI's XML Lint job lints the committed copy — commit it:"
+          echo "   git add $XML_LINTER_SCHEMA_PATH"
         # The snapshot was the problem. Stage it with the XML that made it
         # stale — unless it was already dirty, in which case it belongs to
         # unrelated WIP and is not ours to stage.
@@ -368,10 +446,11 @@ else
         EXIT_CODE=1
       fi
     else
-      # Regeneration is best-effort — fall back to the committed snapshot so a
+      # Regeneration is best-effort — fall back to the snapshot on disk so a
       # broken extractor can't block every commit, and fail only on real lint errors.
+      rm -f "$SCHEMA_BEFORE_REGEN"
       cat /tmp/regen_xml_schema.out
-      echo "⚠️  Schema regeneration failed — linting against the committed snapshot"
+      echo "⚠️  Schema regeneration failed — linting against the snapshot on disk"
       if run_xml_linter >/tmp/lint_xml.out 2>&1; then
         echo "✅ helix-xml-linter passed ($(tail -1 /tmp/lint_xml.out))"
       else
@@ -553,7 +632,16 @@ echo ""
 echo "📏 Checking design-token usage (hardcoded pixels)..."
 
 if [ -f "scripts/check_hardcoded_pixels.py" ]; then
-  if python3 scripts/check_hardcoded_pixels.py --max-allowed 162 --summary \
+  # Pre-commit: scan the post-commit tree (index + HEAD), not the dirty working
+  # tree — so another session's unstaged WIP cannot trip the ratchet on a clean
+  # commit. CI and manual runs use the whole-working-tree scan (no flag).
+  if [ "$STAGED_ONLY" = true ]; then
+    PIXELS_ARGS="--staged-only"
+  else
+    PIXELS_ARGS=""
+  fi
+  # shellcheck disable=SC2086
+  if python3 scripts/check_hardcoded_pixels.py --max-allowed 162 --summary $PIXELS_ARGS \
       >/tmp/hardcoded_pixels.out 2>&1; then
     tail -1 /tmp/hardcoded_pixels.out
   else
@@ -623,6 +711,37 @@ if [ -f "scripts/check_responsive_token_scope.py" ]; then
   fi
 else
   echo "⚠️  check_responsive_token_scope.py not found — skipping"
+fi
+
+# ESP32 firmware app_srcs manifest drift. The manifest is a hand-maintained
+# subset of src/ (v1 Core+AMS cut); a new src/ file that misses it breaks the
+# firmware link ~25 min into esp32-build CI. This makes the drift loud here.
+# Skips cleanly when the firmware tree is absent (e.g. a shallow checkout).
+if [ -f "firmware/helixscreen-esp32/components/helixapp/app_srcs.txt" ] && \
+   [ -f "scripts/check_esp32_app_srcs.py" ]; then
+  if python3 scripts/check_esp32_app_srcs.py >/tmp/esp32_app_srcs.out 2>&1; then
+    echo "✅ ESP32 app_srcs manifest covers src/ (no drift)"
+  else
+    cat /tmp/esp32_app_srcs.out
+    EXIT_CODE=1
+  fi
+else
+  echo "⚠️  esp32 app_srcs manifest or gate not found — skipping"
+fi
+
+# A printer_database.json entry naming an image that does not exist is silent at
+# runtime: the lookup falls through to generic-corexy and logs nothing above debug,
+# so a bed-slinger just quietly shows a CoreXY frame. Twenty entries had drifted
+# that way before anyone noticed.
+if [ -f "assets/config/printer_database.json" ] && [ -f "scripts/check_printer_images.py" ]; then
+  if python3 scripts/check_printer_images.py >/tmp/printer_images.out 2>&1; then
+    cat /tmp/printer_images.out
+  else
+    cat /tmp/printer_images.out
+    EXIT_CODE=1
+  fi
+else
+  echo "⚠️  printer database or image gate not found — skipping"
 fi
 
 echo ""
@@ -1197,6 +1316,37 @@ else
   section_time $SECTION_START
   echo ""
   echo "⚠️  check_grid_metrics_single_source.py not found — skipping"
+fi
+
+echo ""
+
+SECTION_START=$(date +%s)
+echo -n "⏱️  Checking series_meta slot-vs-handle indexing..."
+
+if [ -f "scripts/check_series_meta_indexing.py" ]; then
+  # series_meta is SLOT-indexed; TempGraphHit::series_id is a monotonic handle
+  # that is never reused. remove_series frees a slot without lowering
+  # next_series_id, so after one remove-then-add the same number means two
+  # different things: indexing with the handle renders the wrong series, and
+  # past 16 cycles reads off the end of the array. Resolve with
+  # find_meta_by_id() instead. This shipped once in temp_graph_tooltip_draw_cb
+  # and was caught in review rather than by a test, because the only symptom is
+  # drawn pixels and there is no draw-pass readback here.
+  if python3 scripts/check_series_meta_indexing.py >/tmp/series_meta_indexing.out 2>&1; then
+    section_time $SECTION_START
+    echo ""
+    tail -1 /tmp/series_meta_indexing.out
+  else
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/series_meta_indexing.out
+    echo "   Use helix::temp_graph_internal::find_meta_by_id(graph, id) instead."
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  check_series_meta_indexing.py not found — skipping"
 fi
 
 echo ""

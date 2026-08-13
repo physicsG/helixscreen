@@ -24,7 +24,7 @@
 #include "ams_state.h"
 #include "http_executor.h"
 #include "hv/requests.h"
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "moonraker_config_manager.h"
 #include "runtime_config.h"
 #include "settings_manager.h"

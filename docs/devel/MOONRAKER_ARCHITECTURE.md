@@ -42,9 +42,9 @@ The Moonraker integration is split into three distinct layers with clean separat
 
 **Key Architectural Principle:** MoonrakerClient is pure transport. It does NOT store hardware data. All discovered hardware information flows via callbacks to MoonrakerAPI, which owns the `PrinterDiscovery` instance as the single source of truth.
 
-**Abstraction Boundary (enforced Feb 2026):** UI code should ONLY talk to `MoonrakerAPI`, never `MoonrakerClient` directly. The API provides proxy methods for connection state, subscriptions, database operations, and plugin RPCs. The dead `IMoonrakerDomainService` interface has been deleted; shared data types live in `moonraker_types.h`.
+**Abstraction Boundary (enforced Feb 2026):** UI code should ONLY talk to the API layer, never the transport layer directly. The API provides proxy methods for connection state, subscriptions, database operations, and plugin RPCs. The dead `IMoonrakerDomainService` interface has been deleted; shared data types live in `moonraker_types.h`.
 
-**Mock-parity interfaces (Apr 2026):** `IMoonrakerAPI` (`include/i_moonraker_api.h`) and `helix::IMoonrakerClient` (`include/i_moonraker_client.h`) are narrow pure-virtual interfaces that mirror only the currently-virtual methods on each concrete class. The concretes inherit the interfaces; mocks still inherit the concretes. The interfaces exist to catch silent mock drift at build time via `tests/unit/test_interface_drift_moonraker_*.cpp` — they're not a call-site migration target. Callers continue to use `MoonrakerAPI` / `helix::MoonrakerClient` as before.
+**Interfaces are the consumer contract (Plan 3, Jul 2026):** `IMoonrakerAPI` (`include/i_moonraker_api.h`), `helix::IMoonrakerClient` (`include/i_moonraker_client.h`), and the ten sub-API interfaces in `include/i_moonraker_sub_apis.h` are what every consumer depends on — not the concrete classes. This started as a narrower mock-parity mirror (Apr 2026) of the currently-virtual methods on each concrete class; Plan 3 widened it into the full contract so the network layer can be swapped out (e.g. the ESP32 port's non-libhv client) behind the same interfaces. The concretes (`MoonrakerAPI`, `helix::MoonrakerClient`, the ten `Moonraker*API` sub-classes) live behind `MoonrakerManager` (`include/moonraker_manager.h`), which owns them via `std::unique_ptr<IMoonrakerAPI>` / `std::unique_ptr<helix::IMoonrakerClient>` and constructs them in `create_api()` / `create_client()`. Mocks still inherit the concretes. Drift protection: `tests/unit/test_interface_drift_moonraker_*.cpp`. Lint-enforced: `tests/shell/test_code_lint.bats` fails CI if a concrete type is named outside the network layer.
 
 ## Layer Responsibilities
 
@@ -309,6 +309,10 @@ The following methods have been removed from `MoonrakerClient` and are now in `M
 | `include/moonraker_types.h` | Shared data types (BedMeshProfile, GcodeStoreEntry, etc.) |
 | `include/moonraker_client_mock.h` | Transport layer mock |
 | `include/moonraker_api_mock.h` | Domain layer mock |
+| `include/i_moonraker_client.h` | `helix::IMoonrakerClient` — transport-layer consumer contract |
+| `include/i_moonraker_api.h` | `IMoonrakerAPI` — domain-layer consumer contract |
+| `include/i_moonraker_sub_apis.h` | The ten sub-API interfaces (`IAdvancedAPI`, `IJobAPI`, etc.) |
+| `include/moonraker_manager.h` | Owns the concrete client/API instances behind the interfaces |
 
 ### Sources
 

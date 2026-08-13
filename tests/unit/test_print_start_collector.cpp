@@ -1087,9 +1087,10 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
 // firmware's ordered non-heating phase.
 // ============================================================================
 
-TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
-                 "Heater correction: latched HEATING_NOZZLE with hot nozzle + cold bed -> HEATING_BED",
-                 "[print][collector][heating][heater_correction]") {
+TEST_CASE_METHOD(
+    PrintStartCollectorHeaterFixture,
+    "Heater correction: latched HEATING_NOZZLE with hot nozzle + cold bed -> HEATING_BED",
+    "[print][collector][heating][heater_correction]") {
     // Reproduces the observed K2 screenshot: nozzle already at target (green),
     // bed is the real long pole, but firmware's M109 latched HEATING_NOZZLE.
     collector().start();
@@ -1116,9 +1117,10 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     REQUIRE(get_current_message() == "Heating Bed...");
 }
 
-TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
-                 "Heater correction: latched HEATING_BED with hot bed + cold nozzle -> HEATING_NOZZLE",
-                 "[print][collector][heating][heater_correction]") {
+TEST_CASE_METHOD(
+    PrintStartCollectorHeaterFixture,
+    "Heater correction: latched HEATING_BED with hot bed + cold nozzle -> HEATING_NOZZLE",
+    "[print][collector][heating][heater_correction]") {
     // Symmetric case: bed reached target first, nozzle still climbing.
     collector().start();
     drain_async_updates();
@@ -1194,9 +1196,10 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     REQUIRE(get_current_phase() == PrintStartPhase::HEATING_BED);
 }
 
-TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
-                 "Heater correction: CAS guard refuses to regress a phase that advanced past heating",
-                 "[print][collector][heating][heater_correction]") {
+TEST_CASE_METHOD(
+    PrintStartCollectorHeaterFixture,
+    "Heater correction: CAS guard refuses to regress a phase that advanced past heating",
+    "[print][collector][heating][heater_correction]") {
     // Race guard. In production, check_fallback_completion() snapshots the phase
     // under lock, releases it, reads temps, then relabels — a bg gcode signal can
     // advance current_phase_ past heating in that gap. relabel_heating_phase()
@@ -1218,8 +1221,7 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     set_all_temps(300, 1000, 500, 2100);
 
     // Stale relabel, as check_fallback_completion() would attempt off its snapshot.
-    PrintStartCollectorTestAccess::relabel_heating_phase(collector(),
-                                                         PrintStartPhase::HEATING_BED);
+    PrintStartCollectorTestAccess::relabel_heating_phase(collector(), PrintStartPhase::HEATING_BED);
     drain_async_updates();
     drain_async_updates();
 
@@ -2731,8 +2733,8 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     }
 }
 
-TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
-                 "PrintStartCollector - layer advance latch", "[print_start][regression]") {
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture, "PrintStartCollector - layer advance latch",
+                 "[print_start][regression]") {
     // The pre-print phase can only end once layer data is proven to belong to
     // THIS print. A zero sample proves it, but is not guaranteed to arrive —
     // notify_status_update is coalesced. The advance latch is the second route;

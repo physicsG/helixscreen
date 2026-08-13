@@ -167,6 +167,10 @@ class RemoteControlServer {
     nlohmann::json handle_pointer_press(const nlohmann::json& params);
     nlohmann::json handle_pointer_move(const nlohmann::json& params);
     nlohmann::json handle_pointer_release(const nlohmann::json& params);
+    /// Press, hold past the long-press threshold, and release, all without
+    /// returning to the client. See the comment on the implementation for why the
+    /// hold cannot live in the caller's shell.
+    nlohmann::json handle_pointer_long_press(const nlohmann::json& params);
 
     /// Apply a synthetic pointer state on the UI thread, then block (on the calling
     /// transport thread) until LVGL has sampled the device, so callers can sequence

@@ -429,7 +429,7 @@ Remaining gaps, degraded rather than broken:
 |---------------|---------------|
 | RFID fingerprinting (`build_cfs_slot_uid`) for hardware-change detection | No per-slot UID in the schema; baseline/clear logic no-ops |
 | `set_tool_mapping` via TNN + `box.map` | No equivalent — the module maps tools to slots 1:1 |
-| Bypass / external spool load | The `external: true` entry is observable and `T<external>` exists, but the flow is untested here |
+| Bypass / external spool load | The `external: true` entry is observable and `T<external>` exists, but the flow is untested here. `supports_bypass` stays `false` and the entry is skipped when building `unit.slots`, so it never renders as a fifth bay; `loaded_slot` is bounds-checked because it can name it. Users who feed the holder by hand can surface it for tracking with the `force_bypass_controls` override (`FILAMENT_MANAGEMENT.md` § "Bypass visibility and the force override") |
 
 Note `push_slot_color_to_firmware` is **not** a gap: its Fork counterpart is `_BOX_SLOT_SET`, which writes color, brand, name, and Spoolman link together. Because it requires a material, the backend reads the current slot profile to build the write. The explicit Clear Spool action emits `_BOX_SLOT_CLEAR`.
 

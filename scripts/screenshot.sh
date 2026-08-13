@@ -149,6 +149,10 @@ EXTRA_ARGS=("${FILTERED_ARGS[@]}")
 # forces this on a machine that does have a display, so it is checked before the
 # Wayland auto-detect below — otherwise that branch would claim SDL_VIDEODRIVER
 # first and the request would be silently ignored.
+#
+# No need to also export SDL_AUDIODRIVER=dummy here: the binary's
+# silence_audio_if_headless() in main() notices SDL_VIDEODRIVER=dummy and
+# forces it itself, so a screenshot sweep doesn't beep on every panel change.
 if [ -z "$SDL_VIDEODRIVER" ] && { [ "${HELIX_HEADLESS:-0}" = "1" ] ||
     { [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; }; }; then
     export SDL_VIDEODRIVER=dummy

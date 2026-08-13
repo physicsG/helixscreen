@@ -25,6 +25,7 @@
 
 using helix::ui::temperature::deci_to_degrees;
 using helix::ui::temperature::deci_to_degrees_f;
+using helix::ui::temperature::format_temp_number;
 using helix::ui::temperature::get_heating_state_color;
 
 // ============================================================================
@@ -187,10 +188,9 @@ static void format_target_text(TempDisplayData* data) {
     lv_subject_copy_string(&data->target_text_subject, data->target_text_buf);
 }
 
-/** Format decidegrees as "XX.X" with one decimal place */
+/** Format decidegrees as a compact number (one decimal, dropped when >= 100) */
 static void format_deci_temp(char* buf, size_t buf_size, int deci) {
-    float deg = deci_to_degrees_f(deci);
-    snprintf(buf, buf_size, "%.1f", deg);
+    format_temp_number(deci_to_degrees_f(deci), buf, buf_size);
 }
 
 /** Update the display text based on current values */

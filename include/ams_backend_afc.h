@@ -82,15 +82,6 @@ struct AfcToolState {
     std::string status;         ///< Per-tool AFC State ("ToolDock", "ToolPickup", "Idle", …)
     bool next_pickup = false;   ///< True on the tool about to be picked up
     bool is_standalone = false; ///< Standalone toolhead (own lane) vs lane-fed
-
-    /// Whether AFC ever reported is_standalone for this extruder.
-    ///
-    /// Only v1.2.0+ publishes it (AFC_extruder.get_status), and its presence is
-    /// how eject_lane() tells the two live LANE_UNLOAD shapes apart — v1.2.0
-    /// rewrote the body, and the two versions refuse on different conditions.
-    /// "Absent" must not be read as "reported false", the same distinction
-    /// AfcExtruderSensors::has_on_shuttle draws for on_shuttle.
-    bool has_is_standalone = false;
 };
 
 /**
@@ -154,12 +145,12 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     /**
      * @brief Construct AFC backend
      *
-     * @param api Pointer to MoonrakerAPI (for sending G-code commands)
-     * @param client Pointer to helix::MoonrakerClient (for subscribing to updates)
+     * @param api Pointer to IMoonrakerAPI (for sending G-code commands)
+     * @param client Pointer to helix::IMoonrakerClient (for subscribing to updates)
      *
      * @note Both pointers must remain valid for the lifetime of this backend.
      */
-    AmsBackendAfc(MoonrakerAPI* api, helix::MoonrakerClient* client);
+    AmsBackendAfc(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
     ~AmsBackendAfc() override;
 
     /**
@@ -362,34 +353,25 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     /**
      * @brief Get endless spool capabilities for AFC
      *
-     * AFC supports per-slot backup configuration via SET_RUNOUT G-code.
+     * Available, always enabled (AFC has no on/off switch - a lane either names
+     * a runout lane or it does not), and PerSlot editable via `SET_RUNOUT`.
      *
-     * @return Capabilities with supported=true, editable=true
+     * @note Holds no lock: every field is a constant for this backend.
      */
     [[nodiscard]] helix::printer::EndlessSpoolCapabilities
     get_endless_spool_capabilities() const override;
 
     /**
-     * @brief Get endless spool configuration for all lanes
+     * @brief Get the endless spool relation for all lanes
      *
-     * Returns the backup slot configuration for each lane.
+     * AFC's `runout_lane` is a directed lane->lane edge held in the
+     * SlotRegistry, so this is `endless_spool_config_from_edges()` over
+     * `slots_.backup_edges()` - one ordered two-member group per configured
+     * lane.
      *
-     * @return Vector of configs, one per lane
+     * @note Takes `mutex_`; callers must NOT hold it.
      */
-    [[nodiscard]] std::vector<helix::printer::EndlessSpoolConfig>
-    get_endless_spool_config() const override;
-
-    /**
-     * @brief Set backup slot for endless spool
-     *
-     * Sends SET_RUNOUT G-code to configure which lane will be used as backup
-     * when the specified lane runs out of filament.
-     *
-     * @param slot_index Source lane (0 to slots_.slot_count()-1)
-     * @param backup_slot Backup lane (-1 to disable)
-     * @return AmsError with result
-     */
-    AmsError set_endless_spool_backup(int slot_index, int backup_slot) override;
+    [[nodiscard]] helix::printer::EndlessSpoolConfig get_endless_spool_config() const override;
 
     /**
      * @brief Reset all tool mappings to defaults
@@ -400,16 +382,6 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
      * @return AmsError with result
      */
     AmsError reset_tool_mappings() override;
-
-    /**
-     * @brief Reset all endless spool backup mappings
-     *
-     * Iterates through all lanes and sets each backup to -1 (disabled)
-     * via SET_RUNOUT G-code commands.
-     *
-     * @return AmsError with result
-     */
-    AmsError reset_endless_spool() override;
 
     // Tool Mapping support
     /**
@@ -481,6 +453,20 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
                                    const std::any& value = {}) override;
 
   protected:
+    /**
+     * @brief Transport for one endless-spool edge: `SET_RUNOUT LANE=x RUNOUT=y`.
+     *
+     * Ranges, self-backup and editability are already settled by
+     * AmsBackend::set_endless_spool_backup(). This resolves the two lane names,
+     * screens them for G-code injection, sends, and only then mirrors the edge
+     * into the SlotRegistry - the old order updated the registry first, so a
+     * rejected write left the registry claiming a backup the printer never got.
+     *
+     * @note Takes `mutex_` twice (name lookup, then the post-send mirror) and
+     *       holds it across neither the injection check nor the G-code send.
+     */
+    AmsError apply_endless_spool_backup(int slot_index, int backup_slot) override;
+
     // Allow test helper access to private members
     friend class AmsBackendAfcTestHelper;
     friend class AfcPerSlotLoadedHelper;
@@ -794,7 +780,7 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
      * send_jsonrpc delivers the full JSON-RPC envelope, so the payload lives at
      * result.value. Strict about that shape: a payload is an arbitrary object,
      * so it cannot be told apart from an envelope in general. Replies obtained
-     * via MoonrakerAPI::database_get_item are already unwrapped and must not be
+     * via IMoonrakerAPI::database_get_item are already unwrapped and must not be
      * passed here.
      *
      * @return the payload, or a null json when absent
@@ -1204,38 +1190,6 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     /// success on enqueue — the caller does not need to re-issue if a previous
     /// eject is still running.
     AmsError enqueue_lane_unload(const std::string& lane_name);
-
-    /// Mirror of the refusals inside upstream's own LANE_UNLOAD.
-    ///
-    /// Every condition upstream refuses on ends in a bare `return` (v1.1.0) or
-    /// falls off the end of its if/elif chain (v1.2.0+) — Klipper still acks the
-    /// G-code as success either way. Without this, eject_lane() reports success,
-    /// the path canvas latches into eject mode, and the filament never moves: the
-    /// user-visible symptom is nothing happening at all, with no error to explain
-    /// it. Returns success when upstream would perform the eject.
-    ///
-    /// Callers hold mutex_.
-    AmsError lane_unload_refusal_unlocked(int slot_index, const std::string& lane_name) const;
-
-    /// Whether AFC has published is_standalone for any extruder.
-    ///
-    /// The v1.2.0 (2026-07-26) LANE_UNLOAD rewrite swapped a `hub == 'direct'`
-    /// test for `extruder_obj.is_standalone()`, and the field arrived in the same
-    /// release — so its presence dates the install. Both eras are still in the
-    /// field, and each refuses on a condition the other performs, so applying
-    /// either rule to the wrong one is a real defect in both directions.
-    ///
-    /// Callers hold mutex_.
-    [[nodiscard]] bool afc_reports_standalone_unlocked() const;
-
-    /// The extruder that feeds @p lane_name, or empty when unknown.
-    ///
-    /// Prefers AFC_stepper.extruder (SlotInfo::extruder_name), falling back to
-    /// whichever extruder currently claims the lane via lane_loaded.
-    ///
-    /// Callers hold mutex_.
-    [[nodiscard]] std::string extruder_for_lane_unlocked(int slot_index,
-                                                         const std::string& lane_name) const;
 
   protected:
     /// Dispatch a LANE_UNLOAD via api_->execute_gcode with completion callbacks

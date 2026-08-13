@@ -55,7 +55,24 @@ class DebugBundleCollector {
     /// Individual collectors (public for testing)
     static nlohmann::json collect_system_info();
     static nlohmann::json collect_printer_info();
-    static std::string collect_log_tail(int num_lines = 2000);
+    /// `num_lines <= 0` (the default) ships the whole ring — see
+    /// resolve_log_tail_lines().
+    static std::string collect_log_tail(int num_lines = 0);
+
+    /// How many lines collect_log_tail() actually asks for (public for testing).
+    ///
+    /// The ring's capacity scales with device RAM (logging_init.cpp
+    /// ring_capacity_for_ram(): 16 lines/MB, clamped to [2000, 20000]), but the
+    /// collector used to ask for a hardcoded 2000 — the *floor* of that range.
+    /// So every device above the smallest boards paid the RAM to retain lines
+    /// the bundle then discarded: on a 473 MB AD5X the ring holds 7568 and we
+    /// shipped 26% of it, which on bundle LYGVE39Y meant 12 minutes of history
+    /// against a 9-minute stall that started before the window opened.
+    ///
+    /// A positive `requested` is honoured verbatim. Otherwise ship the whole
+    /// ring, falling back to the floor when no ring is installed (watchdog
+    /// build, or before logging init) so the on-disk cascade stays bounded.
+    static size_t resolve_log_tail_lines(int requested, size_t ring_capacity);
 
     /// Metadata about the log pipeline so a bundle reader knows whether debug
     /// was being captured: { target, level, ring_lines, log_tail_source }.
@@ -88,12 +105,45 @@ class DebugBundleCollector {
     /// from the daemons' own argv (see candidate_log_paths()), so an unknown
     /// platform layout returns empty rather than a guess.
     static std::string collect_local_log_tail(const std::string& log_name, int num_lines,
-                                              bool condense_klipper = false);
-    /// moonraker.log is small — a real 22-hour AD5X log was 2833 lines / 198 KB,
-    /// so the old 2000-line cap discarded the oldest 30% of a file that fits the
-    /// 512 KiB byte budget several times over. Cap high enough that the byte
-    /// budget is what binds.
+                                              int condense_max_repeats = 0);
+    /// Line cap for moonraker.log. Deliberately far above what the byte budget
+    /// yields (a 2 MiB condensed window measured 4319 lines) so kMoonrakerTailBytes
+    /// is what binds, not an arbitrary line count.
     static std::string collect_moonraker_log_tail(int num_lines = 8000);
+
+    /// One entry from Moonraker's `logs` file root.
+    struct LogFileEntry {
+        std::string path; ///< relative to the logs root, may contain '/'
+        uint64_t size = 0;
+        double modified = 0.0;
+    };
+
+    /// Newest rotated predecessor of `stems` in a Moonraker `logs` listing, or ""
+    /// (public for testing).
+    ///
+    /// Why this exists: a printer that just crashed is a printer that is about to
+    /// be rebooted, and the reboot starts a fresh log. On bundle LYGVE39Y the
+    /// incident lived entirely in the ROTATED moonraker.log.2026-08-11 while the
+    /// active moonraker.log held nothing but the restart. We only ever fetched
+    /// the active file, so the evidence was one HTTP GET away and we never made
+    /// it.
+    ///
+    /// `stems` is a list because the klippy log is not called the same thing
+    /// everywhere: Raspberry Pi installs use klippy.log, while AD5M/AD5X (and
+    /// Vger1700's box) use printer.log. Rotated suffixes vary too — dated
+    /// (`.2026-08-11`), dated+hour (`.2026-06-13_15`), and numeric (`.1`) all
+    /// occur on real devices.
+    ///
+    /// Selection is deliberately narrow. A logs root holds other daemons' files,
+    /// and on a live Pi `crowsnest.log.2026-08-11` is 940 KB and NEWER than every
+    /// klippy rotation — so "newest rotated log" would ship a webcam log instead
+    /// of the crash. Only `<stem>.<suffix>` at the root matches; nested paths
+    /// (`mod/init.log.1`) and the active file itself never do.
+    static std::string pick_rotated_sibling(const std::vector<LogFileEntry>& listing,
+                                            const std::vector<std::string>& stems);
+
+    /// GET /server/files/list?root=logs, parsed. Empty on any failure.
+    static std::vector<LogFileEntry> fetch_log_listing(const std::string& base_url);
 
     /// Read crash_report.txt from config_dir (persists after crash.txt consumed)
     static std::string collect_crash_report_txt(const std::string& config_dir);
@@ -128,6 +178,28 @@ class DebugBundleCollector {
 
     /// Filter a Klipper object list to filament-related objects (public for testing)
     static nlohmann::json filter_filament_objects(const nlohmann::json& object_list);
+
+    /// Shape-collapse threshold for klippy.log. Tuned against Klipper's
+    /// per-second Stats line and ZMOD's 4-line toolhead dump.
+    static constexpr int kKlipperCondenseMaxRepeats = 40;
+
+    /// Shape-collapse threshold for moonraker.log. Higher than Klipper's because
+    /// moonraker's most valuable repeated block is proc_stats._handle_shutdown()'s
+    /// ~30 host-CPU samples, and shutdowns cluster: with 40, a second shutdown in
+    /// the window starves the first one's block down to 10 samples (measured on
+    /// Vger1700's moonraker.log.2026-08-11, which had two 102 lines apart). 100
+    /// keeps every block whole while still collapsing the log_request() padding
+    /// that dominates a busy file.
+    static constexpr int kMoonrakerCondenseMaxRepeats = 100;
+
+    /// Byte window fetched for moonraker.log. Raised from the 512 KiB default
+    /// because condensing shrinks the payload afterwards, so a bigger fetch buys
+    /// history rather than bundle size: on a real 1524 KiB moonraker.log, 512 KiB
+    /// reached 7656 lines and shipped 167 KB, while 2 MiB reached all 23862 and
+    /// shipped 240 KB. moonraker.log is also the log that SURVIVES the events
+    /// klippy.log does not — it lives outside the Klipper tree, so a rollback or
+    /// reinstall leaves it intact (bundle LYGVE39Y).
+    static constexpr int kMoonrakerTailBytes = 2 * 1024 * 1024;
 
     /// Collapse repeating noise in a raw klippy.log tail (public for testing).
     ///
@@ -187,13 +259,26 @@ class DebugBundleCollector {
     static nlohmann::json moonraker_get(const std::string& base_url, const std::string& endpoint,
                                         int timeout_sec = 10);
 
-    /// Get the Moonraker HTTP base URL (from MoonrakerAPI if connected)
+    /// Get the Moonraker HTTP base URL (from IMoonrakerAPI if connected)
     static std::string get_moonraker_url();
 
-    /// Fetch the tail of a log file from Moonraker using HTTP Range requests
+    /// Fetch the tail of a log file from Moonraker using HTTP Range requests.
+    ///
+    /// `condense_max_repeats` of 0 ships the window verbatim; anything positive
+    /// runs it through condense_klipper_log() at that threshold. The condenser is
+    /// shape-based, not Klipper-specific, so moonraker.log uses it too — with its
+    /// own threshold, see kMoonrakerCondenseMaxRepeats.
     static std::string fetch_log_tail(const std::string& base_url, const std::string& endpoint,
                                       int num_lines, int tail_bytes = 524288,
-                                      bool condense_klipper = false);
+                                      int condense_max_repeats = 0);
+
+    /// Prepend the newest rotated predecessor when the active log is too short to
+    /// have used its byte budget. See the definition for why that predicate is
+    /// the right trigger.
+    static std::string prepend_rotated_predecessor(const std::string& base_url,
+                                                   const std::vector<std::string>& stems,
+                                                   const std::string& active_body, int tail_bytes,
+                                                   int num_lines, int condense_max_repeats);
 
     /// Check if a key name matches a sensitive pattern
     static bool is_sensitive_key(const std::string& key);

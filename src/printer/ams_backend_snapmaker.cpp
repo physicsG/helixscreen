@@ -228,12 +228,11 @@ struct ChannelStateInfo {
 // Construction
 // ============================================================================
 
-AmsBackendSnapmaker::AmsBackendSnapmaker(MoonrakerAPI* api, helix::MoonrakerClient* client)
+AmsBackendSnapmaker::AmsBackendSnapmaker(IMoonrakerAPI* api, helix::IMoonrakerClient* client)
     : AmsSubscriptionBackend(api, client) {
     // Initialize system info
     system_info_.type = AmsType::SNAPMAKER;
     system_info_.type_name = "Snapmaker SnapSwap";
-    system_info_.supports_endless_spool = false;
     system_info_.supports_tool_mapping = false;
     system_info_.supports_bypass = false;
     system_info_.has_hardware_bypass_sensor = false;
@@ -716,9 +715,9 @@ void AmsBackendSnapmaker::prepare_for_resume(int slot_index, ResumeReadyCallback
     // neutered FEED_AUTO and whose SET_PRINT_FILAMENT_CONFIG / manual extrude were
     // both unnecessary (INNER_RESUME restores config; AUTO_FEEDING does the heat).
     if (!api_) {
-        spdlog::warn("{} prepare_for_resume: MoonrakerAPI unavailable", backend_log_tag());
+        spdlog::warn("{} prepare_for_resume: IMoonrakerAPI unavailable", backend_log_tag());
         if (on_ready) {
-            on_ready(AmsErrorHelper::not_connected("MoonrakerAPI unavailable"));
+            on_ready(AmsErrorHelper::not_connected("IMoonrakerAPI unavailable"));
         }
         return;
     }
@@ -739,11 +738,11 @@ void AmsBackendSnapmaker::prepare_for_resume(int slot_index, ResumeReadyCallback
 
     auto tok = lifetime_.token();
     const char* tag = backend_log_tag();
-    MoonrakerAPI* api_ptr = api_;
+    IMoonrakerAPI* api_ptr = api_;
     api_ptr->execute_gcode(
         chain,
         [this, tok, on_ready, tag, slot]() mutable {
-            // MoonrakerAPI callbacks fire on the libhv WebSocket thread; defer to
+            // IMoonrakerAPI callbacks fire on the libhv WebSocket thread; defer to
             // main so on_ready (and the backstop arm) run on the UI thread.
             tok.defer("AmsBackendSnapmaker::prepare_for_resume.ok",
                       [this, cb = std::move(on_ready), tag, slot]() {

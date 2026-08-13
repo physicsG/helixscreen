@@ -14,7 +14,7 @@
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "observer_factory.h"
 #include "printer_state.h"
 #include "static_subject_registry.h"
@@ -125,13 +125,13 @@ std::vector<std::string> PowerDeviceState::device_names() const {
     return names;
 }
 
-void PowerDeviceState::subscribe(MoonrakerAPI& api) {
+void PowerDeviceState::subscribe(IMoonrakerAPI& api) {
     api.register_method_callback("notify_power_changed", "power_device_state",
                                  [this](const nlohmann::json& msg) { on_power_changed(msg); });
     spdlog::debug("[PowerDeviceState] Subscribed to notify_power_changed");
 }
 
-void PowerDeviceState::unsubscribe(MoonrakerAPI& api) {
+void PowerDeviceState::unsubscribe(IMoonrakerAPI& api) {
     api.unregister_method_callback("notify_power_changed", "power_device_state");
     print_state_observer_.reset();
     deinit_subjects();

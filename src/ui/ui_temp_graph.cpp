@@ -6,6 +6,8 @@
 #include "ui_format_utils.h"
 
 #include "system/crash_handler.h"
+#include "temp_graph_internal.h"
+#include "temp_graph_tooltip.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -19,6 +21,10 @@
 #include <utility>
 #include <vector>
 
+using helix::temp_graph_internal::temp_graph_compute_geometry;
+using helix::temp_graph_internal::temp_graph_geometry_t;
+using helix::temp_graph_internal::temp_graph_time_axis;
+using helix::temp_graph_internal::temp_graph_time_axis_t;
 using helix::ui::format_time;
 
 // Internal scale factor: store deci-degrees (×10) in the LVGL chart for 0.1°C precision.
@@ -266,18 +272,10 @@ static void mask_overrange_end_cb(lv_event_t* e) {
     it->second.clear();
 }
 
-// Geometry of the chart's content rect (inside padding) plus the deci-degree
-// Y range. Returns false when the chart is too small or the range is degenerate.
-// Computed from the chart object directly (no draw context) so it is valid from
-// both the draw callback and the out-of-render-pass async recompute.
-struct gradient_geometry_t {
-    int32_t cx1, cy1; // content top-left (absolute display coords)
-    int32_t cw, ch;   // content width / height
-    int32_t y_min, y_max;
-    uint32_t point_count;
-};
+// See temp_graph_internal.h for the doc comment — shared with the hit test.
+namespace helix::temp_graph_internal {
 
-static bool gradient_compute_geometry(ui_temp_graph_t* graph, gradient_geometry_t* g) {
+bool temp_graph_compute_geometry(ui_temp_graph_t* graph, temp_graph_geometry_t* g) {
     lv_obj_t* chart = graph->chart;
     if (!chart)
         return false;
@@ -318,10 +316,12 @@ static bool gradient_compute_geometry(ui_temp_graph_t* graph, gradient_geometry_
     return true;
 }
 
+} // namespace helix::temp_graph_internal
+
 // Render the per-column gradient fill for every visible series into `target`,
 // with column 0 at x_off and the chart floor at y_off + ch (content-relative
 // when drawing to the cache buffer, absolute when drawing to the event layer).
-static void gradient_render_columns(ui_temp_graph_t* graph, const gradient_geometry_t& g,
+static void gradient_render_columns(ui_temp_graph_t* graph, const temp_graph_geometry_t& g,
                                     lv_layer_t* target, int32_t x_off, int32_t y_off) {
     int32_t cw = g.cw;
     int32_t ch = g.ch;
@@ -425,7 +425,7 @@ static void gradient_render_columns(ui_temp_graph_t* graph, const gradient_geome
 // viewport size. Returns true when a usable buffer is available. A size change
 // reallocates the buffer and marks the cache dirty (cached pixels no longer map
 // to the new geometry). Must run OUTSIDE the render pass.
-static bool gradient_ensure_cache_buf(ui_temp_graph_t* graph, const gradient_geometry_t& g) {
+static bool gradient_ensure_cache_buf(ui_temp_graph_t* graph, const temp_graph_geometry_t& g) {
     if (!graph->chart)
         return false;
 
@@ -476,8 +476,8 @@ static void gradient_recompute_async(void* arg) {
     if (!(graph->features & TEMP_GRAPH_FEATURE_GRADIENTS))
         return;
 
-    gradient_geometry_t g;
-    if (!gradient_compute_geometry(graph, &g))
+    temp_graph_geometry_t g;
+    if (!temp_graph_compute_geometry(graph, &g))
         return;
     if (!gradient_ensure_cache_buf(graph, g))
         return;
@@ -526,8 +526,8 @@ static void draw_gradient_cb(lv_event_t* e) {
     if (!event_layer)
         return;
 
-    gradient_geometry_t g;
-    if (!gradient_compute_geometry(graph, &g))
+    temp_graph_geometry_t g;
+    if (!temp_graph_compute_geometry(graph, &g))
         return;
 
     // Fast path: the cached buffer is valid for the current viewport and clean.
@@ -740,6 +740,72 @@ static void draw_legend_cb(lv_event_t* e) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared plot geometry — one definition for every draw hook
+// ─────────────────────────────────────────────────────────────────────────────
+
+// The chart's plot rectangle in absolute screen coordinates: the area inside
+// the widget's padding that every hook interpolates data positions across.
+//
+// `width` is deliberately the x2 - x1 SPAN, not lv_obj_get_content_width().
+// Those differ by one pixel (plus borders) because lv_area coordinates are
+// inclusive, and interpolating `content_x1 + offset * width / total` is only
+// exact when width is the span — offset == total then lands precisely on
+// content_x2. The X-axis labels used to compute their own width the other way,
+// which is why the grid lines and the times they were supposed to be aligned
+// with sat 1-2px apart (#1245).
+struct temp_graph_plot_area_t {
+    int32_t x1;
+    int32_t x2;
+    int32_t y1;
+    int32_t y2;
+    int32_t width;
+    int32_t height;
+};
+
+static temp_graph_plot_area_t temp_graph_plot_area(lv_obj_t* chart) {
+    lv_area_t coords;
+    lv_obj_get_coords(chart, &coords);
+
+    temp_graph_plot_area_t a;
+    a.x1 = coords.x1 + lv_obj_get_style_pad_left(chart, LV_PART_MAIN);
+    a.x2 = coords.x2 - lv_obj_get_style_pad_right(chart, LV_PART_MAIN);
+    a.y1 = coords.y1 + lv_obj_get_style_pad_top(chart, LV_PART_MAIN);
+    a.y2 = coords.y2 - lv_obj_get_style_pad_bottom(chart, LV_PART_MAIN);
+    a.width = a.x2 - a.x1;
+    a.height = a.y2 - a.y1;
+    return a;
+}
+
+// Both used to derive this independently; keeping one source is what actually
+// guarantees a grid line under every label. See temp_graph_internal.h for the
+// struct's doc comment — shared with the hit test.
+namespace helix::temp_graph_internal {
+
+temp_graph_time_axis_t temp_graph_time_axis(const ui_temp_graph_t* graph) {
+    temp_graph_time_axis_t t;
+    t.total_ms =
+        static_cast<int64_t>(graph->point_count) * UI_TEMP_GRAPH_SAMPLE_INTERVAL_SEC * 1000;
+    t.latest_ms = graph->latest_point_time_ms;
+    t.leftmost_ms = t.latest_ms - t.total_ms;
+
+    // 400 points x 3 s = a 20 min window, labelled every 5 min (#979).
+    t.interval_ms = 5 * 60 * 1000;
+    if (t.total_ms < 2 * 60 * 1000) {
+        t.interval_ms = 30 * 1000;
+    } else if (t.total_ms < 10 * 60 * 1000) {
+        t.interval_ms = 2 * 60 * 1000;
+    }
+
+    t.first_ms = (t.leftmost_ms / t.interval_ms) * t.interval_ms;
+    if (t.first_ms < t.leftmost_ms) {
+        t.first_ms += t.interval_ms;
+    }
+    return t;
+}
+
+} // namespace helix::temp_graph_internal
+
 // Draw target lines: time-varying step trace (TARGET_HISTORY on, default) or
 // a single horizontal dashed line at the current setpoint (TARGET_HISTORY off).
 // Constrained to the content area — LVGL's built-in cursor drawing extends
@@ -759,20 +825,13 @@ static void draw_target_lines_cb(lv_event_t* e) {
         return;
 
     // Content area (inside padding)
-    lv_area_t obj_coords;
-    lv_obj_get_coords(chart, &obj_coords);
-
-    int32_t pad_left = lv_obj_get_style_pad_left(chart, LV_PART_MAIN);
-    int32_t pad_right = lv_obj_get_style_pad_right(chart, LV_PART_MAIN);
-    int32_t pad_top = lv_obj_get_style_pad_top(chart, LV_PART_MAIN);
-    int32_t pad_bottom = lv_obj_get_style_pad_bottom(chart, LV_PART_MAIN);
-
-    int32_t cx1 = obj_coords.x1 + pad_left;
-    int32_t cx2 = obj_coords.x2 - pad_right;
-    int32_t cy1 = obj_coords.y1 + pad_top;
-    int32_t cy2 = obj_coords.y2 - pad_bottom;
-    int32_t chart_width = cx2 - cx1;
-    int32_t chart_height = cy2 - cy1;
+    const temp_graph_plot_area_t plot = temp_graph_plot_area(chart);
+    const int32_t cx1 = plot.x1;
+    const int32_t cx2 = plot.x2;
+    const int32_t cy1 = plot.y1;
+    const int32_t cy2 = plot.y2;
+    const int32_t chart_width = plot.width;
+    const int32_t chart_height = plot.height;
     if (chart_height <= 0 || chart_width <= 0)
         return;
 
@@ -932,16 +991,14 @@ static void draw_x_axis_labels_cb(lv_event_t* e) {
                   graph->visible_point_count, graph->first_point_time_ms,
                   graph->latest_point_time_ms);
 
-    // Get chart bounds
+    // Content area (inside padding) — shared with the grid callback so labels
+    // and grid lines land on the same pixel.
     lv_area_t coords;
     lv_obj_get_coords(chart, &coords);
-    int32_t content_width = lv_obj_get_content_width(chart);
-
-    // Calculate content area (inside padding)
-    int32_t pad_left = lv_obj_get_style_pad_left(chart, LV_PART_MAIN);
-    int32_t pad_right = lv_obj_get_style_pad_right(chart, LV_PART_MAIN);
-    int32_t content_x1 = coords.x1 + pad_left;
-    int32_t content_x2 = coords.x2 - pad_right;
+    const temp_graph_plot_area_t plot = temp_graph_plot_area(chart);
+    const int32_t content_width = plot.width;
+    const int32_t content_x1 = plot.x1;
+    const int32_t content_x2 = plot.x2;
 
     // Setup label descriptor - match Y-axis label style exactly
     // Y-axis labels use configurable font and get their color from LVGL's theme default
@@ -953,17 +1010,11 @@ static void draw_x_axis_labels_cb(lv_event_t* e) {
     label_dsc.align = LV_TEXT_ALIGN_CENTER;
     label_dsc.opa = lv_obj_get_style_text_opa(chart, LV_PART_MAIN); // Use chart's text opacity
 
-    // The chart has a fixed number of points (1200 by default = 20 minutes at 1 sample/sec)
-    // Each data point represents 1 second, so the total time span is fixed
-    int64_t total_display_time_ms =
-        static_cast<int64_t>(graph->point_count) * 1000; // 20 min = 1,200,000 ms
-
-    // The "now" time is always at the rightmost edge
-    int64_t latest_ms = graph->latest_point_time_ms;
-
-    // Calculate what time corresponds to the leftmost edge of the graph
-    // This is "now - total_display_time"
-    int64_t leftmost_ms = latest_ms - total_display_time_ms;
+    // Time axis — shared with the grid callback (see temp_graph_time_axis).
+    const temp_graph_time_axis_t axis = temp_graph_time_axis(graph);
+    const int64_t total_display_time_ms = axis.total_ms;
+    const int64_t latest_ms = axis.latest_ms;
+    const int64_t leftmost_ms = axis.leftmost_ms;
 
     // Label positioning: Y is aligned with bottom Y-axis label (0° baseline)
     // The Y-axis labels use space_between layout, with 0° at the chart content bottom
@@ -975,26 +1026,14 @@ static void draw_x_axis_labels_cb(lv_event_t* e) {
     // Position below chart content with responsive gap
     int32_t label_y = coords.y2 - pad_bottom + space_xs;
 
-    // Determine label interval based on total display time (fixed)
-    // For 20 minutes (1200s), show labels every 5 minutes
-    int64_t label_interval_ms = 5 * 60 * 1000; // 5 minutes default
-    if (total_display_time_ms < 2 * 60 * 1000) {
-        label_interval_ms = 30 * 1000; // 30 seconds for < 2 min
-    } else if (total_display_time_ms < 10 * 60 * 1000) {
-        label_interval_ms = 2 * 60 * 1000; // 2 minutes for < 10 min
-    }
+    const int64_t label_interval_ms = axis.interval_ms;
 
     // Track previous label to skip duplicates
     char prev_label[12] = ""; // Sized for 12H format: "12:30 PM"
 
-    // Draw labels at regular time intervals
-    // Start from the first time that's on a nice boundary after the left edge
-    int64_t first_label_ms = (leftmost_ms / label_interval_ms) * label_interval_ms;
-    if (first_label_ms < leftmost_ms) {
-        first_label_ms += label_interval_ms;
-    }
-
-    for (int64_t label_time_ms = first_label_ms; label_time_ms <= latest_ms;
+    // Draw labels at regular time intervals, starting from the first tick on a
+    // nice boundary at or after the left edge.
+    for (int64_t label_time_ms = axis.first_ms; label_time_ms <= latest_ms;
          label_time_ms += label_interval_ms) {
         // Calculate X position for this time
         // Position is proportional: (time - leftmost) / total_display_time * width
@@ -1073,22 +1112,16 @@ static void draw_grid_lines_cb(lv_event_t* e) {
         return;
     }
 
-    // Get chart bounds
-    lv_area_t coords;
-    lv_obj_get_coords(chart, &coords);
-
-    // Calculate content area (where data is drawn, excluding label areas)
-    int32_t pad_top = lv_obj_get_style_pad_top(chart, LV_PART_MAIN);
-    int32_t pad_left = lv_obj_get_style_pad_left(chart, LV_PART_MAIN);
-    int32_t pad_right = lv_obj_get_style_pad_right(chart, LV_PART_MAIN);
-    int32_t pad_bottom = lv_obj_get_style_pad_bottom(chart, LV_PART_MAIN);
-
-    int32_t content_x1 = coords.x1 + pad_left;
-    int32_t content_x2 = coords.x2 - pad_right;
-    int32_t content_y1 = coords.y1 + pad_top;
-    int32_t content_y2 = coords.y2 - pad_bottom;
-    int32_t content_width = content_x2 - content_x1;
-    int32_t content_height = content_y2 - content_y1;
+    // Content area (where data is drawn, excluding label areas) — shared with
+    // the X-axis label callback so the vertical lines and the times they mark
+    // land on the same pixel.
+    const temp_graph_plot_area_t plot = temp_graph_plot_area(chart);
+    const int32_t content_x1 = plot.x1;
+    const int32_t content_x2 = plot.x2;
+    const int32_t content_y1 = plot.y1;
+    const int32_t content_y2 = plot.y2;
+    const int32_t content_width = plot.width;
+    const int32_t content_height = plot.height;
 
     if (content_width <= 0 || content_height <= 0) {
         return; // Chart not laid out yet
@@ -1112,10 +1145,28 @@ static void draw_grid_lines_cb(lv_event_t* e) {
         lv_draw_line(layer, &line_dsc);
     }
 
-    // Draw vertical grid lines (10 lines = 9 divisions)
-    constexpr int V_DIVISIONS = 10;
-    for (int i = 0; i <= V_DIVISIONS; i++) {
-        int32_t x = content_x1 + (content_width * i) / V_DIVISIONS;
+    // Vertical grid lines sit at TIME-BASED positions from the same axis the
+    // X-axis labels use, so a line lands under every label (#1245).
+    //
+    // Nothing plotted yet means latest_point_time_ms is still 0, and the ticks
+    // would be walked from the Unix epoch — the same reason the label callback
+    // bails above. Skip the vertical lines; the horizontal ones above are
+    // time-independent and still draw.
+    if (graph->visible_point_count == 0) {
+        return;
+    }
+
+    const temp_graph_time_axis_t axis = temp_graph_time_axis(graph);
+
+    for (int64_t line_time_ms = axis.first_ms; line_time_ms <= axis.latest_ms;
+         line_time_ms += axis.interval_ms) {
+        int64_t time_offset = line_time_ms - axis.leftmost_ms;
+        int32_t x =
+            content_x1 + static_cast<int32_t>((time_offset * content_width) / axis.total_ms);
+
+        if (x < content_x1 || x > content_x2)
+            continue;
+
         line_dsc.p1.x = x;
         line_dsc.p1.y = content_y1;
         line_dsc.p2.x = x;
@@ -1373,6 +1424,14 @@ ui_temp_graph_t* ui_temp_graph_create(lv_obj_t* parent) {
     // Register legend draw callback (renders color-coded series chips in upper-left)
     lv_obj_add_event_cb(graph->chart, draw_legend_cb, LV_EVENT_DRAW_POST, graph);
 
+    // Register tap-to-caption draw callback. Registered unconditionally (like the
+    // other draw callbacks above) rather than gated on tooltip-enabled: it no-ops
+    // whenever nothing is pinned, and nothing can be pinned while the tooltip is
+    // disabled, so there is no behavior difference — only one fewer add/remove
+    // pair to keep in sync with ui_temp_graph_set_tooltip_enabled.
+    lv_obj_add_event_cb(graph->chart, helix::temp_graph_internal::temp_graph_tooltip_draw_cb,
+                        LV_EVENT_DRAW_POST, graph);
+
     // Subscribe to theme changes for live color updates
     lv_subject_t* theme_subject = theme_manager_get_changed_subject();
     if (theme_subject) {
@@ -1392,6 +1451,9 @@ ui_temp_graph_t* ui_temp_graph_create(lv_obj_t* parent) {
 void ui_temp_graph_destroy(ui_temp_graph_t* graph) {
     if (!graph)
         return;
+
+    // Unconditional — runs regardless of which teardown branch below fires.
+    helix::temp_graph_internal::temp_graph_tooltip_destroy(graph);
 
     // Transfer ownership to RAII wrapper - automatic cleanup
     std::unique_ptr<ui_temp_graph_t> graph_ptr(graph);
@@ -1430,6 +1492,9 @@ void ui_temp_graph_destroy(ui_temp_graph_t* graph) {
         lv_obj_remove_event_cb(chart, draw_y_axis_labels_cb);
         lv_obj_remove_event_cb(chart, draw_target_lines_cb);
         lv_obj_remove_event_cb(chart, draw_legend_cb);
+        // temp_graph_tooltip_draw_cb and tooltip_press_cb are severed by
+        // temp_graph_tooltip_destroy(), called unconditionally above — before this
+        // block runs — so both are already gone here.
         lv_obj_set_user_data(chart, nullptr);
 
         // Theme observer's user_data points at `graph`; auto-removal does not fire
@@ -1588,6 +1653,8 @@ void ui_temp_graph_remove_series(ui_temp_graph_t* graph, int series_id) {
     // Removing a series drops its gradient band.
     mark_gradient_cache_dirty(graph);
 
+    helix::temp_graph_internal::temp_graph_tooltip_on_series_hidden(graph, series_id);
+
     spdlog::trace("[TempGraph] Removed series {} ({} series remaining)", series_id,
                   graph->series_count);
 }
@@ -1607,6 +1674,10 @@ void ui_temp_graph_show_series(ui_temp_graph_t* graph, int series_id, bool visib
 
     // Visibility change adds/removes a series' gradient band.
     mark_gradient_cache_dirty(graph);
+
+    if (!visible) {
+        helix::temp_graph_internal::temp_graph_tooltip_on_series_hidden(graph, series_id);
+    }
 
     lv_obj_invalidate(graph->chart);
     spdlog::trace("[TempGraph] Series {} '{}' {}", series_id, meta->name,
@@ -1642,6 +1713,8 @@ void ui_temp_graph_update_series(ui_temp_graph_t* graph, int series_id, float te
     // Add point to series (shifts old data left, stored as deci-degrees)
     lv_chart_set_next_value(graph->chart, meta->chart_series,
                             static_cast<int32_t>(temp * TEMP_SCALE));
+
+    helix::temp_graph_internal::temp_graph_tooltip_on_sample_pushed(graph, series_id);
 
     // Mirror the push into the parallel target buffer.
     push_target_sample(graph, meta);
@@ -1691,14 +1764,16 @@ void ui_temp_graph_update_series_with_time(ui_temp_graph_t* graph, int series_id
     } else if (graph->visible_point_count > graph->point_count) {
         // Buffer is full, oldest point scrolled off
         // First visible point is now: latest - (point_count - 1) samples back
-        // At 1 sample/sec, that's (point_count - 1) seconds before latest
-        graph->first_point_time_ms =
-            timestamp_ms - static_cast<int64_t>(graph->point_count - 1) * 1000;
+        // At one sample per SAMPLE_INTERVAL_SEC, that's (point_count - 1) × interval
+        graph->first_point_time_ms = timestamp_ms - static_cast<int64_t>(graph->point_count - 1) *
+                                                        UI_TEMP_GRAPH_SAMPLE_INTERVAL_SEC * 1000;
     }
 
     // Add point to series (shifts old data left, stored as deci-degrees)
     lv_chart_set_next_value(graph->chart, meta->chart_series,
                             static_cast<int32_t>(temp * TEMP_SCALE));
+
+    helix::temp_graph_internal::temp_graph_tooltip_on_sample_pushed(graph, series_id);
 
     // Mirror the push into the parallel target buffer.
     push_target_sample(graph, meta);
@@ -1817,9 +1892,9 @@ void ui_temp_graph_set_axis_timestamps(ui_temp_graph_t* graph, int64_t first_ts_
 
     if (count >= graph->point_count) {
         // Buffer is full; left edge is one full period before the right edge.
-        // Matches update_series_with_time's full-buffer fallback (1 sample/sec).
-        graph->first_point_time_ms =
-            last_ts_ms - static_cast<int64_t>(graph->point_count - 1) * 1000;
+        // Matches update_series_with_time's full-buffer fallback.
+        graph->first_point_time_ms = last_ts_ms - static_cast<int64_t>(graph->point_count - 1) *
+                                                      UI_TEMP_GRAPH_SAMPLE_INTERVAL_SEC * 1000;
     } else {
         graph->first_point_time_ms = first_ts_ms;
     }

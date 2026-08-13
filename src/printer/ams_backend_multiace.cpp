@@ -15,8 +15,7 @@ namespace {
 /// multiACE keys its per-head maps by the head index rendered as a STRING
 /// ("0".."3"), not as a JSON int. Reading them with an int key silently finds
 /// nothing and every head looks feeder-fed.
-template <typename T>
-std::optional<T> head_keyed(const nlohmann::json& obj, int head) {
+template <typename T> std::optional<T> head_keyed(const nlohmann::json& obj, int head) {
     if (!obj.is_object()) {
         return std::nullopt;
     }
@@ -39,9 +38,8 @@ std::optional<uint32_t> color_array_to_rgb(const nlohmann::json& c) {
         return std::nullopt;
     }
     auto ch = [&](size_t i) -> uint32_t {
-        return c[i].is_number_integer()
-                   ? static_cast<uint32_t>(std::clamp(c[i].get<int>(), 0, 255))
-                   : 0u;
+        return c[i].is_number_integer() ? static_cast<uint32_t>(std::clamp(c[i].get<int>(), 0, 255))
+                                        : 0u;
     };
     return (ch(0) << 16) | (ch(1) << 8) | ch(2);
 }
@@ -63,7 +61,7 @@ const char* ace_model_name(const std::string& protocol) {
 
 } // namespace
 
-AmsBackendMultiAce::AmsBackendMultiAce(MoonrakerAPI* api, helix::MoonrakerClient* client)
+AmsBackendMultiAce::AmsBackendMultiAce(IMoonrakerAPI* api, helix::IMoonrakerClient* client)
     : AmsBackendSnapmaker(api, client) {
     // The base ctor has already built unit 0 (the U1's four heads) and every
     // Snapmaker capability flag. Only the identity changes here; ACE units are
@@ -139,8 +137,7 @@ AmsBackendMultiAce::HeadSource AmsBackendMultiAce::head_source_kind(int head) co
     return head_kind_[head];
 }
 
-std::optional<AmsBackendMultiAce::SeatedSource>
-AmsBackendMultiAce::seated_source(int head) const {
+std::optional<AmsBackendMultiAce::SeatedSource> AmsBackendMultiAce::seated_source(int head) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (head < 0 || head >= NUM_TOOLS) {
         return std::nullopt;
@@ -210,8 +207,10 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
     // {0:0,1:1,2:2,3:0} while only head 3 is ACE-fed), so it cannot be used to
     // decide *whether* a head is ACE-fed. head_feeder/head_manual are the
     // authority; ACE is what is left over.
-    const auto& manual = ace.contains("head_manual") ? ace["head_manual"] : nlohmann::json::object();
-    const auto& feeder = ace.contains("head_feeder") ? ace["head_feeder"] : nlohmann::json::object();
+    const auto& manual =
+        ace.contains("head_manual") ? ace["head_manual"] : nlohmann::json::object();
+    const auto& feeder =
+        ace.contains("head_feeder") ? ace["head_feeder"] : nlohmann::json::object();
     // Ask whether the FRAME carried the keys, not whether the locals are objects:
     // the `: json::object()` fallbacks above are objects too, so testing
     // is_object() was true on every frame. A partial update then re-ran the test
@@ -750,8 +749,8 @@ void AmsBackendMultiAce::rebuild_ace_units_locked() {
     system_info_.total_slots = next_global;
     // debug, not info: this runs on every `ace` frame.
     spdlog::debug("{} {} ACE unit(s) in {} mode -> {} units, {} slots total", backend_log_tag(),
-                 device_count_, head_mode_ ? "head" : "multi", system_info_.units.size(),
-                 system_info_.total_slots);
+                  device_count_, head_mode_ ? "head" : "multi", system_info_.units.size(),
+                  system_info_.total_slots);
 }
 
 // ============================================================================

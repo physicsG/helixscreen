@@ -13,6 +13,7 @@
 #include "wizard_step.h" // helix::wizard::StepId
 #include "xml_hot_reloader.h"
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -235,6 +236,12 @@ class Application {
     void on_enter_background();
     void on_enter_foreground();
     bool m_backgrounded = false;
+
+    // Debounce for force_reconnect: on_enter_foreground and the DisplayManager
+    // sleep callback can both fire for the same wake event. Without this, the
+    // second call bumps the connection generation and makes the first
+    // discovery's subscription stale — leaving the temp overlay dead (#1245).
+    std::chrono::steady_clock::time_point m_last_force_reconnect{};
 
     // State
     bool m_running = false;

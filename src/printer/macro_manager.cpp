@@ -93,7 +93,7 @@ std::vector<std::string> parse_macro_names(const std::string& content) {
 // MacroManager Implementation
 // ============================================================================
 
-MacroManager::MacroManager(MoonrakerAPI& api, const PrinterDiscovery& hardware)
+MacroManager::MacroManager(IMoonrakerAPI& api, const PrinterDiscovery& hardware)
     : api_(api), hardware_(hardware) {}
 
 MacroManager::~MacroManager() = default;
@@ -430,7 +430,7 @@ void MacroManager::remove_include_from_config(SuccessCallback on_success, ErrorC
 }
 
 void MacroManager::delete_macro_file(SuccessCallback on_success, ErrorCallback on_error) {
-    // Use MoonrakerAPI to delete the file
+    // Use IMoonrakerAPI to delete the file
     api_.files().delete_file(std::string("config/") + HELIX_MACROS_FILENAME, on_success,
                              [on_success, on_error](const MoonrakerError& err) {
                                  // File might not exist - that's OK for uninstall

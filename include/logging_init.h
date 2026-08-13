@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-#include <spdlog/pattern_formatter.h>
 #include <spdlog/spdlog.h>
 
 #include <memory>

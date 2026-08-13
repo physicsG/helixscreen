@@ -3,6 +3,8 @@
 
 #include "translation_loader.h"
 
+#include "data_root_resolver.h"
+
 #include <spdlog/spdlog.h>
 
 #include <lvgl.h>
@@ -35,7 +37,7 @@ void ensure_translation_loaded(const std::string& lang) {
     if (loaded_locales().count(lang) > 0)
         return;
 
-    std::string path = "A:ui_xml/translations/" + lang + ".xml";
+    std::string path = "A:" + helix::asset_path("ui_xml/translations/" + lang + ".xml");
     lv_result_t res = lv_xml_register_translation_from_file(path.c_str());
     if (res != LV_RESULT_OK) {
         spdlog::warn("[TranslationLoader] Failed to load '{}' — UI will fall back to English",

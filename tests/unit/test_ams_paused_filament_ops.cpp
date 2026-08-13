@@ -408,16 +408,20 @@ TEST_CASE("AmsErrorHelper::print_active copy matches the state it describes",
 // check_preconditions(false) never consults print state, which is right for
 // backends whose cold lane ops the firmware accepts mid-print. AFC's does not:
 // cmd_LANE_UNLOAD opens with `if self.function.is_printing(): AFC_error(...);
-// return` on every version shipped (v1.1.0 AFC.py:1112, v1.2.0 AFC.py:1331).
-// That refusal ends in a bare return with the G-code still acked as success, so
-// an ungated Eject reports success and moves nothing.
+// return`. That refusal ends in a bare return with the G-code still acked as
+// success, so an ungated Eject reports success and moves nothing.
+//
+// This is the one condition eject_lane() still checks locally. The rest of that
+// macro's if/elif chain used to be mirrored too and was removed in
+// prestonbrown/helixscreen#1258; this predicate stayed because it is stable
+// across every AFC version and is the same rule the context menu greys on.
 //
 // is_printing() is `print_stats.state == "printing"` exactly — NOT in_print() —
 // so PAUSED genuinely reaches the firmware and must stay allowed.
 //
-// Mutation check: drop the refuse_if_printing() call from
-// lane_unload_refusal_unlocked() and the PRINTING section fails; widen it to
-// print_occupies_toolhead() and the PAUSED section fails.
+// Mutation check: drop the refuse_if_printing() call from eject_lane() and the
+// PRINTING section fails; widen it to print_occupies_toolhead() and the PAUSED
+// section fails.
 // ============================================================================
 
 /// Named (not anonymous-namespace) and befriended in ams_backend_afc.h, matching

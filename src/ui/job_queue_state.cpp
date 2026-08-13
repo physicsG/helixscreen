@@ -3,8 +3,8 @@
 
 #include "job_queue_state.h"
 
-#include "moonraker_api.h"
-#include "moonraker_client.h"
+#include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
 #include "static_subject_registry.h"
 #include "subject_debug_registry.h"
 
@@ -14,7 +14,7 @@
 #include <cctype>
 #include <cstdio>
 
-JobQueueState::JobQueueState(MoonrakerAPI* api, helix::MoonrakerClient* client)
+JobQueueState::JobQueueState(IMoonrakerAPI* api, helix::IMoonrakerClient* client)
     : api_(api), client_(client) {
     std::memset(state_buffer_, 0, sizeof(state_buffer_));
     std::memset(summary_buffer_, 0, sizeof(summary_buffer_));

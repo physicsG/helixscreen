@@ -158,10 +158,10 @@ curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/script
 
 To install or roll back to a specific release (e.g. a last-known-good version), pass `--version` with the tag:
 ```bash
-curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --version v0.99.108
+curl -sSL https://raw.githubusercontent.com/prestonbrown/helixscreen/main/scripts/install.sh | sh -s -- --version v0.99.111
 ```
 
-Add `--clean` to wipe HelixScreen's settings and start fresh (it asks for confirmation first; your Klipper/Moonraker config and G-code are untouched). Combine the two to reinstall a specific version with default settings: `--clean --version v0.99.108`.
+Add `--clean` to wipe HelixScreen's settings and start fresh (it asks for confirmation first; your Klipper/Moonraker config and G-code are untouched). Combine the two to reinstall a specific version with default settings: `--clean --version v0.99.111`.
 
 Also available through [KIAUH](https://github.com/dw-0/kiauh) as an extension.
 

@@ -157,8 +157,8 @@ TEST_CASE_METHOD(ActivePrintThumbnailFixture,
     CHECK(subject_path() != kThumbA);
     // "Nothing yet" is the placeholder, published explicitly, so the panel
     // actually repaints instead of leaving A's pixels on B's card.
-    CHECK(subject_path() == ActivePrintMediaManager::kNoThumbnailPlaceholder);
-    CHECK(panel_src() == ActivePrintMediaManager::kNoThumbnailPlaceholder);
+    CHECK(subject_path() == ActivePrintMediaManager::no_thumbnail_placeholder());
+    CHECK(panel_src() == ActivePrintMediaManager::no_thumbnail_placeholder());
     CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) != kThumbA);
 
     // --- Print B's thumbnail resolves --------------------------------------
@@ -215,7 +215,7 @@ TEST_CASE_METHOD(ActivePrintThumbnailFixture,
 
     const std::string shown = subject_path();
     CHECK_FALSE(shown.empty());
-    CHECK(shown == ActivePrintMediaManager::kNoThumbnailPlaceholder);
+    CHECK(shown == ActivePrintMediaManager::no_thumbnail_placeholder());
     CHECK(panel_src() == shown);
 }
 
@@ -228,7 +228,7 @@ TEST_CASE_METHOD(ActivePrintThumbnailFixture,
     // LV_IMAGE_SRC_VARIABLE, so LVGL dereferences the one-byte literal as an
     // lv_image_dsc_t. A consumer without a guard is only safe if the subject
     // genuinely never carries "".
-    CHECK(subject_path() == ActivePrintMediaManager::kNoThumbnailPlaceholder);
+    CHECK(subject_path() == ActivePrintMediaManager::no_thumbnail_placeholder());
 
     start_consumers();
     CHECK_FALSE(subject_path().empty());

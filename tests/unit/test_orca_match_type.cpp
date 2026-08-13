@@ -8,6 +8,7 @@
 // similarity search. So an unmatchable string does not degrade gracefully —
 // it becomes PLA temperatures on an ASA-GF spool.
 
+#include "filament_catalog.h"
 #include "filament_variants.h"
 
 #include <filesystem>
@@ -16,25 +17,28 @@
 #include <string>
 
 #include "../catch_amalgamated.hpp"
-#include "filament_catalog.h"
 
 namespace {
 
 // Mirrors the shipped orca_library_types for deterministic tests.
 const std::set<std::string> kLib = {
-    "ABS", "ABS-GF", "ASA", "ASA-AERO", "ASA-CF", "BVOH", "CoPE", "EVA",
-    "HIPS", "PA", "PA-CF", "PA-GF", "PA6-CF", "PC", "PCTG", "PE", "PET-CF",
-    "PETG", "PETG-CF", "PHA", "PLA", "PLA-AERO", "PLA-CF", "PP", "PP-CF",
-    "PP-GF", "PPA-CF", "PPA-GF", "PVA", "SBS", "TPU"};
+    "ABS",    "ABS-GF", "ASA",     "ASA-AERO", "ASA-CF", "BVOH",     "CoPE",   "EVA",
+    "HIPS",   "PA",     "PA-CF",   "PA-GF",    "PA6-CF", "PC",       "PCTG",   "PE",
+    "PET-CF", "PETG",   "PETG-CF", "PHA",      "PLA",    "PLA-AERO", "PLA-CF", "PP",
+    "PP-CF",  "PP-GF",  "PPA-CF",  "PPA-GF",   "PVA",    "SBS",      "TPU"};
 
 const std::map<std::string, std::string> kOverrides = {
-    {"rPLA", "PLA"},   {"rPETG", "PETG"}, {"TPE", "TPU"},  {"TPU-95A", "TPU"},
-    {"TPU-85A", "TPU"}, {"SILK", "PLA"},  {"Color-Change", "PLA"},
-    {"PLA+", "PLA"},   {"ASA+", "ASA"},   {"ABS+", "ABS"}};
+    {"rPLA", "PLA"},    {"rPETG", "PETG"}, {"TPE", "TPU"},          {"TPU-95A", "TPU"},
+    {"TPU-85A", "TPU"}, {"SILK", "PLA"},   {"Color-Change", "PLA"}, {"PLA+", "PLA"},
+    {"ASA+", "ASA"},    {"ABS+", "ABS"}};
 
 struct TableFixture {
-    TableFixture() { filament::FilamentVariantsTestAccess::set_orca_tables(kLib, kOverrides); }
-    ~TableFixture() { filament::FilamentVariantsTestAccess::set_orca_tables({}, {}); }
+    TableFixture() {
+        filament::FilamentVariantsTestAccess::set_orca_tables(kLib, kOverrides);
+    }
+    ~TableFixture() {
+        filament::FilamentVariantsTestAccess::set_orca_tables({}, {});
+    }
 };
 
 } // namespace
@@ -84,9 +88,9 @@ TEST_CASE_METHOD(TableFixture, "orca_match_type handles non-catalog input", "[or
     // Material reaching the write path is not always catalog-sourced: firmware
     // reports strings, the whitelist dropdown has its own spellings, and users
     // type free text. [L093] — test the inputs the code actually receives.
-    CHECK(filament::orca_match_type("  PLA  ") == "PLA");   // whitespace
-    CHECK(filament::orca_match_type("pla") == "PLA");       // case
-    CHECK(filament::orca_match_type("Silk PLA") == "PLA");  // decorated
+    CHECK(filament::orca_match_type("  PLA  ") == "PLA");  // whitespace
+    CHECK(filament::orca_match_type("pla") == "PLA");      // case
+    CHECK(filament::orca_match_type("Silk PLA") == "PLA"); // decorated
 }
 
 // Every catalog type must resolve to a library type, or be on the explicit
@@ -136,7 +140,8 @@ TEST_CASE("every catalog type resolves or is deliberately blank", "[orca_match][
 // returns the cached result; if warm did nothing, that call performs the
 // FIRST load attempt from the broken cwd, fails to find the asset, and
 // (because load_orca_tables_locked only ever attempts once) latches in empty.
-TEST_CASE("warm_orca_tables loads the real asset without a prior match call", "[orca_match][warm]") {
+TEST_CASE("warm_orca_tables loads the real asset without a prior match call",
+          "[orca_match][warm]") {
     // Some earlier TEST_CASE in this binary may have already loaded or
     // injected tables; force back to fresh lazy mode first.
     filament::FilamentVariantsTestAccess::set_orca_tables({}, {});
@@ -167,7 +172,8 @@ TEST_CASE("warm_orca_tables loads the real asset without a prior match call", "[
 // g_orca_mutex. User entries must win over shipped entries in resolution
 // (step 1 of orca_match_type beats step 2/3), and the empty-string "suppress"
 // case must round-trip verbatim.
-TEST_CASE_METHOD(TableFixture, "merge_user_orca_overrides adds and supersedes", "[orca_match][user_override]") {
+TEST_CASE_METHOD(TableFixture, "merge_user_orca_overrides adds and supersedes",
+                 "[orca_match][user_override]") {
     // Baseline: "Unobtainium-Plus" is not in the shipped library or overrides,
     // and its base material ("Unobtainium") isn't either, so it resolves to ""
     // today (Orca shows the lane empty — the safe failure direction).
@@ -180,15 +186,15 @@ TEST_CASE_METHOD(TableFixture, "merge_user_orca_overrides adds and supersedes", 
     CHECK(filament::orca_match_type("PLA-Silk") == "PLA");
 
     std::map<std::string, std::string> user_map;
-    user_map["Unobtainium-Plus"] = "PLA";  // adds a new match where there was none
-    user_map["PLA-Silk"] = "";              // suppresses a previously-working match
-    user_map["rPLA"] = "PETG";              // supersedes a shipped override (was "PLA")
+    user_map["Unobtainium-Plus"] = "PLA"; // adds a new match where there was none
+    user_map["PLA-Silk"] = "";            // suppresses a previously-working match
+    user_map["rPLA"] = "PETG";            // supersedes a shipped override (was "PLA")
 
     filament::merge_user_orca_overrides(user_map);
 
-    CHECK(filament::orca_match_type("Unobtainium-Plus") == "PLA");  // new entry applied
-    CHECK(filament::orca_match_type("PLA-Silk") == "");             // suppress honored
-    CHECK(filament::orca_match_type("rPLA") == "PETG");             // user wins over shipped
+    CHECK(filament::orca_match_type("Unobtainium-Plus") == "PLA"); // new entry applied
+    CHECK(filament::orca_match_type("PLA-Silk") == "");            // suppress honored
+    CHECK(filament::orca_match_type("rPLA") == "PETG");            // user wins over shipped
     // Unrelated shipped entries are untouched.
     CHECK(filament::orca_match_type("TPU-95A") == "TPU");
     CHECK(filament::orca_match_type("ASA-CF") == "ASA-CF");
@@ -238,10 +244,10 @@ TEST_CASE_METHOD(TableFixture, "merge_user_orca_overrides supersedes a case-vari
     // must still let the user win: without case-insensitive replacement, "SILK"
     // and "Silk" coexist and std::map's sorted iteration (upper before lower)
     // returns the shipped "PLA", silently dropping the user's suppression.
-    CHECK(filament::orca_match_type("Silk") == "PLA");  // baseline: shipped SILK, case-insensitive
+    CHECK(filament::orca_match_type("Silk") == "PLA"); // baseline: shipped SILK, case-insensitive
 
     std::map<std::string, std::string> user_map;
-    user_map["Silk"] = "";  // suppress, using a different case than shipped "SILK"
+    user_map["Silk"] = ""; // suppress, using a different case than shipped "SILK"
     filament::merge_user_orca_overrides(user_map);
 
     // User wins outright regardless of the case in the query or the shipped key.

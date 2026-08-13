@@ -312,7 +312,7 @@ TEST_CASE("grouping never alters the type string a product emits",
 }
 
 TEST_CASE_METHOD(XMLTestFixture, "selector emits the product's own type, not the family heading",
-          "[filament][family][regression][orca][catalog_selector]") {
+                 "[filament][family][regression][orca][catalog_selector]") {
     lv_obj_t* root = make_fragment();
     REQUIRE(root != nullptr);
 
@@ -361,8 +361,9 @@ TEST_CASE_METHOD(XMLTestFixture, "selector emits the product's own type, not the
 // Picker grouping behavior
 // ===========================================================================
 
-TEST_CASE_METHOD(XMLTestFixture, "ASA-CF and ASA-GF sit under one ASA heading and stay distinguishable",
-          "[filament][family][catalog_selector]") {
+TEST_CASE_METHOD(XMLTestFixture,
+                 "ASA-CF and ASA-GF sit under one ASA heading and stay distinguishable",
+                 "[filament][family][catalog_selector]") {
     lv_obj_t* root = make_fragment();
     REQUIRE(root != nullptr);
 
@@ -427,7 +428,7 @@ TEST_CASE_METHOD(XMLTestFixture, "ASA-CF and ASA-GF sit under one ASA heading an
 }
 
 TEST_CASE_METHOD(XMLTestFixture, "the base material stays selectable inside its own family heading",
-          "[filament][family][catalog_selector]") {
+                 "[filament][family][catalog_selector]") {
     lv_obj_t* root = make_fragment();
     REQUIRE(root != nullptr);
 
@@ -451,7 +452,7 @@ TEST_CASE_METHOD(XMLTestFixture, "the base material stays selectable inside its 
 }
 
 TEST_CASE_METHOD(XMLTestFixture, "a variant-only row is chipped with the type it emits",
-          "[filament][family][catalog_selector]") {
+                 "[filament][family][catalog_selector]") {
     lv_obj_t* root = make_fragment();
     REQUIRE(root != nullptr);
 
@@ -511,8 +512,8 @@ TEST_CASE("a variant-NAMED product typed as the base still emits the base materi
     for (const auto* p : raw.all_products()) {
         if (p->brand == "Elegoo" && p->name == "PETG-CF") {
             ++elegoo_petg_cf;
-            CHECK(p->type == "PETG");                            // unchanged
-            CHECK(filament::display_family(p->type) == "PETG");  // under PETG heading
+            CHECK(p->type == "PETG");                           // unchanged
+            CHECK(filament::display_family(p->type) == "PETG"); // under PETG heading
         }
     }
     CHECK(elegoo_petg_cf == 1); // present, and not duplicated
@@ -574,7 +575,8 @@ TEST_CASE("PPA keeps its own heading separate from PA",
     CHECK(saw_ppa);
 }
 
-TEST_CASE_METHOD(XMLTestFixture, "family grouping collapses the type dropdown", "[filament][family][catalog_selector]") {
+TEST_CASE_METHOD(XMLTestFixture, "family grouping collapses the type dropdown",
+                 "[filament][family][catalog_selector]") {
     lv_obj_t* root = make_fragment();
     REQUIRE(root != nullptr);
 
@@ -607,16 +609,15 @@ TEST_CASE_METHOD(XMLTestFixture, "family grouping collapses the type dropdown", 
 
 #if HELIX_HAS_IFS
 TEST_CASE_METHOD(XMLTestFixture, "AD5X whitelist filters entries, not just headings",
-          "[filament][family][whitelist][catalog_selector]") {
+                 "[filament][family][whitelist][catalog_selector]") {
     lv_obj_t* root = make_fragment();
     REQUIRE(root != nullptr);
 
     FilamentCatalogSelector sel;
     sel.attach(root);
     // Stock AD5X firmware whitelist, derived from the backend rather than re-typed.
-    sel.configure(std::nullopt,
-                  std::vector<std::string>(AmsBackendAd5xIfs::kStockWhitelist.begin(),
-                                           AmsBackendAd5xIfs::kStockWhitelist.end()));
+    sel.configure(std::nullopt, std::vector<std::string>(AmsBackendAd5xIfs::kStockWhitelist.begin(),
+                                                         AmsBackendAd5xIfs::kStockWhitelist.end()));
     sel.populate();
 
     // Headings collapse to the four allowed families.
@@ -651,7 +652,7 @@ TEST_CASE_METHOD(XMLTestFixture, "AD5X whitelist filters entries, not just headi
 #endif // HELIX_HAS_IFS
 
 TEST_CASE_METHOD(XMLTestFixture, "an unwhitelisted family produces no heading at all",
-          "[filament][family][whitelist][catalog_selector]") {
+                 "[filament][family][whitelist][catalog_selector]") {
     lv_obj_t* root = make_fragment();
     REQUIRE(root != nullptr);
 
@@ -675,7 +676,7 @@ TEST_CASE_METHOD(XMLTestFixture, "an unwhitelisted family produces no heading at
 }
 
 TEST_CASE_METHOD(XMLTestFixture, "no whitelist means every variant is reachable under its family",
-          "[filament][family][whitelist][catalog_selector]") {
+                 "[filament][family][whitelist][catalog_selector]") {
     lv_obj_t* root = make_fragment();
     REQUIRE(root != nullptr);
 

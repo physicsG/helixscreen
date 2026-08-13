@@ -27,7 +27,7 @@
                print_status_arc_thickness_tier_subject_ this widget owns. -->
           <helix_progress_arc name="detailed_progress_arc" width="80" height="80" align="center" event_bubble="true"/>
           <text_body name="detailed_progress_pct"
-                     align="center" bind_text="print_status_progress_pct" clickable="false" event_bubble="true"/>
+                     align="center" bind_text="print_progress_text" clickable="false" event_bubble="true"/>
         </lv_obj>
       </lv_obj>
       <lv_obj name="detailed_data_col"

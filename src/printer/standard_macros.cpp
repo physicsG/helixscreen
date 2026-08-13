@@ -4,8 +4,8 @@
 #include "standard_macros.h"
 
 #include "config.h"
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 #include "printer_discovery.h"
 
 #include <spdlog/spdlog.h>
@@ -229,14 +229,14 @@ void StandardMacros::save_to_config() {
     }
 }
 
-bool StandardMacros::execute(StandardMacroSlot slot, MoonrakerAPI* api, SuccessCallback on_success,
+bool StandardMacros::execute(StandardMacroSlot slot, IMoonrakerAPI* api, SuccessCallback on_success,
                              ErrorCallback on_error, uint32_t timeout_ms,
                              bool suppress_auto_toast) {
     return execute(slot, api, {}, std::move(on_success), std::move(on_error), timeout_ms,
                    suppress_auto_toast);
 }
 
-bool StandardMacros::execute(StandardMacroSlot slot, MoonrakerAPI* api,
+bool StandardMacros::execute(StandardMacroSlot slot, IMoonrakerAPI* api,
                              const std::map<std::string, std::string>& params,
                              SuccessCallback on_success, ErrorCallback on_error,
                              uint32_t timeout_ms, bool suppress_auto_toast) {

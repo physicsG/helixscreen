@@ -16,6 +16,7 @@
 #include "ui_modal.h"
 #include "ui_notification_history.h"
 #include "ui_notification_manager.h"
+#include "ui_notification_threshold.h"
 #include "ui_observer_guard.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
@@ -37,6 +38,13 @@ static void show_notification(const char* title, const char* message, ToastSever
 // Thread tracking for auto-detection
 static std::thread::id g_main_thread_id;
 static std::atomic<bool> g_main_thread_id_initialized{false};
+
+// True if `sev` meets the user's toast threshold (#1213). Reads the header-only
+// inline cache that SafetySettingsManager pushes to; safe on any thread.
+static bool should_show_toast(ToastSeverity sev) {
+    return helix::ui::notifications::severity_meets_threshold(
+        static_cast<int>(sev), helix::ui::notifications::get_min_toast_severity_cache());
+}
 
 // RAII observer guard for automatic cleanup
 static ObserverGuard s_notification_observer;
@@ -126,7 +134,9 @@ static void async_message_callback(void* user_data) {
             delete data;
             return;
         }
-        ToastManager::instance().show(data->severity, display_buf, data->duration_ms);
+        if (should_show_toast(data->severity)) {
+            ToastManager::instance().show(data->severity, display_buf, data->duration_ms);
+        }
 
         // Add to history
         NotificationHistoryEntry entry = {};
@@ -187,8 +197,11 @@ static void async_error_callback(void* user_data) {
 
             helix::ui::notification_update(NotificationStatus::ERROR);
         } else {
-            // Show toast for non-critical errors
-            ToastManager::instance().show(ToastSeverity::ERROR, data->message, 6000);
+            // Show toast for non-critical errors (still subject to the user's
+            // min-severity gate; modal errors above bypass it deliberately).
+            if (should_show_toast(ToastSeverity::ERROR)) {
+                ToastManager::instance().show(ToastSeverity::ERROR, data->message, 6000);
+            }
         }
 
         // Add to history
@@ -271,7 +284,9 @@ static void show_notification(const char* title, const char* message, ToastSever
 
     if (is_main_thread()) {
         // Main thread: call LVGL directly
-        ToastManager::instance().show(severity, display_msg.c_str(), duration_ms);
+        if (should_show_toast(severity)) {
+            ToastManager::instance().show(severity, display_msg.c_str(), duration_ms);
+        }
 
         NotificationHistoryEntry entry = {};
         entry.timestamp_ms = lv_tick_get();
@@ -414,8 +429,10 @@ void show_detail_notification(ToastSeverity severity, const char* message, const
         if (try_defer_to_startup_queue(p->severity, joined.c_str()))
             return;
 
-        ToastManager::instance().show_with_detail(p->severity, p->message.c_str(),
-                                                  p->detail.c_str(), p->duration_ms);
+        if (should_show_toast(p->severity)) {
+            ToastManager::instance().show_with_detail(p->severity, p->message.c_str(),
+                                                      p->detail.c_str(), p->duration_ms);
+        }
 
         NotificationHistoryEntry entry = {};
         entry.timestamp_ms = lv_tick_get();
@@ -485,8 +502,11 @@ void ui_notification_error(const char* title, const char* message, bool modal) {
 
             helix::ui::notification_update(NotificationStatus::ERROR);
         } else {
-            // Show toast for non-critical errors
-            ToastManager::instance().show(ToastSeverity::ERROR, message, 6000);
+            // Show toast for non-critical errors (subject to the min-severity gate;
+            // modal errors above bypass it deliberately).
+            if (should_show_toast(ToastSeverity::ERROR)) {
+                ToastManager::instance().show(ToastSeverity::ERROR, message, 6000);
+            }
         }
 
         // Add to history

@@ -1,6 +1,8 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#if HELIX_HAS_BED_MESH_3D
+
 #include "bed_mesh_render_thread.h"
 
 #include <spdlog/spdlog.h>
@@ -234,3 +236,5 @@ void BedMeshRenderThread::render_loop() {
 
 } // namespace mesh
 } // namespace helix
+
+#endif // HELIX_HAS_BED_MESH_3D

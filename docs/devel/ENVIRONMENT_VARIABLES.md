@@ -485,7 +485,10 @@ HELIX_HEADLESS=1 ./scripts/screenshot.sh helix-screen filament-panel filament
 
 The binary itself needs no HelixScreen-specific variable — `SDL_VIDEODRIVER=dummy`
 is enough, and the SDL backend falls back to the software renderer on its own
-when the accelerated one is unavailable. See `docs/devel/HELIXCTL.md`
+when the accelerated one is unavailable. Audio is silenced automatically too:
+`main()` watches for `SDL_VIDEODRIVER=dummy` and forces `SDL_AUDIODRIVER=dummy`
+(with `overwrite=0`, so exporting `SDL_AUDIODRIVER` yourself still wins — useful
+when you want to debug audio under a headless window). See `docs/devel/HELIXCTL.md`
 § "Running headless".
 
 ---
@@ -508,7 +511,8 @@ Simple axis range mapping via LVGL's built-in calibration. Use for devices with 
 - All four min/max variables must be set together for calibration to apply
 - To invert an axis, swap the min/max values (e.g., `MIN_Y=3200 MAX_Y=900` inverts Y)
 - These values override the kernel-reported axis ranges from `EVIOCGABS`
-- `HELIX_TOUCH_SWAP_AXES` is a manual override for the fbdev backend, applied at the evdev layer (raw X/Y are swapped before the calibration matrix). Separately, the calibration wizard auto-detects swapped axes and bakes the correction directly into the `a`–`f` matrix coefficients — there is no `swap_axes` config flag (it is not read at runtime)
+- `HELIX_TOUCH_SWAP_AXES` is a manual override honored by **both** the fbdev and DRM backends, applied at the evdev layer (raw X/Y are swapped before the calibration matrix). Separately, the calibration wizard auto-detects swapped axes and bakes the correction directly into the `a`–`f` matrix coefficients — there is no `swap_axes` config flag (it is not read at runtime)
+- **The swap happens BEFORE the min/max scaling** (`lv_evdev.c`, `_evdev_process_pointer`). So with `HELIX_TOUCH_SWAP_AXES=1`, `HELIX_TOUCH_MIN_X`/`MAX_X` describe the range of the axis that is now feeding screen X — that is, the controller's **raw Y** range. Set the pair to the raw range of the axis it consumes, not the one it is named after. Combining the swap with inverted min/max reaches all eight panel orientations.
 
 **Example:**
 ```bash
@@ -530,7 +534,11 @@ screen_x = a * touch_x + b * touch_y + c
 screen_y = d * touch_x + e * touch_y + f
 ```
 
-The calibration wizard is automatically presented during first-run setup on framebuffer devices. It can also be triggered manually from Settings or via the `HELIX_TOUCH_CALIBRATE` environment variable.
+Identity is `a=1, b=0, c=0, d=0, e=1, f=0`.
+
+**`touch_x`/`touch_y` are NOT raw controller counts.** `install_calibration_wrapper()` wraps evdev's read callback, so by the time the affine runs, LVGL has already linearly mapped the controller's ABS range onto the display — the inputs are screen-space, `0..width-1` and `0..height-1`. The wizard's "raw" capture only disables the affine, so it records that same space. Hand-writing a matrix means working in display pixels: on a 480x272 panel a pure axis swap is `a=0, b=480/272, c=0, d=272/480, e=0, f=0`, not `b=1, d=1` — the two axes have different lengths and a bare swap drops one to 57% of its span while running the other off the end. A rotation additionally needs `c`/`f` to move the origin back into the corner.
+
+**Availability:** the wizard auto-fires during first-run setup only on devices the auto-heuristic flags (resistive controllers, or a broken/mismatched ABS range). The manual Settings entry point is offered for **any** real touch panel — including factory-calibrated capacitive ones — because a panel mounted at 90° to the display reports an ordinary controller name and an ABS range matching the display exactly, so nothing we can probe distinguishes it from a correct one (prestonbrown/helixscreen#1259). It can also be forced via the `HELIX_TOUCH_CALIBRATE` environment variable.
 
 ### `HELIX_TOUCH_CALIBRATE`
 

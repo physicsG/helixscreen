@@ -78,7 +78,17 @@ std::chrono::system_clock::time_point parse_iso8601(const std::string& s) {
     is >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
     if (is.fail())
         return {};
+#if defined(HELIX_PLATFORM_ESP32)
+    // newlib has no timegm(); compute days-since-epoch directly (UTC, no DST).
+    const int y = tm.tm_year + 1900, mo = tm.tm_mon + 1;
+    const int a = (14 - mo) / 12, yy = y + 4800 - a, mm = mo + 12 * a - 3;
+    const long days = tm.tm_mday + (153 * mm + 2) / 5 + 365L * yy + yy / 4 - yy / 100 + yy / 400 -
+                      32045 - 2440588;
+    const time_t t = days * 86400L + tm.tm_hour * 3600L + tm.tm_min * 60L + tm.tm_sec;
+    return std::chrono::system_clock::from_time_t(t);
+#else
     return std::chrono::system_clock::from_time_t(timegm(&tm));
+#endif
 }
 
 // Convert FilamentSlotOverride + slot_index to the AFC-shaped JSON Orca expects,

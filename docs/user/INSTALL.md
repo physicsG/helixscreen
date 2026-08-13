@@ -111,9 +111,27 @@ This covers any Klipper printer with a Raspberry Pi running MainsailOS (or simil
   - MainsailOS installed and working
   - Klipper running and printing works via Mainsail web interface
   - SSH access to your Pi
+  - **Debian 11 (Bullseye) or newer** — glibc 2.31+. See the OS version note below.
   - About 100MB free disk space
 
 > **32-bit vs 64-bit:** The installer automatically detects your OS architecture and downloads the correct binary. If you're unsure which you have, run `uname -m` — `aarch64` means 64-bit, `armv7l` means 32-bit.
+
+> **OS version — Bullseye or newer.** The `pi` and `pi32` packages are dynamically linked
+> against **glibc 2.31**, the version in Debian 11 (Bullseye). They will not start on an
+> older release. Debian 10 (Buster) ships glibc 2.28, which is too old — the binary fails
+> at load with `version 'GLIBC_2.29' not found` or similar. Check yours with:
+>
+> ```bash
+> ldd --version | head -1        # glibc version
+> cat /etc/os-release | head -2  # distro release
+> ```
+>
+> This matters mainly on **stock printer images**, several of which still ship Buster even
+> though current Raspberry Pi OS and MainsailOS are well past it. If you are on one of
+> those and cannot upgrade the OS, install the **`cc1` package instead** — it is statically
+> linked and carries its own C library, so it runs on old armv7 systems regardless of what
+> glibc they have. It has been used successfully this way on non-Creality armv7 hardware
+> (e.g. Rockchip RV1126 boards). See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#binary-wont-start-glibc-version-not-found).
 
 ### Flashforge Adventurer 5M / 5M Pro
 

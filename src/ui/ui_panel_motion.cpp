@@ -16,8 +16,8 @@
 #include "app_globals.h"
 #include "config.h"
 #include "format_utils.h"
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 #include "observer_factory.h"
 #include "printer_state.h"
 #include "subject_managed_panel.h"
@@ -737,7 +737,7 @@ void MotionPanel::dispatch_jog(const helix::AxisMove& delta) {
 }
 
 void MotionPanel::send_jog_move(const helix::AxisMove& move) {
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         jog_coalescer_.on_error();
         return;
@@ -763,7 +763,7 @@ void MotionPanel::send_jog_move(const helix::AxisMove& move) {
 void MotionPanel::home(char axis) {
     spdlog::debug("[{}] Home command: {} axis", get_name(), axis);
 
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (api) {
         // Convert axis char to string for API ("" for all, "X", "Y", "Z", or "XY")
         std::string axes_str;

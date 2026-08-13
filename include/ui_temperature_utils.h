@@ -180,9 +180,27 @@ char* format_temperature_pair(int current, int target, char* buffer, size_t buff
 char* format_target_or_off(int target, char* buffer, size_t buffer_size);
 
 /**
+ * @brief Format a temperature as a number with the compact-wide rule
+ *
+ * Formats the bare number (no unit suffix) with one decimal place, dropping the
+ * decimal when the integer portion is 3 digits or more (>= 100): "60.5", "211".
+ * This is the shared rule behind format_temperature_f / format_temperature_pair_f;
+ * widgets that render their own unit/label structure (e.g. a separate "°C" label)
+ * call this directly so the decimal-drop behaviour stays consistent everywhere.
+ *
+ * @param temp Temperature in degrees (float)
+ * @param buffer Output buffer
+ * @param buffer_size Size of buffer (recommended: 16)
+ * @return Pointer to buffer for chaining convenience
+ */
+char* format_temp_number(float temp, char* buffer, size_t buffer_size);
+
+/**
  * @brief Format a temperature value with one decimal place
  *
- * Formats as "210.5°C" for precision display (graphs, PID tuning).
+ * Formats as "210.5°C" for precision display (graphs, PID tuning). When the integer
+ * portion is 3 digits or more (>= 100), the decimal is dropped (e.g. "211°C") to keep
+ * wide values compact.
  *
  * @param temp Temperature in degrees (float)
  * @param buffer Output buffer
@@ -194,7 +212,8 @@ char* format_temperature_f(float temp, char* buffer, size_t buffer_size);
 /**
  * @brief Format a float current/target temperature pair
  *
- * Formats as "210.5 / 215.0°C" or "180.5 / —°C" when target is 0.
+ * Formats as "210.5 / 215.0°C" or "180.5 / —°C" when target is 0. Each value drops its
+ * decimal when the integer portion is 3 digits or more (>= 100).
  *
  * @param current Current temperature in degrees (float)
  * @param target Target temperature in degrees (float, 0 = heater off)

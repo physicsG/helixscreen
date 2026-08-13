@@ -17,7 +17,7 @@ using namespace moonraker_internal;
 // MoonrakerFileAPI Implementation
 // ============================================================================
 
-MoonrakerFileAPI::MoonrakerFileAPI(helix::MoonrakerClient& client) : client_(client) {}
+MoonrakerFileAPI::MoonrakerFileAPI(helix::IMoonrakerClient& client) : client_(client) {}
 
 // ============================================================================
 // File Management Operations

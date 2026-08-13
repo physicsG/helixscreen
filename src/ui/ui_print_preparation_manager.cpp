@@ -109,7 +109,7 @@ PrePrintOptionState PrintPreparationManager::get_option_state(const std::string&
 // Setup
 // ============================================================================
 
-void PrintPreparationManager::set_dependencies(MoonrakerAPI* api, PrinterState* printer_state) {
+void PrintPreparationManager::set_dependencies(IMoonrakerAPI* api, PrinterState* printer_state) {
     api_ = api;
     printer_state_ = printer_state;
 

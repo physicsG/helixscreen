@@ -8,7 +8,7 @@
 #include <functional>
 #include <string>
 
-class MoonrakerAPI;
+class IMoonrakerAPI;
 
 namespace helix::zoffset {
 
@@ -34,7 +34,7 @@ void format_offset_compact(int microns, char* buf, size_t buf_size);
 /// @param strategy      Calibration strategy determining command sequence
 /// @param on_success    Called after SAVE_CONFIG succeeds (Klipper will restart)
 /// @param on_error      Called with user-facing message on any failure
-void apply_and_save(MoonrakerAPI* api, ZOffsetCalibrationStrategy strategy,
+void apply_and_save(IMoonrakerAPI* api, ZOffsetCalibrationStrategy strategy,
                     std::function<void()> on_success,
                     std::function<void(const std::string& error)> on_error);
 

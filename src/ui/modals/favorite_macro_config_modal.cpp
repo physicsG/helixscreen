@@ -10,7 +10,7 @@
 #include "device_display_name.h"
 #include "favorite_macro_config.h"
 #include "helix-xml/src/xml/lv_xml.h"
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "panel_widget_config.h"
 #include "panel_widget_manager.h"
 #include "static_subject_registry.h"
@@ -180,14 +180,14 @@ void FavoriteMacroConfigModal::skip_params_cb(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_END();
 }
 
-MoonrakerAPI* FavoriteMacroConfigModal::get_api() const {
+IMoonrakerAPI* FavoriteMacroConfigModal::get_api() const {
     return get_moonraker_api();
 }
 
 void FavoriteMacroConfigModal::populate_macro_list() {
     if (!macro_list_)
         return;
-    MoonrakerAPI* api = get_api();
+    IMoonrakerAPI* api = get_api();
     if (!api) {
         spdlog::warn("[FavoriteMacroConfigModal] No API available for macro list");
         return;

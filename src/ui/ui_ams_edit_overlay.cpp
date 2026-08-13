@@ -31,7 +31,7 @@
 #include "ui_overlay_qr_scanner.h"
 #include "ui_toast_manager.h"
 
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "printer_state.h"
 #include "spoolman_slot_saver.h"
 #include "spoolman_types.h"
@@ -54,7 +54,7 @@ bool AmsEditOverlay::callbacks_registered_ = false;
 // Fire-and-forget: notify Moonraker of the active spool so other clients
 // (Mainsail, Fluidd) see the change and filament tracking works.
 // Pass 0 to clear the active spool (unlink).
-static void sync_active_spool(MoonrakerAPI* api, int spool_id) {
+static void sync_active_spool(IMoonrakerAPI* api, int spool_id) {
     spdlog::info("[AmsEditOverlay] Syncing active spool to {} on server", spool_id);
     api->spoolman().set_active_spool(
         spool_id,
@@ -103,7 +103,7 @@ lv_obj_t* AmsEditOverlay::find_widget(const char* name) const {
 // ============================================================================
 
 bool AmsEditOverlay::show_for_slot(lv_obj_t* parent, int slot_index, const SlotInfo& initial_info,
-                                   MoonrakerAPI* api, CompletionCallback on_complete,
+                                   IMoonrakerAPI* api, CompletionCallback on_complete,
                                    bool open_on_picker) {
     // A previous widget tree may have died with its screen (display rebuild,
     // test teardown) without the destroy-on-close path running — drop the
@@ -1213,6 +1213,7 @@ void AmsEditOverlay::on_detail_field_changed_cb(lv_event_t* e) {
 }
 
 void AmsEditOverlay::handle_scan_qr() {
+#if HELIX_HAS_CAMERA
     spdlog::info("[AmsEditOverlay] Scan QR requested for slot {}", slot_index_);
 
     // The scanner overlay pushes ON TOP of the editor (spec §13.5). Our
@@ -1255,6 +1256,9 @@ void AmsEditOverlay::handle_scan_qr() {
             // to do — session state was never torn down.
             spdlog::debug("[AmsEditOverlay] QR scan cancelled - editor resumes");
         });
+#else
+    spdlog::debug("[AmsEditOverlay] Scan QR unavailable (no camera) for slot {}", slot_index_);
+#endif // HELIX_HAS_CAMERA
 }
 
 #if HELIX_HAS_LABEL_PRINTER
@@ -1320,11 +1324,18 @@ void AmsEditOverlay::update_spoolman_button_state() {
     // lone Change Filament button centered.
     lv_obj_t* scan_btn = find_widget("btn_scan_qr_code");
     if (scan_btn) {
+#if defined(HELIX_PLATFORM_ESP32)
+        // No camera on the v1 Core+AMS cut — Scan QR has no offline analogue,
+        // so keep it hidden regardless of Spoolman availability.
+        lv_obj_add_flag(scan_btn, LV_OBJ_FLAG_HIDDEN);
+        (void)has_spoolman;
+#else
         if (has_spoolman) {
             lv_obj_remove_flag(scan_btn, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(scan_btn, LV_OBJ_FLAG_HIDDEN);
         }
+#endif
     }
 }
 

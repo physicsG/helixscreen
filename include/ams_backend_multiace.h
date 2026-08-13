@@ -52,7 +52,7 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     friend class MultiAceTestAccess;
 
   public:
-    AmsBackendMultiAce(MoonrakerAPI* api, helix::MoonrakerClient* client);
+    AmsBackendMultiAce(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
     ~AmsBackendMultiAce() override = default;
 
     /// Upper bound on ACE units multiACE supports.

@@ -10,6 +10,7 @@
  * the internal state machine via the SpoolmanManagerTestAccess friend class.
  */
 
+#include "ui_spoolman_overlay.h"
 #include "ui_update_queue.h"
 
 #include "../test_helpers/update_queue_test_access.h"
@@ -17,7 +18,6 @@
 #include "app_globals.h"
 #include "printer_state.h"
 #include "spoolman_manager.h"
-#include "ui_spoolman_overlay.h"
 
 #include "../catch_amalgamated.hpp"
 
@@ -367,7 +367,8 @@ TEST_CASE_METHOD(SpoolmanFixture, "SpoolmanOverlay: repeated sync apply takes on
     REQUIRE(TA::poll_refcount(mgr) == 0);
 }
 
-TEST_CASE_METHOD(SpoolmanFixture, "SpoolmanOverlay: release never steals another holder's reference",
+TEST_CASE_METHOD(SpoolmanFixture,
+                 "SpoolmanOverlay: release never steals another holder's reference",
                  "[spoolman][overlay]") {
     auto& mgr = SpoolmanManager::instance();
     set_spoolman_available(true);

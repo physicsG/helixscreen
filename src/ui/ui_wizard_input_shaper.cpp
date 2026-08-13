@@ -11,11 +11,11 @@
 #include "app_globals.h"
 #include "calibration_types.h"
 #include "config.h"
+#include "i_moonraker_api.h"
 #include "input_shaper_calibrator.h"
 #include "lvgl/lvgl.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "memory_utils.h"
-#include "moonraker_api.h"
 #include "printer_state.h"
 #include "static_panel_registry.h"
 

@@ -14,7 +14,7 @@
 
 #include "app_globals.h"
 #include "display_settings_manager.h"
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "printer_state.h"
 #include "sound_manager.h"
 #include "static_panel_registry.h"
@@ -555,7 +555,7 @@ void QrScannerOverlay::on_spool_id_detected(int spool_id) {
 void QrScannerOverlay::lookup_spool(int spool_id) {
     auto* api = get_moonraker_api();
     if (!api) {
-        spdlog::error("[{}] No MoonrakerAPI available", get_name());
+        spdlog::error("[{}] No IMoonrakerAPI available", get_name());
         update_status("Error: not connected to printer");
         last_decoded_id_ = -1;
         return;

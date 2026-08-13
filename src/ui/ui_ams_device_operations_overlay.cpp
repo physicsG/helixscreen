@@ -11,6 +11,7 @@
 #include "ui_ams_device_section_detail_overlay.h"
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
+#include "ui_modal.h"
 #include "ui_nav_manager.h"
 #include "ui_status_pill.h"
 #include "ui_utils.h"
@@ -66,6 +67,7 @@ AmsDeviceOperationsOverlay::~AmsDeviceOperationsOverlay() {
         lv_subject_deinit(&is_qidi_subject_);
         lv_subject_deinit(&qidi_eject_distance_display_subject_);
         lv_subject_deinit(&qidi_eject_velocity_display_subject_);
+        lv_subject_deinit(&can_reset_endless_spool_subject_);
     }
     spdlog::trace("[{}] Destroyed", get_name());
 }
@@ -131,6 +133,12 @@ void AmsDeviceOperationsOverlay::init_subjects() {
     lv_xml_register_subject(nullptr, "ams_device_ops_qidi_eject_velocity_display",
                             &qidi_eject_velocity_display_subject_);
 
+    // "Reset Endless Spool" row visibility. Gates on
+    // EndlessSpoolCapabilities::editable() in update_from_backend().
+    lv_subject_init_int(&can_reset_endless_spool_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_device_ops_can_reset_endless_spool",
+                            &can_reset_endless_spool_subject_);
+
     subjects_initialized_ = true;
     spdlog::debug("[{}] Subjects initialized", get_name());
 }
@@ -150,6 +158,8 @@ void AmsDeviceOperationsOverlay::register_callbacks() {
                              on_qidi_eject_distance_changed);
     lv_xml_register_event_cb(nullptr, "on_ams_qidi_eject_velocity_changed",
                              on_qidi_eject_velocity_changed);
+    lv_xml_register_event_cb(nullptr, "on_ams_reset_endless_spool_clicked",
+                             on_reset_endless_spool_clicked);
     lv_xml_register_event_cb(nullptr, "on_ams_section_clicked", on_section_row_clicked);
     spdlog::debug("[{}] Callbacks registered", get_name());
 }
@@ -235,6 +245,7 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
         lv_subject_set_int(&supports_auto_heat_subject_, 0);
         lv_subject_set_int(&is_afc_subject_, 0);
         lv_subject_set_int(&is_qidi_subject_, 0);
+        lv_subject_set_int(&can_reset_endless_spool_subject_, 0);
         system_info_buf_[0] = '\0';
         lv_subject_copy_string(&system_info_subject_, system_info_buf_);
         snprintf(status_buf_, sizeof(status_buf_), "%s",
@@ -308,6 +319,15 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
                  eject_velocity);
         lv_subject_copy_string(&qidi_eject_velocity_display_subject_, qidi_eject_velocity_buf_);
     }
+
+    // "Reset Endless Spool" lights up for any backend whose endless-spool
+    // mapping the UI may write (editable() = available + not ReadOnly): AFC's
+    // per-slot edges, single-unit Happy Hare's groups, and the mock. CFS and
+    // AD5X IFS are read-only, so the row stays hidden there. The base
+    // reset_endless_spool() re-checks this and rejects if it moved, so a
+    // stale button that won the race just reports the refusal.
+    lv_subject_set_int(&can_reset_endless_spool_subject_,
+                       backend->get_endless_spool_capabilities().editable() ? 1 : 0);
 
     // Update status
     AmsAction action = backend->get_current_action();
@@ -690,6 +710,45 @@ void AmsDeviceOperationsOverlay::on_section_row_clicked(lv_event_t* e) {
             detail.show(overlay.parent_screen_, section.id, section.label);
         }
     }
+
+    LVGL_SAFE_EVENT_CB_END();
+}
+
+void AmsDeviceOperationsOverlay::on_reset_endless_spool_clicked(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_reset_endless_spool_clicked");
+    LV_UNUSED(e);
+
+    spdlog::info("[AmsDeviceOperationsOverlay] Reset Endless Spool button clicked");
+
+    // The reset wipes ALL failover config, so it needs a confirmation, not a
+    // bare tap. on_confirm re-fetches the backend so it cannot dangle if the
+    // panel/backend changed while the dialog was open, and dismisses the dialog
+    // itself (a custom on_confirm replaces the default close handler).
+    //
+    // Both outcomes are announced. refresh() only re-derives
+    // can_reset_endless_spool_subject_ from editable(), which a reset does not
+    // change, and this overlay renders no endless-spool assignments at all (the
+    // backup arrows live on AmsPanel and are not refreshed from here) — so
+    // without a toast, wiping every spool's failover looks exactly like a no-op.
+    helix::ui::modal_show_confirmation(
+        lv_tr("Reset Endless Spool?"),
+        lv_tr("This clears every spool's failover assignment. The print will stop on runout "
+              "until you set up failover again."),
+        ModalSeverity::Warning, lv_tr("Reset"),
+        +[](lv_event_t* /*e*/) {
+            AmsBackend* b = AmsState::instance().get_backend();
+            if (b) {
+                AmsError result = b->reset_endless_spool();
+                if (!result.success()) {
+                    helix::ui::notify_ams_error(result, lv_tr("Reset endless spool failed"));
+                } else {
+                    NOTIFY_INFO("{}", lv_tr("Endless spool failover cleared for every slot"));
+                }
+                get_ams_device_operations_overlay().refresh();
+            }
+            helix::ui::modal_hide(helix::ui::modal_get_top());
+        },
+        /*on_cancel*/ nullptr, /*user_data*/ nullptr);
 
     LVGL_SAFE_EVENT_CB_END();
 }

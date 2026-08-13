@@ -91,7 +91,13 @@ void SoundSequencer::sequencer_loop() {
             std::unique_lock<std::mutex> lock(queue_mutex_);
 
             if (!playing_.load() && request_queue_.empty() && !external_tick_) {
-                // Nothing playing, nothing queued — wait for a signal
+                // Nothing playing, nothing queued — wait for a signal.
+                // Suspend the backend device so it stops running its render
+                // callback over silence (Android AudioTrack churn + idle CPU).
+                if (device_active_) {
+                    backend_->suspend();
+                    device_active_ = false;
+                }
                 was_playing = false;
                 queue_cv_.wait_for(lock, std::chrono::milliseconds(10));
                 last_tick = std::chrono::steady_clock::now();
@@ -128,6 +134,10 @@ void SoundSequencer::sequencer_loop() {
 
         bool has_work = ext_tick || playing_.load();
         if (has_work) {
+            if (!device_active_) {
+                backend_->resume();
+                device_active_ = true;
+            }
             if (!was_playing) {
                 last_tick = std::chrono::steady_clock::now();
                 was_playing = true;
@@ -148,6 +158,12 @@ void SoundSequencer::sequencer_loop() {
                 tick(dt_ms);
             }
         } else {
+            // Queue drained without starting playback — also idle. Suspend here
+            // since the idle branch above was skipped (queue was non-empty at check).
+            if (device_active_) {
+                backend_->suspend();
+                device_active_ = false;
+            }
             was_playing = false;
             last_tick = std::chrono::steady_clock::now();
         }
@@ -159,6 +175,10 @@ void SoundSequencer::sequencer_loop() {
     // Clean shutdown
     if (playing_.load()) {
         end_playback();
+    }
+    if (device_active_) {
+        backend_->suspend();
+        device_active_ = false;
     }
 }
 

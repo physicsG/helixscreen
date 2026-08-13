@@ -116,7 +116,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "PrePrintOptionsRenderer: single-category se
     REQUIRE(lv_obj_get_child_count(container) == 1);
 }
 
-TEST_CASE_METHOD(LVGLUITestFixture, "PrePrintOptionsRenderer: multi-category set emits flat row list",
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "PrePrintOptionsRenderer: multi-category set emits flat row list",
                  "[print_file_detail][pre_print_options]") {
     PrePrintOptionsRenderer renderer;
     lv_obj_t* container = lv_obj_create(test_screen());
@@ -347,7 +348,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "PrePrintOptionsRenderer: label_key wins ove
     REQUIRE(unkeyed_text == "AI Detect");
 }
 
-TEST_CASE_METHOD(LVGLUITestFixture, "PrePrintOptionsRenderer: clear() drops rows and resets subjects",
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "PrePrintOptionsRenderer: clear() drops rows and resets subjects",
                  "[print_file_detail][pre_print_options]") {
     PrePrintOptionsRenderer renderer;
     lv_obj_t* container = lv_obj_create(test_screen());

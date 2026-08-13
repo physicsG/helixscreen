@@ -7,7 +7,7 @@
 #include "ui_panel_base.h"
 
 #include "async_lifetime_guard.h"
-#include "moonraker_api.h" // Need full definition for PowerDevice
+#include "i_moonraker_api.h" // Need full definition for PowerDevice
 #include "subject_managed_panel.h"
 
 #include <map>
@@ -24,7 +24,7 @@
  */
 class PowerPanel : public PanelBase {
   public:
-    PowerPanel(helix::PrinterState& printer_state, MoonrakerAPI* api);
+    PowerPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
     ~PowerPanel() override;
 
     void init_subjects() override;

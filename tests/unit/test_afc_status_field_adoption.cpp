@@ -81,15 +81,20 @@ namespace {
 
 /// The envelope Moonraker sends for server.database.get_item.
 json db_envelope(const json& value) {
-    return {{"jsonrpc", "2.0"}, {"id", 1}, {"result", {{"namespace", "afc-install"}, {"value", value}}}};
+    return {{"jsonrpc", "2.0"},
+            {"id", 1},
+            {"result", {{"namespace", "afc-install"}, {"value", value}}}};
 }
 
 /// A clean AFC status object shaped like the live v1.1.0 capture — note it
 /// carries no "version" key, because no released AFC emits one.
 json pre_807_state() {
-    return json{{"current_load", "lane1"},   {"current_lane", nullptr},
-                {"current_state", "Idle"},   {"error_state", false},
-                {"bypass_state", false},     {"lanes", json::array({"lane1", "lane2"})},
+    return json{{"current_load", "lane1"},
+                {"current_lane", nullptr},
+                {"current_state", "Idle"},
+                {"error_state", false},
+                {"bypass_state", false},
+                {"lanes", json::array({"lane1", "lane2"})},
                 {"message", {{"message", ""}, {"type", ""}}}};
 }
 

@@ -378,7 +378,7 @@ ObserverGuard init_print_completion_observer() {
                          on_print_state_changed_for_notification, nullptr);
 }
 
-void cleanup_stale_helix_temp_files(MoonrakerAPI* api) {
+void cleanup_stale_helix_temp_files(IMoonrakerAPI* api) {
     if (!api) {
         spdlog::warn("[PrintComplete] Cannot cleanup stale temp files - API not available");
         return;

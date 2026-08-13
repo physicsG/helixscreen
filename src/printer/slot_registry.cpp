@@ -278,6 +278,15 @@ void SlotRegistry::set_backup(int global_index, int backup_slot) {
     slots_[global_index].endless_spool_backup = backup_slot;
 }
 
+std::vector<int> SlotRegistry::backup_edges() const {
+    std::vector<int> edges;
+    edges.reserve(slots_.size());
+    for (const auto& slot : slots_) {
+        edges.push_back(slot.endless_spool_backup);
+    }
+    return edges;
+}
+
 AmsSystemInfo SlotRegistry::build_system_info() const {
     AmsSystemInfo info;
     info.total_slots = slot_count();

@@ -178,7 +178,8 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 // Panel level — the two dismissal triggers
 // ============================================================================
 
-TEST_CASE_METHOD(AmsErrorModalFixture, "AmsPanel shows the error modal when the action enters ERROR",
+TEST_CASE_METHOD(AmsErrorModalFixture,
+                 "AmsPanel shows the error modal when the action enters ERROR",
                  "[ui_integration][ams][regression][1185]") {
     // Baseline for every case below: without this, "the modal went away"
     // assertions would pass vacuously.

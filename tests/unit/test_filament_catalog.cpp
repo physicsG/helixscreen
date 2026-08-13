@@ -2,7 +2,6 @@
 #include "filament_catalog.h"
 #include "filament_product_form.h"
 #include "helix_test_fixture.h"
-#include "../catch_amalgamated.hpp"
 
 #include <cstdio>
 #include <filesystem>
@@ -11,6 +10,7 @@
 #include <sstream>
 #include <string>
 
+#include "../catch_amalgamated.hpp"
 #include "hv/json.hpp"
 
 using helix::printer::FilamentCatalog;
@@ -22,7 +22,7 @@ using helix::ui::validate_product_form;
 namespace {
 constexpr const char* FIX = "tests/fixtures/filaments_test.json";
 constexpr const char* USER_FIX = "tests/fixtures/user_filaments_test.json";
-}
+} // namespace
 
 TEST_CASE_METHOD(HelixTestFixture, "resolve_code cfs hit and miss", "[filament_catalog]") {
     auto cat = FilamentCatalog::load_from_file(FIX, /*codes_only=*/true, "cfs");
@@ -33,13 +33,14 @@ TEST_CASE_METHOD(HelixTestFixture, "resolve_code cfs hit and miss", "[filament_c
     CHECK(cat.resolve_code("cfs", "99999") == nullptr);
 }
 
-TEST_CASE_METHOD(HelixTestFixture, "effective inherits type range when thin", "[filament_catalog]") {
+TEST_CASE_METHOD(HelixTestFixture, "effective inherits type range when thin",
+                 "[filament_catalog]") {
     auto cat = FilamentCatalog::load_from_file(FIX, false, "");
-    const auto* pla = cat.resolve_id("polymaker-pla-pro");   // no explicit range
+    const auto* pla = cat.resolve_id("polymaker-pla-pro"); // no explicit range
     REQUIRE(pla != nullptr);
-    CHECK(pla->nozzle_min == 190);   // inherited from PLA type
+    CHECK(pla->nozzle_min == 190); // inherited from PLA type
     CHECK(pla->nozzle_max == 220);
-    CHECK(pla->bed_temp == 60);      // inherited from PLA type
+    CHECK(pla->bed_temp == 60); // inherited from PLA type
     CHECK(pla->compat_group == std::string("PLA"));
 }
 
@@ -47,14 +48,15 @@ TEST_CASE_METHOD(HelixTestFixture, "explicit override wins over type", "[filamen
     auto cat = FilamentCatalog::load_from_file(FIX, false, "");
     const auto* abs = cat.resolve_id("polymaker-abs-pro");
     REQUIRE(abs != nullptr);
-    CHECK(abs->nozzle_min == 270);   // explicit, outside generic ABS range
+    CHECK(abs->nozzle_min == 270); // explicit, outside generic ABS range
     CHECK(abs->nozzle_max == 290);
-    CHECK(abs->bed_temp == 105);     // explicit bed
+    CHECK(abs->bed_temp == 105); // explicit bed
 }
 
-TEST_CASE_METHOD(HelixTestFixture, "load_codes materializes only coded slice", "[filament_catalog]") {
+TEST_CASE_METHOD(HelixTestFixture, "load_codes materializes only coded slice",
+                 "[filament_catalog]") {
     auto cat = FilamentCatalog::load_from_file(FIX, true, "cfs");
-    CHECK(cat.all_products().size() == 1);          // only the cfs-coded entry
+    CHECK(cat.all_products().size() == 1); // only the cfs-coded entry
     CHECK(cat.resolve_id("polymaker-abs-pro") == nullptr);
 }
 
@@ -65,16 +67,16 @@ TEST_CASE_METHOD(HelixTestFixture, "queries by brand and type", "[filament_catal
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "user overlay overrides and adds", "[filament_catalog]") {
-    auto cat = FilamentCatalog::load_with_overlay(
-        "tests/fixtures/filaments_test.json", "tests/fixtures/user_filaments_test.json");
+    auto cat = FilamentCatalog::load_with_overlay("tests/fixtures/filaments_test.json",
+                                                  "tests/fixtures/user_filaments_test.json");
     const auto* abs = cat.resolve_id("polymaker-abs-pro");
     REQUIRE(abs != nullptr);
-    CHECK(abs->nozzle_min == 265);   // overridden by user
+    CHECK(abs->nozzle_min == 265); // overridden by user
     CHECK(abs->nozzle_max == 285);
     const auto* added = cat.resolve_id("acme-custom-petg");
-    REQUIRE(added != nullptr);       // new user product
+    REQUIRE(added != nullptr); // new user product
     CHECK(added->brand == "Acme");
-    CHECK(added->bed_temp == 80);    // inherited from PETG type
+    CHECK(added->bed_temp == 80); // inherited from PETG type
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "user overlay accepts legacy bare-array product form",
@@ -97,7 +99,8 @@ TEST_CASE_METHOD(HelixTestFixture, "user overlay accepts legacy bare-array produ
     std::remove(TMP);
 }
 
-TEST_CASE_METHOD(HelixTestFixture, "load_user_orca_type_map_from reads object form", "[filament_catalog]") {
+TEST_CASE_METHOD(HelixTestFixture, "load_user_orca_type_map_from reads object form",
+                 "[filament_catalog]") {
     auto m = FilamentCatalog::load_user_orca_type_map_from(USER_FIX);
     REQUIRE(m.size() == 3);
     CHECK(m.at("PLA-BioTough") == "PLA");
@@ -110,7 +113,8 @@ TEST_CASE_METHOD(HelixTestFixture, "load_user_orca_type_map_from reads object fo
 
 TEST_CASE_METHOD(HelixTestFixture, "load_user_orca_type_map_from missing file returns empty",
                  "[filament_catalog]") {
-    CHECK(FilamentCatalog::load_user_orca_type_map_from("tests/fixtures/does_not_exist.json").empty());
+    CHECK(FilamentCatalog::load_user_orca_type_map_from("tests/fixtures/does_not_exist.json")
+              .empty());
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "load_user_orca_type_map_from empty path returns empty",
@@ -162,17 +166,28 @@ std::string read_small_file(const std::string& path) {
 
 constexpr const char* SAVE_TMP = "/tmp/helix_user_save_test.json";
 
-void remove_save_tmp() { std::remove(SAVE_TMP); }
-}  // namespace
+void remove_save_tmp() {
+    std::remove(SAVE_TMP);
+}
+} // namespace
 
 TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to round-trips through load_with_overlay",
                  "[filament_catalog][user_save]") {
     remove_save_tmp();
     std::vector<nlohmann::json> products = {
-        {{"id", "acme-test-pla"}, {"brand", "Acme"}, {"name", "Test PLA"},
-         {"type", "PLA"}, {"nozzle", 220}, {"source", "user"}},
-        {{"id", "brand-x-abs"}, {"brand", "Brand X"}, {"name", "Fast ABS"},
-         {"type", "ABS"}, {"nozzle_min", 240}, {"nozzle_max", 260}, {"source", "user"}},
+        {{"id", "acme-test-pla"},
+         {"brand", "Acme"},
+         {"name", "Test PLA"},
+         {"type", "PLA"},
+         {"nozzle", 220},
+         {"source", "user"}},
+        {{"id", "brand-x-abs"},
+         {"brand", "Brand X"},
+         {"name", "Fast ABS"},
+         {"type", "ABS"},
+         {"nozzle_min", 240},
+         {"nozzle_max", 260},
+         {"source", "user"}},
     };
 
     REQUIRE(FilamentCatalog::save_user_products_to(products, SAVE_TMP));
@@ -194,7 +209,7 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to round-trips through lo
     const auto* added = cat.resolve_id("acme-test-pla");
     REQUIRE(added != nullptr);
     CHECK(added->brand == "Acme");
-    CHECK(added->nozzle_recommended == 220);  // "nozzle" key
+    CHECK(added->nozzle_recommended == 220); // "nozzle" key
 
     remove_save_tmp();
 }
@@ -246,7 +261,7 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to migrates legacy bare-a
     REQUIRE(FilamentCatalog::save_user_products_to(products, SAVE_TMP));
 
     auto doc = nlohmann::json::parse(read_small_file(SAVE_TMP));
-    REQUIRE(doc.is_object());  // migrated to object form
+    REQUIRE(doc.is_object()); // migrated to object form
     REQUIRE(doc["filaments"].size() == 1);
     CHECK(doc["filaments"][0]["id"] == "post-migration");
     // Reader accepts the new shape.
@@ -301,7 +316,7 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to backs up a corrupt exi
     // real data the user would want back, but the file no longer parses.
     {
         std::ofstream out(SAVE_TMP);
-        out << R"({"orca_type_map":{"PreciousHint":"PLA"}, "filaments":[)";  // truncated
+        out << R"({"orca_type_map":{"PreciousHint":"PLA"}, "filaments":[)"; // truncated
     }
 
     std::vector<nlohmann::json> products = {
@@ -380,7 +395,7 @@ TEST_CASE_METHOD(HelixTestFixture, "load_user_products_from reads authored produ
     auto products = FilamentCatalog::load_user_products_from(SAVE_TMP);
     REQUIRE(products.size() == 2);
     CHECK(products[0]["id"] == "a");
-    CHECK(products[1]["nozzle"] == 250);  // authored value, not resolved/inherited
+    CHECK(products[1]["nozzle"] == 250); // authored value, not resolved/inherited
 
     // Legacy bare-array form is accepted too.
     {
@@ -407,9 +422,9 @@ TEST_CASE_METHOD(HelixTestFixture, "upsert_product replaces by id or appends",
     // Edit: same id replaces in place, preserves order, returns true.
     CHECK(FilamentCatalog::upsert_product(products, {{"id", "a"}, {"type", "PETG"}}));
     REQUIRE(products.size() == 2);
-    CHECK(products[0]["id"] == "a");           // still first
-    CHECK(products[0]["type"] == "PETG");      // replaced
-    CHECK(products[1]["id"] == "b");           // untouched
+    CHECK(products[0]["id"] == "a");      // still first
+    CHECK(products[0]["type"] == "PETG"); // replaced
+    CHECK(products[1]["id"] == "b");      // untouched
 
     // Add: new id appends, returns false.
     CHECK_FALSE(FilamentCatalog::upsert_product(products, {{"id", "c"}, {"type", "TPU"}}));
@@ -465,7 +480,7 @@ TEST_CASE_METHOD(HelixTestFixture, "product edit round-trip preserves orca_type_
     auto cat = FilamentCatalog::load_with_overlay(FIX, SAVE_TMP);
     const auto* edited = cat.resolve_id("user-pla");
     REQUIRE(edited != nullptr);
-    CHECK(edited->nozzle_recommended == 225);  // edit applied
+    CHECK(edited->nozzle_recommended == 225); // edit applied
 
     // --- Delete / Restore-Defaults (remove the overlay entry) ---
     auto after_edit = FilamentCatalog::load_user_products_from(SAVE_TMP);
@@ -533,13 +548,14 @@ TEST_CASE_METHOD(HelixTestFixture, "build_product_json emits provided fields wit
     CHECK_FALSE(j.contains("density_g_cm3"));
 }
 
-TEST_CASE_METHOD(HelixTestFixture, "build_product_json omits blank numerics but keeps explicit zero",
+TEST_CASE_METHOD(HelixTestFixture,
+                 "build_product_json omits blank numerics but keeps explicit zero",
                  "[filament_catalog][user_save]") {
     FilamentFormValues v;
     v.id = "z";
     v.type = "PLA";
-    v.nozzle_min = "";  // blank -> omit
-    v.bed = "0";        // explicit zero -> keep (user intent)
+    v.nozzle_min = ""; // blank -> omit
+    v.bed = "0";       // explicit zero -> keep (user intent)
     auto j = build_product_json(v);
     CHECK_FALSE(j.contains("nozzle_min"));
     REQUIRE(j.contains("bed"));

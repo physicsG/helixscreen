@@ -21,6 +21,7 @@
 #include "ui_settings_sensors.h"
 #include "ui_subject_registry.h"
 #include "ui_temperature_utils.h"
+#include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
@@ -71,7 +72,7 @@ using helix::ui::position::format_position;
 // CONSTRUCTOR
 // ============================================================================
 
-ControlsPanel::ControlsPanel(PrinterState& printer_state, MoonrakerAPI* api)
+ControlsPanel::ControlsPanel(PrinterState& printer_state, IMoonrakerAPI* api)
     : PanelBase(printer_state, api) {
     // Dependencies passed for interface consistency
     // Child panels (motion, temp, extrusion) may use these when wired
@@ -1730,11 +1731,21 @@ void ControlsPanel::handle_motors_cancel() {
 }
 
 void ControlsPanel::handle_calibration_bed_mesh() {
+#if defined(HELIX_PLATFORM_ESP32)
+    // Bed-mesh calibration is excluded from the v1 Core+AMS cut; its panel is a
+    // null-vtable link stub. Toast instead of the LoadProhibited crash.
+    helix::ui::show_feature_unavailable_toast();
+    return;
+#endif
     helix::ui::lazy_create_and_push_overlay<BedMeshPanel>(
         get_global_bed_mesh_panel, bed_mesh_panel_, parent_screen_, "Bed Mesh", get_name(), true);
 }
 
 void ControlsPanel::handle_calibration_zoffset() {
+#if defined(HELIX_PLATFORM_ESP32)
+    helix::ui::show_feature_unavailable_toast();
+    return;
+#endif
     // Set the Moonraker client before lazy creation so it's available when calibration starts
     get_global_zoffset_cal_panel().set_api(get_moonraker_api());
     helix::ui::lazy_create_and_push_overlay<ZOffsetCalibrationPanel>(
@@ -1743,6 +1754,10 @@ void ControlsPanel::handle_calibration_zoffset() {
 }
 
 void ControlsPanel::handle_calibration_screws() {
+#if defined(HELIX_PLATFORM_ESP32)
+    helix::ui::show_feature_unavailable_toast();
+    return;
+#endif
     get_global_screws_tilt_panel().set_client(get_moonraker_client(), get_moonraker_api());
     helix::ui::lazy_create_and_push_overlay<ScrewsTiltPanel>(
         get_global_screws_tilt_panel, screws_panel_, parent_screen_, "Bed Screws", get_name());

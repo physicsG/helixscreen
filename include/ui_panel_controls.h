@@ -63,9 +63,9 @@ class ControlsPanel : public PanelBase {
      * @brief Construct ControlsPanel with injected dependencies
      *
      * @param printer_state Reference to helix::PrinterState
-     * @param api Pointer to MoonrakerAPI (may be nullptr)
+     * @param api Pointer to IMoonrakerAPI (may be nullptr)
      */
-    ControlsPanel(helix::PrinterState& printer_state, MoonrakerAPI* api);
+    ControlsPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
 
     ~ControlsPanel() override;
 

@@ -16,8 +16,8 @@
 #include "app_globals.h"
 #include "config.h"
 #include "device_display_name.h"
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 #include "printer_state.h"
 #include "static_panel_registry.h"
 
@@ -30,7 +30,7 @@
 
 using namespace helix;
 
-PowerPanel::PowerPanel(PrinterState& printer_state, MoonrakerAPI* api)
+PowerPanel::PowerPanel(PrinterState& printer_state, IMoonrakerAPI* api)
     : PanelBase(printer_state, api) {
     std::snprintf(status_buf_, sizeof(status_buf_), "%s", lv_tr("Loading devices..."));
     load_selected_devices();
@@ -109,7 +109,7 @@ void PowerPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
 
 void PowerPanel::fetch_devices() {
     if (!api_) {
-        spdlog::warn("[{}] No MoonrakerAPI available - cannot fetch devices", get_name());
+        spdlog::warn("[{}] No IMoonrakerAPI available - cannot fetch devices", get_name());
         std::snprintf(status_buf_, sizeof(status_buf_), "%s", lv_tr("Not connected to printer"));
         lv_subject_copy_string(&status_subject_, status_buf_);
         return;
@@ -269,7 +269,7 @@ void PowerPanel::create_device_row(const PowerDevice& device) {
 
 void PowerPanel::handle_device_toggle(const std::string& device, bool power_on) {
     if (!api_) {
-        spdlog::warn("[{}] No MoonrakerAPI available - cannot toggle device", get_name());
+        spdlog::warn("[{}] No IMoonrakerAPI available - cannot toggle device", get_name());
         return;
     }
 

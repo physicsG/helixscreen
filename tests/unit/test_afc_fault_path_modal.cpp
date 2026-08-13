@@ -120,8 +120,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "afc_fault_path_apply publishes and clears t
 
 TEST_CASE_METHOD(LVGLUITestFixture, "the fault position is named in words, not only in colour",
                  "[afc][fault][modal][1196]") {
-    auto* graphic = static_cast<lv_obj_t*>(lv_xml_create(lv_screen_active(), "afc_fault_path",
-                                                         nullptr));
+    auto* graphic =
+        static_cast<lv_obj_t*>(lv_xml_create(lv_screen_active(), "afc_fault_path", nullptr));
     REQUIRE(graphic != nullptr);
 
     struct Case {

@@ -5,6 +5,7 @@
 
 #include "ui_fonts.h"
 
+#include "data_root_resolver.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -221,38 +222,44 @@ void AssetManager::register_images() {
 
     spdlog::trace("[AssetManager] Registering images...");
 
+    // reg_img routes the bundle-relative source through asset_component_uri so
+    // the registered src resolves against the mount on firmware
+    // (/assets/assets/images/...) and stays byte-identical on desktop
+    // (asset_root "."). lv_xml_register_image lv_strdup's the src, so passing a
+    // temporary c_str() is safe. The registration NAME is left unchanged — the
+    // "path-as-name" entries keep their "A:assets/images/..." literal so existing
+    // XML / lv_image_set_src references by that name still resolve.
+    auto reg_img = [](const char* name, const char* rel) {
+        lv_xml_register_image(nullptr, name, helix::asset_component_uri(rel).c_str());
+    };
+
     // Branding
-    lv_xml_register_image(nullptr, "A:assets/images/helixscreen-logo.png",
-                          "A:assets/images/helixscreen-logo.png");
-    lv_xml_register_image(nullptr, "A:assets/images/about-logo.bin",
-                          "A:assets/images/about-logo.bin");
+    reg_img("A:assets/images/helixscreen-logo.png", "assets/images/helixscreen-logo.png");
+    reg_img("A:assets/images/about-logo.bin", "assets/images/about-logo.bin");
 
     // Printer and UI images
-    lv_xml_register_image(nullptr, "A:assets/images/printer_400.png",
-                          "A:assets/images/printer_400.png");
-    lv_xml_register_image(nullptr, "filament_spool", "A:assets/images/filament_spool.png");
+    reg_img("A:assets/images/printer_400.png", "assets/images/printer_400.png");
+    reg_img("filament_spool", "assets/images/filament_spool.png");
     // Tintable Spoolman mark (AMS editor identity chip)
-    lv_xml_register_image(nullptr, "spoolman_mark", "A:assets/images/ams/spoolman_24.png");
-    lv_xml_register_image(nullptr, "A:assets/images/placeholder_thumb_centered.png",
-                          "A:assets/images/placeholder_thumb_centered.png");
-    lv_xml_register_image(nullptr, "A:assets/images/thumbnail-gradient-bg.png",
-                          "A:assets/images/thumbnail-gradient-bg.png");
-    lv_xml_register_image(nullptr, "A:assets/images/benchy_thumbnail_white.png",
-                          "A:assets/images/benchy_thumbnail_white.png");
-
-    lv_xml_register_image(nullptr, "A:assets/images/prerendered/benchy_thumbnail_white.bin",
-                          "A:assets/images/prerendered/benchy_thumbnail_white.bin");
+    reg_img("spoolman_mark", "assets/images/ams/spoolman_24.png");
+    reg_img("A:assets/images/placeholder_thumb_centered.png",
+            "assets/images/placeholder_thumb_centered.png");
+    reg_img("A:assets/images/thumbnail-gradient-bg.png", "assets/images/thumbnail-gradient-bg.png");
+    reg_img("A:assets/images/benchy_thumbnail_white.png",
+            "assets/images/benchy_thumbnail_white.png");
+    reg_img("A:assets/images/prerendered/benchy_thumbnail_white.bin",
+            "assets/images/prerendered/benchy_thumbnail_white.bin");
 
     // Flag icons (language chooser wizard) - pre-rendered ARGB8888 32x24
-    lv_xml_register_image(nullptr, "flag_en", "A:assets/images/flags/flag_en.bin");
-    lv_xml_register_image(nullptr, "flag_de", "A:assets/images/flags/flag_de.bin");
-    lv_xml_register_image(nullptr, "flag_fr", "A:assets/images/flags/flag_fr.bin");
-    lv_xml_register_image(nullptr, "flag_es", "A:assets/images/flags/flag_es.bin");
-    lv_xml_register_image(nullptr, "flag_ru", "A:assets/images/flags/flag_ru.bin");
-    lv_xml_register_image(nullptr, "flag_pt", "A:assets/images/flags/flag_pt.bin");
-    lv_xml_register_image(nullptr, "flag_it", "A:assets/images/flags/flag_it.bin");
-    lv_xml_register_image(nullptr, "flag_zh", "A:assets/images/flags/flag_zh.bin");
-    lv_xml_register_image(nullptr, "flag_ja", "A:assets/images/flags/flag_ja.bin");
+    reg_img("flag_en", "assets/images/flags/flag_en.bin");
+    reg_img("flag_de", "assets/images/flags/flag_de.bin");
+    reg_img("flag_fr", "assets/images/flags/flag_fr.bin");
+    reg_img("flag_es", "assets/images/flags/flag_es.bin");
+    reg_img("flag_ru", "assets/images/flags/flag_ru.bin");
+    reg_img("flag_pt", "assets/images/flags/flag_pt.bin");
+    reg_img("flag_it", "assets/images/flags/flag_it.bin");
+    reg_img("flag_zh", "assets/images/flags/flag_zh.bin");
+    reg_img("flag_ja", "assets/images/flags/flag_ja.bin");
 
     s_images_registered = true;
     spdlog::trace("[AssetManager] Images registered successfully");

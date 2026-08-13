@@ -78,8 +78,7 @@ struct ToolheadMenuModel {
  */
 [[nodiscard]] ToolheadMenuModel toolhead_menu_model(int tool_index, int mounted_tool,
                                                     bool supports_park, bool slot_present,
-                                                    bool can_unload,
-                                                    bool print_blocks_ops = false);
+                                                    bool can_unload, bool print_blocks_ops = false);
 
 /// True when the model has no entries — nothing to show, so show nothing.
 [[nodiscard]] inline bool toolhead_menu_is_empty(const ToolheadMenuModel& m) {
@@ -87,6 +86,8 @@ struct ToolheadMenuModel {
 }
 
 class AmsToolheadMenu : public ContextMenu {
+    HELIX_CONTEXT_MENU_KIND(AmsToolheadMenu)
+
   public:
     enum class ToolheadAction {
         CANCELLED, ///< User dismissed menu without action

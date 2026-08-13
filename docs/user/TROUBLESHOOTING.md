@@ -116,6 +116,55 @@ curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update
 
 The `chroot` step is required — see UPGRADING.md for why.
 
+### Binary won't start (GLIBC version not found)
+
+**Symptoms:**
+- The install completes, but the service never comes up
+- Running the binary by hand prints one or more of:
+  ```
+  /lib/arm-linux-gnueabihf/libm.so.6: version `GLIBC_2.29' not found
+  /lib/arm-linux-gnueabihf/libpthread.so.0: version `GLIBC_2.30' not found
+  /usr/lib/arm-linux-gnueabihf/libstdc++.so.6: version `GLIBCXX_3.4.26' not found
+  ```
+- The installer may have warned about this before it finished
+
+**Cause:** your OS is older than the build targets. The `pi` and `pi32` packages are
+dynamically linked against **glibc 2.31** (Debian 11 "Bullseye"). glibc is forward- but
+not backward-compatible, so those binaries run on Bullseye and anything newer, and fail
+to load on anything older. Debian 10 "Buster" ships glibc 2.28.
+
+Confirm what you have:
+
+```bash
+ldd --version | head -1          # e.g. "ldd (Debian GLIBC 2.28-10) 2.28"
+cat /etc/os-release | head -2    # e.g. VERSION="10 (buster)"
+uname -m                         # armv7l = 32-bit, aarch64 = 64-bit
+```
+
+**Fix — pick one:**
+
+1. **Upgrade the OS to Bullseye or newer.** Best option on a general-purpose Pi. Current
+   Raspberry Pi OS and MainsailOS images are already well past Bullseye, so a reflash
+   solves it outright.
+
+2. **Install the `cc1` package instead.** It is **statically linked** — it carries its own
+   C library and does not care what glibc the host has. This is the practical answer on
+   stock printer images that are pinned to Buster and cannot be upgraded. Despite the
+   name it is not Creality-specific; it is a generic static armv7 build and has been run
+   successfully on other armv7 hardware, including Rockchip RV1126 boards.
+
+   ```bash
+   # replace vX.Y.Z with the current release
+   wget https://github.com/prestonbrown/helixscreen/releases/download/vX.Y.Z/helixscreen-cc1.zip
+   ./install.sh --local helixscreen-cc1.zip
+   ```
+
+   Trade-off: a static binary is larger and does not pick up the host's own OpenSSL/system
+   libraries. For a printer touchscreen that is rarely a problem.
+
+If neither works on your hardware, open an issue with the output of all three commands
+above — new armv7 platforms are worth adding support for.
+
 ### HelixScreen crashes immediately (segfault)
 
 **Symptoms:**

@@ -5,11 +5,13 @@
 
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
+#include "ui_format_utils.h"
 #include "ui_nav_manager.h"
 #include "ui_overlay_temp_graph.h"
 #include "ui_panel_print_select.h"
 #include "ui_panel_print_status.h"
 #include "ui_progress_arc.h"
+#include "ui_temperature_utils.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
@@ -17,9 +19,11 @@
 #include "ams_state.h"
 #include "app_constants.h"
 #include "app_globals.h"
+#include "data_root_resolver.h"
 #include "filament_op_dispatch.h"
 #include "filament_op_router.h"
 #include "filament_sensor_manager.h"
+#include "format_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "moonraker_api.h"
 #include "moonraker_client.h"
@@ -45,6 +49,16 @@
 #include <string_view>
 #include <unordered_set>
 
+namespace {
+// The idle hero thumbnail is the same benchy image the print-thumbnail subject
+// publishes when a file has no thumbnail of its own, so both come from one
+// resolution point. The returned pointer outlives the widget, which
+// lv_image_set_src and the idle-thumb subject both require.
+const char* benchy_thumb_path() {
+    return helix::PrinterPrintState::no_thumbnail_placeholder();
+}
+} // namespace
+
 namespace helix {
 void register_print_status_widget() {
     register_widget_factory(
@@ -57,12 +71,6 @@ void register_print_status_widget() {
     lv_xml_register_event_cb(nullptr, "library_last_cb", PrintStatusWidget::library_last_cb);
     lv_xml_register_event_cb(nullptr, "library_recent_cb", PrintStatusWidget::library_recent_cb);
     lv_xml_register_event_cb(nullptr, "library_queue_cb", PrintStatusWidget::library_queue_cb);
-    lv_xml_register_event_cb(nullptr, "print_status_picker_backdrop_cb",
-                             PrintStatusWidget::print_status_picker_backdrop_cb);
-    lv_xml_register_event_cb(nullptr, "print_status_picker_done_cb",
-                             PrintStatusWidget::print_status_picker_done_cb);
-    lv_xml_register_event_cb(nullptr, "print_status_nozzle_picker_backdrop_cb",
-                             PrintStatusWidget::print_status_nozzle_picker_backdrop_cb);
     lv_xml_register_event_cb(nullptr, "print_status_nozzle_chevron_cb",
                              PrintStatusWidget::print_status_nozzle_chevron_cb);
     lv_xml_register_event_cb(nullptr, "print_status_layout_library_cb",
@@ -79,9 +87,6 @@ void register_print_status_widget() {
 } // namespace helix
 
 using namespace helix;
-
-PrintStatusWidget* PrintStatusWidget::s_active_picker_ = nullptr;
-PrintStatusWidget* PrintStatusWidget::s_active_nozzle_picker_ = nullptr;
 
 std::unordered_set<PrintStatusWidget*>& PrintStatusWidget::live_instances() {
     static std::unordered_set<PrintStatusWidget*> instances;
@@ -132,6 +137,10 @@ void PrintStatusWidget::init_static_subjects() {
     lv_xml_register_subject(nullptr, "print_status_view", &view_subject_);
     // Default to benchy; reset_print_card_to_idle replaces with last-print
     // thumbnail when history loads.
+    // Resolve the benchy default to its bundle-absolute path before the subject
+    // captures it (a raw "A:assets/images/..." literal misses the /assets mount
+    // on firmware and lv_image_set_src can't open it).
+    snprintf(idle_thumb_path_buf_, sizeof(idle_thumb_path_buf_), "%s", benchy_thumb_path());
     lv_subject_init_string(&idle_thumb_path_subject_, idle_thumb_path_buf_, nullptr,
                            sizeof(idle_thumb_path_buf_), idle_thumb_path_buf_);
     lv_xml_register_subject(nullptr, "print_status_idle_thumb_path", &idle_thumb_path_subject_);
@@ -176,7 +185,7 @@ void PrintStatusWidget::init_static_subjects() {
 PrintStatusWidget::PrintStatusWidget() : printer_state_(get_printer_state()) {
     init_static_subjects();
 
-    // Eager DetailedFormatter creation — its subjects (print_status_progress_pct,
+    // Eager DetailedFormatter creation — its subjects (print_status_layer_text,
     // print_status_bed_text, etc.) MUST be registered BEFORE lv_xml_create
     // parses the widget XML. helix-xml's bind_text/bind_flag_if_eq parser
     // permanently skips bindings whose subject doesn't exist at parse time.
@@ -198,6 +207,7 @@ PrintStatusWidget::~PrintStatusWidget() {
 }
 
 void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
+    using helix::ui::observe_int_immediate;
     using helix::ui::observe_int_sync;
     using helix::ui::observe_print_state;
     using helix::ui::observe_string_immediate;
@@ -279,6 +289,24 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         },
         printer_state_.get_subjects_lifetime());
 
+#if defined(HELIX_PLATFORM_ESP32)
+    // ESP32 has no disk thumbnail cache, so print_thumbnail_path stays empty and
+    // the image arrives as a PSRAM buffer instead. Observe the generation counter
+    // ActivePrintMediaManager bumps when it installs one. observe_int_immediate
+    // for the same reason as the path observer above: the handler only does
+    // lv_image_set_src plus a shared_ptr swap (no observer lifecycle changes, no
+    // widget destruction), and the setter always runs on the UI thread — so the
+    // extra deferral would only add a frame and a stale-read window.
+    print_psram_thumb_observer_ = observe_int_immediate<PrintStatusWidget>(
+        printer_state_.get_print_psram_thumb_gen_subject(), this,
+        [](PrintStatusWidget* self, int /*gen*/) {
+            if (!self->widget_obj_)
+                return;
+            self->apply_esp_psram_thumbnail();
+        },
+        printer_state_.get_subjects_lifetime());
+#endif
+
     auto& fsm = helix::FilamentSensorManager::instance();
     filament_runout_observer_ = observe_int_sync<PrintStatusWidget>(
         fsm.get_any_runout_subject(), this, [](PrintStatusWidget* self, int any_runout) {
@@ -352,6 +380,14 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
             lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
         if (state == PrintJobState::PRINTING || state == PrintJobState::PAUSED) {
             on_print_state_changed(state);
+#if defined(HELIX_PLATFORM_ESP32)
+            // Widget instances are recycled across page rebuilds, so a fresh
+            // attach lands on a print that already has its thumbnail loaded and
+            // no further generation bump coming. Re-apply from the held buffer;
+            // on other platforms the print_thumbnail_path observer's initial
+            // notification covers this.
+            apply_esp_psram_thumbnail();
+#endif
         } else {
             // Defer the initial idle reset: synchronous reset_print_card_to_idle
             // cascades lv_image_set_src → update_align → lv_obj_update_layout up
@@ -396,8 +432,8 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 
 void PrintStatusWidget::detach() {
     // Dismiss any open pickers
-    dismiss_configure_picker();
-    dismiss_nozzle_tool_picker();
+    configure_picker_.hide();
+    nozzle_picker_.hide();
 
     // Invalidate lifetime guard FIRST to abort in-flight async fetches
     lifetime_.invalidate();
@@ -411,6 +447,20 @@ void PrintStatusWidget::detach() {
     // Release observers
     print_state_observer_.reset();
     print_thumbnail_path_observer_.reset();
+#if defined(HELIX_PLATFORM_ESP32)
+    print_psram_thumb_observer_.reset();
+    // detach() is main-thread, which EspPsramThumbnail's destructor requires.
+    // Stop the image pointing at the descriptor before releasing: instances are
+    // recycled, so the lv_image outlives this detach, and for a variable source
+    // lv_image stores the raw pointer (it only strdups paths). Ours can be the
+    // last reference — PrinterState drops its own on the next filename change.
+    if (esp_thumbnail_ && print_card_active_thumb_ &&
+        lv_image_get_src(print_card_active_thumb_) == esp_thumbnail_->dsc()) {
+        lv_image_set_src(print_card_active_thumb_,
+                         helix::PrinterPrintState::no_thumbnail_placeholder());
+    }
+    esp_thumbnail_.reset();
+#endif
     filament_runout_observer_.reset();
     job_queue_count_observer_.reset();
     connection_observer_.reset();
@@ -735,11 +785,31 @@ void PrintStatusWidget::on_print_thumbnail_path_changed(const char* path) {
     }
 
     // No empty-path branch: ActivePrintMediaManager is the subject's sole writer
-    // and publishes kNoThumbnailPlaceholder — the very image this used to
+    // and publishes no_thumbnail_placeholder() — the very image this used to
     // substitute — when a file has no thumbnail, so the value is always an image.
     lv_image_set_src(print_card_active_thumb_, path);
     spdlog::info("[PrintStatusWidget] Active print thumbnail updated: {}", path);
 }
+
+#if defined(HELIX_PLATFORM_ESP32)
+void PrintStatusWidget::apply_esp_psram_thumbnail() {
+    if (!widget_obj_ || !print_card_active_thumb_) {
+        return;
+    }
+    auto thumb = printer_state_.get_print_psram_thumbnail();
+    if (!thumb) {
+        return;
+    }
+    // `previous` keeps the outgoing buffer alive until after the widget stops
+    // pointing at it — otherwise the last release could free the descriptor the
+    // widget's src still names. Both releases happen here, on the main thread,
+    // which is what EspPsramThumbnail's destructor requires.
+    auto previous = std::move(esp_thumbnail_);
+    esp_thumbnail_ = std::move(thumb);
+    lv_image_set_src(print_card_active_thumb_, esp_thumbnail_->dsc());
+    spdlog::info("[PrintStatusWidget] Active print PSRAM thumbnail applied");
+}
+#endif
 
 std::string PrintStatusWidget::get_last_print_thumbnail_path() const {
     auto* history = get_print_history_manager();
@@ -844,7 +914,7 @@ void PrintStatusWidget::reset_print_card_to_idle() {
     // Try to show the last printed file's thumbnail instead of benchy
     std::string thumb_rel_path = get_last_print_thumbnail_path();
     if (thumb_rel_path.empty()) {
-        set_thumb_on_widgets("A:assets/images/benchy_thumbnail_white.png");
+        set_thumb_on_widgets(benchy_thumb_path());
         spdlog::debug("[PrintStatusWidget] Idle thumbnail: benchy (no history)");
         return;
     }
@@ -874,7 +944,7 @@ void PrintStatusWidget::reset_print_card_to_idle() {
     }
 
     // Set benchy as placeholder while we fetch
-    set_thumb_on_widgets("A:assets/images/benchy_thumbnail_white.png");
+    set_thumb_on_widgets(benchy_thumb_path());
 
     auto* api = get_moonraker_api();
     if (!api) {
@@ -1135,7 +1205,7 @@ void PrintStatusWidget::dispatch_load() {
                 spdlog::error("[PrintStatusWidget] Load fallback failed: {}", err.message);
                 NOTIFY_ERROR(lv_tr("Failed to load filament: {}"), err.user_message());
             },
-            MoonrakerAPI::EXTRUSION_TIMEOUT_MS);
+            IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
         return;
     }
     }
@@ -1236,21 +1306,20 @@ void PrintStatusWidget::recompute_actions_visibility() {
 }
 
 void PrintStatusWidget::show_configure_picker() {
-    if (picker_backdrop_ || !parent_screen_) {
+    if (configure_picker_.is_visible() || !parent_screen_ || !widget_obj_) {
         return;
     }
 
-    picker_backdrop_ = static_cast<lv_obj_t*>(
-        lv_xml_create(parent_screen_, "print_status_configure_picker", nullptr));
-    if (!picker_backdrop_) {
-        spdlog::error("[PrintStatusWidget] Failed to create configure picker from XML");
-        return;
-    }
+    // The card hangs under the widget tile, centred on it, flipping above when the
+    // tile sits low on the screen.
+    configure_picker_.show_below_widget(parent_screen_, widget_obj_,
+                                        helix::ui::ContextMenu::AnchorAlign::Center);
+}
 
-    lv_obj_t* option_list = lv_obj_find_by_name(picker_backdrop_, "option_list");
+void PrintStatusWidget::ConfigurePicker::on_created(lv_obj_t* backdrop) {
+    lv_obj_t* option_list = lv_obj_find_by_name(backdrop, "option_list");
     if (!option_list) {
         spdlog::error("[PrintStatusWidget] option_list not found in picker XML");
-        helix::ui::safe_delete_deferred(picker_backdrop_);
         return;
     }
 
@@ -1261,20 +1330,19 @@ void PrintStatusWidget::show_configure_picker() {
     };
     int space_sm = resolve_space("space_sm", 6);
     int space_xs = resolve_space("space_xs", 4);
-    int space_md = resolve_space("space_md", 10);
 
     // Create checkbox rows for each toggle option
     struct Option {
-        const char* name; // lv_obj name for lookup in apply_picker_state()
+        const char* name; // lv_obj name for lookup in apply_state()
         const char* label;
         bool checked;
     };
     Option options[] = {
-        {"opt_title", "Title", show_title_},
-        {"opt_print_files", "Print Files", show_print_files_},
-        {"opt_reprint_last", "Reprint Last", show_reprint_last_},
-        {"opt_recent_prints", "Recent Prints", show_recent_prints_},
-        {"opt_job_queue", "Job Queue", show_job_queue_},
+        {"opt_title", "Title", owner_.show_title_},
+        {"opt_print_files", "Print Files", owner_.show_print_files_},
+        {"opt_reprint_last", "Reprint Last", owner_.show_reprint_last_},
+        {"opt_recent_prints", "Recent Prints", owner_.show_recent_prints_},
+        {"opt_job_queue", "Job Queue", owner_.show_job_queue_},
     };
 
     for (const auto& opt : options) {
@@ -1302,11 +1370,13 @@ void PrintStatusWidget::show_configure_picker() {
         lv_obj_set_flex_grow(label, 1);
         lv_obj_set_style_text_font(label, lv_font_get_default(), 0);
 
-        // Click row to toggle checkbox
+        // Click row to toggle checkbox. The picker travels as the event's
+        // user_data, since a toggle applies straight through to the widget.
         lv_obj_add_event_cb(
             row,
             [](lv_event_t* e) {
-                auto* target = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+                LVGL_SAFE_EVENT_CB_BEGIN("[PrintStatusWidget] option_row_cb");
+                auto* target = lv_event_get_current_target_obj(e);
                 uint32_t count = lv_obj_get_child_count(target);
                 for (uint32_t i = 0; i < count; ++i) {
                     lv_obj_t* child = lv_obj_get_child(target, static_cast<int32_t>(i));
@@ -1321,83 +1391,38 @@ void PrintStatusWidget::show_configure_picker() {
                 }
 
                 // Apply immediately
-                if (s_active_picker_ && s_active_picker_->picker_backdrop_) {
-                    s_active_picker_->apply_picker_state();
+                if (auto* picker = static_cast<ConfigurePicker*>(lv_event_get_user_data(e))) {
+                    picker->apply_state();
                 }
+                LVGL_SAFE_EVENT_CB_END();
             },
-            LV_EVENT_CLICKED, nullptr);
-    }
-
-    s_active_picker_ = this;
-
-    // Self-clearing delete callback
-    lv_obj_add_event_cb(
-        picker_backdrop_,
-        [](lv_event_t* e) {
-            auto* self = static_cast<PrintStatusWidget*>(lv_event_get_user_data(e));
-            if (self) {
-                self->picker_backdrop_ = nullptr;
-                if (s_active_picker_ == self) {
-                    s_active_picker_ = nullptr;
-                }
-            }
-        },
-        LV_EVENT_DELETE, this);
-
-    // Position card near widget
-    lv_obj_t* card = lv_obj_find_by_name(picker_backdrop_, "context_menu");
-    if (card && widget_obj_) {
-        int screen_w = lv_obj_get_width(parent_screen_);
-        int screen_h = lv_obj_get_height(parent_screen_);
-        int card_w = std::clamp(screen_w * 3 / 10, 160, 240);
-
-        lv_obj_set_width(card, card_w);
-        lv_obj_set_style_max_height(card, screen_h * 80 / 100, 0);
-        lv_obj_update_layout(card);
-        int card_h = lv_obj_get_height(card);
-
-        lv_area_t widget_area;
-        lv_obj_get_coords(widget_obj_, &widget_area);
-
-        int card_x = (widget_area.x1 + widget_area.x2) / 2 - card_w / 2;
-        int card_y = widget_area.y2 + space_xs;
-
-        if (card_x < space_md)
-            card_x = space_md;
-        if (card_x + card_w > screen_w - space_md)
-            card_x = screen_w - card_w - space_md;
-        if (card_y + card_h > screen_h - space_md) {
-            card_y = widget_area.y1 - card_h - space_xs;
-            if (card_y < space_md)
-                card_y = space_md;
-        }
-
-        lv_obj_set_pos(card, card_x, card_y);
+            LV_EVENT_CLICKED, this);
     }
 
     // Initial visual state: primary-fill the selected layout button, hide the
     // Show Sections group when Detailed is active. Visuals-only — full
-    // apply_picker_state() would re-save the config on every open.
-    apply_picker_visuals();
+    // apply_state() would re-save the config on every open.
+    apply_visuals();
 
-    spdlog::debug("[PrintStatusWidget] Configure picker shown");
+    spdlog::debug("[PrintStatusWidget] Configure picker built");
 }
 
-void PrintStatusWidget::apply_picker_visuals() {
-    if (!picker_backdrop_)
+void PrintStatusWidget::ConfigurePicker::apply_visuals() {
+    lv_obj_t* backdrop = menu();
+    if (!backdrop)
         return;
 
     // Library/Detailed selector buttons: selected = primary accent fill,
     // unselected = outlined (XML default).
-    lv_obj_t* lib_btn = lv_obj_find_by_name(picker_backdrop_, "layout_btn_library");
-    lv_obj_t* det_btn = lv_obj_find_by_name(picker_backdrop_, "layout_btn_detailed");
+    lv_obj_t* lib_btn = lv_obj_find_by_name(backdrop, "layout_btn_library");
+    lv_obj_t* det_btn = lv_obj_find_by_name(backdrop, "layout_btn_detailed");
     if (lib_btn && det_btn) {
-        bool detailed = (layout_style_ == "detailed");
-        lv_obj_t* active = detailed ? det_btn : lib_btn;
+        bool detailed = (owner_.layout_style_ == "detailed");
+        lv_obj_t* active_btn = detailed ? det_btn : lib_btn;
         lv_obj_t* inactive = detailed ? lib_btn : det_btn;
         lv_color_t accent = theme_manager_get_color("primary");
-        lv_obj_set_style_bg_color(active, accent, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(active, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(active_btn, accent, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(active_btn, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(inactive, LV_OPA_TRANSP, LV_PART_MAIN);
     } else {
         spdlog::warn("[PrintStatusWidget] picker layout buttons not found "
@@ -1406,22 +1431,23 @@ void PrintStatusWidget::apply_picker_visuals() {
     }
 
     // Show Sections only applies to the Library layout — hide in Detailed.
-    lv_obj_t* show_sections = lv_obj_find_by_name(picker_backdrop_, "show_sections_group");
+    lv_obj_t* show_sections = lv_obj_find_by_name(backdrop, "show_sections_group");
     if (show_sections) {
-        if (layout_style_ == "detailed")
+        if (owner_.layout_style_ == "detailed")
             lv_obj_add_flag(show_sections, LV_OBJ_FLAG_HIDDEN);
         else
             lv_obj_remove_flag(show_sections, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
-void PrintStatusWidget::apply_picker_state() {
-    if (!picker_backdrop_)
+void PrintStatusWidget::ConfigurePicker::apply_state() {
+    lv_obj_t* backdrop = menu();
+    if (!backdrop)
         return;
 
-    apply_picker_visuals();
+    apply_visuals();
 
-    lv_obj_t* option_list = lv_obj_find_by_name(picker_backdrop_, "option_list");
+    lv_obj_t* option_list = lv_obj_find_by_name(backdrop, "option_list");
     if (!option_list)
         return;
 
@@ -1440,92 +1466,72 @@ void PrintStatusWidget::apply_picker_state() {
         return true;
     };
 
-    show_title_ = read_checkbox("opt_title");
-    show_print_files_ = read_checkbox("opt_print_files");
-    show_reprint_last_ = read_checkbox("opt_reprint_last");
-    show_recent_prints_ = read_checkbox("opt_recent_prints");
-    show_job_queue_ = read_checkbox("opt_job_queue");
+    owner_.show_title_ = read_checkbox("opt_title");
+    owner_.show_print_files_ = read_checkbox("opt_print_files");
+    owner_.show_reprint_last_ = read_checkbox("opt_reprint_last");
+    owner_.show_recent_prints_ = read_checkbox("opt_recent_prints");
+    owner_.show_job_queue_ = read_checkbox("opt_job_queue");
 
     // Persist
-    nlohmann::json new_config = config_;
-    new_config["show_title"] = show_title_;
-    new_config["show_print_files"] = show_print_files_;
-    new_config["show_reprint_last"] = show_reprint_last_;
-    new_config["show_recent_prints"] = show_recent_prints_;
-    new_config["show_job_queue"] = show_job_queue_;
-    config_ = new_config;
-    save_widget_config(new_config);
+    nlohmann::json new_config = owner_.config_;
+    new_config["show_title"] = owner_.show_title_;
+    new_config["show_print_files"] = owner_.show_print_files_;
+    new_config["show_reprint_last"] = owner_.show_reprint_last_;
+    new_config["show_recent_prints"] = owner_.show_recent_prints_;
+    new_config["show_job_queue"] = owner_.show_job_queue_;
+    owner_.config_ = new_config;
+    owner_.save_widget_config(new_config);
 
     // Apply visibility immediately
-    apply_visibility_config();
+    owner_.apply_visibility_config();
 
     spdlog::info("[PrintStatusWidget] Config updated: title={}, print_files={}, reprint_last={}, "
                  "recent_prints={}, job_queue={}",
-                 show_title_, show_print_files_, show_reprint_last_, show_recent_prints_,
-                 show_job_queue_);
+                 owner_.show_title_, owner_.show_print_files_, owner_.show_reprint_last_,
+                 owner_.show_recent_prints_, owner_.show_job_queue_);
 }
 
-void PrintStatusWidget::dismiss_configure_picker() {
-    if (!picker_backdrop_) {
-        return;
-    }
+void PrintStatusWidget::ConfigurePicker::select_layout(const char* style) {
+    owner_.layout_style_ = style;
+    owner_.config_["layout_style"] = style;
+    lv_subject_set_int(&layout_mode_subject_, std::string_view(style) == "detailed" ? 1 : 0);
+    apply_state();
+    // Apply to the live widget immediately so the user sees the swap behind the picker overlay.
+    owner_.update_idle_compact_mode();
+    owner_.update_active_layout_mode();
+}
 
-    s_active_picker_ = nullptr;
-    helix::ui::safe_delete_deferred(picker_backdrop_);
+void PrintStatusWidget::ConfigurePicker::on_backdrop_clicked() {
+    apply_state();
+    hide();
+    owner_.regate_after_configure();
+}
 
-    spdlog::debug("[PrintStatusWidget] Configure picker dismissed");
-
-    // After the user changed layout_style, re-run width gating so the change
-    // takes effect immediately on the visible widget.
+void PrintStatusWidget::regate_after_configure() {
+    // A layout_style change only reaches the visible widget once width gating has
+    // been re-run against the last size the grid granted this tile.
     if (widget_obj_) {
+        spdlog::debug("[PrintStatusWidget] Re-gating after configure picker ({}x{}px)",
+                      last_width_px_, last_height_px_);
         on_size_changed(0, 0, last_width_px_, last_height_px_);
     }
 }
 
-void PrintStatusWidget::print_status_picker_backdrop_cb(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStatusWidget] print_status_picker_backdrop_cb");
-    (void)e;
-    if (s_active_picker_) {
-        s_active_picker_->apply_picker_state();
-        s_active_picker_->dismiss_configure_picker();
-    }
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PrintStatusWidget::print_status_picker_done_cb(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStatusWidget] print_status_picker_done_cb");
-    (void)e;
-    if (s_active_picker_) {
-        s_active_picker_->apply_picker_state();
-        s_active_picker_->dismiss_configure_picker();
-    }
-    LVGL_SAFE_EVENT_CB_END();
-}
-
 void PrintStatusWidget::print_status_layout_library_cb(lv_event_t* /*e*/) {
     LVGL_SAFE_EVENT_CB_BEGIN("[PrintStatusWidget] print_status_layout_library_cb");
-    if (!s_active_picker_)
-        return;
-    s_active_picker_->layout_style_ = "library";
-    s_active_picker_->config_["layout_style"] = "library";
-    lv_subject_set_int(&layout_mode_subject_, 0);
-    s_active_picker_->apply_picker_state();
-    // Apply to the live widget immediately so the user sees the swap behind the picker overlay.
-    s_active_picker_->update_idle_compact_mode();
-    s_active_picker_->update_active_layout_mode();
+    // The buttons live inside the configure picker's own card, so the menu on
+    // screen when one is tapped is the picker that owns them.
+    if (auto* picker = helix::ui::ContextMenu::active_as<ConfigurePicker>()) {
+        picker->select_layout("library");
+    }
     LVGL_SAFE_EVENT_CB_END();
 }
 
 void PrintStatusWidget::print_status_layout_detailed_cb(lv_event_t* /*e*/) {
     LVGL_SAFE_EVENT_CB_BEGIN("[PrintStatusWidget] print_status_layout_detailed_cb");
-    if (!s_active_picker_)
-        return;
-    s_active_picker_->layout_style_ = "detailed";
-    s_active_picker_->config_["layout_style"] = "detailed";
-    lv_subject_set_int(&layout_mode_subject_, 1);
-    s_active_picker_->apply_picker_state();
-    s_active_picker_->update_idle_compact_mode();
-    s_active_picker_->update_active_layout_mode();
+    if (auto* picker = helix::ui::ContextMenu::active_as<ConfigurePicker>()) {
+        picker->select_layout("detailed");
+    }
     LVGL_SAFE_EVENT_CB_END();
 }
 
@@ -1534,7 +1540,7 @@ void PrintStatusWidget::print_status_layout_detailed_cb(lv_event_t* /*e*/) {
 // ============================================================================
 
 void PrintStatusWidget::show_nozzle_tool_picker(lv_obj_t* anchor) {
-    if (nozzle_picker_backdrop_ || !parent_screen_)
+    if (nozzle_picker_.is_visible() || !parent_screen_ || !anchor)
         return;
 
     // Single-tool printer: picker has nothing useful to offer. The whole
@@ -1544,29 +1550,17 @@ void PrintStatusWidget::show_nozzle_tool_picker(lv_obj_t* anchor) {
         return;
     }
 
-    nozzle_picker_backdrop_ = static_cast<lv_obj_t*>(
-        lv_xml_create(parent_screen_, "print_status_nozzle_tool_picker", nullptr));
-    if (!nozzle_picker_backdrop_) {
-        spdlog::error("[PrintStatusWidget] Failed to create nozzle tool picker");
-        return;
-    }
+    // Left edge flush with the nozzle readout the tap came from, so the card
+    // reads as hanging off that slot rather than off the whole print card.
+    nozzle_picker_.show_below_widget(parent_screen_, anchor,
+                                     helix::ui::ContextMenu::AnchorAlign::Left);
+}
 
-    lv_obj_t* option_list = lv_obj_find_by_name(nozzle_picker_backdrop_, "option_list");
+void PrintStatusWidget::NozzleToolPicker::on_created(lv_obj_t* backdrop) {
+    lv_obj_t* option_list = lv_obj_find_by_name(backdrop, "option_list");
     if (!option_list) {
         spdlog::error("[PrintStatusWidget] option_list not found in nozzle picker XML");
-        helix::ui::safe_delete_deferred(nozzle_picker_backdrop_);
-        nozzle_picker_backdrop_ = nullptr;
         return;
-    }
-
-    // Give the context_menu an explicit width before adding rows. The XML has
-    // width=content; option_list inside has width=100%, which would otherwise
-    // resolve against a still-zero content area (L082) and collapse rows to
-    // zero width. Same trick the configure picker uses.
-    if (lv_obj_t* card = lv_obj_find_by_name(nozzle_picker_backdrop_, "context_menu")) {
-        int screen_w = lv_obj_get_width(parent_screen_);
-        int card_w = std::clamp(screen_w * 3 / 10, 160, 240);
-        lv_obj_set_width(card, card_w);
     }
 
     // Resolve a couple of space tokens for padding.
@@ -1576,7 +1570,7 @@ void PrintStatusWidget::show_nozzle_tool_picker(lv_obj_t* anchor) {
     };
     int space_sm = resolve_space("space_sm", 6);
 
-    auto add_row = [option_list, space_sm](const char* label, const std::string& tool_key) {
+    auto add_row = [this, option_list, space_sm](const char* label, const std::string& tool_key) {
         // Plain lv_obj row with a centered label — same shape the configure
         // picker uses for its checkbox rows. Going through lv_xml_create on
         // ui_button didn't render reliably here.
@@ -1594,32 +1588,37 @@ void PrintStatusWidget::show_nozzle_tool_picker(lv_obj_t* anchor) {
         lv_obj_set_style_text_color(lbl, theme_manager_get_color("text"), 0);
         lv_obj_remove_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
 
-        auto* key_holder = new std::string(tool_key);
-        lv_obj_set_user_data(row, key_holder);
+        lv_obj_set_user_data(row, new RowPayload{this, tool_key});
+
         lv_obj_add_event_cb(
             row,
             [](lv_event_t* e) {
                 LVGL_SAFE_EVENT_CB_BEGIN("nozzle_picker_row_cb");
-                auto* btn = lv_event_get_current_target_obj(e);
-                auto* holder = static_cast<std::string*>(lv_obj_get_user_data(btn));
-                if (!s_active_nozzle_picker_ || !holder)
+                auto* target = lv_event_get_current_target_obj(e);
+                auto* payload = static_cast<RowPayload*>(lv_obj_get_user_data(target));
+                if (!payload)
                     return;
-                auto* self = s_active_nozzle_picker_;
-                self->nozzle_tool_override_ = *holder;
-                self->config_["nozzle_tool_override"] = *holder;
+
+                // Copy the key: hide() takes the row - and this payload - with it.
+                std::string tool_key = payload->tool_key;
+                NozzleToolPicker* picker = payload->picker;
+                picker->hide();
+
+                picker->owner_.nozzle_tool_override_ = tool_key;
+                picker->owner_.config_["nozzle_tool_override"] = tool_key;
                 if (s_formatter_)
-                    s_formatter_->set_nozzle_tool_override(*holder);
-                self->dismiss_nozzle_tool_picker();
+                    s_formatter_->set_nozzle_tool_override(tool_key);
                 LVGL_SAFE_EVENT_CB_END();
             },
             LV_EVENT_CLICKED, nullptr);
+
         lv_obj_add_event_cb(
             row,
             [](lv_event_t* e) {
                 LVGL_SAFE_EVENT_CB_BEGIN("nozzle_picker_row_delete_cb");
-                auto* btn = lv_event_get_current_target_obj(e);
-                auto* holder = static_cast<std::string*>(lv_obj_get_user_data(btn));
-                delete holder;
+                auto* target = lv_event_get_current_target_obj(e);
+                delete static_cast<RowPayload*>(lv_obj_get_user_data(target));
+                lv_obj_set_user_data(target, nullptr);
                 LVGL_SAFE_EVENT_CB_END();
             },
             LV_EVENT_DELETE, nullptr);
@@ -1629,7 +1628,7 @@ void PrintStatusWidget::show_nozzle_tool_picker(lv_obj_t* anchor) {
     // Use the same display names PrinterTemperatureState exposes — "Nozzle 1",
     // "Nozzle 2", ... — for parity with the temp_graph config modal and the
     // multi-tool nozzle_temps widget.
-    const auto& exts = printer_state_.temperature_state().extruders();
+    const auto& exts = owner_.printer_state_.temperature_state().extruders();
     int count = ToolState::instance().tool_count();
     for (int i = 0; i < count; ++i) {
         std::string name = (i == 0) ? "extruder" : ("extruder" + std::to_string(i));
@@ -1645,65 +1644,7 @@ void PrintStatusWidget::show_nozzle_tool_picker(lv_obj_t* anchor) {
         add_row(label.c_str(), name);
     }
 
-    s_active_nozzle_picker_ = this;
-
-    lv_obj_add_event_cb(
-        nozzle_picker_backdrop_,
-        [](lv_event_t* e) {
-            LVGL_SAFE_EVENT_CB_BEGIN("nozzle_picker_backdrop_delete_cb");
-            if (s_active_nozzle_picker_ && s_active_nozzle_picker_->nozzle_picker_backdrop_ ==
-                                               lv_event_get_current_target_obj(e)) {
-                s_active_nozzle_picker_->nozzle_picker_backdrop_ = nullptr;
-                s_active_nozzle_picker_ = nullptr;
-            }
-            LVGL_SAFE_EVENT_CB_END();
-        },
-        LV_EVENT_DELETE, nullptr);
-
-    // Position context menu near the anchor with overflow clamp
-    lv_obj_t* card = lv_obj_find_by_name(nozzle_picker_backdrop_, "context_menu");
-    if (card && anchor) {
-        lv_obj_update_layout(anchor);
-        lv_obj_update_layout(card);
-        lv_area_t a;
-        lv_obj_get_coords(anchor, &a);
-        int screen_h = lv_obj_get_height(parent_screen_);
-        int screen_w = lv_obj_get_width(parent_screen_);
-        int card_h = lv_obj_get_height(card);
-        int card_w = lv_obj_get_width(card);
-        int card_y = a.y2 + 4;
-        if (card_y + card_h > screen_h - 8) {
-            // Flip above the anchor
-            card_y = a.y1 - card_h - 4;
-            if (card_y < 8)
-                card_y = 8;
-        }
-        int card_x = a.x1;
-        if (card_x + card_w > screen_w - 8) {
-            card_x = screen_w - card_w - 8;
-        }
-        if (card_x < 8)
-            card_x = 8;
-        lv_obj_set_pos(card, card_x, card_y);
-    }
-
-    spdlog::debug("[PrintStatusWidget] Nozzle tool picker shown");
-}
-
-void PrintStatusWidget::dismiss_nozzle_tool_picker() {
-    if (!nozzle_picker_backdrop_)
-        return;
-    s_active_nozzle_picker_ = nullptr;
-    helix::ui::safe_delete_deferred(nozzle_picker_backdrop_);
-    nozzle_picker_backdrop_ = nullptr;
-    spdlog::debug("[PrintStatusWidget] Nozzle tool picker dismissed");
-}
-
-void PrintStatusWidget::print_status_nozzle_picker_backdrop_cb(lv_event_t* /*e*/) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStatusWidget] print_status_nozzle_picker_backdrop_cb");
-    if (s_active_nozzle_picker_)
-        s_active_nozzle_picker_->dismiss_nozzle_tool_picker();
-    LVGL_SAFE_EVENT_CB_END();
+    spdlog::debug("[PrintStatusWidget] Nozzle tool picker built with {} tools", count);
 }
 
 // ============================================================================
@@ -1827,21 +1768,13 @@ int cd_to_c(int cd) {
 }
 } // namespace
 
-void PrintStatusWidget::DetailedFormatter::update_progress_pct() {
-    int pct = lv_subject_get_int(get_printer_state().get_print_progress_subject());
-    snprintf(progress_pct_buf_, sizeof(progress_pct_buf_), "%d%%", pct);
-    lv_subject_copy_string(&progress_pct_subject_, progress_pct_buf_);
-}
-
 void PrintStatusWidget::DetailedFormatter::update_layer_text() {
     auto& ps = get_printer_state();
     int cur = lv_subject_get_int(ps.get_print_layer_current_subject());
     int tot = lv_subject_get_int(ps.get_print_layer_total_subject());
-    if (tot <= 0) {
-        snprintf(layer_text_buf_, sizeof(layer_text_buf_), "Layer %d", cur);
-    } else {
-        snprintf(layer_text_buf_, sizeof(layer_text_buf_), "Layer %d / %d", cur, tot);
-    }
+    std::string text = helix::ui::format_layer_progress(
+        cur, tot, ps.layer_is_accurate(), lv_subject_get_int(ps.get_gcode_position_z_subject()));
+    snprintf(layer_text_buf_, sizeof(layer_text_buf_), "%s", text.c_str());
     lv_subject_copy_string(&layer_text_subject_, layer_text_buf_);
 }
 
@@ -1850,8 +1783,9 @@ void PrintStatusWidget::DetailedFormatter::update_time_text() {
     int elapsed = lv_subject_get_int(ps.get_print_elapsed_subject());
     int remain = lv_subject_get_int(ps.get_print_time_left_subject());
     int total = elapsed + remain;
-    snprintf(time_text_buf_, sizeof(time_text_buf_), "%dh %02dm / %dh %02dm", elapsed / 3600,
-             (elapsed % 3600) / 60, total / 3600, (total % 3600) / 60);
+    std::string text =
+        helix::format::duration_padded(elapsed) + " / " + helix::format::duration_padded(total);
+    snprintf(time_text_buf_, sizeof(time_text_buf_), "%s", text.c_str());
     lv_subject_copy_string(&time_text_subject_, time_text_buf_);
 }
 
@@ -1860,8 +1794,9 @@ void PrintStatusWidget::DetailedFormatter::update_filament_text() {
     if (used_mm <= 0) {
         filament_text_buf_[0] = '\0';
     } else {
-        snprintf(filament_text_buf_, sizeof(filament_text_buf_), "Filament: %.1fm",
-                 used_mm / 1000.0);
+        std::string text = std::string(lv_tr("Filament")) + ": " +
+                           helix::format::format_filament_length(static_cast<double>(used_mm));
+        snprintf(filament_text_buf_, sizeof(filament_text_buf_), "%s", text.c_str());
     }
     lv_subject_copy_string(&filament_text_subject_, filament_text_buf_);
 
@@ -1900,9 +1835,8 @@ void PrintStatusWidget::DetailedFormatter::update_nozzle_text() {
     // String form kept for the (unused-by-XML but test-asserted) nozzle_text
     // subject, so test_print_status_widget_tool_override.cpp still verifies
     // the pinning + auto-mode dispatch.
-    int t = cd_to_c(temp_dd);
-    int tg = cd_to_c(tgt_dd);
-    snprintf(nozzle_text_buf_, sizeof(nozzle_text_buf_), "%d / %d°C", t, tg);
+    helix::ui::temperature::format_temperature_pair(cd_to_c(temp_dd), cd_to_c(tgt_dd),
+                                                    nozzle_text_buf_, sizeof(nozzle_text_buf_));
     lv_subject_copy_string(&nozzle_text_subject_, nozzle_text_buf_);
 }
 
@@ -2050,8 +1984,6 @@ void PrintStatusWidget::DetailedFormatter::update_idle_fields() {
 }
 
 PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
-    UI_MANAGED_SUBJECT_STRING(progress_pct_subject_, progress_pct_buf_, "0%",
-                              "print_status_progress_pct", subjects_);
     UI_MANAGED_SUBJECT_STRING(layer_text_subject_, layer_text_buf_, "", "print_status_layer_text",
                               subjects_);
     UI_MANAGED_SUBJECT_STRING(time_text_subject_, time_text_buf_, "0h 00m / 0h 00m",
@@ -2085,7 +2017,6 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
         if (auto* hm = get_print_history_manager()) {
             hm->remove_observer(&s_formatter_->history_cb_);
         }
-        s_formatter_->progress_observer_.reset();
         s_formatter_->layer_current_observer_.reset();
         s_formatter_->layer_total_observer_.reset();
         s_formatter_->elapsed_observer_.reset();
@@ -2103,9 +2034,6 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
 
     using helix::ui::observe_int_sync;
     auto& ps = get_printer_state();
-    progress_observer_ = observe_int_sync<DetailedFormatter>(
-        ps.get_print_progress_subject(), this,
-        [](DetailedFormatter* self, int) { self->update_progress_pct(); });
     layer_current_observer_ = observe_int_sync<DetailedFormatter>(
         ps.get_print_layer_current_subject(), this,
         [](DetailedFormatter* self, int) { self->update_layer_text(); });
@@ -2134,7 +2062,6 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
     // for those. The nozzle path still mirrors because pinning rebinds it.
 
     // Seed initial values from current subject state
-    update_progress_pct();
     update_layer_text();
     update_time_text();
     update_filament_text();
@@ -2195,7 +2122,6 @@ PrintStatusWidget::DetailedFormatter::~DetailedFormatter() {
     if (auto* hm = get_print_history_manager()) {
         hm->remove_observer(&history_cb_);
     }
-    progress_observer_.reset();
     layer_current_observer_.reset();
     layer_total_observer_.reset();
     elapsed_observer_.reset();

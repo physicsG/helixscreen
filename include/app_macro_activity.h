@@ -17,7 +17,7 @@ namespace helix {
  * thread.
  *
  * SCOPE: consulted ONLY by the busy-toast decision in
- * MoonrakerAPI::execute_gcode. Neither PrinterState::is_blocking_operation_active()
+ * IMoonrakerAPI::execute_gcode. Neither PrinterState::is_blocking_operation_active()
  * nor is_external_blocking_operation_active() reads it, and neither may start:
  * those predicates also gate motion, and letting a late jog through during a
  * filament op is a toolhead-collision hazard (#1108). Blast radius is one
@@ -29,7 +29,7 @@ namespace helix {
  * in the gap between "Moonraker acked the macro" and "idle_timeout finally
  * cleared" would still see a blocking op with nothing outstanding, and toast.
  *
- * Invariant: MoonrakerAPI::execute_gcode wraps BOTH the success and error
+ * Invariant: IMoonrakerAPI::execute_gcode wraps BOTH the success and error
  * callback of every stamped send — including when the caller supplied neither,
  * which is the common case for macro sends — so inflight_ stays balanced.
  */

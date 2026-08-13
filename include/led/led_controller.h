@@ -16,9 +16,9 @@
 
 #include "hv/json.hpp"
 
-class MoonrakerAPI;
+class IMoonrakerAPI;
 namespace helix {
-class MoonrakerClient;
+class IMoonrakerClient;
 }
 
 namespace helix {
@@ -44,7 +44,7 @@ class NativeBackend {
 
     NativeBackend() = default;
 
-    void set_api(MoonrakerAPI* api) {
+    void set_api(IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -69,7 +69,7 @@ class NativeBackend {
     using SuccessCallback = std::function<void()>;
     using ErrorCallback = std::function<void(const std::string&)>;
 
-    // `on_queued` is the third disposition MoonrakerAPI::execute_gcode offers:
+    // `on_queued` is the third disposition IMoonrakerAPI::execute_gcode offers:
     // SET_LED is discretionary, so while an external blocking op holds Klipper's
     // gcode lock the command is queued fire-and-forget and its RPC response is
     // dropped — neither on_success nor on_error will ever fire. Pass on_queued to
@@ -107,7 +107,7 @@ class NativeBackend {
     }
 
   private:
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
     std::vector<LedStripInfo> strips_;
     std::unordered_map<std::string, StripColor> strip_colors_;
     ColorChangeCallback color_change_cb_;
@@ -117,7 +117,7 @@ class LedEffectBackend {
   public:
     LedEffectBackend() = default;
 
-    void set_api(MoonrakerAPI* api) {
+    void set_api(IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -168,7 +168,7 @@ class LedEffectBackend {
     static std::string display_name_for_effect(const std::string& config_name);
 
   private:
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
     std::vector<LedEffectInfo> effects_;
 };
 
@@ -176,10 +176,10 @@ class WledBackend {
   public:
     WledBackend() = default;
 
-    void set_api(MoonrakerAPI* api) {
+    void set_api(IMoonrakerAPI* api) {
         api_ = api;
     }
-    void set_client(MoonrakerClient* client) {
+    void set_client(IMoonrakerClient* client) {
         client_ = client;
     }
 
@@ -231,8 +231,8 @@ class WledBackend {
                                    std::function<void()> on_complete = nullptr);
 
   private:
-    MoonrakerAPI* api_ = nullptr;
-    MoonrakerClient* client_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
+    IMoonrakerClient* client_ = nullptr;
     std::vector<LedStripInfo> strips_;
     std::unordered_map<std::string, std::string> strip_addresses_;
     std::unordered_map<std::string, std::vector<WledPresetInfo>> strip_presets_;
@@ -244,7 +244,7 @@ class MacroBackend {
   public:
     MacroBackend() = default;
 
-    void set_api(MoonrakerAPI* api) {
+    void set_api(IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -278,7 +278,7 @@ class MacroBackend {
     [[nodiscard]] bool has_known_state(const std::string& macro_name) const;
 
   private:
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
     std::vector<LedMacroInfo> macros_;
 };
 
@@ -286,7 +286,7 @@ class OutputPinBackend {
   public:
     OutputPinBackend() = default;
 
-    void set_api(MoonrakerAPI* api) {
+    void set_api(IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -333,7 +333,7 @@ class OutputPinBackend {
     void set_pin_pwm(const std::string& pin_id, bool is_pwm);
 
   private:
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
     std::vector<LedStripInfo> pins_;
     std::unordered_map<std::string, double> pin_values_;
 };
@@ -342,7 +342,7 @@ class LedController {
   public:
     static LedController& instance();
 
-    void init(MoonrakerAPI* api, MoonrakerClient* client);
+    void init(IMoonrakerAPI* api, IMoonrakerClient* client);
     void deinit();
 
     [[nodiscard]] bool is_initialized() const {
@@ -533,8 +533,8 @@ class LedController {
     LedController& operator=(const LedController&) = delete;
 
     bool initialized_ = false;
-    MoonrakerAPI* api_ = nullptr;
-    MoonrakerClient* client_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
+    IMoonrakerClient* client_ = nullptr;
     helix::AsyncLifetimeGuard lifetime_;
 
     NativeBackend native_;

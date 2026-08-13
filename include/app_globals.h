@@ -11,11 +11,14 @@
 
 // Forward declarations
 namespace helix {
-class MoonrakerClient;
+class IMoonrakerClient;
 class TemperatureController;
 } // namespace helix
-class MoonrakerAPI;
+class IMoonrakerAPI;
 class MoonrakerManager;
+#ifdef HELIX_ENABLE_MOCKS
+class MoonrakerClientMock;
+#endif
 namespace helix {
 class PrinterState;
 }
@@ -27,25 +30,47 @@ class TemperatureHistoryManager;
  * @brief Get global MoonrakerClient instance
  * @return Pointer to global MoonrakerClient (may be nullptr if not initialized)
  */
-helix::MoonrakerClient* get_moonraker_client();
+helix::IMoonrakerClient* get_moonraker_client();
 
 /**
  * @brief Set global MoonrakerClient instance (called by main.cpp during init)
  * @param client Pointer to MoonrakerClient instance
  */
-void set_moonraker_client(helix::MoonrakerClient* client);
+void set_moonraker_client(helix::IMoonrakerClient* client);
+
+#ifdef HELIX_ENABLE_MOCKS
+/**
+ * @brief Get the global client under its concrete mock type
+ *
+ * Non-null only while the registered client is a MoonrakerClientMock. Consumers
+ * that need the mock-only API (AmsBackend's simulated-gcode-tool subscription)
+ * read this instead of downcasting get_moonraker_client() — the firmware builds
+ * -fno-rtti and the desktop build must not diverge.
+ *
+ * @return Pointer to the mock client, or nullptr on a real-client run
+ */
+MoonrakerClientMock* get_moonraker_client_mock();
 
 /**
- * @brief Get global MoonrakerAPI instance
- * @return Pointer to global MoonrakerAPI (may be nullptr if not initialized)
+ * @brief Publish the global client under its concrete mock type
+ *
+ * Called by MoonrakerManager::create_client(), which is the one place that
+ * knows what it built. Pass nullptr when the client is real or being torn down.
  */
-MoonrakerAPI* get_moonraker_api();
+void set_moonraker_client_mock(MoonrakerClientMock* client);
+#endif
 
 /**
- * @brief Set global MoonrakerAPI instance (called by main.cpp during init)
- * @param api Pointer to MoonrakerAPI instance
+ * @brief Get global IMoonrakerAPI instance
+ * @return Pointer to global IMoonrakerAPI (may be nullptr if not initialized)
  */
-void set_moonraker_api(MoonrakerAPI* api);
+IMoonrakerAPI* get_moonraker_api();
+
+/**
+ * @brief Set global IMoonrakerAPI instance (called by main.cpp during init)
+ * @param api Pointer to IMoonrakerAPI instance
+ */
+void set_moonraker_api(IMoonrakerAPI* api);
 
 /**
  * @brief Get the global TemperatureController (shared resource registered by SubjectInitializer)

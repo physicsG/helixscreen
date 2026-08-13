@@ -59,11 +59,11 @@
 #include "format_utils.h"
 #include "hardware_validator.h"
 #include "helix_version.h"
+#include "i_moonraker_api.h"
+#include "i_moonraker_client.h"
 #include "input_settings_manager.h"
 #include "led/led_controller.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
-#include "moonraker_client.h"
 #include "moonraker_manager.h"
 #include "observer_factory.h"
 #include "platform_info.h"
@@ -93,7 +93,7 @@ using namespace helix;
 // CONSTRUCTOR
 // ============================================================================
 
-SettingsPanel::SettingsPanel(PrinterState& printer_state, MoonrakerAPI* api)
+SettingsPanel::SettingsPanel(PrinterState& printer_state, IMoonrakerAPI* api)
     : PanelBase(printer_state, api) {
     spdlog::trace("[{}] Constructor", get_name());
 }
@@ -257,6 +257,21 @@ static void on_scroll_limit_changed(lv_event_t* e) {
     get_global_settings_panel().show_restart_prompt();
 }
 
+static void on_long_press_time_changed(lv_event_t* e) {
+    lv_obj_t* slider = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    int value = static_cast<int>(lv_slider_get_value(slider));
+    sync_slider_value_label(slider, value);
+    InputSettingsManager::instance().set_long_press_time(value);
+    // No restart prompt — set_long_press_time live-applies via lv_indev_set_long_press_time.
+}
+
+static void on_home_edit_mode_changed(lv_event_t* e) {
+    lv_obj_t* toggle = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    InputSettingsManager::instance().set_home_edit_mode_enabled(
+        lv_obj_has_state(toggle, LV_STATE_CHECKED));
+    // No restart prompt — should_suppress_edit_mode checks this live.
+}
+
 static void on_scroll_guard_changed(lv_event_t* e) {
     lv_obj_t* toggle = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
     InputSettingsManager::instance().set_scroll_guard(lv_obj_has_state(toggle, LV_STATE_CHECKED));
@@ -313,8 +328,13 @@ void SettingsPanel::init_subjects() {
 #ifdef HELIX_DISPLAY_SDL
     bool show_touch_cal = get_runtime_config()->is_test_mode();
 #else
+    // supports_ (any real touch panel), NOT needs_ (auto-fire the first-run
+    // wizard). The auto-fire heuristic keys off controller name and ABS range,
+    // and neither can see a touch panel mounted 90° from the display — so
+    // gating the manual entry point on it left those users with no way in
+    // (prestonbrown/helixscreen#1259).
     DisplayManager* dm = DisplayManager::instance();
-    bool show_touch_cal = dm && dm->needs_touch_calibration();
+    bool show_touch_cal = dm && dm->supports_touch_calibration();
 #endif
     lv_subject_init_int(&show_touch_calibration_subject_, show_touch_cal ? 1 : 0);
     subjects_.register_subject(&show_touch_calibration_subject_);
@@ -325,7 +345,12 @@ void SettingsPanel::init_subjects() {
     // Platform visibility subjects — hidden on Android where OS manages these
     bool on_android = helix::is_android_platform();
 
-    lv_subject_init_int(&show_network_settings_subject_, on_android ? 0 : 1);
+    // Task 13: un-hidden on ESP32 now that WifiBackend over esp_wifi
+    // (wifi_backend_esp.cpp) backs wifi_manager.h for real — Ethernet stays
+    // out of scope (ethernet_manager.h still resolves to the
+    // helixapp_platform_stubs.cpp seam; no ESP32 wired-network HIL exists).
+    bool show_network_settings = !on_android;
+    lv_subject_init_int(&show_network_settings_subject_, show_network_settings ? 1 : 0);
     subjects_.register_subject(&show_network_settings_subject_);
     lv_xml_register_subject(nullptr, "show_network_settings", &show_network_settings_subject_);
 
@@ -377,6 +402,8 @@ void SettingsPanel::init_subjects() {
         {"on_debug_touches_changed", on_debug_touches_changed},
         {"on_jitter_threshold_changed", on_jitter_threshold_changed},
         {"on_scroll_limit_changed", on_scroll_limit_changed},
+        {"on_long_press_time_changed", on_long_press_time_changed},
+        {"on_home_edit_mode_changed", on_home_edit_mode_changed},
         {"on_scroll_guard_changed", on_scroll_guard_changed},
 
         // Toggle switches
@@ -960,7 +987,7 @@ void SettingsPanel::handle_spoolman_settings_clicked() {
         overlay.init_subjects();
         overlay.register_callbacks();
     }
-    MoonrakerAPI* api = get_moonraker_api();
+    IMoonrakerAPI* api = get_moonraker_api();
     if (api) {
         overlay.set_api(api);
     }
@@ -1041,8 +1068,8 @@ void SettingsPanel::handle_power_devices_clicked() {
 
 void SettingsPanel::handle_touch_calibration_clicked() {
     DisplayManager* dm = DisplayManager::instance();
-    if (dm && !dm->needs_touch_calibration()) {
-        spdlog::debug("[{}] Touch calibration not needed for this device", get_name());
+    if (dm && !dm->supports_touch_calibration()) {
+        spdlog::debug("[{}] No calibratable touch device", get_name());
         return;
     }
 
@@ -1120,6 +1147,7 @@ void SettingsPanel::handle_factory_reset_clicked() {
 }
 
 void SettingsPanel::handle_plugins_clicked() {
+#if HELIX_HAS_PLUGINS
     spdlog::debug("[{}] Plugins clicked - opening overlay", get_name());
 
     auto& overlay = get_settings_plugins_overlay();
@@ -1135,6 +1163,11 @@ void SettingsPanel::handle_plugins_clicked() {
         NavigationManager::instance().register_overlay_instance(overlay.get_root(), &overlay);
         NavigationManager::instance().push_overlay(overlay.get_root());
     }
+#else
+    // Plugin system compiled out (HELIX_HAS_PLUGINS=0) — row_plugins stays in the
+    // XML layout (see CLAUDE.md gcode_viewer precedent) but the click is inert.
+    spdlog::debug("[{}] Plugins clicked - plugin system compiled out, ignoring", get_name());
+#endif
 }
 
 void SettingsPanel::perform_factory_reset() {
@@ -1550,6 +1583,8 @@ void register_settings_panel_callbacks() {
         {"on_debug_touches_changed", on_debug_touches_changed},
         {"on_jitter_threshold_changed", on_jitter_threshold_changed},
         {"on_scroll_limit_changed", on_scroll_limit_changed},
+        {"on_long_press_time_changed", on_long_press_time_changed},
+        {"on_home_edit_mode_changed", on_home_edit_mode_changed},
         {"on_scroll_guard_changed", on_scroll_guard_changed},
         // Action row callbacks used in settings_panel.xml
         {"on_printers_clicked", SettingsPanel::on_printers_clicked},

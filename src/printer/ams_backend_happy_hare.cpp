@@ -9,7 +9,8 @@
 #include "config.h"
 #include "hh_defaults.h"
 #include "humidity_sensor_types.h"
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
+#include "json_utils.h"
 #include "operation_patterns.h" // helix::contains_ci
 
 #include <spdlog/fmt/fmt.h>
@@ -35,12 +36,16 @@ constexpr int kHappyHarePosUnloaded = 0;
 // Construction / Destruction
 // ============================================================================
 
-AmsBackendHappyHare::AmsBackendHappyHare(MoonrakerAPI* api, MoonrakerClient* client)
+AmsBackendHappyHare::AmsBackendHappyHare(IMoonrakerAPI* api, IMoonrakerClient* client)
     : AmsSubscriptionBackend(api, client) {
     // Initialize system info with Happy Hare defaults
     system_info_.type = AmsType::HAPPY_HARE;
     system_info_.type_name = "Happy Hare";
-    system_info_.supports_endless_spool = true;
+    // Endless spool AVAILABILITY is unconditional for Happy Hare and lives in
+    // get_endless_spool_capabilities(). This is the ENABLE bit, and it starts
+    // false so nothing claims the feature is running before mmu.
+    // endless_spool_enabled arrives (see handle_status_update).
+    system_info_.endless_spool_enabled = false;
     system_info_.supports_tool_mapping = true;
     // Bypass support is determined at runtime from mmu.has_bypass status field.
     // Starts false so the bypass UI stays absent until the firmware confirms it:
@@ -130,7 +135,7 @@ AmsSystemInfo AmsBackendHappyHare::get_system_info() const {
     info.current_toolchange = system_info_.current_toolchange;
     info.number_of_toolchanges = system_info_.number_of_toolchanges;
     info.filament_loaded = system_info_.filament_loaded;
-    info.supports_endless_spool = system_info_.supports_endless_spool;
+    info.endless_spool_enabled = system_info_.endless_spool_enabled;
     info.supports_tool_mapping = system_info_.supports_tool_mapping;
     info.supports_bypass = system_info_.supports_bypass;
     info.has_hardware_bypass_sensor = system_info_.has_hardware_bypass_sensor;
@@ -1046,6 +1051,19 @@ void AmsBackendHappyHare::parse_mmu_state(const nlohmann::json& mmu_data) {
             dryer_info_.active = any_active;
             spdlog::trace("[AMS HappyHare] Dryer state (array): supported=true, active={}",
                           any_active);
+        }
+    }
+
+    // Parse the endless-spool ENABLE bit. Happy Hare publishes it under two
+    // keys, both tagged DEPRECATED in mmu.py's get_status() with no replacement
+    // shipped, so read the newer spelling and fall back to the older one; a
+    // future HH that drops both leaves the flag at its last value rather than
+    // silently flipping to off. The bit gates apply_endless_spool_backup(),
+    // because cmd_MMU_ENDLESS_SPOOL ignores GROUPS while disabled.
+    for (const char* key : {"endless_spool_enabled", "endless_spool"}) {
+        if (mmu_data.contains(key) && !mmu_data[key].is_null()) {
+            system_info_.endless_spool_enabled = helix::json_util::safe_bool(mmu_data, key, false);
+            break;
         }
     }
 
@@ -2552,7 +2570,7 @@ AmsError AmsBackendHappyHare::set_slot_info(int slot_index, const SlotInfo& info
         }
 
         // Material (validate to prevent command injection)
-        if (!info.material.empty() && MoonrakerAPI::is_safe_gcode_param(info.material)) {
+        if (!info.material.empty() && IMoonrakerAPI::is_safe_gcode_param(info.material)) {
             cmd += fmt::format(" MATERIAL={}", info.material);
             has_changes = true;
         } else if (!info.material.empty()) {
@@ -2693,89 +2711,75 @@ bool AmsBackendHappyHare::is_bypass_active() const {
 }
 
 // ============================================================================
-// Endless Spool Operations (Read-Only)
+// Endless Spool Operations (group-based, runtime-editable on a single unit)
 // ============================================================================
 
 helix::printer::EndlessSpoolCapabilities
 AmsBackendHappyHare::get_endless_spool_capabilities() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    // Happy Hare uses group-based endless spool, settable at runtime via
-    // MMU_ENDLESS_SPOOL GROUPS=... The gcode has no UNIT= parameter and acts on the
-    // currently-selected unit, so editing is only safe on a single-unit MMU.
-    const bool single_unit = system_info_.units.size() <= 1;
-    return {true, single_unit,
-            single_unit ? "Happy Hare group-based (runtime editable)"
-                        : "Happy Hare group-based (read-only on multi-unit)"};
-}
+    using namespace helix::printer;
 
-std::vector<helix::printer::EndlessSpoolConfig>
-AmsBackendHappyHare::get_endless_spool_config() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    std::vector<helix::printer::EndlessSpoolConfig> configs;
+    EndlessSpoolCapabilities caps;
+    caps.availability = EndlessSpoolAvailability::Available;
+    // Derived from the transport-parsed carrier, never answered independently.
+    // mmu.endless_spool_enabled is the only source; when the subscription has
+    // not delivered a frame yet the flag is still false, which the NotReady
+    // restriction below is what actually communicates.
+    caps.enabled =
+        system_info_.endless_spool_enabled ? EndlessSpoolEnabled::On : EndlessSpoolEnabled::Off;
 
     if (!slots_.is_initialized()) {
-        return configs;
+        caps.editability = EndlessSpoolEditability::ReadOnly;
+        caps.restriction = EndlessSpoolRestriction::NotReady;
+        caps.enabled = EndlessSpoolEnabled::Unknown;
+        return caps;
     }
-
-    // Iterate through all slots and find backup slots based on endless_spool_group
-    for (int i = 0; i < slots_.slot_count(); ++i) {
-        const auto* entry = slots_.get(i);
-        if (!entry) {
-            continue;
-        }
-
-        helix::printer::EndlessSpoolConfig config;
-        config.slot_index = entry->info.global_index;
-        config.backup_slot = -1; // Default: no backup
-
-        if (entry->info.endless_spool_group >= 0) {
-            // Find another slot in the same group
-            for (int j = 0; j < slots_.slot_count(); ++j) {
-                if (j == i) {
-                    continue;
-                }
-                const auto* other = slots_.get(j);
-                if (other && other->info.endless_spool_group == entry->info.endless_spool_group) {
-                    config.backup_slot = other->info.global_index;
-                    break; // Use first match
-                }
-            }
-        }
-        configs.push_back(config);
+    // MMU_ENDLESS_SPOOL has no UNIT= and acts on the currently-selected unit, so
+    // a client cannot reliably target one unit's groups on an EMU rig.
+    if (system_info_.units.size() > 1) {
+        caps.editability = EndlessSpoolEditability::ReadOnly;
+        caps.restriction = EndlessSpoolRestriction::MultiUnit;
+        return caps;
     }
-
-    return configs;
+    caps.editability = EndlessSpoolEditability::Group;
+    return caps;
 }
 
-AmsError AmsBackendHappyHare::set_endless_spool_backup(int slot_index, int backup_slot) {
+helix::printer::EndlessSpoolConfig AmsBackendHappyHare::get_endless_spool_config() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!slots_.is_initialized()) {
+        return {};
+    }
+    // One group id per gate, straight from mmu.endless_spool_groups. The lossy
+    // "pick the first other member" step that used to happen right here is now a
+    // rendering concern (endless_spool_backup_edges), so a 4-gate group survives
+    // as one group instead of four arbitrary arrows.
+    std::vector<int> group_ids;
+    group_ids.reserve(static_cast<size_t>(slots_.slot_count()));
+    for (int i = 0; i < slots_.slot_count(); ++i) {
+        const auto* entry = slots_.get(i);
+        group_ids.push_back(entry ? entry->info.endless_spool_group : -1);
+    }
+    return helix::printer::endless_spool_config_from_groups(group_ids);
+}
+
+AmsError AmsBackendHappyHare::apply_endless_spool_backup(int slot_index, int backup_slot) {
     std::string csv;
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        if (!slots_.is_initialized()) {
-            return AmsErrorHelper::not_supported("Endless spool (MMU not ready)");
-        }
-        // MMU_ENDLESS_SPOOL has no UNIT= parameter and operates on the selected
-        // unit, so a client cannot reliably target a specific unit's groups.
-        if (system_info_.units.size() > 1) {
-            return AmsErrorHelper::not_supported("Endless spool editing on multi-unit Happy Hare");
+        // Availability, editability, ranges and self-backup are settled by
+        // AmsBackend::set_endless_spool_backup(). What is left is Happy Hare's
+        // own precondition: GROUPS is ignored while the feature is off.
+        if (!system_info_.endless_spool_enabled) {
+            return AmsError(AmsResult::WRONG_STATE,
+                            "MMU_ENDLESS_SPOOL ignores GROUPS while endless spool is disabled",
+                            "Endless spool is turned off on this MMU",
+                            "Turn endless spool on, then set the backup gate");
         }
 
         const int n = slots_.slot_count();
-        if (!slots_.is_valid_index(slot_index)) {
-            return AmsErrorHelper::invalid_slot(slot_index, n > 0 ? n - 1 : 0);
-        }
-        if (backup_slot != -1) {
-            if (!slots_.is_valid_index(backup_slot)) {
-                return AmsErrorHelper::invalid_slot(backup_slot, n > 0 ? n - 1 : 0);
-            }
-            if (backup_slot == slot_index) {
-                return AmsError(AmsResult::INVALID_SLOT, "Cannot use slot as its own backup",
-                                "A slot cannot be its own endless spool backup",
-                                "Select a different backup slot");
-            }
-        }
 
         // Build the GROUPS array (length == num_gates), indexed by gate. HH requires
         // a non-negative group id for every gate; gates with no group get a fresh
@@ -2823,8 +2827,10 @@ AmsError AmsBackendHappyHare::set_endless_spool_backup(int slot_index, int backu
 
     spdlog::info("[AMS HappyHare] Setting endless spool: slot {} backup {} -> GROUPS={}",
                  slot_index, backup_slot, csv);
-    // ENABLE=1 is required: HH ignores GROUPS while endless spool is disabled.
-    return execute_gcode("MMU_ENDLESS_SPOOL ENABLE=1 QUIET=1 GROUPS=" + csv);
+    // No ENABLE=: the guard above already established that endless spool is on,
+    // so GROUPS will be honoured, and passing ENABLE=1 would persist a state
+    // change the user did not ask for.
+    return execute_gcode("MMU_ENDLESS_SPOOL QUIET=1 GROUPS=" + csv);
 }
 
 AmsError AmsBackendHappyHare::reset_tool_mappings() {

@@ -15,6 +15,7 @@
 #include "advanced_panel_types.h"
 #include "belt_tension_types.h"
 #include "calibration_types.h"
+#include "i_moonraker_sub_apis.h"
 #include "moonraker_error.h"
 #include "moonraker_types.h"
 
@@ -28,7 +29,7 @@
 
 // Forward declarations
 namespace helix {
-class MoonrakerClient;
+class IMoonrakerClient;
 } // namespace helix
 class MoonrakerAPI;
 
@@ -47,7 +48,7 @@ class MoonrakerAPI;
  *   MoonrakerAdvancedAPI advanced(client, api);
  *   advanced.start_bed_mesh_calibrate(on_progress, on_complete, on_error);
  */
-class MoonrakerAdvancedAPI {
+class MoonrakerAdvancedAPI : public IAdvancedAPI {
   public:
     // ========== Timeout constants for long-running G-code commands ==========
     static constexpr uint32_t CALIBRATION_TIMEOUT_MS =
@@ -83,13 +84,11 @@ class MoonrakerAdvancedAPI {
     /// Callback for PID calibration result
     using PIDCalibrateCallback = std::function<void(float kp, float ki, float kd)>;
 
-    /// Result struct for MPC calibration
-    struct MPCResult {
-        float block_heat_capacity = 0;
-        float sensor_responsiveness = 0;
-        float ambient_transfer = 0;
-        std::string fan_ambient_transfer; // Comma-separated values like "0.12, 0.18, 0.25"
-    };
+    /// Result struct for MPC calibration.
+    /// Lives on IAdvancedAPI (start_mpc_calibrate is declared there); aliased
+    /// here so existing qualified references (MoonrakerAdvancedAPI::MPCResult)
+    /// keep resolving.
+    using MPCResult = IAdvancedAPI::MPCResult;
 
     /// Callback for MPC calibration result
     using MPCCalibrateCallback = std::function<void(const MPCResult&)>;
@@ -104,7 +103,7 @@ class MoonrakerAdvancedAPI {
      * @param client MoonrakerClient instance (must remain valid during API lifetime)
      * @param api MoonrakerAPI instance for G-code execution (must remain valid during API lifetime)
      */
-    MoonrakerAdvancedAPI(helix::MoonrakerClient& client, MoonrakerAPI& api);
+    MoonrakerAdvancedAPI(helix::IMoonrakerClient& client, MoonrakerAPI& api);
     virtual ~MoonrakerAdvancedAPI() = default;
 
     // ========================================================================
@@ -120,7 +119,7 @@ class MoonrakerAdvancedAPI {
      *
      * @return Pointer to active mesh profile, or nullptr if none loaded
      */
-    const BedMeshProfile* get_active_bed_mesh() const;
+    const BedMeshProfile* get_active_bed_mesh() const override;
 
     /**
      * @brief Update bed mesh data from Moonraker status
@@ -132,7 +131,7 @@ class MoonrakerAdvancedAPI {
      *
      * @param bed_mesh_data JSON object containing bed_mesh status fields
      */
-    void update_bed_mesh(const json& bed_mesh_data);
+    void update_bed_mesh(const json& bed_mesh_data) override;
 
     /**
      * @brief Get list of available mesh profile names
@@ -143,14 +142,14 @@ class MoonrakerAdvancedAPI {
      *
      * @return Vector of profile names
      */
-    std::vector<std::string> get_bed_mesh_profiles() const;
+    std::vector<std::string> get_bed_mesh_profiles() const override;
 
     /**
      * @brief Check if bed mesh data is available
      *
      * @return true if a mesh profile with valid probed_matrix is loaded
      */
-    bool has_bed_mesh() const;
+    bool has_bed_mesh() const override;
 
     /**
      * @brief Get mesh data for a specific stored profile
@@ -161,7 +160,7 @@ class MoonrakerAdvancedAPI {
      * @param profile_name Name of the profile to retrieve
      * @return Pointer to profile data, or nullptr if not found
      */
-    const BedMeshProfile* get_bed_mesh_profile(const std::string& profile_name) const;
+    const BedMeshProfile* get_bed_mesh_profile(const std::string& profile_name) const override;
 
     /**
      * @brief Get set of currently excluded object names (async)
@@ -173,7 +172,7 @@ class MoonrakerAdvancedAPI {
      * @param on_error Error callback
      */
     void get_excluded_objects(std::function<void(const std::set<std::string>&)> on_success,
-                              ErrorCallback on_error);
+                              ErrorCallback on_error) override;
 
     /**
      * @brief Get list of available objects in current print (async)
@@ -185,7 +184,7 @@ class MoonrakerAdvancedAPI {
      * @param on_error Error callback
      */
     void get_available_objects(std::function<void(const std::vector<std::string>&)> on_success,
-                               ErrorCallback on_error);
+                               ErrorCallback on_error) override;
 
     // ========================================================================
     // Bed Leveling Operations
@@ -207,9 +206,9 @@ class MoonrakerAdvancedAPI {
      *        or [bltouch] config).  Used to divide the fallback "probe at" line
      *        count back to mesh points.  Default 1.
      */
-    virtual void start_bed_mesh_calibrate(BedMeshProgressCallback on_progress,
-                                          SuccessCallback on_complete, ErrorCallback on_error,
-                                          int expected_probes = 0, int probe_samples = 1);
+    void start_bed_mesh_calibrate(BedMeshProgressCallback on_progress, SuccessCallback on_complete,
+                                  ErrorCallback on_error, int expected_probes = 0,
+                                  int probe_samples = 1) override;
 
     /**
      * @brief Calculate screw adjustments for manual bed leveling
@@ -220,7 +219,8 @@ class MoonrakerAdvancedAPI {
      * @param on_success Called with screw adjustment results
      * @param on_error Called on failure
      */
-    virtual void calculate_screws_tilt(helix::ScrewTiltCallback on_success, ErrorCallback on_error);
+    void calculate_screws_tilt(helix::ScrewTiltCallback on_success,
+                               ErrorCallback on_error) override;
 
     /**
      * @brief Run Quad Gantry Level
@@ -230,7 +230,7 @@ class MoonrakerAdvancedAPI {
      * @param on_success Called when leveling completes
      * @param on_error Called on failure
      */
-    virtual void run_qgl(SuccessCallback on_success, ErrorCallback on_error);
+    void run_qgl(SuccessCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Run Z-Tilt Adjust
@@ -240,7 +240,7 @@ class MoonrakerAdvancedAPI {
      * @param on_success Called when adjustment completes
      * @param on_error Called on failure
      */
-    virtual void run_z_tilt_adjust(SuccessCallback on_success, ErrorCallback on_error);
+    void run_z_tilt_adjust(SuccessCallback on_success, ErrorCallback on_error) override;
 
     // ========================================================================
     // Input Shaper Operations
@@ -257,9 +257,9 @@ class MoonrakerAdvancedAPI {
      * @param on_complete Called with test results
      * @param on_error Called on failure
      */
-    virtual void start_resonance_test(char axis, helix::AdvancedProgressCallback on_progress,
-                                      helix::InputShaperCallback on_complete,
-                                      ErrorCallback on_error);
+    void start_resonance_test(char axis, helix::AdvancedProgressCallback on_progress,
+                              helix::InputShaperCallback on_complete,
+                              ErrorCallback on_error) override;
 
     /**
      * @brief Start Klippain Shake&Tune calibration
@@ -271,9 +271,8 @@ class MoonrakerAdvancedAPI {
      * @param on_success Called when calibration completes
      * @param on_error Called on failure
      */
-    virtual void start_klippain_shaper_calibration(const std::string& axis,
-                                                   SuccessCallback on_success,
-                                                   ErrorCallback on_error);
+    void start_klippain_shaper_calibration(const std::string& axis, SuccessCallback on_success,
+                                           ErrorCallback on_error) override;
 
     /**
      * @brief Apply input shaper settings
@@ -286,8 +285,8 @@ class MoonrakerAdvancedAPI {
      * @param on_success Called when settings are applied
      * @param on_error Called on failure
      */
-    virtual void set_input_shaper(char axis, const std::string& shaper_type, double freq_hz,
-                                  SuccessCallback on_success, ErrorCallback on_error);
+    void set_input_shaper(char axis, const std::string& shaper_type, double freq_hz,
+                          SuccessCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Check accelerometer noise level
@@ -299,7 +298,7 @@ class MoonrakerAdvancedAPI {
      * @param on_complete Called with noise level on success
      * @param on_error Called on failure (e.g., no accelerometer configured)
      */
-    virtual void measure_axes_noise(NoiseCheckCallback on_complete, ErrorCallback on_error);
+    void measure_axes_noise(NoiseCheckCallback on_complete, ErrorCallback on_error) override;
 
     /**
      * @brief Get current input shaper configuration
@@ -310,8 +309,8 @@ class MoonrakerAdvancedAPI {
      * @param on_success Called with current InputShaperConfig
      * @param on_error Called on failure
      */
-    virtual void get_input_shaper_config(InputShaperConfigCallback on_success,
-                                         ErrorCallback on_error);
+    void get_input_shaper_config(InputShaperConfigCallback on_success,
+                                 ErrorCallback on_error) override;
 
     // ========================================================================
     // PID Calibration Operations
@@ -327,8 +326,8 @@ class MoonrakerAdvancedAPI {
      * @param on_complete Called with current Kp, Ki, Kd values
      * @param on_error Called if values cannot be retrieved
      */
-    virtual void get_heater_pid_values(const std::string& heater, PIDCalibrateCallback on_complete,
-                                       ErrorCallback on_error);
+    void get_heater_pid_values(const std::string& heater, PIDCalibrateCallback on_complete,
+                               ErrorCallback on_error) override;
 
     /**
      * @brief Query the control type for a heater from printer configuration
@@ -340,9 +339,8 @@ class MoonrakerAdvancedAPI {
      * @param on_complete Called with control type string ("pid", "mpc", etc.)
      * @param on_error Called if the heater cannot be found in config
      */
-    virtual void get_heater_control_type(const std::string& heater,
-                                         HeaterControlTypeCallback on_complete,
-                                         ErrorCallback on_error);
+    void get_heater_control_type(const std::string& heater, HeaterControlTypeCallback on_complete,
+                                 ErrorCallback on_error) override;
 
     /**
      * @brief Start PID calibration for a heater
@@ -355,9 +353,9 @@ class MoonrakerAdvancedAPI {
      * @param on_complete Called with PID values on success
      * @param on_error Called on failure
      */
-    virtual void start_pid_calibrate(const std::string& heater, int target_temp,
-                                     PIDCalibrateCallback on_complete, ErrorCallback on_error,
-                                     PIDProgressCallback on_progress = nullptr);
+    void start_pid_calibrate(const std::string& heater, int target_temp,
+                             PIDCalibrateCallback on_complete, ErrorCallback on_error,
+                             PIDProgressCallback on_progress = nullptr) override;
 
     /**
      * @brief Start MPC calibration for a heater (Kalico/Danger Klipper)
@@ -375,10 +373,9 @@ class MoonrakerAdvancedAPI {
      * @param on_error Called on failure
      * @param on_progress Called for each calibration phase (phase, total_phases, description)
      */
-    virtual void start_mpc_calibrate(const std::string& heater, int target_temp,
-                                     int fan_breakpoints, MPCCalibrateCallback on_complete,
-                                     ErrorCallback on_error,
-                                     MPCProgressCallback on_progress = nullptr);
+    void start_mpc_calibrate(const std::string& heater, int target_temp, int fan_breakpoints,
+                             MPCCalibrateCallback on_complete, ErrorCallback on_error,
+                             MPCProgressCallback on_progress = nullptr) override;
 
     // ========================================================================
     // Machine Limits Operations
@@ -392,8 +389,8 @@ class MoonrakerAdvancedAPI {
      * @param on_success Called with current limits
      * @param on_error Called on failure
      */
-    virtual void get_machine_limits(helix::MachineLimitsCallback on_success,
-                                    ErrorCallback on_error);
+    void get_machine_limits(helix::MachineLimitsCallback on_success,
+                            ErrorCallback on_error) override;
 
     /**
      * @brief Set machine limits (temporary, not saved to config)
@@ -404,8 +401,8 @@ class MoonrakerAdvancedAPI {
      * @param on_success Called when limits are applied
      * @param on_error Called on failure
      */
-    virtual void set_machine_limits(const MachineLimits& limits, SuccessCallback on_success,
-                                    ErrorCallback on_error);
+    void set_machine_limits(const MachineLimits& limits, SuccessCallback on_success,
+                            ErrorCallback on_error) override;
 
     /**
      * @brief Save current configuration to printer.cfg
@@ -415,7 +412,7 @@ class MoonrakerAdvancedAPI {
      * @param on_success Called when save is initiated
      * @param on_error Called on failure
      */
-    virtual void save_config(SuccessCallback on_success, ErrorCallback on_error);
+    void save_config(SuccessCallback on_success, ErrorCallback on_error) override;
 
     // ========================================================================
     // Macro Operations
@@ -429,10 +426,9 @@ class MoonrakerAdvancedAPI {
      * @param on_success Called when macro execution starts
      * @param on_error Called on failure
      */
-    virtual void execute_macro(const std::string& name,
-                               const std::map<std::string, std::string>& params,
-                               SuccessCallback on_success, ErrorCallback on_error,
-                               uint32_t timeout_ms = 0, bool suppress_auto_toast = false);
+    void execute_macro(const std::string& name, const std::map<std::string, std::string>& params,
+                       SuccessCallback on_success, ErrorCallback on_error, uint32_t timeout_ms = 0,
+                       bool suppress_auto_toast = false) override;
 
     /**
      * @brief Get list of user-visible macros
@@ -443,7 +439,7 @@ class MoonrakerAdvancedAPI {
      * @param include_system Include _* system macros
      * @return Vector of macro information
      */
-    std::vector<MacroInfo> get_user_macros(bool include_system = false) const;
+    std::vector<MacroInfo> get_user_macros(bool include_system = false) const override;
 
     // ========================================================================
     // Belt Tension Operations
@@ -465,7 +461,7 @@ class MoonrakerAdvancedAPI {
      * @param on_complete Called with detected hardware capabilities
      * @param on_error Called on failure
      */
-    virtual void detect_belt_hardware(BeltHardwareCallback on_complete, ErrorCallback on_error);
+    void detect_belt_hardware(BeltHardwareCallback on_complete, ErrorCallback on_error) override;
 
     /**
      * @brief Run TEST_RESONANCES for belt tension measurement
@@ -480,9 +476,9 @@ class MoonrakerAdvancedAPI {
      * @param on_complete Called with output name on success
      * @param on_error Called on failure
      */
-    virtual void test_belt_resonance(const std::string& axis_param, const std::string& output_name,
-                                     helix::AdvancedProgressCallback on_progress,
-                                     BeltResonanceCallback on_complete, ErrorCallback on_error);
+    void test_belt_resonance(const std::string& axis_param, const std::string& output_name,
+                             helix::AdvancedProgressCallback on_progress,
+                             BeltResonanceCallback on_complete, ErrorCallback on_error) override;
 
     /**
      * @brief Run TEST_RESONANCES at a fixed frequency (for strobe mode)
@@ -495,8 +491,8 @@ class MoonrakerAdvancedAPI {
      * @param on_complete Called when excitation completes
      * @param on_error Called on failure
      */
-    virtual void excite_belt_at_frequency(const std::string& axis_param, float freq_hz,
-                                          SuccessCallback on_complete, ErrorCallback on_error);
+    void excite_belt_at_frequency(const std::string& axis_param, float freq_hz,
+                                  SuccessCallback on_complete, ErrorCallback on_error) override;
 
     /**
      * @brief Set PWM LED strobe frequency
@@ -509,8 +505,8 @@ class MoonrakerAdvancedAPI {
      * @param on_success Called on success
      * @param on_error Called on failure
      */
-    virtual void set_strobe_frequency(const std::string& pin_name, float freq_hz,
-                                      SuccessCallback on_success, ErrorCallback on_error);
+    void set_strobe_frequency(const std::string& pin_name, float freq_hz,
+                              SuccessCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Download raw accelerometer CSV from Klipper data store
@@ -522,12 +518,12 @@ class MoonrakerAdvancedAPI {
      * @param on_complete Called with raw CSV data on success
      * @param on_error Called on failure
      */
-    virtual void download_accel_csv(const std::string& filename,
-                                    std::function<void(const std::string& csv_data)> on_complete,
-                                    ErrorCallback on_error);
+    void download_accel_csv(const std::string& filename,
+                            std::function<void(const std::string& csv_data)> on_complete,
+                            ErrorCallback on_error) override;
 
   protected:
-    helix::MoonrakerClient& client_;
+    helix::IMoonrakerClient& client_;
     MoonrakerAPI& api_;
 
   private:

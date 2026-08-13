@@ -630,6 +630,20 @@ static nlohmann::json build_request_from_tokens(const std::vector<std::string>& 
             params["y"] = std::atoi(tokens[2].c_str());
         }
         return build_request("pointer_release", params);
+    } else if (cmd == "long_press") {
+        if (tokens.size() < 3) {
+            fprintf(stderr, "Error: long_press requires x and y coordinates\n");
+            return {};
+        }
+        nlohmann::json params;
+        params["x"] = std::atoi(tokens[1].c_str());
+        params["y"] = std::atoi(tokens[2].c_str());
+        // Optional hold in ms; the server defaults it from the live long-press
+        // threshold rather than a number duplicated here.
+        if (tokens.size() >= 4) {
+            params["hold_ms"] = std::atoi(tokens[3].c_str());
+        }
+        return build_request("pointer_long_press", params);
     } else if (cmd == "set_value") {
         if (tokens.size() < 3) {
             fprintf(stderr, "Error: set_value requires a widget name/@path and value\n");
@@ -746,6 +760,7 @@ static const char* REPL_COMMANDS[] = {"ping",
                                       "press",
                                       "move",
                                       "release",
+                                      "long_press",
                                       "scroll",
                                       "scenario",
                                       "list_scenarios",

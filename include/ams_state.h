@@ -24,9 +24,9 @@
 #include <vector>
 
 // Forward declarations
-class MoonrakerAPI;
+class IMoonrakerAPI;
 namespace helix {
-class MoonrakerClient;
+class IMoonrakerClient;
 }
 
 namespace helix {
@@ -128,11 +128,11 @@ class AmsState {
      * Does nothing if no MMU is detected or if already in mock mode.
      *
      * @param hardware Discovered printer hardware
-     * @param api MoonrakerAPI instance for making API calls
-     * @param client helix::MoonrakerClient instance for WebSocket communication
+     * @param api IMoonrakerAPI instance for making API calls
+     * @param client helix::IMoonrakerClient instance for WebSocket communication
      */
-    void init_backend_from_hardware(const helix::PrinterDiscovery& hardware, MoonrakerAPI* api,
-                                    helix::MoonrakerClient* client);
+    void init_backend_from_hardware(const helix::PrinterDiscovery& hardware, IMoonrakerAPI* api,
+                                    helix::IMoonrakerClient* client);
 
     /**
      * @brief Initialize backends from all detected AMS/filament systems
@@ -142,11 +142,11 @@ class AmsState {
      * concurrent backends for printers with multiple filament systems.
      *
      * @param hardware Discovered printer hardware
-     * @param api MoonrakerAPI instance for making API calls
-     * @param client helix::MoonrakerClient instance for WebSocket communication
+     * @param api IMoonrakerAPI instance for making API calls
+     * @param client helix::IMoonrakerClient instance for WebSocket communication
      */
-    void init_backends_from_hardware(const helix::PrinterDiscovery& hardware, MoonrakerAPI* api,
-                                     helix::MoonrakerClient* client);
+    void init_backends_from_hardware(const helix::PrinterDiscovery& hardware, IMoonrakerAPI* api,
+                                     helix::IMoonrakerClient* client);
 
     /**
      * @brief Set the AMS backend
@@ -220,9 +220,9 @@ class AmsState {
      * When set, AmsState will automatically call set_active_spool() when
      * a slot with a Spoolman ID becomes loaded. Pass nullptr to disable.
      *
-     * @param api MoonrakerAPI instance (not owned)
+     * @param api IMoonrakerAPI instance (not owned)
      */
-    void set_moonraker_api(MoonrakerAPI* api);
+    void set_moonraker_api(IMoonrakerAPI* api);
 
     /**
      * @brief Set callback for mock backend gcode response injection
@@ -290,6 +290,35 @@ class AmsState {
      */
     lv_subject_t* get_ams_action_detail_subject() {
         return &ams_action_detail_;
+    }
+
+    /**
+     * @brief Endless-spool status code, backend-neutral.
+     *
+     * Holds helix::printer::EndlessSpoolStatusKind as an int and is registered
+     * for XML as `ams_endless_state`. 0 (Hidden) means the active backend has no
+     * endless-spool mechanism, which is the one case where the status row has
+     * nothing truthful to say - bind visibility to it with
+     * `<bind_flag_if_eq subject="ams_endless_state" flag="hidden" ref_value="0"/>`.
+     *
+     * Replaced the AD5X-only `ams_ifs_plugin` / `ams_ifs_backup_enabled` pair:
+     * every backend answers the same three-axis capability question now, so a
+     * per-firmware subject could only ever describe one printer's answer.
+     */
+    lv_subject_t* get_endless_state_subject() {
+        return &ams_endless_state_;
+    }
+
+    /**
+     * @brief Endless-spool status sentence, translated.
+     *
+     * Registered for XML as `ams_endless_text`. Computed by
+     * helix::printer::endless_spool_status() from the active backend's
+     * capabilities; may contain an embedded newline (the restriction reason on
+     * its own line), so bind it to a `long_mode="wrap"` label.
+     */
+    lv_subject_t* get_endless_text_subject() {
+        return &ams_endless_text_;
     }
 
     /**
@@ -1244,6 +1273,17 @@ class AmsState {
     /** @brief Sync clog detection meter subjects from system info */
     void sync_clog_meter_from_info(const AmsSystemInfo& info);
 
+    /**
+     * @brief Sync the endless-spool status subjects from a backend's capabilities.
+     *
+     * Main thread only (it writes subjects). Called from sync_from_backend(),
+     * which the EVENT_STATE_CHANGED handler already marshals through
+     * helix::ui::queue_update().
+     *
+     * @param backend Active primary backend; nullptr resets the row to Hidden.
+     */
+    void sync_endless_spool_from_backend(AmsBackend* backend);
+
     /** @brief Set up observer on HumiditySensorManager dryer humidity subject */
 
     AmsState();
@@ -1263,10 +1303,10 @@ class AmsState {
      * Makes an async REST call to /server/ace/info. If successful,
      * creates ACE backend via lv_async_call to maintain thread safety.
      *
-     * @param api MoonrakerAPI instance for REST calls
-     * @param client helix::MoonrakerClient instance for the backend
+     * @param api IMoonrakerAPI instance for REST calls
+     * @param client helix::IMoonrakerClient instance for the backend
      */
-    void probe_ace(MoonrakerAPI* api, helix::MoonrakerClient* client);
+    void probe_ace(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
 
     /**
      * @brief Create and start ACE backend
@@ -1274,10 +1314,10 @@ class AmsState {
      * Called on main thread after successful ACE probe.
      * Must be called from LVGL thread context.
      *
-     * @param api MoonrakerAPI instance
-     * @param client helix::MoonrakerClient instance
+     * @param api IMoonrakerAPI instance
+     * @param client helix::IMoonrakerClient instance
      */
-    void create_ace_backend(MoonrakerAPI* api, helix::MoonrakerClient* client);
+    void create_ace_backend(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
 
     /// Per-backend slot subject storage for secondary backends (index > 0)
     struct BackendSlotSubjects {
@@ -1304,7 +1344,7 @@ class AmsState {
     bool initialized_ = false;
 
     // Moonraker API for Spoolman integration
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
     int last_synced_spoolman_id_ = 0; ///< Track to avoid duplicate set_active_spool calls
 
     // Subject manager for automatic cleanup
@@ -1425,6 +1465,14 @@ class AmsState {
     char system_logo_buf_[64];
     lv_subject_t ams_current_tool_text_;
     char ams_current_tool_text_buf_[16]; // "T0" to "T15" or "---"
+
+    /// Endless-spool status: kind as int, sentence as string. See the accessors.
+    /// The buffer holds two translated lines; German and Russian restriction
+    /// texts are the long ones, and Cyrillic costs ~2 bytes a character, hence
+    /// 384 rather than the 64 used elsewhere.
+    lv_subject_t ams_endless_state_;
+    lv_subject_t ams_endless_text_;
+    char ams_endless_text_buf_[384];
 
     // Tool change progress (AFC multi-color prints)
     lv_subject_t toolchange_visible_;        // 1 when swaps expected, 0 otherwise

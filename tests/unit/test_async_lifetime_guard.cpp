@@ -429,8 +429,7 @@ TEST_CASE("async_lifetime take_snapshot resets counters", "[lifetime_guard][tele
     REQUIRE(second.entries.empty());
 }
 
-TEST_CASE("async_lifetime nullptr tag normalised to (null)",
-         "[lifetime_guard][telemetry]") {
+TEST_CASE("async_lifetime nullptr tag normalised to (null)", "[lifetime_guard][telemetry]") {
     drain_skip_counters();
 
     helix::async_lifetime::note_skipped(nullptr);
@@ -529,7 +528,7 @@ TEST_CASE("async_lifetime a producer hot in consecutive windows stays named",
 }
 
 TEST_CASE("async_lifetime repeated tags after snapshot count fresh",
-         "[lifetime_guard][telemetry]") {
+          "[lifetime_guard][telemetry]") {
     drain_skip_counters();
 
     helix::async_lifetime::note_skipped("TagA");

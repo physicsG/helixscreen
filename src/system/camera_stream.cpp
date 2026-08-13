@@ -8,7 +8,7 @@
 
 #include "app_globals.h"
 #include "hv/requests.h"
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "printer_state.h"
 #include "spdlog/spdlog.h"
 #include "stb_image.h"

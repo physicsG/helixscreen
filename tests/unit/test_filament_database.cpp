@@ -602,9 +602,8 @@ TEST_CASE("orphan catalog types now resolve with complete data", "[filament][dat
     // Every one of these had >= 1 product in assets/filaments.json but no
     // database row. Deleting any row fails this test.
     static const char* kFormerOrphans[] = {
-        "ASA-AERO", "CoPE",   "EVA",    "PA6-CF", "PE",     "PET",
-        "PHA",      "PLA-AERO", "PP",   "PP-CF",  "PP-GF",  "PPA-CF",
-        "PPA-GF",   "PPS",    "PPS-CF", "SBS",
+        "ASA-AERO", "CoPE",  "EVA",   "PA6-CF", "PE",     "PET", "PHA",    "PLA-AERO",
+        "PP",       "PP-CF", "PP-GF", "PPA-CF", "PPA-GF", "PPS", "PPS-CF", "SBS",
     };
 
     for (const auto* name : kFormerOrphans) {

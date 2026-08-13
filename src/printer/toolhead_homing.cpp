@@ -3,7 +3,7 @@
 
 #include "app_globals.h"
 #include "async_lifetime_guard.h"
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "moonraker_error.h"
 #include "printer_state.h"
 
@@ -33,7 +33,7 @@ bool toolhead_is_homed(const PrinterState& ps) {
            s.find('z') != std::string::npos;
 }
 
-void ensure_homed_then(MoonrakerAPI* api, AsyncLifetimeGuard& guard, std::function<void()> then,
+void ensure_homed_then(IMoonrakerAPI* api, AsyncLifetimeGuard& guard, std::function<void()> then,
                        std::function<void(const MoonrakerError&)> on_error) {
     if (toolhead_is_homed(get_printer_state())) {
         spdlog::debug("[ensure_homed_then] Already homed, proceeding");
@@ -45,11 +45,11 @@ void ensure_homed_then(MoonrakerAPI* api, AsyncLifetimeGuard& guard, std::functi
 
     if (!api) {
         spdlog::error(
-            "[ensure_homed_then] Not homed and no MoonrakerAPI available — cannot send G28");
+            "[ensure_homed_then] Not homed and no IMoonrakerAPI available — cannot send G28");
         if (on_error) {
             MoonrakerError err;
             err.type = MoonrakerErrorType::CONNECTION_LOST;
-            err.message = "MoonrakerAPI unavailable";
+            err.message = "IMoonrakerAPI unavailable";
             on_error(err);
         }
         return;
@@ -72,7 +72,7 @@ void ensure_homed_then(MoonrakerAPI* api, AsyncLifetimeGuard& guard, std::functi
                                            on_error(err);
                                        }
                                    }),
-                       MoonrakerAPI::HOMING_TIMEOUT_MS);
+                       IMoonrakerAPI::HOMING_TIMEOUT_MS);
 }
 
 } // namespace helix

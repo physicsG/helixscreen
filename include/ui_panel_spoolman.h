@@ -67,7 +67,7 @@ class SpoolmanPanel : public OverlayBase {
     /**
      * @brief Refresh spool list from Spoolman server
      *
-     * Fetches all spools via MoonrakerAPI and updates the UI.
+     * Fetches all spools via IMoonrakerAPI and updates the UI.
      * Shows loading state during fetch, empty state if no spools.
      */
     void refresh_spools();

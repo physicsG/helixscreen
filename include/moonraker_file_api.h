@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "i_moonraker_sub_apis.h"
 #include "moonraker_error.h"
 #include "moonraker_types.h"
 
@@ -24,7 +25,7 @@
 
 // Forward declarations
 namespace helix {
-class MoonrakerClient;
+class IMoonrakerClient;
 } // namespace helix
 
 /**
@@ -65,7 +66,7 @@ inline std::string moonraker_path_leaf(const std::string& name) {
  *       [](const auto& files) { ... },
  *       [](const auto& err) { ... });
  */
-class MoonrakerFileAPI {
+class MoonrakerFileAPI : public IFilesAPI {
   public:
     using SuccessCallback = std::function<void()>;
     using ErrorCallback = std::function<void(const MoonrakerError&)>;
@@ -77,7 +78,7 @@ class MoonrakerFileAPI {
      *
      * @param client MoonrakerClient instance (must remain valid during API lifetime)
      */
-    explicit MoonrakerFileAPI(helix::MoonrakerClient& client);
+    explicit MoonrakerFileAPI(helix::IMoonrakerClient& client);
     virtual ~MoonrakerFileAPI() = default;
 
     // ========================================================================
@@ -94,7 +95,7 @@ class MoonrakerFileAPI {
      * @param on_error Error callback
      */
     void list_files(const std::string& root, const std::string& path, bool recursive,
-                    FileListCallback on_success, ErrorCallback on_error);
+                    FileListCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Get directory contents with explicit directory entries
@@ -116,8 +117,8 @@ class MoonrakerFileAPI {
      *       the callbacks (the class is already polymorphic via its virtual
      *       dtor, so this adds no new ABI/vtable cost).
      */
-    virtual void get_directory(const std::string& root, const std::string& path,
-                               FileListCallback on_success, ErrorCallback on_error);
+    void get_directory(const std::string& root, const std::string& path,
+                       FileListCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Get detailed metadata for a file
@@ -130,8 +131,8 @@ class MoonrakerFileAPI {
      * @note virtual so tests can inject a capturing sub-API. The class is already
      *       polymorphic (virtual dtor), so this adds no new ABI/vtable cost.
      */
-    virtual void get_file_metadata(const std::string& filename, FileMetadataCallback on_success,
-                                   ErrorCallback on_error, bool silent = false);
+    void get_file_metadata(const std::string& filename, FileMetadataCallback on_success,
+                           ErrorCallback on_error, bool silent = false) override;
 
     /**
      * @brief Trigger metadata scan for a file
@@ -146,7 +147,7 @@ class MoonrakerFileAPI {
      * @param silent If true, don't emit RPC_ERROR events (no toast on failure)
      */
     void metascan_file(const std::string& filename, FileMetadataCallback on_success,
-                       ErrorCallback on_error, bool silent = true);
+                       ErrorCallback on_error, bool silent = true) override;
 
     /**
      * @brief Delete a file
@@ -156,7 +157,7 @@ class MoonrakerFileAPI {
      * @param on_error Error callback
      */
     void delete_file(const std::string& filename, SuccessCallback on_success,
-                     ErrorCallback on_error);
+                     ErrorCallback on_error) override;
 
     /**
      * @brief Move or rename a file
@@ -167,7 +168,7 @@ class MoonrakerFileAPI {
      * @param on_error Error callback
      */
     void move_file(const std::string& source, const std::string& dest, SuccessCallback on_success,
-                   ErrorCallback on_error);
+                   ErrorCallback on_error) override;
 
     /**
      * @brief Copy a file
@@ -178,7 +179,7 @@ class MoonrakerFileAPI {
      * @param on_error Error callback
      */
     void copy_file(const std::string& source, const std::string& dest, SuccessCallback on_success,
-                   ErrorCallback on_error);
+                   ErrorCallback on_error) override;
 
     /**
      * @brief Create a directory
@@ -188,7 +189,7 @@ class MoonrakerFileAPI {
      * @param on_error Error callback
      */
     void create_directory(const std::string& path, SuccessCallback on_success,
-                          ErrorCallback on_error);
+                          ErrorCallback on_error) override;
 
     /**
      * @brief Delete a directory
@@ -199,10 +200,10 @@ class MoonrakerFileAPI {
      * @param on_error Error callback
      */
     void delete_directory(const std::string& path, bool force, SuccessCallback on_success,
-                          ErrorCallback on_error);
+                          ErrorCallback on_error) override;
 
   protected:
-    helix::MoonrakerClient& client_;
+    helix::IMoonrakerClient& client_;
 
     /**
      * @brief Parse file list response from server.files.list

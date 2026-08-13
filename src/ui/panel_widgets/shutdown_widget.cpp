@@ -11,7 +11,7 @@
 
 #include "config.h"
 #include "host_identity.h"
-#include "moonraker_api.h"
+#include "i_moonraker_api.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
 #include "runtime_config.h"
@@ -39,7 +39,7 @@ constexpr uint32_t kScopeScreen = 2;
 constexpr uint32_t kVerificationWindowMs = 20000;
 
 struct VerifyCtx {
-    MoonrakerAPI* api;
+    IMoonrakerAPI* api;
     bool is_reboot;
 };
 
@@ -62,7 +62,7 @@ void verify_host_down_timer_cb(lv_timer_t* timer) {
 
 // Invoked from Moonraker WebSocket (background) thread. Creating an lv_timer
 // is not thread-safe, so hop to the main thread via queue_update.
-void schedule_host_down_verification(MoonrakerAPI* api, bool is_reboot) {
+void schedule_host_down_verification(IMoonrakerAPI* api, bool is_reboot) {
     if (!api) {
         return;
     }
@@ -134,7 +134,7 @@ void queue_machine_power_failure(const MoonrakerError& err, bool is_reboot,
 
 // @p allow_local_fallback is set only when Moonraker runs on this same host —
 // see handle_machine_power_failure().
-void execute_printer_shutdown(MoonrakerAPI* api, bool allow_local_fallback = false) {
+void execute_printer_shutdown(IMoonrakerAPI* api, bool allow_local_fallback = false) {
     if (!api)
         return;
     spdlog::info("[ShutdownDialog] Executing machine shutdown");
@@ -148,7 +148,7 @@ void execute_printer_shutdown(MoonrakerAPI* api, bool allow_local_fallback = fal
         });
 }
 
-void execute_printer_reboot(MoonrakerAPI* api, bool allow_local_fallback = false) {
+void execute_printer_reboot(IMoonrakerAPI* api, bool allow_local_fallback = false) {
     if (!api)
         return;
     spdlog::info("[ShutdownDialog] Executing machine reboot");
@@ -181,7 +181,7 @@ void execute_screen_reboot() {
 // WS frame, leaving the printer up. Fire screen on both success AND error:
 // the user said "Both", so we power down the screen even if the printer side
 // reported a failure.
-void execute_both_shutdown(MoonrakerAPI* api, AsyncLifetimeGuard& lifetime) {
+void execute_both_shutdown(IMoonrakerAPI* api, AsyncLifetimeGuard& lifetime) {
     if (!api)
         return;
     spdlog::info("[ShutdownDialog] Executing both shutdown — printer first, screen on ack");
@@ -205,7 +205,7 @@ void execute_both_shutdown(MoonrakerAPI* api, AsyncLifetimeGuard& lifetime) {
         });
 }
 
-void execute_both_reboot(MoonrakerAPI* api, AsyncLifetimeGuard& lifetime) {
+void execute_both_reboot(IMoonrakerAPI* api, AsyncLifetimeGuard& lifetime) {
     if (!api)
         return;
     spdlog::info("[ShutdownDialog] Executing both reboot — printer first, screen on ack");
@@ -290,7 +290,7 @@ void on_shutdown_split_clicked(lv_event_t* e) {
 
 void register_shutdown_widget() {
     register_widget_factory("shutdown", [](const std::string&) {
-        auto* api = PanelWidgetManager::instance().shared_resource<MoonrakerAPI>();
+        auto* api = PanelWidgetManager::instance().shared_resource<IMoonrakerAPI>();
         return std::make_unique<ShutdownWidget>(api);
     });
 
@@ -302,7 +302,7 @@ void register_shutdown_widget() {
     lv_xml_register_event_cb(nullptr, "on_shutdown_split_clicked", on_shutdown_split_clicked);
 }
 
-ShutdownWidget::ShutdownWidget(MoonrakerAPI* api) : api_(api) {}
+ShutdownWidget::ShutdownWidget(IMoonrakerAPI* api) : api_(api) {}
 
 ShutdownWidget::~ShutdownWidget() {
     detach();
@@ -367,7 +367,7 @@ bool handle_machine_power_failure(const std::string& err_message, bool is_reboot
     return false;
 }
 
-void show_shutdown_dialog(MoonrakerAPI* api, ShutdownModal& modal, AsyncLifetimeGuard& lifetime,
+void show_shutdown_dialog(IMoonrakerAPI* api, ShutdownModal& modal, AsyncLifetimeGuard& lifetime,
                           lv_obj_t* parent_screen) {
     if (!api) {
         spdlog::warn("[ShutdownDialog] No API available");

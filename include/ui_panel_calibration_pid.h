@@ -15,7 +15,7 @@
 #include <lvgl.h>
 #include <string>
 
-class MoonrakerAPI;
+class IMoonrakerAPI;
 class MoonrakerAdvancedAPI;
 class TemperatureService;
 
@@ -137,9 +137,9 @@ class PIDCalibrationPanel : public OverlayBase {
     /**
      * @brief Set the Moonraker API for high-level operations
      *
-     * @param api MoonrakerAPI for PID calibrate and save_config
+     * @param api IMoonrakerAPI for PID calibrate and save_config
      */
-    void set_api(MoonrakerAPI* api) {
+    void set_api(IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -200,7 +200,7 @@ class PIDCalibrationPanel : public OverlayBase {
     // Client/API references
     // Note: overlay_root_ inherited from OverlayBase
     lv_obj_t* parent_screen_ = nullptr;
-    MoonrakerAPI* api_ = nullptr;
+    IMoonrakerAPI* api_ = nullptr;
 
     // State
     State state_ = State::IDLE;

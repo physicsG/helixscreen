@@ -3,6 +3,8 @@
 
 #include "filament_display_name.h"
 
+#include "operation_patterns.h"
+
 #include <cctype>
 #include <initializer_list>
 
@@ -66,24 +68,6 @@ bool contains_word(const std::string& haystack, const std::string& needle) {
         const size_t end = i + needle.size();
         const bool right_boundary = (end == haystack.size()) || !is_word_char(haystack[end]);
         if (left_boundary && right_boundary) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/// Case-insensitive substring search, no boundary requirement.
-bool contains_ci(const std::string& haystack, const std::string& needle) {
-    if (needle.empty() || needle.size() > haystack.size()) {
-        return false;
-    }
-    const size_t last = haystack.size() - needle.size();
-    for (size_t i = 0; i <= last; ++i) {
-        size_t j = 0;
-        while (j < needle.size() && ascii_lower(haystack[i + j]) == ascii_lower(needle[j])) {
-            ++j;
-        }
-        if (j == needle.size()) {
             return true;
         }
     }

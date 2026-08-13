@@ -22,9 +22,9 @@
 #include "ui_observer_guard.h"
 #include "ui_update_queue.h"
 
+#include "connection_state.h"
 #include "lvgl/lvgl.h"
-#include "moonraker_client.h" // ConnectionState
-#include "printer_state.h"    // PrintJobState
+#include "printer_state.h" // PrintJobState
 
 #include <memory>
 #include <string>

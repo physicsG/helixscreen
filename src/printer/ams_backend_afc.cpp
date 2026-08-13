@@ -13,8 +13,8 @@
 #include "ams_bypass_policy.h"
 #include "ams_fault_event.h"
 #include "config.h"
+#include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "moonraker_api.h"
 #include "operation_patterns.h" // helix::contains_ci
 #include "printer_discovery.h"
 #include "settings_manager.h"
@@ -182,14 +182,16 @@ void afc_state_translation_hints_() {
 // Construction / Destruction
 // ============================================================================
 
-AmsBackendAfc::AmsBackendAfc(MoonrakerAPI* api, MoonrakerClient* client)
+AmsBackendAfc::AmsBackendAfc(IMoonrakerAPI* api, IMoonrakerClient* client)
     : AmsSubscriptionBackend(api, client) {
     // Initialize system info with AFC defaults
     system_info_.type = AmsType::AFC;
     system_info_.type_name = "AFC";
     // AFC capabilities from shared defaults
     auto caps = helix::printer::afc_default_capabilities();
-    system_info_.supports_endless_spool = caps.supports_endless_spool;
+    // AFC has no on/off switch for endless spool: present means on. Sourced
+    // from the shared defaults so the mock's AFC scenario cannot drift.
+    system_info_.endless_spool_enabled = caps.supports_endless_spool;
     system_info_.supports_tool_mapping = caps.supports_tool_mapping;
     system_info_.supports_bypass = caps.supports_bypass;
     system_info_.supports_purge = caps.supports_purge;
@@ -396,7 +398,7 @@ AmsSystemInfo AmsBackendAfc::get_system_info() const {
     info.position_saved = system_info_.position_saved;
     info.spoolman_url = system_info_.spoolman_url;
     info.filament_loaded = system_info_.filament_loaded;
-    info.supports_endless_spool = system_info_.supports_endless_spool;
+    info.endless_spool_enabled = system_info_.endless_spool_enabled;
     info.supports_tool_mapping = system_info_.supports_tool_mapping;
     info.supports_bypass = system_info_.supports_bypass;
     info.has_hardware_bypass_sensor = system_info_.has_hardware_bypass_sensor;
@@ -1611,7 +1613,7 @@ AmsError AmsBackendAfc::dispatch_operation(std::string gcode, AmsAction action) 
     });
 
     if (!result) {
-        // The gcode never left: no MoonrakerAPI, or the send was refused. No ack
+        // The gcode never left: no IMoonrakerAPI, or the send was refused. No ack
         // will ever arrive, so undo the optimistic action instead of leaving the
         // UI busy until the stuck-action budget expires.
         spdlog::warn("[AMS AFC] Dispatch #{} failed to send ({}), reverting optimistic action",
@@ -2814,7 +2816,6 @@ void AmsBackendAfc::parse_afc_extruder(const std::string& ext_name, const nlohma
         }
         if (data.contains("is_standalone") && data["is_standalone"].is_boolean()) {
             ts.is_standalone = data["is_standalone"].get<bool>();
-            ts.has_is_standalone = true;
         }
     }
 
@@ -3047,7 +3048,7 @@ const nlohmann::json& AmsBackendAfc::database_item_value(const nlohmann::json& r
     // payload: a payload is an arbitrary object, so "envelope or payload?" is
     // undecidable — the afc-install payload is {"version":…}, which carries no
     // "value" key to key off. Callers that route through
-    // MoonrakerAPI::database_get_item get the payload pre-unwrapped and must
+    // IMoonrakerAPI::database_get_item get the payload pre-unwrapped and must
     // not pass it here.
     const auto result = response.find("result");
     if (result == response.end() || !result->is_object())
@@ -4080,7 +4081,7 @@ AmsError AmsBackendAfc::execute_gcode_notify(const std::string& gcode,
                                              const std::string& success_msg,
                                              const std::string& error_prefix) {
     if (!api_) {
-        return AmsErrorHelper::not_connected("MoonrakerAPI not available");
+        return AmsErrorHelper::not_connected("IMoonrakerAPI not available");
     }
 
     spdlog::info("[AMS AFC] Executing G-code: {}", gcode);
@@ -4106,7 +4107,7 @@ AmsError AmsBackendAfc::execute_gcode_notify(const std::string& gcode,
                 spdlog::error("[AMS AFC] G-code failed: {} - {}", gcode, err.message);
             }
         },
-        MoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
+        IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
 
     return AmsErrorHelper::success();
 }
@@ -4605,6 +4606,24 @@ AmsError AmsBackendAfc::recover_lane_position(int slot_index) {
 }
 
 AmsError AmsBackendAfc::eject_lane(int slot_index) {
+    // No gate on cmd_LANE_UNLOAD's own if/elif chain. Those conditions differ
+    // across AFC versions and there is no reliable version to read (the
+    // afc-install database key reports 1.0.0 on installs that are not), so any
+    // copy of them here is a guess that goes stale — see
+    // prestonbrown/helixscreen#1258. Send the macro and let AFC decide.
+    //
+    // What that costs: AFC's own refusals reach the user only as far as AFC
+    // reports them. "Lane is loaded in toolhead" is a bare logger.info, console
+    // only, absent from AFC.message, so it is silent here. Matching that console
+    // string would re-create exactly the coupling this shed; the fix belongs
+    // upstream (promote it to logger.warning, which reaches message_queue and so
+    // AFC.message, which parse_afc_state() already toasts).
+    //
+    // refuse_if_printing() below is deliberately NOT part of that removal. It is
+    // one stable predicate, the first line of cmd_LANE_UNLOAD at every AFC
+    // version checked, and it is the same rule the context menu already greys the
+    // button on (cold_lane_ops_refused_during_print). Dropping it here while
+    // keeping it there would leave the two layers disagreeing.
     std::string lane_name;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -4612,6 +4631,10 @@ AmsError AmsBackendAfc::eject_lane(int slot_index) {
         AmsError precondition = check_preconditions();
         if (!precondition) {
             return precondition;
+        }
+
+        if (AmsError printing = refuse_if_printing(); !printing) {
+            return printing;
         }
 
         AmsError slot_err = validate_slot_index(slot_index);
@@ -4623,176 +4646,9 @@ AmsError AmsBackendAfc::eject_lane(int slot_index) {
         if (lane_name.empty()) {
             return AmsErrorHelper::invalid_slot(slot_index, system_info_.total_slots - 1);
         }
-
-        AmsError refusal = lane_unload_refusal_unlocked(slot_index, lane_name);
-        if (!refusal) {
-            return refusal;
-        }
     }
 
     return enqueue_lane_unload(lane_name);
-}
-
-bool AmsBackendAfc::afc_reports_standalone_unlocked() const {
-    // Callers hold mutex_.
-    for (const auto& [ext_name, ts] : tool_states_) {
-        if (ts.has_is_standalone) {
-            return true;
-        }
-    }
-    return false;
-}
-
-std::string AmsBackendAfc::extruder_for_lane_unlocked(int slot_index,
-                                                      const std::string& lane_name) const {
-    // Callers hold mutex_.
-    //
-    // AFC_stepper.extruder names the extruder a lane feeds whether or not that
-    // lane is currently seated, which is what the standalone check needs — the
-    // condition it models is precisely "this extruder holds nothing".
-    const helix::printer::SlotEntry* entry = slots_.get(slot_index);
-    if (entry && !entry->info.extruder_name.empty()) {
-        return entry->info.extruder_name;
-    }
-
-    // Fallback for a partial delta that has not carried AFC_stepper.extruder yet.
-    // Only a seated lane can be found this way, which is the case the caller's
-    // toolhead check has already handled — so this mostly returns empty, and an
-    // unknown extruder makes no claim rather than guessing "extruder".
-    for (const auto& [ext_name, sensors] : extruder_sensors_) {
-        if (sensors.lane_loaded == lane_name) {
-            return ext_name;
-        }
-    }
-    return {};
-}
-
-AmsError AmsBackendAfc::lane_unload_refusal_unlocked(int slot_index,
-                                                     const std::string& lane_name) const {
-    // Callers hold mutex_.
-    //
-    // Two upstream shapes are live in the field and they refuse on DIFFERENT
-    // conditions, so each guard below is scoped to the era that actually has it.
-    // v1.1.0 (AFC.py:1123-1157) keys on the global AFC.current and the lane's hub
-    // routing; v1.2.0 (AFC.py:1342-1378, unchanged on main) rewrote the body to
-    // key on the lane's own extruder and its is_standalone flag, dropping hub
-    // routing from the decision entirely. Applying either era's rule to the other
-    // is a defect in both directions — over-refusing an eject upstream would
-    // perform, or letting through one it silently discards.
-
-    // 1. Printing. Identical on every version: cmd_LANE_UNLOAD opens with
-    //    `if self.function.is_printing()` and returns after AFC_error(...,
-    //    pause=False). is_printing() is `print_stats.state == "printing"`
-    //    exactly (AFC_functions.py:308-323) — NOT in_print(), so a PAUSED job is
-    //    genuinely allowed. refuse_if_printing() already resolves to precisely
-    //    that for a backend which does not self-home, so this is the same rule,
-    //    not a second one.
-    if (AmsError printing = refuse_if_printing(); !printing) {
-        return printing;
-    }
-
-    // 2. The body's own if/elif chain. Transcribed per era rather than reduced to
-    //    a set of independent tests, because the ORDER carries meaning: on
-    //    v1.2.0 a standalone extruder that IS holding the lane takes the second
-    //    arm and performs a retract, so the "lane is at the toolhead" reading
-    //    that would refuse it never gets to run.
-    const AmsError loaded_here(AmsResult::WRONG_STATE, "Lane is loaded in toolhead",
-                               "Unload from toolhead first", "Use Unload before Eject");
-
-    // Set when the era's own authority had nothing to say for this lane — no
-    // extruder attribution on v1.2.0, no AFC.current on v1.1.0. Moonraker sends
-    // deltas, so a frame can reach here before the object that carries the
-    // signal has ever arrived. The aggregate fallback below covers that gap.
-    bool authority_silent = false;
-    AmsError era_refusal = AmsErrorHelper::success();
-
-    if (afc_reports_standalone_unlocked()) {
-        // v1.2.0 (AFC.py:1342-1378, unchanged on main):
-        //
-        //   if name != extruder.lane_loaded and not extruder.is_standalone(): ACT
-        //   elif extruder.is_standalone() and extruder.lane_loaded:           ACT
-        //   elif name == extruder.lane_loaded:                                refuse, logs
-        //   (no else)                                                         refuse, SILENT
-        //
-        // Both comparisons are against the lane's OWN extruder, not the global
-        // AFC.current v1.1.0 used — the distinction only matters on a
-        // toolchanger, and there the per-extruder answer is the correct one.
-        const std::string ext_name = extruder_for_lane_unlocked(slot_index, lane_name);
-        auto sensors = extruder_sensors_.find(ext_name);
-        auto ts = tool_states_.find(ext_name);
-
-        if (ext_name.empty() || sensors == extruder_sensors_.end()) {
-            // Nothing attributes this lane to an extruder yet, so neither arm can
-            // be evaluated against a real lane_loaded.
-            authority_silent = true;
-        } else {
-            const std::string& lane_loaded = sensors->second.lane_loaded;
-            const bool standalone = ts != tool_states_.end() && ts->second.is_standalone;
-
-            if (lane_name != lane_loaded && !standalone) {
-                // arm 1: the normal lane eject
-            } else if (standalone && !lane_loaded.empty()) {
-                // arm 2: the standalone retract
-            } else if (lane_name == lane_loaded) {
-                era_refusal = loaded_here; // arm 3: logged refusal
-            } else {
-                // Fell off the end: a standalone extruder holding nothing. AFC
-                // returns having logged NOTHING AT ALL — the only refusal in
-                // either era with no trace in klippy.log, and so the hardest to
-                // diagnose from a user report.
-                era_refusal =
-                    AmsError(AmsResult::WRONG_STATE, "Standalone extruder reports no lane loaded",
-                             "Nothing to eject on this toolhead",
-                             "Load the lane first, or unload from the toolhead");
-            }
-        }
-    } else {
-        // v1.1.0 (AFC.py:1123-1157):
-        //
-        //   if name != AFC.current and hub != 'direct': ACT
-        //   elif name == AFC.current:                   refuse, logs
-        //   elif hub == 'direct':                       refuse, logs
-        //
-        // v1.2.0 dropped hub routing from this decision entirely, which is why
-        // the direct-lane arm is confined to this branch: applying it to a 1.2.0
-        // install would refuse ejects upstream performs happily.
-        //
-        // Exact match on "direct", deliberately NOT the rfind("direct", 0) prefix
-        // used for topology derivation above — upstream compares `== 'direct'`,
-        // and "direct_load" appears nowhere in the AFC source at any version.
-        auto route = lane_hub_routing_.find(lane_name);
-        const bool is_direct = route != lane_hub_routing_.end() && route->second == "direct";
-        authority_silent = toolhead_lane_.empty();
-
-        if (lane_name != toolhead_lane_ && !is_direct) {
-            // the normal lane eject
-        } else if (lane_name == toolhead_lane_) {
-            era_refusal = loaded_here;
-        } else {
-            era_refusal = AmsError(AmsResult::WRONG_STATE, "Direct lane cannot be lane-ejected",
-                                   "Unload from the toolhead instead",
-                                   "This lane feeds the extruder directly — use Unload, not Eject");
-        }
-    }
-
-    if (!era_refusal) {
-        return era_refusal;
-    }
-
-    // 3. Last resort: the aggregate pair, used ONLY where the era's own authority
-    //    said nothing. These are derived signals — parse_afc_state() computes
-    //    filament_loaded from `loaded_lane`, which prefers AFC.current_loading and
-    //    so reads true across an entire toolchange (see toolhead_is_free_unlocked)
-    //    — which is exactly why they must not outrank a per-lane answer. But
-    //    before the AFC_extruder / AFC objects have landed they are the only thing
-    //    that knows a lane is at the head, and refusing with a clear message beats
-    //    firing a LANE_UNLOAD that upstream silently discards.
-    if (authority_silent && system_info_.filament_loaded &&
-        system_info_.current_slot == slot_index) {
-        return loaded_here;
-    }
-
-    return AmsErrorHelper::success();
 }
 
 AmsError AmsBackendAfc::enqueue_lane_unload(const std::string& lane_name) {
@@ -4849,7 +4705,7 @@ void AmsBackendAfc::dispatch_lane_unload(const std::string& lane_name) {
                 on_lane_unload_done();
             });
         },
-        MoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
+        IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
 }
 
 void AmsBackendAfc::on_lane_unload_done() {
@@ -5006,7 +4862,7 @@ AmsError AmsBackendAfc::set_slot_info(int slot_index, const SlotInfo& info, bool
                 }
 
                 // Material (validate to prevent command injection)
-                if (!info.material.empty() && MoonrakerAPI::is_safe_gcode_param(info.material)) {
+                if (!info.material.empty() && IMoonrakerAPI::is_safe_gcode_param(info.material)) {
                     execute_gcode(
                         fmt::format("SET_MATERIAL LANE={} MATERIAL={}", lane_name, info.material));
                 } else if (!info.material.empty()) {
@@ -5143,8 +4999,14 @@ bool AmsBackendAfc::is_bypass_active() const {
 // ============================================================================
 
 helix::printer::EndlessSpoolCapabilities AmsBackendAfc::get_endless_spool_capabilities() const {
-    // AFC supports per-slot backup configuration via SET_RUNOUT G-code
-    return {true, true, "AFC per-slot backup"};
+    // AFC has no global on/off switch: a lane either names a runout lane or it
+    // does not, so the feature is On whenever it is present. Editing is per-slot
+    // via SET_RUNOUT, one lane at a time, with no side effects on other lanes.
+    // provider stays empty: AFC implements this itself, there is no optional
+    // package to name.
+    return {.availability = helix::printer::EndlessSpoolAvailability::Available,
+            .enabled = helix::printer::EndlessSpoolEnabled::On,
+            .editability = helix::printer::EndlessSpoolEditability::PerSlot};
 }
 
 // ============================================================================
@@ -5161,59 +5023,35 @@ std::vector<int> AmsBackendAfc::get_tool_mapping() const {
     return slots_.build_system_info().tool_to_slot_map;
 }
 
-std::vector<helix::printer::EndlessSpoolConfig> AmsBackendAfc::get_endless_spool_config() const {
+helix::printer::EndlessSpoolConfig AmsBackendAfc::get_endless_spool_config() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<helix::printer::EndlessSpoolConfig> configs;
-    for (int i = 0; i < slots_.slot_count(); ++i) {
-        configs.push_back({i, slots_.backup_for_slot(i)});
-    }
-    return configs;
+    return helix::printer::endless_spool_config_from_edges(slots_.backup_edges());
 }
 
-AmsError AmsBackendAfc::set_endless_spool_backup(int slot_index, int backup_slot) {
+AmsError AmsBackendAfc::apply_endless_spool_backup(int slot_index, int backup_slot) {
     std::string lane_name;
     std::string backup_lane_name;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-
-        int lane_count = slots_.slot_count();
-
-        // Validate slot_index
-        if (!slots_.is_valid_index(slot_index)) {
-            return AmsErrorHelper::invalid_slot(slot_index, lane_count > 0 ? lane_count - 1 : 0);
-        }
-
-        // Validate backup_slot (-1 or valid index, not equal to slot_index)
-        if (backup_slot != -1) {
-            if (!slots_.is_valid_index(backup_slot)) {
-                return AmsErrorHelper::invalid_slot(backup_slot,
-                                                    lane_count > 0 ? lane_count - 1 : 0);
-            }
-            if (backup_slot == slot_index) {
-                return AmsError(AmsResult::INVALID_SLOT, "Cannot use slot as its own backup",
-                                "A slot cannot be set as its own endless spool backup",
-                                "Select a different backup slot");
-            }
-        }
-
-        // Get lane names from registry
+        // Ranges are the base's job; this only resolves names. A registry that
+        // has not caught up with the slot count the base validated against still
+        // yields an empty name, which the injection screen below rejects.
         lane_name = slots_.name_of(slot_index);
         if (backup_slot >= 0) {
             backup_lane_name = slots_.name_of(backup_slot);
         }
-
-        // Update registry backup config
-        slots_.set_backup(slot_index, backup_slot);
     }
 
-    // Validate lane names to prevent command injection
-    if (!MoonrakerAPI::is_safe_gcode_param(lane_name)) {
+    // Validate lane names to prevent command injection. Empty counts as unsafe:
+    // `SET_RUNOUT LANE=` is a malformed command, not a no-op.
+    if (lane_name.empty() || !IMoonrakerAPI::is_safe_gcode_param(lane_name)) {
         spdlog::warn("[AMS AFC] Unsafe lane name characters in endless spool config");
         return AmsError(AmsResult::MAPPING_ERROR, "Invalid lane name",
                         "Lane name contains invalid characters", "Check AFC configuration");
     }
-    if (backup_slot >= 0 && !MoonrakerAPI::is_safe_gcode_param(backup_lane_name)) {
+    if (backup_slot >= 0 &&
+        (backup_lane_name.empty() || !IMoonrakerAPI::is_safe_gcode_param(backup_lane_name))) {
         spdlog::warn("[AMS AFC] Unsafe backup lane name characters");
         return AmsError(AmsResult::MAPPING_ERROR, "Invalid backup lane name",
                         "Backup lane name contains invalid characters", "Check AFC configuration");
@@ -5231,7 +5069,17 @@ AmsError AmsBackendAfc::set_endless_spool_backup(int slot_index, int backup_slot
         spdlog::info("[AMS AFC] Disabling endless spool backup for {}", lane_name);
     }
 
-    return execute_gcode(gcode);
+    AmsError result = execute_gcode(gcode);
+    if (!result.success()) {
+        // Leave the registry alone: the printer did not take the change, and a
+        // desynced mirror would render an arrow the hardware will not honour.
+        return result;
+    }
+    // Optimistic mirror so the arrows and the dropdown update before the next
+    // AFC status frame lands; that frame is authoritative and will overwrite it.
+    std::lock_guard<std::mutex> lock(mutex_);
+    slots_.set_backup(slot_index, backup_slot);
+    return result;
 }
 
 AmsError AmsBackendAfc::reset_tool_mappings() {
@@ -5244,31 +5092,9 @@ AmsError AmsBackendAfc::reset_tool_mappings() {
     return result;
 }
 
-AmsError AmsBackendAfc::reset_endless_spool() {
-    spdlog::info("[AMS AFC] Resetting endless spool mappings");
-
-    int slot_count = 0;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        slot_count = slots_.slot_count();
-    }
-
-    // AFC has no command to reset only runout lanes, iterate through slots
-    // Continue on failure to reset as many as possible, return first error
-    AmsError first_error = AmsErrorHelper::success();
-    for (int slot = 0; slot < slot_count; slot++) {
-        AmsError result = set_endless_spool_backup(slot, -1);
-        if (!result.success()) {
-            spdlog::error("[AMS AFC] Failed to reset slot {} endless spool: {}", slot,
-                          result.technical_msg);
-            if (first_error.success()) {
-                first_error = result;
-            }
-        }
-    }
-
-    return first_error;
-}
+// reset_endless_spool() is not overridden: AFC has no command that resets only
+// the runout lanes, and the "loop the setter with -1" fallback that used to live
+// here is now AmsBackend::reset_endless_spool() for every editable backend.
 
 // ============================================================================
 // AFC Config File Management
@@ -5280,7 +5106,7 @@ void AmsBackendAfc::load_afc_configs() {
     }
 
     if (!api_) {
-        spdlog::warn("[AMS AFC] Cannot load configs: MoonrakerAPI is null");
+        spdlog::warn("[AMS AFC] Cannot load configs: IMoonrakerAPI is null");
         return;
     }
 

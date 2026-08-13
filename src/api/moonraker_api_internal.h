@@ -11,7 +11,9 @@
  * utility functions used by the split moonraker_api_*.cpp implementation files.
  */
 
-#include "hv/HttpMessage.h"
+#if !defined(HELIX_PLATFORM_ESP32)
+#include "hv/HttpMessage.h" // HttpResponse — only the REST/HTTP sub-APIs use it
+#endif
 #include "moonraker_api.h"
 #include "spdlog/spdlog.h"
 #include "system/telemetry_manager.h"
@@ -557,6 +559,7 @@ inline MoonrakerErrorType http_status_to_error_type(int status_code) {
  * @param expected Expected HTTP status code (default: 200)
  * @return true if response is valid and has expected status, false otherwise
  */
+#if !defined(HELIX_PLATFORM_ESP32) // HTTP response handlers — REST/HTTP sub-APIs only
 inline bool handle_http_response(const std::shared_ptr<HttpResponse>& resp, std::string_view method,
                                  const MoonrakerAPI::ErrorCallback& on_error, int expected = 200) {
     if (!resp) {
@@ -607,6 +610,7 @@ inline bool handle_http_response(const std::shared_ptr<HttpResponse>& resp, std:
     report_error(on_error, type, method, message, resp->status_code);
     return false;
 }
+#endif // !HELIX_PLATFORM_ESP32
 
 // ============================================================================
 // JSON EXTRACTION HELPERS

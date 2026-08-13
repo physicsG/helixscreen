@@ -112,6 +112,11 @@ class SlotRegistry {
     // === Endless spool ===
     int backup_for_slot(int global_index) const;
     void set_backup(int global_index, int backup_slot);
+    /// Every slot's backup edge in one vector: `backup_edges()[slot]` is that
+    /// slot's backup, or -1. Feed it to
+    /// helix::printer::endless_spool_config_from_edges() - that pair is what
+    /// replaced the identical build-a-config loop AFC and the mock each carried.
+    std::vector<int> backup_edges() const;
 
     // === Snapshot ===
     AmsSystemInfo build_system_info() const;

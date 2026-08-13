@@ -11,6 +11,7 @@
 #include "ams_state.h"
 #include "ams_types.h"
 #include "app_globals.h"
+#include "data_root_resolver.h"
 #include "filament_op_slot_resolver.h"
 #include "printer_state.h"
 
@@ -299,7 +300,8 @@ void AmsToolheadMenu::register_callbacks() {
     // this shipped broken: the XML was registered only in AmsPanel, so a tap on
     // the overview logged "not a known widget/element/component" and no menu
     // appeared. Registration is idempotent and this whole function runs once.
-    lv_xml_register_component_from_file("A:ui_xml/ams_toolhead_menu.xml");
+    lv_xml_register_component_from_file(
+        helix::asset_component_uri("ui_xml/ams_toolhead_menu.xml").c_str());
 
     register_xml_callbacks({
         {"ams_toolhead_backdrop_cb", on_backdrop_cb},
@@ -358,7 +360,6 @@ void AmsToolheadMenu::on_unload_cb(lv_event_t* /*e*/) {
         self->handle_unload();
     }
 }
-
 
 // ============================================================================
 // Shared dispatch
