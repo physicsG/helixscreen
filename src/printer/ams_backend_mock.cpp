@@ -2432,6 +2432,153 @@ void AmsBackendMock::set_snapmaker_mode(bool enabled) {
     system_info_.filament_loaded = true;
 }
 
+void AmsBackendMock::set_multiace_mode(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    multiace_mode_ = enabled;
+    if (!enabled) {
+        return;
+    }
+
+    snapmaker_mode_ = false;
+    tool_changer_mode_ = false;
+    afc_mode_ = false;
+    multi_unit_mode_ = false;
+    mixed_topology_mode_ = false;
+    vivid_mixed_mode_ = false;
+    ifs_mode_ = false;
+    htlf_toolchanger_mode_ = false;
+
+    system_info_.type = AmsType::MULTIACE;
+    system_info_.type_name = "Snapmaker U1 + multiACE (Mock)";
+    system_info_.total_slots = 12;
+    system_info_.supports_endless_spool = false;
+    system_info_.supports_tool_mapping = false;
+    system_info_.supports_bypass = false;
+    system_info_.has_hardware_bypass_sensor = false;
+    system_info_.tip_method = TipMethod::NONE;
+
+    // Unit 0 is the U1's four heads; units 1 and 2 are the ACEs, bound to head
+    // 0 and head 1 respectively. Heads 2 and 3 stay on their stock feeders, so
+    // one screen shows both kinds of position side by side.
+    slots_.clear();
+    slots_.initialize_units({
+        {"SnapSwap", {"1", "2", "3", "4"}},
+        {"ACE 1", {"1", "2", "3", "4"}},
+        {"ACE 2", {"1", "2", "3", "4"}},
+    });
+
+    struct Bay {
+        const char* material;
+        const char* brand;
+        uint32_t color;
+        const char* color_name;
+        SlotStatus status;
+        int spoolman_id;
+        float remaining;
+    };
+    // Heads: 0 and 1 hold what their ACE has seated, 2 and 3 their own spools.
+    const Bay heads[4] = {
+        {"PETG", "Kingroon", 0x83AFFF, "Silver", SlotStatus::LOADED, 15, 502.0f},
+        {"PLA", "Jayo", 0xE72F1D, "Red", SlotStatus::AVAILABLE, 23, 250.0f},
+        {"PLA", "Forshape", 0xF4C032, "Yellow", SlotStatus::AVAILABLE, 31, 800.0f},
+        {"ABS", "Snapmaker", 0x080A0D, "Black", SlotStatus::EMPTY, -1, 0.0f},
+    };
+    // ACE 1 (feeds head 0) — bay 0 is the seated one, matching heads[0].
+    const Bay ace1[4] = {
+        {"PETG", "Kingroon", 0x83AFFF, "Silver", SlotStatus::LOADED, 15, 502.0f},
+        {"PETG", "Kingroon", 0x8FA7C8, "Gray", SlotStatus::AVAILABLE, 10, 1000.0f},
+        {"PETG", "Generic", 0x632C2C, "Brick", SlotStatus::AVAILABLE, 41, 640.0f},
+        {"PETG", "Kingroon", 0xC47053, "Orange", SlotStatus::AVAILABLE, 17, 845.0f},
+    };
+    // ACE 2 (feeds head 1) — bay 2 is the seated one, matching heads[1]. A
+    // different bay on purpose: the seat must not be assumed to be bay 0.
+    const Bay ace2[4] = {
+        {"PLA", "Polymaker", 0x1E9E4A, "Green", SlotStatus::AVAILABLE, 51, 900.0f},
+        {"PLA", "eSUN", 0x19C3D6, "Cyan", SlotStatus::EMPTY, -1, 0.0f},
+        {"PLA", "Jayo", 0xE72F1D, "Red", SlotStatus::LOADED, 23, 250.0f},
+        {"TPU", "Overture", 0xFFFFFF, "White", SlotStatus::AVAILABLE, 62, 480.0f},
+    };
+
+    auto fill = [this](int gi, const Bay& b, int mapped_tool) {
+        auto* entry = slots_.get_mut(gi);
+        if (!entry) {
+            return;
+        }
+        entry->info.slot_index = gi;
+        entry->info.global_index = gi;
+        entry->info.material = b.material;
+        entry->info.brand = b.brand;
+        entry->info.color_rgb = b.color;
+        entry->info.color_name = b.color_name;
+        entry->info.status = b.status;
+        entry->info.spoolman_id = b.spoolman_id;
+        entry->info.remaining_weight_g = b.remaining;
+        entry->info.total_weight_g = b.remaining > 0.0f ? 1000.0f : -1.0f;
+        entry->info.mapped_tool = mapped_tool;
+        if (auto mat = filament::find_material(b.material)) {
+            entry->info.nozzle_temp_min = mat->nozzle_min;
+            entry->info.nozzle_temp_max = mat->nozzle_max;
+            entry->info.bed_temp = mat->bed_temp;
+        }
+    };
+
+    for (int i = 0; i < 4; ++i) {
+        fill(i, heads[i], i);
+        // Every bay of an ACE feeds the single head it is bound to — head mode.
+        fill(4 + i, ace1[i], 0);
+        fill(8 + i, ace2[i], 1);
+    }
+
+    multiace_seated_ = {{4, 10, -1, -1}}; // ACE 1 bay 0, ACE 2 bay 2
+
+    if (system_info_.units.size() >= 3) {
+        system_info_.units[0].topology = PathTopology::PARALLEL;
+        system_info_.units[0].name = "SnapSwap";
+        system_info_.units[0].display_name = "SnapSwap";
+        // A bound ACE is a combiner, not a fan: all four bays reach one head.
+        system_info_.units[1].topology = PathTopology::HUB;
+        system_info_.units[1].display_name = "ACE 2 Pro";
+        system_info_.units[2].topology = PathTopology::HUB;
+        system_info_.units[2].display_name = "ACE 2 Pro";
+    }
+    topology_ = PathTopology::PARALLEL;
+    // Populating AmsUnit::topology is NOT enough: compute_system_tool_layout()
+    // asks the BACKEND, and unit_topologies_ is what answers. Without this each
+    // ACE drew four separate nozzles all labelled with the same tool instead of
+    // the combiner it is — the very trap ams_backend_multiace.h warns about,
+    // walked into here.
+    unit_topologies_ = {PathTopology::PARALLEL, PathTopology::HUB, PathTopology::HUB};
+
+    system_info_.current_tool = 0;
+    system_info_.current_slot = 0;
+    system_info_.filament_loaded = true;
+}
+
+std::optional<int> AmsBackendMock::slot_identity_owner_unit(int slot_index) const {
+    if (!multiace_mode_ || slot_index < 0 || slot_index >= 4) {
+        return std::nullopt;
+    }
+    // Heads 0 and 1 are ACE-fed; the ACE describes their spool. Wiring, not
+    // contents — it holds whether or not a bay is currently seated, which is
+    // what keeps the head from flipping back to a SnapSwap spool on unload.
+    if (slot_index == 0) {
+        return 1;
+    }
+    if (slot_index == 1) {
+        return 2;
+    }
+    return std::nullopt;
+}
+
+std::optional<int> AmsBackendMock::slot_identity_owner_slot(int slot_index) const {
+    if (!multiace_mode_ || slot_index < 0 ||
+        slot_index >= static_cast<int>(multiace_seated_.size())) {
+        return std::nullopt;
+    }
+    const int seated = multiace_seated_[static_cast<size_t>(slot_index)];
+    return seated >= 0 ? std::optional<int>(seated) : std::nullopt;
+}
+
 void AmsBackendMock::apply_remap_overrides(const std::string& csv) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!slots_.is_initialized()) {

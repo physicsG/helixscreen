@@ -457,6 +457,20 @@ class AmsBackendMock : public AmsBackend {
      */
     void set_snapmaker_mode(bool enabled);
 
+    /// Simulate a U1 with TWO ACE units, one bound to each of the first two
+    /// heads. The shape the real rig cannot show on one machine: heads 0 and 1
+    /// ACE-fed (so each draws its feeder's four bays), heads 2 and 3 on their
+    /// stock feeders. Exercises the presentation an ACE-fed position gets —
+    /// bars, a spool-number range, no tool badge, no Load — without a printer.
+    void set_multiace_mode(bool enabled);
+
+    /// In multiace mode heads 0 and 1 are fed by ACE 1 and ACE 2, so their
+    /// spool identity belongs to that unit — exactly as AmsBackendMultiAce
+    /// reports for the real thing. Every other mode answers nullopt, which is
+    /// the base behaviour.
+    [[nodiscard]] std::optional<int> slot_identity_owner_unit(int slot_index) const override;
+    [[nodiscard]] std::optional<int> slot_identity_owner_slot(int slot_index) const override;
+
     /**
      * @brief Seed per-tool→slot firmware mappings from a "tool:slot" CSV.
      *
@@ -713,6 +727,11 @@ class AmsBackendMock : public AmsBackend {
     bool ifs_mode_ = false;              ///< Simulate AD5X IFS (4 slots, LINEAR)
     bool htlf_toolchanger_mode_ = false; ///< Simulate HTLF + Toolchanger mixed topology
     bool snapmaker_mode_ = false; ///< Simulate Snapmaker U1 (4 slots, PARALLEL, non-editable)
+    bool multiace_mode_ = false;  ///< Simulate a U1 with two ACE units (see set_multiace_mode)
+    /// Which ACE bay is seated at each U1 head in multiace mode, -1 = none.
+    /// Drives slot_identity_owner_slot(), so the head and its bay share one
+    /// spool number instead of each consuming one.
+    std::array<int, 4> multiace_seated_{{-1, -1, -1, -1}};
     std::vector<PathTopology> unit_topologies_; ///< Per-unit topology storage
 
     // Endless spool simulation state

@@ -178,6 +178,9 @@ create_mock_with_features(int gate_count, MoonrakerClient* mock_client = nullptr
         } else if (ams_type == "snapmaker" || ams_type == "snapswap" || ams_type == "u1") {
             mock->set_snapmaker_mode(true);
             spdlog::info("[AMS Backend] Mock Snapmaker U1 mode enabled");
+        } else if (ams_type == "multiace" || ams_type == "u1_ace" || ams_type == "ace2") {
+            mock->set_multiace_mode(true);
+            spdlog::info("[AMS Backend] Mock U1 + 2x ACE mode enabled");
         }
     }
 
