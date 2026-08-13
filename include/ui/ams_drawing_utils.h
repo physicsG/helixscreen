@@ -180,6 +180,15 @@ struct BarStyleParams {
 constexpr int32_t STATUS_LINE_HEIGHT_PX = 3;
 constexpr int32_t STATUS_LINE_GAP_PX = 2;
 
+/// Mini slot-bar geometry. Shared because two surfaces draw the same bars: the
+/// overview's unit cards, and the slot that stands for a position fed from
+/// another unit (an ACE-fed head shows its ACE's bays rather than one spool).
+/// Keeping them here is what stops the two drifting into near-identical.
+constexpr int32_t MINI_BAR_MIN_WIDTH_PX = 6; ///< below this a bar is invisible
+constexpr int32_t MINI_BAR_MAX_WIDTH_PX = 14;
+constexpr int32_t MINI_BAR_HEIGHT_PX = 40; ///< decorative; no responsive scaling
+constexpr int32_t MINI_BAR_RADIUS_PX = 4;
+
 /** Create slot column: bar_bg (with bar_fill child) + status_line in a column flex container */
 SlotColumn create_slot_column(lv_obj_t* parent, int32_t bar_width, int32_t bar_height,
                               int32_t bar_radius);

@@ -49,17 +49,13 @@ using namespace helix;
 // Layout Constants
 // ============================================================================
 
-/// Minimum bar width for mini slot bars (prevents invisible bars)
-static constexpr int32_t MINI_BAR_MIN_WIDTH_PX = 6;
-
-/// Maximum bar width for mini slot bars
-static constexpr int32_t MINI_BAR_MAX_WIDTH_PX = 14;
-
-/// Height of each mini slot bar (decorative, no need for responsive scaling)
-static constexpr int32_t MINI_BAR_HEIGHT_PX = 40;
-
-/// Border radius for bar corners
-static constexpr int32_t MINI_BAR_RADIUS_PX = 4;
+// The MINI_BAR_* geometry moved to ams_drawing_utils.h: the AMS slot draws the
+// same bars for a position fed from another unit, and two private copies of the
+// same four numbers is exactly how those two surfaces would drift apart.
+using ams_draw::MINI_BAR_HEIGHT_PX;
+using ams_draw::MINI_BAR_MAX_WIDTH_PX;
+using ams_draw::MINI_BAR_MIN_WIDTH_PX;
+using ams_draw::MINI_BAR_RADIUS_PX;
 
 /// Zoom animation duration (ms) for detail view transitions
 static constexpr uint32_t DETAIL_ZOOM_DURATION_MS = 200;

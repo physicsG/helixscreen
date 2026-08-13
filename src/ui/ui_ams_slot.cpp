@@ -82,6 +82,13 @@ struct AmsSlotData {
     // 3D spool canvas widget (when use_3d_style is true)
     lv_obj_t* spool_canvas = nullptr;
 
+    /// Bar row shown INSTEAD of the spool for a position fed from another unit.
+    /// An ACE-fed U1 head does not hold one spool — in head mode every bay of
+    /// its ACE feeds it — so a single spool graphic names whichever bay happens
+    /// to be seated and hides the other three. The bars are the same ones the
+    /// multi-filament overview draws on a unit card, via the shared helpers.
+    lv_obj_t* source_bars = nullptr;
+
     // Other UI elements
     lv_obj_t* material_label = nullptr;
     lv_obj_t* leader_line = nullptr;     // Dotted line connecting label to spool (when staggered)
@@ -296,6 +303,14 @@ static bool slot_has_retained_identity(int slot_index) {
 static void apply_slot_material(AmsSlotData* data, const char* material) {
     if (!data || !data->material_label)
         return;
+    // A position drawn as its feeder's bays holds no single filament to name —
+    // the label would state whichever bay happened to be seated, which is the
+    // same half-truth the spool graphic told. Decided here, in the rule that
+    // owns this label, for the reason the other three are: it re-runs.
+    if (data->source_bars) {
+        lv_obj_add_flag(data->material_label, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
     if (data->last_status == SlotStatus::EMPTY && !slot_has_retained_identity(data->slot_index)) {
         // Name the lane's purpose instead of showing a placeholder for a
         // material that was never there. "Empty" is UI copy, not a material
@@ -397,7 +412,11 @@ static void apply_slot_status(AmsSlotData* data, int status_int) {
     }
     // Handle spool visibility based on status and assignment
     lv_opa_t spool_opa = LV_OPA_COVER;
-    bool show_spool = true;
+    // A position drawn as its feeder's bays has no spool of its own to draw —
+    // the bars replaced it. Decided here, where spool visibility is owned:
+    // hiding the layers next to apply_source_bars() only lasted until the next
+    // status update put them straight back.
+    bool show_spool = (data->source_bars == nullptr);
     bool show_empty_placeholder = false;
 
     if (status == SlotStatus::EMPTY) {
@@ -413,7 +432,9 @@ static void apply_slot_status(AmsSlotData* data, int status_int) {
             // refresh below owns it, so the material observer firing afterwards
             // reaches the same answer instead of replacing it with "--".
             show_spool = false;
-            show_empty_placeholder = true;
+            // ...but not the dashed "empty" circle behind the bars: the bars
+            // already show which of the feeder's bays are empty, one by one.
+            show_empty_placeholder = (data->source_bars == nullptr);
         }
     }
 
@@ -620,6 +641,16 @@ static void apply_tool_badge(AmsSlotData* data, int mapped_tool, bool is_overrid
         return;
     }
 
+    // A position drawn as its feeder's bays is not one tool's spool — it is the
+    // set the tool can draw from — so the tool letter belongs to the toolhead
+    // row below, not on top of the bars. Decided here, with the rest of this
+    // badge's visibility: a hide made next to the bars is re-shown by the next
+    // status update, which is how the first attempt at this failed.
+    if (data->source_bars) {
+        lv_obj_add_flag(data->tool_badge_bg, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
     // Tool changers: badge is redundant with toolhead label below
     auto* backend = AmsState::instance().get_backend(0);
     if (backend && backend->should_hide_slot_tool_badge()) {
@@ -751,6 +782,98 @@ static void create_spool_visualization(AmsSlotData* data) {
  * @brief Setup observers for a given slot index
  * Uses observer factory pattern for type-safe lambda observers
  */
+/**
+ * @brief Draw the feeding unit's bays as bars, instead of one spool.
+ *
+ * A position fed from another unit is not a spool position — it is a view of
+ * several. On a U1 in head mode all four bays of the bound ACE feed the one
+ * ACE-fed head, so a single spool graphic showed whichever bay happened to be
+ * seated and silently hid the other three; the badge already says "4-7".
+ *
+ * Uses the same ams_draw helpers the multi-filament overview's unit cards use,
+ * so the two surfaces cannot drift apart visually.
+ *
+ * No-op for an ordinary slot, which keeps its spool. Safe to call repeatedly:
+ * the row is built once and restyled thereafter.
+ */
+static void apply_source_bars(AmsSlotData* data) {
+    if (!data || !data->spool_container) {
+        return;
+    }
+    auto* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        return;
+    }
+    const auto owner = backend->slot_identity_owner_unit(data->slot_index);
+    if (!owner) {
+        return; // holds its own spool — nothing to do
+    }
+    const AmsSystemInfo info = backend->get_system_info();
+    if (*owner < 0 || *owner >= static_cast<int>(info.units.size())) {
+        return;
+    }
+    const auto& unit = info.units[static_cast<size_t>(*owner)];
+    const int bays = static_cast<int>(unit.slots.size());
+    if (bays <= 0) {
+        return;
+    }
+
+    // The spool visual and the bars are alternatives, never both — but the hide
+    // belongs to apply_slot_status(), which owns spool visibility and re-runs on
+    // every update. Setting source_bars below is what tells it.
+
+    const int32_t box = lv_obj_get_width(data->spool_container);
+    const int32_t gap = theme_manager_get_spacing("space_xxs");
+    const int32_t bar_w = ams_draw::calc_bar_width(box, bays, gap, ams_draw::MINI_BAR_MIN_WIDTH_PX,
+                                                   ams_draw::MINI_BAR_MAX_WIDTH_PX);
+
+    if (!data->source_bars) {
+        data->source_bars = lv_obj_create(data->spool_container);
+        lv_obj_remove_style_all(data->source_bars);
+        lv_obj_set_size(data->source_bars, LV_PCT(100), LV_PCT(100));
+        lv_obj_set_flex_flow(data->source_bars, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(data->source_bars, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(data->source_bars, gap, LV_PART_MAIN);
+        lv_obj_remove_flag(data->source_bars, LV_OBJ_FLAG_SCROLLABLE);
+        // Taps belong to the head's menu, so the bars must not swallow them.
+        lv_obj_remove_flag(data->source_bars, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(data->source_bars, LV_OBJ_FLAG_EVENT_BUBBLE);
+    } else {
+        lv_obj_clean(data->source_bars);
+    }
+
+    const int32_t bar_h = box > 0 ? (box * 3) / 4 : ams_draw::MINI_BAR_HEIGHT_PX;
+    for (int b = 0; b < bays; ++b) {
+        const SlotInfo& bay = unit.slots[static_cast<size_t>(b)];
+        auto col = ams_draw::create_slot_column(data->source_bars, bar_w, bar_h,
+                                                ams_draw::MINI_BAR_RADIUS_PX);
+        ams_draw::BarStyleParams params;
+        params.color_rgb = bay.color_rgb;
+        params.fill_pct = bay.display_fill_pct();
+        params.is_present = bay.is_present();
+        ams_draw::style_slot_bar(col, params, ams_draw::MINI_BAR_RADIUS_PX);
+    }
+
+    // The number badge is withdrawn by apply_slot_status(), which owns badge
+    // visibility and would undo a hide made here on its next run. The TOOL badge
+    // stays either way: it is the only thing identifying which head this is.
+
+    // Badges are created by XML before this row, so lift them back on top.
+    if (data->tool_badge_bg) {
+        lv_obj_move_to_index(data->tool_badge_bg, -1);
+    }
+
+    // Re-run the rules that read source_bars. The status observer may already
+    // have fired for this slot before the bars existed, in which case it drew
+    // the spool and the tool badge; without this they stay until whatever
+    // happens to update the slot next.
+    if (auto* status_subject = AmsState::instance().get_slot_status_subject(data->slot_index)) {
+        apply_slot_status(data, lv_subject_get_int(status_subject));
+    }
+    refresh_slot_material_label(data);
+}
+
 static void setup_slot_observers(AmsSlotData* data) {
     if (data->slot_index < 0 || data->slot_index >= AmsState::MAX_SLOTS) {
         spdlog::warn("[AmsSlot] Invalid slot index {}, skipping observers", data->slot_index);
@@ -900,12 +1023,27 @@ static void setup_slot_observers(AmsSlotData* data) {
             });
     }
 
-    // Update slot badge with 1-based display number
+    // Update slot badge with its 1-based SPOOL number, which is not the global
+    // index: the index is dense over every addressable slot, the label counts
+    // spools. They diverge when one slot only views another's spool — a U1 head
+    // fed from an ACE bay — and numbering by index there labelled seven spools
+    // 1-8. Identical to slot_index + 1 on every backend where each slot owns
+    // what it holds.
     if (data->slot_badge) {
-        char badge_text[16];
-        snprintf(badge_text, sizeof(badge_text), "%d", data->slot_index + 1);
-        lv_label_set_text(data->slot_badge, badge_text);
+        auto* badge_backend = AmsState::instance().get_backend();
+        // A range ("4-7") when the position is fed by several of another unit's
+        // bays; the badge is width="content" over a min-width, so it widens into
+        // a pill on its own.
+        const std::string label = badge_backend
+                                      ? badge_backend->spool_display_label(data->slot_index)
+                                      : std::to_string(data->slot_index + 1);
+        lv_label_set_text(data->slot_badge, label.c_str());
     }
+
+    // A position fed from another unit shows that unit's bays instead of one
+    // spool. Here rather than at create time: slot_index is only set after the
+    // widget is built, so the backend cannot be asked about it any earlier.
+    apply_source_bars(data);
 
     // Trigger initial updates from current subject values
     if (color_subject && data->color_observer) {
