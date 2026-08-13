@@ -692,6 +692,31 @@ class AmsBackend {
     }
 
     /**
+     * @brief Does changing to slot @p slot_index's mapped tool COMPLETE its load?
+     *
+     * plan_load()'s swap arm turns "load slot N" into `change_tool(N's mapped
+     * tool)` and stops there, on the strength of that being the whole operation:
+     * ACE's change_tool() is literally `return load_filament(...)`, AFC's is
+     * `CHANGE_TOOL LANE={n}`, QIDI's load prepends its own unload. Nothing
+     * chains a second command, so a backend where the tool change is only HALF
+     * the job silently performs half.
+     *
+     * multiACE is that backend. Its ACE bays report mapped_tool = the head they
+     * feed, so tapping Load on a bay planned `T3` -- which mounts head 3, moves
+     * the carriage, and feeds nothing. The bay still has to be named:
+     * `ACE_LOAD_HEAD HEAD=h ACE=a SLOT=s`.
+     *
+     * Per-slot rather than per-backend because one backend can be both: on
+     * multiACE the U1's own heads keep their filament at the head, so a tool
+     * change really is the whole load there, while a bay four slots later is
+     * not. Default true -- the behaviour every backend had before this existed.
+     */
+    [[nodiscard]] virtual bool change_tool_completes_load(int slot_index) const {
+        (void)slot_index;
+        return true;
+    }
+
+    /**
      * @brief Record that the user has already agreed to a pre-operation home for
      *        the NEXT dispatch, so ensure_homed_then() does not ask a second
      *        time.

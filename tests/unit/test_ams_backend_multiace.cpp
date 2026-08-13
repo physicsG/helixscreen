@@ -902,3 +902,62 @@ TEST_CASE_METHOD(HelixTestFixture, "before any ace frame no head ends early",
         CHECK_FALSE(backend.preload_finish_ends_unload(head));
     }
 }
+
+// =============================================================================
+// Loading an ACE bay feeds it — it does not just mount the head
+//
+// plan_load()'s swap arm turns "load slot N" into change_tool(N's mapped tool)
+// and stops, which is the whole operation on ACE / AFC / QIDI. An ACE bay
+// reports mapped_tool = the head it feeds, so tapping Load on a bay planned
+// `T3`: the carriage moved, nothing was fed, and no error was shown. The bay
+// has to be named.
+// =============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "a tool change does not complete an ACE bay's load",
+                 "[ams][multiace][bay_load]") {
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    // The U1's own heads keep their filament at the head: `T{n}` really is the
+    // whole load there, and that arm must keep working.
+    for (int head = 0; head < 4; ++head) {
+        INFO("head " << head);
+        CHECK(backend.change_tool_completes_load(head));
+    }
+    // Every ACE bay needs its own command.
+    for (int bay = 4; bay < 8; ++bay) {
+        INFO("bay " << bay);
+        CHECK_FALSE(backend.change_tool_completes_load(bay));
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "an ACE bay load names the bay", "[ams][multiace][bay_load]") {
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    // The captured machine has one ACE (device 0) feeding head 3, contributing
+    // global slots 4..7.
+    auto bay = backend.bay_source(5);
+    REQUIRE(bay.has_value());
+    CHECK(bay->ace_index == 0);
+    CHECK(bay->bay == 1);
+    CHECK(bay->head == 3);
+
+    // A head is not a bay.
+    CHECK_FALSE(backend.bay_source(3).has_value());
+
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.load_filament(5).success());
+    REQUIRE(backend.captured_gcodes.size() >= 1);
+    const std::string& load = backend.captured_gcodes.back();
+    // The whole point: HEAD, ACE and SLOT all present. `ACE_LOAD_HEAD HEAD=3`
+    // alone is the feeder-head form and would feed whatever was last selected.
+    CHECK(load.find("ACE_LOAD_HEAD") != std::string::npos);
+    CHECK(load.find("HEAD=3") != std::string::npos);
+    CHECK(load.find("ACE=0") != std::string::npos);
+    CHECK(load.find("SLOT=1") != std::string::npos);
+    // And it is never a bare tool change.
+    for (const auto& g : backend.captured_gcodes) {
+        CHECK(g != "T3");
+    }
+}

@@ -104,6 +104,28 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
         return head_source_kind(head) == HeadSource::ACE;
     }
 
+    /// See AmsBackend::change_tool_completes_load(). True for the U1's own four
+    /// heads, whose filament sits at the head already -- `T{n}` really is the
+    /// whole load there. False for every ACE bay: mounting the head the bay
+    /// feeds moves the carriage and feeds nothing, and the bay has to be named
+    /// (`ACE_LOAD_HEAD HEAD=h ACE=a SLOT=s`).
+    [[nodiscard]] bool change_tool_completes_load(int slot_index) const override {
+        return slot_index < NUM_TOOLS;
+    }
+
+    /// An ACE bay, split out of its GLOBAL slot index.
+    ///
+    /// Global layout: slots 0..3 are the U1's heads (unit 0), then each ACE
+    /// contributes ACE_SLOTS_PER_UNIT bays in unit order. `head` is the head
+    /// that ACE feeds in head mode, or -1 when no head is bound to it.
+    struct BaySource {
+        int ace_index = -1; ///< multiACE's own 0-based device index
+        int bay = -1;       ///< Bay within that ACE
+        int head = -1;      ///< Head this ACE feeds, or -1
+    };
+    /// nullopt when @p slot_index is a head rather than a bay, or out of range.
+    [[nodiscard]] std::optional<BaySource> bay_source(int slot_index) const;
+
     // Every ACE reports temperature and humidity. Answered at the BACKEND level,
     // as the interface asks it: unit 0 is the U1 itself and has no sensor, but
     // the per-unit `ams_env_ind_<n>_visible` subject already hides the indicator

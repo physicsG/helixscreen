@@ -881,7 +881,71 @@ AmsError AmsBackendMultiAce::set_auto_dry_enabled(bool enabled, int unit) {
 // Filament ops — ACE-fed heads take the ACE path
 // ============================================================================
 
+std::optional<AmsBackendMultiAce::BaySource> AmsBackendMultiAce::bay_source(int slot_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (slot_index < NUM_TOOLS) {
+        return std::nullopt; // a head, not a bay
+    }
+    // system_info_ is the authority on where a unit's slots start -- deriving it
+    // as NUM_TOOLS + ace_index * ACE_SLOTS_PER_UNIT would silently drift if the
+    // unit list is ever built differently (same reasoning as
+    // slot_identity_owner_slot()).
+    for (size_t u = 1; u < system_info_.units.size(); ++u) {
+        const auto& unit = system_info_.units[u];
+        const int first = unit.first_slot_global_index;
+        if (slot_index < first || slot_index >= first + unit.slot_count) {
+            continue;
+        }
+        BaySource src;
+        src.ace_index = static_cast<int>(u) - 1; // unit 0 is the U1 itself
+        src.bay = slot_index - first;
+        // Which head this ACE actually FEEDS -- multiACE's own aceHeadForAce()
+        // reverse lookup, and note it tests the head's source KIND as well.
+        // head_ace_index_ is a binding for every head, not a statement that the
+        // ACE feeds it: a live U1 reports head_ace {0:0, 1:1, 2:2, 3:0}, so
+        // matching on the index alone picks head 0 -- a stock feeder head -- for
+        // ACE 0's bays, and the load would go to the wrong toolhead.
+        for (int h = 0; h < NUM_TOOLS; ++h) {
+            if (head_kind_[h] == HeadSource::ACE && head_ace_index_[h] == src.ace_index) {
+                src.head = h;
+                break;
+            }
+        }
+        return src;
+    }
+    return std::nullopt;
+}
+
 AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
+    // A BAY, not a head: this is "feed this specific spool to the head its ACE
+    // serves". The base validate_slot_index() only knows the U1's four heads, so
+    // this arm comes first. Sequence copied from multiACE's own web UI
+    // (`http://<printer>/multiace/app.js`, loadSlotHeadMode): unload the head
+    // first when it already holds a DIFFERENT source, then load, because
+    // ACE_LOAD_HEAD's own guard only refuses when filament is already at the
+    // head -- it will not swap for you.
+    if (auto bay = bay_source(slot_index)) {
+        if (bay->head < 0) {
+            return AmsErrorHelper::invalid_slot(slot_index, get_system_info().total_slots - 1);
+        }
+        auto seated = seated_source(bay->head);
+        const bool same_source =
+            seated && seated->ace_index == bay->ace_index && seated->slot == bay->bay;
+        if (seated && !same_source) {
+            spdlog::info("[AmsBackendMultiAce] head {} holds ACE {} slot {} -> unload before "
+                         "loading ACE {} slot {}",
+                         bay->head, seated->ace_index, seated->slot, bay->ace_index, bay->bay);
+            AmsError unload_err = execute_gcode(fmt::format("ACE_UNLOAD_HEAD HEAD={}", bay->head));
+            if (!unload_err.success()) {
+                return unload_err;
+            }
+        }
+        spdlog::info("[AmsBackendMultiAce] bay {} -> ACE_LOAD_HEAD HEAD={} ACE={} SLOT={}",
+                     slot_index, bay->head, bay->ace_index, bay->bay);
+        return execute_gcode(fmt::format("ACE_LOAD_HEAD HEAD={} ACE={} SLOT={}", bay->head,
+                                         bay->ace_index, bay->bay));
+    }
+
     auto err = validate_slot_index(slot_index);
     if (err.result != AmsResult::SUCCESS) {
         return err;

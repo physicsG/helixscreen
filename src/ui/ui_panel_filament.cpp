@@ -2628,6 +2628,7 @@ void FilamentPanel::execute_load() {
         caps.present = true;
         caps.requires_slot_selection_for_load = backend->requires_slot_selection_for_load();
         caps.needs_unload_before_load = backend->needs_unload_before_load(sys, target_slot);
+        caps.change_tool_completes_load = backend->change_tool_completes_load(target_slot);
         caps.is_tool_changer = backend->get_type() == AmsType::TOOL_CHANGER;
     }
 
