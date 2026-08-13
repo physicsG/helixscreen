@@ -92,10 +92,43 @@ std::optional<int> AmsBackendMultiAce::slot_identity_owner_unit(int slot_index) 
     if (slot_index < 0 || slot_index >= NUM_TOOLS) {
         return std::nullopt;
     }
+    if (head_kind_[slot_index] != HeadSource::ACE) {
+        return std::nullopt;
+    }
+    // Wiring, not contents: an ACE-fed head is the ACE's to describe whether or
+    // not filament happens to be in it. Requiring head_seated_ here made the head
+    // flip back to a SnapSwap spool position on every unload — the unit count
+    // went 3 -> 4 and the ACE's bays renumbered under the user.
+    if (head_ace_index_[slot_index] >= 0) {
+        return head_ace_index_[slot_index] + 1; // unit 0 is the U1 itself
+    }
+    // No head_ace yet (older firmware, or before the first full frame): fall
+    // back to whatever is seated, which is the only other thing that knows.
+    if (head_seated_[slot_index]) {
+        return head_seated_[slot_index]->unit_index;
+    }
+    return std::nullopt;
+}
+
+std::optional<int> AmsBackendMultiAce::slot_identity_owner_slot(int slot_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Same gate as slot_identity_owner_unit: only a seated ACE-fed head views a
+    // spool it does not hold.
+    if (slot_index < 0 || slot_index >= NUM_TOOLS) {
+        return std::nullopt;
+    }
     if (head_kind_[slot_index] != HeadSource::ACE || !head_seated_[slot_index]) {
         return std::nullopt;
     }
-    return head_seated_[slot_index]->unit_index;
+    const auto& seated = *head_seated_[slot_index];
+    // system_info_ is the authority on where a unit's slots start; deriving it
+    // as NUM_TOOLS + ace_index * ACE_SLOTS_PER_UNIT would silently drift if the
+    // unit list is ever built differently.
+    if (seated.unit_index < 0 || seated.unit_index >= static_cast<int>(system_info_.units.size())) {
+        return std::nullopt;
+    }
+    return system_info_.units[static_cast<size_t>(seated.unit_index)].first_slot_global_index +
+           seated.slot;
 }
 
 AmsBackendMultiAce::HeadSource AmsBackendMultiAce::head_source_kind(int head) const {
@@ -140,9 +173,16 @@ void AmsBackendMultiAce::handle_status_update(const nlohmann::json& notification
     }
 
     bool changed = false;
+    bool want_overrides = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         parse_ace_object_locked(status["ace"], changed);
+        want_overrides = override_refetch_wanted_;
+        override_refetch_wanted_ = false;
+    }
+    // Outside the lock on purpose: fetch_slot_overrides() takes mutex_ itself.
+    if (want_overrides) {
+        fetch_slot_overrides();
     }
     if (changed) {
         emit_event(EVENT_STATE_CHANGED);
@@ -172,7 +212,21 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
     // authority; ACE is what is left over.
     const auto& manual = ace.contains("head_manual") ? ace["head_manual"] : nlohmann::json::object();
     const auto& feeder = ace.contains("head_feeder") ? ace["head_feeder"] : nlohmann::json::object();
-    const bool have_maps = manual.is_object() || feeder.is_object();
+    // Ask whether the FRAME carried the keys, not whether the locals are objects:
+    // the `: json::object()` fallbacks above are objects too, so testing
+    // is_object() was true on every frame. A partial update then re-ran the test
+    // below against two empty maps, where "not manual, not feeder" falls through
+    // to ACE — quietly relabelling all four heads ACE-fed a moment after a good
+    // frame, which is the wrong command path for a head on its stock feeder.
+    const bool have_maps = (ace.contains("head_manual") && ace["head_manual"].is_object()) ||
+                           (ace.contains("head_feeder") && ace["head_feeder"].is_object());
+
+    // ...but once head_feeder/head_manual have decided WHETHER, `head_ace` is the
+    // authority on WHICH ACE feeds the head, and it is the only one that survives
+    // an EMPTY head: head_source goes null the moment the filament leaves, while
+    // the wiring does not change. Binding on head_source alone made an ACE-fed
+    // head revert to a SnapSwap spool position whenever it was unloaded.
+    const auto& head_ace = ace.contains("head_ace") ? ace["head_ace"] : nlohmann::json::object();
 
     // Status frames are DELTAS. A frame that says nothing about head sources must
     // leave them alone -- treating "absent" as "cleared" wiped the seating on
@@ -193,6 +247,15 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
             }
             if (kind != head_kind_[h]) {
                 head_kind_[h] = kind;
+                changed = true;
+            }
+        }
+
+        // Delta-safe: only touched when this frame carries the key.
+        if (auto a = head_keyed<int>(head_ace, h)) {
+            const int idx = (*a >= 0 && *a < MAX_ACE_UNITS) ? *a : -1;
+            if (idx != head_ace_index_[h]) {
+                head_ace_index_[h] = idx;
                 changed = true;
             }
         }
@@ -244,6 +307,26 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
                 st.dryer_remaining_min = helix::json_util::safe_int(ds, "remain_time", 0);
             }
 
+            // Frames are DELTAS, so every field keeps its previous value when the
+            // frame does not mention it. `auto_dry_running` is its own key next to
+            // the block, not inside it, and arrives on its own often enough that
+            // defaulting it to false here would flicker the rule off between frames.
+            if (unit.contains("auto_dry") && unit["auto_dry"].is_object()) {
+                const auto& ad = unit["auto_dry"];
+                st.has_auto_dry = true;
+                st.auto_dry_enabled = ad.value("enabled", st.auto_dry_enabled);
+                st.auto_dry_rh_start =
+                    helix::json_util::safe_float(ad, "rh_start", st.auto_dry_rh_start);
+                st.auto_dry_rh_end = helix::json_util::safe_float(ad, "rh_end", st.auto_dry_rh_end);
+                st.auto_dry_temp_c = helix::json_util::safe_int(ad, "temp", st.auto_dry_temp_c);
+                st.auto_dry_master = helix::json_util::safe_int(ad, "master", st.auto_dry_master);
+                st.auto_dry_add_time_min =
+                    helix::json_util::safe_int(ad, "add_time", st.auto_dry_add_time_min);
+            }
+            if (unit.contains("auto_dry_running")) {
+                st.auto_dry_running = unit.value("auto_dry_running", st.auto_dry_running);
+            }
+
             if (unit.contains("gate_status") && unit["gate_status"].is_array()) {
                 const auto& gs = unit["gate_status"];
                 for (int s = 0; s < ACE_SLOTS_PER_UNIT && s < static_cast<int>(gs.size()); ++s) {
@@ -266,7 +349,238 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
         }
     }
 
+    // slot_overrides.json lives on disk, not in this object, so nothing here can
+    // say it changed. `event_seq` is multiACE's own bump-on-any-state-change
+    // counter, which is the closest thing to a signal — and the first frame
+    // (seq -1) is what fetches it at all.
+    if (ace.contains("event_seq") && ace["event_seq"].is_number_integer()) {
+        const int64_t seq = ace["event_seq"].get<int64_t>();
+        if (seq != overrides_fetched_seq_) {
+            overrides_fetched_seq_ = seq;
+            override_refetch_wanted_ = true;
+        }
+    } else if (overrides_fetched_seq_ < 0) {
+        overrides_fetched_seq_ = 0; // firmware without event_seq: fetch once
+        override_refetch_wanted_ = true;
+    }
+
+    parse_spool_table_locked(ace, changed);
     rebuild_ace_units_locked();
+}
+
+AmsBackendMultiAce::OverrideMap
+AmsBackendMultiAce::parse_slot_overrides(const std::string& content) {
+    OverrideMap out{};
+    nlohmann::json doc;
+    try {
+        doc = nlohmann::json::parse(content);
+    } catch (const nlohmann::json::parse_error& e) {
+        spdlog::warn("[AMS multiACE] slot_overrides.json parse error: {}", e.what());
+        return out;
+    }
+    if (!doc.is_object()) {
+        return out;
+    }
+    for (const auto& [key, v] : doc.items()) {
+        if (!v.is_object()) {
+            continue;
+        }
+        // Keyed "<ace>_<slot>", the same shape as spool_binding. The entries also
+        // repeat the pair as `ace`/`slot` fields; the key is authoritative.
+        const auto sep = key.find('_');
+        if (sep == std::string::npos) {
+            continue;
+        }
+        int a = -1;
+        int s = -1;
+        try {
+            a = std::stoi(key.substr(0, sep));
+            s = std::stoi(key.substr(sep + 1));
+        } catch (...) {
+            continue;
+        }
+        if (a < 0 || a >= MAX_ACE_UNITS || s < 0 || s >= ACE_SLOTS_PER_UNIT) {
+            continue;
+        }
+        auto& o = out[static_cast<size_t>(a)][static_cast<size_t>(s)];
+        o.set = true;
+        o.material = helix::json_util::safe_string(v, "material", "");
+        o.brand = helix::json_util::safe_string(v, "brand", "");
+        // "#RRGGBB" here — leading '#', unlike the spool table's bare hex and
+        // unlike slots[].color's [r,g,b] array. Three encodings, one concept.
+        std::string col = helix::json_util::safe_string(v, "color", "");
+        if (!col.empty() && col.front() == '#') {
+            col.erase(0, 1);
+        }
+        if (col.size() >= 6) {
+            try {
+                o.color_rgb =
+                    static_cast<uint32_t>(std::stoul(col.substr(col.size() - 6), nullptr, 16));
+            } catch (...) {
+            }
+        }
+    }
+    return out;
+}
+
+void AmsBackendMultiAce::fetch_slot_overrides() {
+    if (!api_) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (override_fetch_in_flight_) {
+            return; // one at a time; the next event_seq will ask again
+        }
+        override_fetch_in_flight_ = true;
+    }
+
+    auto token = lifetime_.token();
+    api_->transfers().download_file(
+        "config", "extended/multiace/slot_overrides.json",
+        [this, token](const std::string& content) {
+            // BG THREAD: parse_slot_overrides is static and touches no member.
+            OverrideMap parsed = parse_slot_overrides(content);
+            token.defer("AmsBackendMultiAce::slot_overrides_apply",
+                        [this, parsed = std::move(parsed)]() mutable {
+                            {
+                                std::lock_guard<std::mutex> lock(mutex_);
+                                slot_overrides_ = std::move(parsed);
+                                override_fetch_in_flight_ = false;
+                                rebuild_ace_units_locked();
+                            }
+                            emit_event(EVENT_STATE_CHANGED);
+                        });
+        },
+        [this, token](const MoonrakerError& error) {
+            // Absent on an install that has never used the web UI, which is not
+            // an error worth shouting about — the spool table still stands.
+            spdlog::debug("[AMS multiACE] slot_overrides.json unavailable: {}", error.message);
+            token.defer("AmsBackendMultiAce::slot_overrides_failed", [this]() {
+                std::lock_guard<std::mutex> lock(mutex_);
+                override_fetch_in_flight_ = false;
+            });
+        });
+}
+
+void AmsBackendMultiAce::parse_spool_table_locked(const nlohmann::json& ace, bool& changed) {
+    // A bay's identity is NOT in `slots[]` — those fields are filled from RFID
+    // and read empty for every hand-entered spool, which is why the panel showed
+    // nothing the user had typed into multiACE's own web UI. It lives in a spool
+    // TABLE, `spools` (keyed by id, as a string), joined to bays through
+    // `spool_binding` with keys of the form "<ace>_<slot>".
+    //
+    // Both keys are deltas like everything else, so a frame that omits them
+    // leaves the table alone. `spool_binding` also has to be handled as a
+    // WHOLESALE replacement when present: unbinding a spool DELETES its key
+    // rather than nulling it, so merging would strand the old binding forever.
+    bool touched = false;
+
+    // The TABLE, keyed by spool id. Cached: a frame that only moves a binding
+    // does not resend it, and resolving the two together threw every detail away
+    // the moment a spool was unbound.
+    if (ace.contains("spools") && ace["spools"].is_object()) {
+        spool_table_.clear();
+        for (const auto& [id, sp] : ace["spools"].items()) {
+            if (!sp.is_object()) {
+                continue;
+            }
+            AceUnitState::BaySpool e;
+            e.bound = true;
+            e.material = helix::json_util::safe_string(sp, "material", "");
+            e.vendor = helix::json_util::safe_string(sp, "vendor", "");
+            e.label = helix::json_util::safe_string(sp, "label", "");
+            e.sku = helix::json_util::safe_string(sp, "sku", "");
+            // spoolman_id is a STRING here, unlike everywhere else it appears.
+            const std::string sm = helix::json_util::safe_string(sp, "spoolman_id", "");
+            if (!sm.empty()) {
+                try {
+                    e.spoolman_id = std::stoi(sm);
+                } catch (...) {
+                    e.spoolman_id = 0;
+                }
+            }
+            // `weight_g` is deliberately not read: it is multiACE's local copy of
+            // Spoolman's remaining weight, and Spoolman owns both weights here.
+            // Bare hex, no leading '#', unlike slots[].color which is [r,g,b].
+            const std::string col = helix::json_util::safe_string(sp, "color", "");
+            if (col.size() >= 6) {
+                try {
+                    e.color_rgb =
+                        static_cast<uint32_t>(std::stoul(col.substr(col.size() - 6), nullptr, 16));
+                } catch (...) {
+                }
+            }
+            spool_table_[id] = std::move(e);
+        }
+        touched = true;
+    }
+
+    // The BINDINGS. Replaced WHOLESALE when present: unbinding a spool deletes
+    // its key rather than nulling it, so merging would strand it forever.
+    if (ace.contains("spool_binding") && ace["spool_binding"].is_object()) {
+        for (auto& row : bay_spool_id_) {
+            row.fill(std::string{});
+        }
+        for (const auto& [key, value] : ace["spool_binding"].items()) {
+            // "<ace>_<slot>"
+            const auto sep = key.find('_');
+            if (sep == std::string::npos) {
+                continue;
+            }
+            int a = -1;
+            int s = -1;
+            try {
+                a = std::stoi(key.substr(0, sep));
+                s = std::stoi(key.substr(sep + 1));
+            } catch (...) {
+                continue;
+            }
+            if (a < 0 || a >= MAX_ACE_UNITS || s < 0 || s >= ACE_SLOTS_PER_UNIT) {
+                continue;
+            }
+            // The id is a string in both the binding and the table's keys.
+            bay_spool_id_[static_cast<size_t>(a)][static_cast<size_t>(s)] =
+                value.is_string()
+                    ? value.get<std::string>()
+                    : (value.is_number_integer() ? std::to_string(value.get<int>()) : "");
+        }
+        touched = true;
+    }
+
+    if (!touched) {
+        return;
+    }
+
+    // Resolve bays from the two caches.
+    std::array<std::array<AceUnitState::BaySpool, ACE_SLOTS_PER_UNIT>, MAX_ACE_UNITS> next{};
+    for (int a = 0; a < MAX_ACE_UNITS; ++a) {
+        for (int s = 0; s < ACE_SLOTS_PER_UNIT; ++s) {
+            const std::string& id = bay_spool_id_[static_cast<size_t>(a)][static_cast<size_t>(s)];
+            if (id.empty()) {
+                continue;
+            }
+            auto& bay = next[static_cast<size_t>(a)][static_cast<size_t>(s)];
+            auto it = spool_table_.find(id);
+            if (it != spool_table_.end()) {
+                bay = it->second;
+            } else {
+                bay.bound = true; // bound to a spool the table has not described
+            }
+        }
+    }
+
+    for (int a = 0; a < MAX_ACE_UNITS; ++a) {
+        for (int s = 0; s < ACE_SLOTS_PER_UNIT; ++s) {
+            auto& cur = ace_units_[static_cast<size_t>(a)].spool[static_cast<size_t>(s)];
+            const auto& nx = next[static_cast<size_t>(a)][static_cast<size_t>(s)];
+            if (cur.bound != nx.bound || cur.material != nx.material || cur.label != nx.label ||
+                cur.color_rgb != nx.color_rgb || cur.spoolman_id != nx.spoolman_id) {
+                changed = true;
+            }
+            cur = nx;
+        }
+    }
 }
 
 void AmsBackendMultiAce::rebuild_ace_units_locked() {
@@ -336,21 +650,100 @@ void AmsBackendMultiAce::rebuild_ace_units_locked() {
             // head. -1 when nothing is bound, so the canvas draws no lane.
             slot.mapped_tool = -1;
             if (head_mode_) {
+                // Which head this ACE is wired to, from head_ace — NOT from
+                // head_seated_, which empties on every unload and took the bays'
+                // tool badges and the unit's path with it.
                 for (int h = 0; h < NUM_TOOLS; ++h) {
-                    if (head_seated_[h] && head_seated_[h]->ace_index == a) {
+                    if (head_kind_[h] == HeadSource::ACE && head_ace_index_[h] == a) {
                         slot.mapped_tool = h;
                         break;
+                    }
+                }
+                if (slot.mapped_tool < 0) {
+                    for (int h = 0; h < NUM_TOOLS; ++h) {
+                        if (head_seated_[h] && head_seated_[h]->ace_index == a) {
+                            slot.mapped_tool = h;
+                            break;
+                        }
                     }
                 }
             } else if (s < NUM_TOOLS) {
                 slot.mapped_tool = s;
             }
 
+            // These SlotInfo objects are reused across rebuilds — only a change
+            // in unit COUNT reallocates them — so every identity field has to be
+            // cleared here or it survives the spool that put it there. `material`
+            // and `color_rgb` above are assigned unconditionally and so reset
+            // themselves; these four were only ever written, never cleared, and
+            // an unbound bay kept the name of the spool taken out of it.
+            slot.spool_name.clear();
+            slot.brand.clear();
+            slot.spoolman_id = 0;
+            // Both weights, together: they are one pair and come from one place
+            // (Spoolman, via spoolman_id). Clearing only the remaining left a
+            // total from a previous spool and a percentage measured against it.
+            slot.remaining_weight_g = -1.0f;
+            slot.total_weight_g = -1.0f;
+
             // The base class's convergence point has already run by the time we
             // get here, so these slots would never see the override layer
             // without this — which is why a spool assigned to an ACE bay was
             // written and then invisible.
             apply_overrides_for(slot, global_index);
+
+            // ...but multiACE's own spool table OUTRANKS the local override
+            // store for a bay it has a binding for. The ACE is the authority on
+            // what is in its own bays — the same doctrine slot_identity_owner_unit()
+            // already states for an ACE-fed head — so a value the user typed into
+            // multiACE must not be masked by a stale local edit. Applied after
+            // the overrides for exactly that reason.
+            const auto& bay = st.spool[static_cast<size_t>(s)];
+            if (bay.bound) {
+                if (!bay.material.empty()) {
+                    slot.material = bay.material;
+                }
+                if (!bay.vendor.empty()) {
+                    slot.brand = bay.vendor;
+                }
+                if (!bay.label.empty()) {
+                    slot.spool_name = bay.label;
+                }
+                if (bay.color_rgb) {
+                    slot.color_rgb = *bay.color_rgb;
+                }
+                // The one the override layer cannot supply, and the one that
+                // matters most: SpoolmanManager keys its weight refresh on it and
+                // fills BOTH remaining and total from Spoolman. multiACE's own
+                // `weight_g` is deliberately NOT used — it is a local copy, so
+                // preferring it took remaining from one source and total from
+                // another and computed a percentage across the two.
+                // tracks_weight_locally() stays false for the same reason.
+                if (bay.spoolman_id > 0) {
+                    slot.spoolman_id = bay.spoolman_id;
+                }
+            }
+
+            // The override file wins over both. multiACE resolves its own web UI
+            // from it — every bay there reports source:"override" — and it is the
+            // only place a bay with NO spool bound can still carry a material and
+            // colour, which is how bay 2 read empty here while multiACE showed
+            // PETG/Generic.
+            const auto& ov = slot_overrides_[static_cast<size_t>(a)][static_cast<size_t>(s)];
+            if (ov.set) {
+                if (!ov.material.empty()) {
+                    slot.material = ov.material;
+                }
+                if (!ov.brand.empty()) {
+                    slot.brand = ov.brand;
+                }
+                if (ov.color_rgb) {
+                    slot.color_rgb = *ov.color_rgb;
+                }
+                // A bound bay holds a spool even when gate_status has not caught
+                // up, and multiACE keeps the binding across a spool being taken
+                // out — so presence still comes from the gate, not from this.
+            }
         }
     }
 
@@ -429,6 +822,60 @@ AmsError AmsBackendMultiAce::stop_drying(int unit) {
         return AmsErrorHelper::not_supported("Dryer");
     }
     return execute_gcode(fmt::format("ACE_STOP_DRYING ACE={}", ace));
+}
+
+AutoDryInfo AmsBackendMultiAce::get_auto_dry_info(int unit) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AutoDryInfo info;
+    const int ace = ace_index_for_unit(unit, device_count_);
+    if (ace < 0) {
+        return info; // the U1 itself has no dryer, so no rule to arm either
+    }
+    const auto& st = ace_units_[static_cast<size_t>(ace)];
+    if (!st.has_auto_dry) {
+        return info; // firmware too old to carry the block
+    }
+    info.supported = true;
+    info.enabled = st.auto_dry_enabled;
+    info.running = st.auto_dry_running;
+    info.rh_start_pct = st.auto_dry_rh_start;
+    info.rh_end_pct = st.auto_dry_rh_end;
+    info.temp_c = st.auto_dry_temp_c;
+    // Only the ACE 2 Pro (protocol v2) carries a humidity sensor, so only it can
+    // evaluate a threshold. A v1 unit has no reading of its own and instead
+    // mirrors a v2 unit's cycle, running on for add_time past it.
+    info.follows_master = (st.protocol != "v2");
+    info.add_time_min = st.auto_dry_add_time_min;
+    // multiACE names the master by ACE index; AMS unit indices are one higher
+    // because unit 0 is the U1. -1 (none picked) must stay -1, not become 0.
+    info.master_unit = st.auto_dry_master >= 0 ? st.auto_dry_master + 1 : -1;
+    return info;
+}
+
+AmsError AmsBackendMultiAce::set_auto_dry_enabled(bool enabled, int unit) {
+    // Reads its own lock, so it has to happen before we take ours.
+    const AutoDryInfo info = get_auto_dry_info(unit);
+    if (!info.supported) {
+        return AmsErrorHelper::not_supported("Auto-dry");
+    }
+    // Arming a follower that has no master is a state multiACE rejects; refusing
+    // here keeps the failure on our side of the wire, where it can be explained.
+    if (enabled && !info.can_enable()) {
+        return AmsErrorHelper::wrong_state("no auto-dry master selected",
+                                           "a master unit to follow");
+    }
+    int ace = -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ace = ace_index_for_unit(unit, device_count_);
+    }
+    if (ace < 0) {
+        return AmsErrorHelper::not_supported("Auto-dry");
+    }
+    spdlog::info("{} ACE {} auto-dry {}", backend_log_tag(), ace, enabled ? "on" : "off");
+    // ENABLE alone: every field of ACE_SET_AUTO_DRY is independent, so arming the
+    // rule must not restate thresholds the user set in multiACE's own UI.
+    return execute_gcode(fmt::format("ACE_SET_AUTO_DRY ACE={} ENABLE={}", ace, enabled ? 1 : 0));
 }
 
 // ============================================================================

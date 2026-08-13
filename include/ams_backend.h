@@ -1585,6 +1585,41 @@ class AmsBackend {
         return get_default_drying_presets();
     }
 
+    /**
+     * @brief Get humidity-controlled ("auto") drying state for a unit
+     *
+     * A dryer is not necessarily an auto-dryer: this is a separate capability
+     * from get_dryer_info() and a backend may support one without the other.
+     * Check AutoDryInfo::supported before showing any auto-dry UI.
+     *
+     * @param unit AMS unit index (0-based)
+     * @return AutoDryInfo struct (supported=false if the unit has no auto-dry)
+     */
+    [[nodiscard]] virtual AutoDryInfo get_auto_dry_info(int unit = 0) const {
+        (void)unit;
+        return AutoDryInfo{};
+    }
+
+    /**
+     * @brief Arm or disarm humidity-controlled drying
+     *
+     * Arming does not start a cycle — it hands the dryer to the humidity rule,
+     * which starts one when the reading crosses AutoDryInfo::rh_start_pct.
+     * Backends are expected to persist the setting across reboots.
+     *
+     * Refuse rather than send when AutoDryInfo::can_enable() is false; a
+     * follower with no master is a state the firmware rejects anyway.
+     *
+     * @param enabled true to arm the rule, false to disarm it
+     * @param unit AMS unit index (0-based)
+     * @return AmsError with SUCCESS result on success, or error with reason
+     */
+    virtual AmsError set_auto_dry_enabled(bool enabled, int unit = 0) {
+        (void)enabled;
+        (void)unit;
+        return AmsErrorHelper::not_supported("Auto-dry");
+    }
+
     // ========================================================================
     // Endless Spool Control
     // ========================================================================

@@ -206,6 +206,10 @@ translations:
   Auto-Detect: Auto-Detect
   Auto-Heat on Load: Auto-Heat on Load
   Auto-detect: Auto-detect
+  Auto-dry: Auto-dry
+  Auto-dry off: Auto-dry off
+  Auto-dry on: Auto-dry on
+  Auto-dry unchanged: Auto-dry unchanged
   Auto-install only works on local Moonraker: Auto-install only works on local Moonraker
   Auto-lock: Auto-lock
   Auto-poll for weight updates: Auto-poll for weight updates
@@ -694,6 +698,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Downloading... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: Draw a ripple at each touch
     — helps diagnose offsets
+  Dries above %d%%, stops below %d%%: Dries above %d%%, stops below %d%%
   Drive Cal: Drive Cal
   Drop shadow strength (0 = disabled): Drop shadow strength (0 = disabled)
   Drying: Drying
@@ -992,6 +997,7 @@ translations:
   Flowguard: Flowguard
   Flying Toasters: Flying Toasters
   Follow active tool: Follow active tool
+  Follows unit %d: Follows unit %d
   Follow graph screen: Follow graph screen
   Forget: Forget
   Forget Network?: Forget Network?

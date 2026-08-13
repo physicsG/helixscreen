@@ -6,7 +6,9 @@
 #include "ams_backend_snapmaker.h"
 
 #include <array>
+#include <map>
 #include <optional>
+#include <string>
 
 /**
  * @file ams_backend_multiace.h
@@ -85,6 +87,11 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// nullopt for a feeder head or any ACE bay (those describe themselves).
     [[nodiscard]] std::optional<int> slot_identity_owner_unit(int slot_index) const override;
 
+    /// The ACE bay behind an ACE-fed head, as a global slot index. Pairs with
+    /// slot_identity_owner_unit() so the head and its bay share one spool
+    /// number instead of each consuming one.
+    [[nodiscard]] std::optional<int> slot_identity_owner_slot(int slot_index) const override;
+
     /// How head @p head is fed, per the last `ace` frame.
     [[nodiscard]] HeadSource head_source_kind(int head) const;
 
@@ -96,6 +103,15 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     [[nodiscard]] DryerInfo get_dryer_info(int unit = 0) const override;
     AmsError start_drying(float temp_c, int duration_min, int fan_pct = -1, int unit = 0) override;
     AmsError stop_drying(int unit = 0) override;
+
+    // Humidity-controlled drying. `ACE_SET_AUTO_DRY ACE=n ...` takes each field
+    // independently, so arming the rule never restates thresholds the user set
+    // elsewhere. Its full surface, read off multiACE's own web UI rather than
+    // guessed (see the plan's § "Auto-dry"):
+    //   ACE=n [ENABLE=0|1] [TEMP=35..80] [RH_START=5..95] [RH_END=1..94]
+    //         [MASTER=<ace idx|-1>] [ADD_TIME=0..600]
+    [[nodiscard]] AutoDryInfo get_auto_dry_info(int unit = 0) const override;
+    AmsError set_auto_dry_enabled(bool enabled, int unit = 0) override;
 
     /// Which (unit, slot) is seated at head @p head, or nullopt when the head is
     /// not ACE-fed. `unit_index` is the GLOBAL unit index (ace_index + 1), since
@@ -121,6 +137,32 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
   private:
     /// Parse the `ace` object. Caller must hold mutex_.
     void parse_ace_object_locked(const nlohmann::json& ace, bool& changed);
+    /// Resolve each bay's spool through `spool_binding` -> `spools`. Caller must
+    /// hold mutex_. See AceUnitState::BaySpool for why this is not `slots[]`.
+    void parse_spool_table_locked(const nlohmann::json& ace, bool& changed);
+
+    /// Per-bay identity that multiACE keeps in a FILE, not in its Klipper object.
+    ///
+    /// `slot_overrides.json` is what multiACE's own web UI resolves from — every
+    /// bay it reports comes back `source: "override"` — and it covers bays the
+    /// spool table does not: a bay can carry a material and colour with no spool
+    /// bound to it at all, which read as empty here until this was added.
+    ///
+    /// Fetched over Moonraker's file API rather than multiACE's optional FastAPI
+    /// service, so it needs nothing installed beyond multiACE itself.
+    struct BayOverride {
+        bool set = false;
+        std::string material;
+        std::string brand;
+        std::optional<uint32_t> color_rgb;
+    };
+    using OverrideMap = std::array<std::array<BayOverride, ACE_SLOTS_PER_UNIT>, MAX_ACE_UNITS>;
+
+    /// Pure, and static so it can run on the HTTP thread without touching `this`.
+    [[nodiscard]] static OverrideMap parse_slot_overrides(const std::string& content);
+    /// Ask Moonraker for the file. Main thread; applies its result via the
+    /// lifetime token.
+    void fetch_slot_overrides();
     /// Rebuild units 1..N from the parsed ACE inventory. Caller must hold mutex_.
     void rebuild_ace_units_locked();
 
@@ -132,6 +174,11 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     std::array<HeadSource, NUM_TOOLS> head_kind_{
         {HeadSource::UNKNOWN, HeadSource::UNKNOWN, HeadSource::UNKNOWN, HeadSource::UNKNOWN}};
     std::array<std::optional<SeatedSource>, NUM_TOOLS> head_seated_{};
+    /// Which ACE feeds each head, off `head_ace`. Meaningful ONLY once
+    /// head_kind_ says the head is ACE-fed — head_ace names an ACE for every
+    /// head, including ones on their stock feeder. Unlike head_seated_ this
+    /// survives an empty head, so it is what the wiring questions ask.
+    std::array<int, NUM_TOOLS> head_ace_index_{{-1, -1, -1, -1}};
 
     /// Per-ACE inventory as last parsed, indexed by multiACE's ace_index.
     struct AceUnitState {
@@ -146,11 +193,59 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
         int dryer_target_c = 0;
         int dryer_duration_min = 0;
         int dryer_remaining_min = 0;
+        /// Humidity-controlled drying, off `aces[].auto_dry` and its sibling
+        /// `auto_dry_running`. `has_auto_dry` is what gates the UI: a unit that
+        /// has never reported the block has no auto-dry at all, which is a
+        /// different thing from one reporting it disabled.
+        bool has_auto_dry = false;
+        bool auto_dry_enabled = false;
+        bool auto_dry_running = false;
+        float auto_dry_rh_start = 0.0f;
+        float auto_dry_rh_end = 0.0f;
+        int auto_dry_temp_c = 0;
+        /// multiACE's own ACE index of the followed unit, or -1 for none.
+        int auto_dry_master = -1;
+        int auto_dry_add_time_min = 0;
         std::array<bool, ACE_SLOTS_PER_UNIT> gate_present{{false, false, false, false}};
         std::array<std::string, ACE_SLOTS_PER_UNIT> material{};
+        /// What the user entered in multiACE, resolved from `spools` through
+        /// `spool_binding`. This — not `slots[].material` — is where a bay's
+        /// identity actually lives: the inline fields are only filled from RFID
+        /// and read empty on every non-RFID spool.
+        struct BaySpool {
+            bool bound = false;
+            std::string material;
+            std::string vendor;
+            std::string label;
+            std::string sku;
+            int spoolman_id = 0;
+            std::optional<uint32_t> color_rgb;
+            // No weight here on purpose — Spoolman owns remaining AND total, and
+            // multiACE's `weight_g` is only a copy of it. See where this is applied.
+        };
+        std::array<BaySpool, ACE_SLOTS_PER_UNIT> spool{};
+        using SpoolEntry = BaySpool;
         /// nullopt = the ACE reported no colour, so keep SlotInfo's default
         /// rather than painting the slot black.
         std::array<std::optional<uint32_t>, ACE_SLOTS_PER_UNIT> color_rgb{};
     };
     std::array<AceUnitState, MAX_ACE_UNITS> ace_units_{};
+
+    /// multiACE's spool table, keyed by spool id, and the bay->id bindings.
+    /// Cached SEPARATELY because the two arrive independently: a frame that
+    /// moves a spool between bays carries `spool_binding` and no `spools`, so
+    /// resolving them together lost every detail on the next binding change.
+    std::map<std::string, AceUnitState::BaySpool> spool_table_;
+    std::array<std::array<std::string, ACE_SLOTS_PER_UNIT>, MAX_ACE_UNITS> bay_spool_id_{};
+
+    /// Last fetched contents of slot_overrides.json, and the `ace.event_seq`
+    /// that fetch was for. The file is not on the WebSocket, so event_seq — which
+    /// multiACE bumps on its own state changes — is what says it may have moved.
+    OverrideMap slot_overrides_{};
+    int64_t overrides_fetched_seq_ = -1;
+    bool override_fetch_in_flight_ = false;
+    /// Set under mutex_ when a frame's event_seq outruns overrides_fetched_seq_;
+    /// read and cleared by handle_status_update AFTER the lock is dropped, since
+    /// the fetch must not be issued while holding it.
+    bool override_refetch_wanted_ = false;
 };

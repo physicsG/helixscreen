@@ -159,6 +159,24 @@
                          width="100%" height="#button_height" bind_text="ams_env_overlay_start_stop_text">
                 <event_cb trigger="clicked" callback="on_ams_env_start_stop_clicked"/>
               </ui_button>
+
+              <!-- Humidity-controlled drying. Carries its OWN visibility rather
+                   than riding on ams_env_overlay_dryer_visible: a dryer is not
+                   necessarily an auto-dryer, and only the units that report the
+                   rule (and can actually be armed) should show the switch. The
+                   note spells out the thresholds because they are not editable
+                   here — a bare switch gives no clue what humidity it acts on. -->
+              <lv_obj name="auto_dry_section"
+                      width="100%" height="content" style_pad_all="0" flex_flow="column"
+                      style_pad_gap="#space_xxs" scrollable="false" hidden="true">
+                <bind_flag_if_eq subject="ams_env_overlay_auto_dry_visible" flag="hidden"
+                                 ref_value="0"/>
+                <compact_toggle_row label="Auto-dry" label_tag="Auto-dry"
+                                    subject="ams_env_overlay_auto_dry_on"
+                                    callback="on_ams_env_auto_dry_toggled"/>
+                <text_small bind_text="ams_env_overlay_auto_dry_text"
+                            style_text_color="#text_muted"/>
+              </lv_obj>
             </lv_obj>
 
             <!-- No Dryer / Storage Advice (visible when no dryer) -->
