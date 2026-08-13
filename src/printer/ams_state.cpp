@@ -2892,10 +2892,26 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
                 snprintf(tmp, sizeof(tmp), lv_tr("Current: Tool %d"), slot_index);
             } else {
                 std::string unit_display;
-                int display_slot = slot_index + 1; // 1-based global slot number
+                // The spool's ORIGIN, not the position holding it. On multiACE
+                // an ACE-fed head shows the ACE's spool -- the card right below
+                // this label is that spool's material and colour -- so naming
+                // the SnapSwap here contradicted the thing it captions. The
+                // toolhead is already named on the canvas beneath.
+                //
+                // Same answer the "Open in <unit>" action and the shared spool
+                // numbering use; nullopt for every position that describes
+                // itself, which is every slot on every other backend.
+                const auto owner = loaded_backend->slot_identity_owner_unit(slot_index);
+                // ...and the number the badges show, not slot + 1: an ACE-fed
+                // head and the bay behind it share ONE spool number, so the two
+                // are computed differently and would drift apart.
+                const int display_slot = loaded_backend->spool_display_number(slot_index);
                 for (const auto& unit : sys.units) {
-                    if (slot_index >= unit.first_slot_global_index &&
-                        slot_index < unit.first_slot_global_index + unit.slot_count) {
+                    const bool is_source =
+                        owner ? unit.unit_index == *owner
+                              : (slot_index >= unit.first_slot_global_index &&
+                                 slot_index < unit.first_slot_global_index + unit.slot_count);
+                    if (is_source) {
                         // Prefer display_name, fall back to name, replace _ with spaces
                         unit_display = !unit.display_name.empty() ? unit.display_name : unit.name;
                         std::replace(unit_display.begin(), unit_display.end(), '_', ' ');

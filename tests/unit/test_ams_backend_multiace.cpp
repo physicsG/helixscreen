@@ -1032,3 +1032,28 @@ TEST_CASE_METHOD(HelixTestFixture, "the seated bay reads as actively loaded",
         CHECK_FALSE(backend.slot_is_actively_loaded(g));
     }
 }
+
+TEST_CASE_METHOD(HelixTestFixture, "an ACE-fed head and its bay report one spool number",
+                 "[ams][multiace][bay_load]") {
+    // What the sidebar's "Current: <unit> · Slot <n>" caption leans on. It used
+    // to print slot_index + 1, which happened to equal the badge number with one
+    // ACE and was computed independently of it. Now it asks
+    // spool_display_number(), so whether the current slot is recorded as the
+    // HEAD or as the BAY the caption reads the same -- and it is the number the
+    // badge under the spool actually shows.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    auto owner_slot = backend.slot_identity_owner_slot(3);
+    REQUIRE(owner_slot.has_value()); // head 3 is fed by a bay
+
+    CHECK(backend.spool_display_number(3) == backend.spool_display_number(*owner_slot));
+    // ...and the unit named is the ACE, not the SnapSwap head holding it.
+    auto owner_unit = backend.slot_identity_owner_unit(3);
+    REQUIRE(owner_unit.has_value());
+    CHECK(*owner_unit == 1);
+
+    // A feeder head still describes itself, so the caption keeps naming the U1.
+    CHECK_FALSE(backend.slot_identity_owner_unit(0).has_value());
+    CHECK(backend.spool_display_number(0) == 1);
+}
