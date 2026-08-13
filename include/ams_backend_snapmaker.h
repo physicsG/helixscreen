@@ -71,6 +71,22 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
 
     ~AmsBackendSnapmaker() override;
 
+    /// The U1's four heads are independent toolheads, each drawn and labelled
+    /// below its slot — so a "T3" badge on the spool repeats what the toolhead
+    /// already says, and did it twice on an ACE-fed head whose spool is a range.
+    /// Same reasoning AmsBackendToolChanger gives; the U1 simply never opted in.
+    [[nodiscard]] bool should_hide_slot_tool_badge() const override {
+        return true;
+    }
+
+    /// `print_task_config` carries filament_type and filament_vendor per head,
+    /// so the printer states what is loaded even though it stores no Spoolman
+    /// id (has_firmware_spool_persistence() is separately false). Inherited by
+    /// AmsBackendMultiAce, where the ACE's own table covers its bays.
+    [[nodiscard]] bool has_firmware_filament_identity() const override {
+        return true;
+    }
+
     [[nodiscard]] AmsType get_type() const override {
         return AmsType::SNAPMAKER;
     }
@@ -306,6 +322,19 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// by get_filament_segment() / get_slot_filament_segment() to break the
     /// spool→toolhead line when the active tool has run out.
     std::array<bool, NUM_TOOLS> sensor_filament_present_{{true, true, true, true}};
+
+    /// What `print_task_config.filament_type` last said for each head.
+    ///
+    /// Needed to tell a real material EDIT from a side effect of binding a
+    /// Spoolman spool: apply_spool_to_slot() writes the spool's material into
+    /// SlotInfo, and set_slot_info(persist=true) then stamped
+    /// user_locked_material from "is the material non-empty", so simply linking
+    /// a spool silently locked a material against the printer's own report —
+    /// which apply_overrides then replayed forever. Compared against here so a
+    /// bind that agrees with firmware locks nothing. Mirrors the AD5X IFS
+    /// backend's last_firmware_color_ guard for the same class of self-inflicted
+    /// lock (#965).
+    std::array<std::string, NUM_TOOLS> last_firmware_material_{};
 
     /// Per-slot port/buffer sensor state — the filament_feed left/right
     /// .extruder{N}.filament_detected flag. Reads the physical-presence

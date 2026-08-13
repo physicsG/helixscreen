@@ -2024,6 +2024,25 @@ class AmsBackend {
     }
 
     /**
+     * @brief Whether firmware states what filament is in each slot
+     *
+     * A DIFFERENT question from has_firmware_spool_persistence(), and conflating
+     * the two is a real bug: the Snapmaker U1 publishes filament_type and
+     * filament_vendor per head in `print_task_config` while keeping no Spoolman
+     * id at all, so it answers false there and true here.
+     *
+     * When true, ToolState's persisted assignments must not be pushed back onto
+     * slots — the firmware already knows, and a cached assignment that disagrees
+     * is stale by definition. Without this, a head the printer reported as PLA
+     * displayed PETG, resolved from a spool that was physically in an ACE bay.
+     *
+     * @return true if slot material/vendor come from firmware
+     */
+    [[nodiscard]] virtual bool has_firmware_filament_identity() const {
+        return false;
+    }
+
+    /**
      * @brief Whether this backend unloads the toolhead automatically after a print
      *
      * Some filament systems (e.g. AD5X IFS) retract filament out of the extruder

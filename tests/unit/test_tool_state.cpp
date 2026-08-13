@@ -10,6 +10,9 @@
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "ams_backend_mock.h"
+#include "ams_backend_multiace.h"
+#include "ams_backend_snapmaker.h"
+#include "ams_backend_toolchanger.h"
 #include "ams_state.h"
 #include "printer_discovery.h"
 #include "tool_state.h"
@@ -1360,6 +1363,96 @@ TEST_CASE_METHOD(ToolStateFixture,
     ams.set_backend(nullptr);
     ams.deinit_subjects();
     ts.deinit_subjects();
+}
+
+TEST_CASE_METHOD(ToolStateFixture,
+                 "ToolState: reverse-sync leaves a slot the printer says is EMPTY alone",
+                 "[tool][tool-state][spool][ams]") {
+    // ToolState persists to Moonraker's DB, so an assignment that outlives the
+    // filament comes back on every restart. The forward sync already refuses to
+    // let an empty slot claim a tool's spool; without the same rule here it
+    // simply returned the other way — on the U1 that put material and colour on
+    // two SnapSwap heads whose print_task_config.filament_exist read false.
+    lv_init_safe();
+
+    auto& ts = ToolState::instance();
+    ts.deinit_subjects();
+    ts.init_subjects(false);
+
+    PrinterDiscovery hw;
+    nlohmann::json objects = nlohmann::json::array(
+        {"toolchanger", "tool T0", "tool T1", "extruder", "extruder1", "heater_bed", "gcode_move"});
+    hw.parse_objects(objects);
+    ts.init_tools(hw);
+    REQUIRE(ts.tool_count() == 2);
+
+    auto mock = std::make_unique<AmsBackendMock>(2);
+    mock->set_tool_changer_mode(true);
+    mock->set_operation_delay(0);
+    auto* mock_ptr = mock.get();
+
+    // Slot 0 is positively EMPTY; slot 1 is UNKNOWN — the state a tool changer's
+    // slots start in, and the one that must STILL accept an assignment, since
+    // for those backends ToolState is the source of truth.
+    for (int i = 0; i < 2; ++i) {
+        SlotInfo s = mock_ptr->get_slot_info(i);
+        s.spoolman_id = 0;
+        s.spool_name.clear();
+        mock_ptr->set_slot_info(i, s, false);
+        // Status is firmware-derived, so set_slot_info() ignores it outright —
+        // this is the staging API for it.
+        mock_ptr->force_slot_status(i, (i == 0) ? SlotStatus::EMPTY : SlotStatus::UNKNOWN);
+    }
+    REQUIRE(mock_ptr->get_slot_info(0).status == SlotStatus::EMPTY);
+    REQUIRE(mock_ptr->get_slot_info(1).status == SlotStatus::UNKNOWN);
+
+    auto& ams = AmsState::instance();
+    ams.deinit_subjects();
+    ams.init_subjects(false);
+    ams.set_backend(std::move(mock));
+    REQUIRE(ams.get_backend() != nullptr);
+
+    ts.assign_spool(0, 42, "Ghost PLA", 750.0f, 1000.0f);
+    ts.assign_spool(1, 43, "Real PETG", 500.0f, 1000.0f);
+
+    ams.sync_from_backend();
+
+    // The EMPTY slot keeps nothing — no spool, and so nothing for Spoolman to
+    // resolve a material and colour from.
+    CHECK(mock_ptr->get_slot_info(0).spoolman_id == 0);
+    CHECK(mock_ptr->get_slot_info(0).spool_name.empty());
+
+    // UNKNOWN is not a claim of emptiness, so that one still populates.
+    CHECK(mock_ptr->get_slot_info(1).spoolman_id == 43);
+    CHECK(mock_ptr->get_slot_info(1).spool_name == "Real PETG");
+
+    ams.set_backend(nullptr);
+    ams.deinit_subjects();
+    ts.deinit_subjects();
+}
+
+TEST_CASE("AmsBackend: firmware spool persistence and filament identity are separate questions",
+          "[ams][backend][spool-persistence]") {
+    // Conflating them is the bug this pair exists to stop. The Snapmaker U1
+    // publishes filament_type/filament_vendor per head in print_task_config
+    // while storing no Spoolman id at all — so it answers false to one and true
+    // to the other. Reverse-syncing ToolState over it renamed the filament under
+    // the printer: a head reporting PLA displayed PETG, resolved from a spool
+    // that was physically in an ACE bay, and it returned on every restart
+    // because ToolState persists to Moonraker's DB.
+    AmsBackendSnapmaker snap(nullptr, nullptr);
+    CHECK_FALSE(snap.has_firmware_spool_persistence());
+    CHECK(snap.has_firmware_filament_identity());
+
+    // multiACE inherits it — its ACE bays are described by the ACE's own table.
+    AmsBackendMultiAce multi(nullptr, nullptr);
+    CHECK(multi.has_firmware_filament_identity());
+
+    // A tool changer knows neither, which is precisely why the reverse sync
+    // exists for it.
+    AmsBackendToolChanger tc(nullptr, nullptr);
+    CHECK_FALSE(tc.has_firmware_spool_persistence());
+    CHECK_FALSE(tc.has_firmware_filament_identity());
 }
 
 TEST_CASE_METHOD(ToolStateFixture,

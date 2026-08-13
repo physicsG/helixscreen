@@ -862,7 +862,15 @@ AmsError AmsBackendSnapmaker::set_slot_info(int slot_index, const SlotInfo& info
             // when the user provided one; an explicit empty material means
             // "let bootstrap fill it on next firmware report."
             ovr.user_locked_color = true;
-            ovr.user_locked_material = !info.material.empty();
+            // Only a material that DISAGREES with firmware is a user choice.
+            // Binding a Spoolman spool routes through here with the spool's
+            // material in SlotInfo, so locking on "non-empty" alone made every
+            // spool link a permanent material override — the printer would
+            // report PLA at a head and the panel kept showing the bound spool's
+            // PETG. A bind that matches firmware now locks nothing.
+            ovr.user_locked_material =
+                !info.material.empty() && (slot_index < 0 || slot_index >= NUM_TOOLS ||
+                                           info.material != last_firmware_material_[slot_index]);
             // SlotInfo carries the user's edit OR the bound Spoolman spool's
             // filament profile; the material-DB fallback for fields left at 0
             // is applied at emit time inside resolved_temps(). Centralized in
@@ -1589,6 +1597,9 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                     auto* slot = system_info_.units[0].get_slot(i);
                     if (slot) {
                         auto type = type_arr[i].get<std::string>();
+                        // Remember firmware's own word before any override layers
+                        // over it — see last_firmware_material_.
+                        last_firmware_material_[i] = type;
                         slot->material = type; // Base type only (e.g., "PLA") for compact display
                         changed = true;
                     }
@@ -1869,7 +1880,17 @@ void AmsBackendSnapmaker::apply_overrides(SlotInfo& slot, int slot_index) {
         slot.color_rgb = o.color_rgb;
     if (!o.color_name.empty())
         slot.color_name = o.color_name;
-    if (!o.material.empty())
+    // Material is the one field firmware also states: print_task_config carries
+    // filament_type per head, and that is the truth about what is physically
+    // loaded. So an override may only replace a material firmware NAMED when the
+    // user explicitly locked one; otherwise firmware wins. Without this, a head
+    // the printer reported as PLA displayed PETG indefinitely, and an empty head
+    // ("NONE") showed the last spool bound to it.
+    //
+    // Slots firmware says nothing about — every ACE bay, since print_task_config
+    // only covers the four heads — are unaffected: their material arrives empty
+    // and the override is the only source there.
+    if (!o.material.empty() && (slot.material.empty() || o.user_locked_material))
         slot.material = o.material;
     // Catalog product identity — same "override wins only when it carries a
     // real value" rule as the strings above. Firmware never populates these

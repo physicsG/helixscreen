@@ -1593,12 +1593,33 @@ void AmsState::sync_from_backend() {
     // don't persist spool info in firmware (e.g., toolchanger). Without this,
     // spool assignments loaded from Moonraker DB / local JSON on startup
     // don't propagate back to slot UI subjects.
-    if (!backend->has_firmware_spool_persistence()) {
+    // ...but NOT when the firmware itself says what is in each slot. Those are
+    // two different questions and the U1 answers them differently: it persists
+    // no Spoolman id (so the flag above is false) yet publishes filament_type
+    // and filament_vendor per head. Pushing ToolState back over that renamed the
+    // filament under the printer — a head reporting PLA displayed PETG, resolved
+    // from a spool sitting in an ACE bay — and since ToolState persists to
+    // Moonraker's DB it came back on every restart.
+    if (!backend->has_firmware_spool_persistence() && !backend->has_firmware_filament_identity()) {
         auto& tool_state = ToolState::instance();
         const auto& tools = tool_state.tools();
         for (int i = 0; i < std::min(info.total_slots, MAX_SLOTS); ++i) {
             const SlotInfo* slot = info.get_slot_global(i);
-            if (slot && slot->mapped_tool >= 0 && slot->spoolman_id == 0) {
+            // A slot the printer has positively said is EMPTY gets nothing back.
+            // The forward sync above already refuses to let an empty slot claim a
+            // tool's spool; without the same rule here the assignment simply came
+            // back the other way, and since ToolState persists to Moonraker's DB
+            // it survived restarts. On the U1 that showed as two SnapSwap heads
+            // displaying filament (with material and colour, resolved from the
+            // returned spoolman_id) while print_task_config.filament_exist read
+            // false for both.
+            //
+            // EMPTY specifically, NOT !is_present(): that also covers UNKNOWN,
+            // which is exactly the state a tool changer's slots start in — and
+            // for those backends ToolState IS the source of truth, so gating on
+            // "not present" would stop the assignment ever reaching them.
+            const bool known_empty = slot && slot->status == SlotStatus::EMPTY;
+            if (slot && slot->mapped_tool >= 0 && slot->spoolman_id == 0 && !known_empty) {
                 int ti = slot->mapped_tool;
                 if (ti >= 0 && ti < static_cast<int>(tools.size()) && tools[ti].spoolman_id > 0) {
                     SlotInfo updated = *slot;

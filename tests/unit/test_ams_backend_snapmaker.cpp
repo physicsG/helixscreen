@@ -1428,6 +1428,12 @@ TEST_CASE_METHOD(SnapmakerFixture,
     ovr.color_rgb = 0xFF5500;
     ovr.color_set = true;
     ovr.material = "PLA";
+    // Material only outranks firmware when the user actually chose one. Every
+    // override that reaches this code in production carries the flag — both load
+    // paths set it and set_slot_info() stamps it — so a hand-seeded record has
+    // to say so too. Without it firmware wins, which is what stops a spool bind
+    // from pinning a material against the printer's own report.
+    ovr.user_locked_material = true;
     SnapmakerTestAccess::seed_override(backend, 0, ovr);
 
     // Firmware pushes a different color (blue) and a different material.
@@ -2231,4 +2237,80 @@ TEST_CASE_METHOD(SnapmakerFixture,
     REQUIRE(callback_fired);
     REQUIRE_FALSE(captured.success());
     REQUIRE(captured.result == AmsResult::COMMAND_FAILED);
+}
+
+// ============================================================================
+// Override vs firmware material
+//
+// print_task_config.filament_type is the printer's own word on what is loaded
+// at each head. An override may correct it, but only when the user actually
+// chose a material — and binding a Spoolman spool is not that choice.
+// ============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "Snapmaker: firmware material beats an unlocked override",
+                 "[ams][snapmaker][overrides]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.material = "PETG";
+    ovr.user_locked_material = false; // never a deliberate material choice
+    SnapmakerTestAccess::seed_override(backend, 1, ovr);
+
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"print_task_config",
+                       {{"filament_type", json::array({"PLA", "PLA", "NONE", "NONE"})}}}});
+
+    // The head reported PLA and displayed PETG indefinitely before this — the
+    // override replayed over firmware on every parse.
+    CHECK(backend.get_slot_info(1).material == "PLA");
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "Snapmaker: a locked override still corrects firmware",
+                 "[ams][snapmaker][overrides]") {
+    // The user-correction path has to survive the fix above.
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.material = "PETG";
+    ovr.user_locked_material = true;
+    SnapmakerTestAccess::seed_override(backend, 1, ovr);
+
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"print_task_config",
+                       {{"filament_type", json::array({"PLA", "PLA", "NONE", "NONE"})}}}});
+
+    CHECK(backend.get_slot_info(1).material == "PETG");
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "Snapmaker: binding a spool does not lock a material",
+                 "[ams][snapmaker][overrides]") {
+    // apply_spool_to_slot() puts the spool's material into SlotInfo, so locking
+    // on "material is non-empty" made every spool link a permanent override.
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"print_task_config",
+                       {{"filament_type", json::array({"PLA", "PLA", "NONE", "NONE"})}}}});
+
+    SECTION("a spool whose material agrees with firmware locks nothing") {
+        SlotInfo info = backend.get_slot_info(1);
+        info.spoolman_id = 15;
+        info.spool_name = "SIlver";
+        info.material = "PLA"; // same as firmware
+        backend.set_slot_info(1, info, /*persist=*/true);
+
+        auto stored = SnapmakerTestAccess::get_override(backend, 1);
+        REQUIRE(stored.has_value());
+        CHECK_FALSE(stored->user_locked_material);
+    }
+
+    SECTION("a material that disagrees is a real choice and locks") {
+        SlotInfo info = backend.get_slot_info(1);
+        info.material = "ASA";
+        backend.set_slot_info(1, info, /*persist=*/true);
+
+        auto stored = SnapmakerTestAccess::get_override(backend, 1);
+        REQUIRE(stored.has_value());
+        CHECK(stored->user_locked_material);
+    }
 }
