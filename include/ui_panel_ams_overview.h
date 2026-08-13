@@ -79,6 +79,10 @@ class AmsOverviewPanel : public PanelBase {
      */
     void show_overview();
 
+    /// Back out of the current unit detail, to wherever it was entered FROM:
+    /// the unit that drilled into it, else the cards. See detail_return_unit_.
+    void leave_unit_detail();
+
     /**
      * @brief Check if currently in detail (zoomed) mode
      */
@@ -110,7 +114,15 @@ class AmsOverviewPanel : public PanelBase {
 
     // === Detail View State ===
     static constexpr int MAX_DETAIL_SLOTS = 16;
-    int detail_unit_index_ = -1;             ///< Currently shown unit (-1 = overview mode)
+    int detail_unit_index_ = -1; ///< Currently shown unit (-1 = overview mode)
+
+    /// Where Back should land when leaving the current unit detail, or -1 for
+    /// the cards. There are two ways into a unit detail and they deserve
+    /// different exits: tapping its card on the overview (Back = the cards), and
+    /// "Open in <unit>" from a slot whose spool another unit describes — an
+    /// ACE-fed head — which drills SnapSwap -> ACE and should come back to the
+    /// SnapSwap detail, not to the cards the user never visited.
+    int detail_return_unit_ = -1;
     lv_obj_t* detail_container_ = nullptr;   ///< Detail view root container
     AmsDetailWidgets detail_widgets_;        ///< Shared widget pointers for detail view
     lv_obj_t* detail_path_canvas_ = nullptr; ///< Filament path visualization

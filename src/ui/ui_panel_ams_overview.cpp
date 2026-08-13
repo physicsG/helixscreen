@@ -277,10 +277,14 @@ void AmsOverviewPanel::on_activate() {
 void AmsOverviewPanel::on_deactivate() {
     spdlog::debug("[{}] Deactivated", get_name());
 
-    // Reset to overview mode so next open starts at the cards view
-    if (detail_unit_index_ >= 0) {
-        show_overview();
-    }
+    // Deliberately does NOT reset to the cards view. on_deactivate() fires both
+    // when the user leaves AMS *and* when something is merely pushed on top of
+    // it — the slot editor, a modal — and resetting here made the second case
+    // lose the open unit, so closing the editor returned to the cards rather
+    // than to the ACE or SnapSwap detail it was opened from. The "start at the
+    // cards" reset belongs to opening the panel, and lives in
+    // navigate_to_ams_panel(); on_activate() restores detail_unit_index_ when a
+    // cover is dismissed.
 }
 
 // ============================================================================
@@ -798,6 +802,13 @@ void AmsOverviewPanel::show_unit_detail(int unit_index) {
         lv_obj_get_coords(unit_cards_[unit_index].card, &card_coords);
     }
 
+    // Drilling from one unit's detail straight into another's ("Open in <unit>")
+    // is the only way this is entered while already in detail mode, and Back
+    // from it belongs at the unit we came from rather than at the cards. Entering
+    // from the cards clears the target, so Back there stays the cards.
+    detail_return_unit_ =
+        (detail_unit_index_ >= 0 && detail_unit_index_ != unit_index) ? detail_unit_index_ : -1;
+
     detail_unit_index_ = unit_index;
     const AmsUnit& unit = info.units[unit_index];
 
@@ -863,6 +874,21 @@ void AmsOverviewPanel::show_unit_detail(int unit_index) {
     }
 }
 
+void AmsOverviewPanel::leave_unit_detail() {
+    // Take the target before show_unit_detail() recomputes it: re-entering the
+    // previous unit is itself a detail->detail move, which would otherwise set a
+    // return target pointing back at the unit we are leaving and trap Back
+    // between the two.
+    const int back_to = detail_return_unit_;
+    detail_return_unit_ = -1;
+    if (back_to >= 0) {
+        show_unit_detail(back_to);
+        detail_return_unit_ = -1;
+        return;
+    }
+    show_overview();
+}
+
 void AmsOverviewPanel::show_overview() {
     if (!panel_ || !detail_container_ || !cards_row_)
         return;
@@ -878,6 +904,8 @@ void AmsOverviewPanel::show_overview() {
     spdlog::info("[{}] Returning to overview mode", get_name());
 
     detail_unit_index_ = -1;
+    // The cards are the top of this panel; nothing is left to go back to.
+    detail_return_unit_ = -1;
 
     // Restore header to overview mode: show title, hide detail elements
     lv_obj_t* title = lv_obj_find_by_name(panel_, "header_title");
@@ -1113,7 +1141,7 @@ static void ensure_overview_registered() {
         LV_UNUSED(e);
         AmsOverviewPanel* panel = g_overview_panel_instance.load();
         if (panel && panel->is_in_detail_mode()) {
-            panel->show_overview();
+            panel->leave_unit_detail();
         } else {
             NavigationManager::instance().go_back();
         }
@@ -1544,7 +1572,9 @@ void AmsOverviewPanel::show_edit_modal(int slot_index, bool open_on_picker) {
                     AmsError err = backend->set_slot_info(result.slot_index, result.slot_info);
                     AmsState::instance().sync_from_backend();
                     if (err.result == AmsResult::SUCCESS) {
-                        NOTIFY_INFO(lv_tr("Slot {} updated"), result.slot_index + 1);
+                        // The badge's spool number — see spool_display_number().
+                        NOTIFY_INFO(lv_tr("Slot {} updated"),
+                                    backend->spool_display_number(result.slot_index));
                     } else {
                         helix::ui::notify_ams_error(err, lv_tr("Could not update slot"));
                     }
@@ -1578,6 +1608,12 @@ void navigate_to_ams_panel() {
             // persistent map), so a cached panel re-opened after a navbar tap
             // loses its lifecycle registration. Idempotent (keyed by widget).
             NavigationManager::instance().register_overlay_instance(panel, &overview);
+            // Opening the AMS panel afresh starts at the cards. This used to be
+            // done from on_deactivate(), which cannot tell "the user navigated
+            // away" from "an overlay covered me for a moment" — so pushing the
+            // slot editor threw away which unit was open, and closing it landed
+            // back on the cards instead of the unit you were editing.
+            overview.show_overview();
             NavigationManager::instance().push_overlay(panel);
         }
     } else {
