@@ -30,7 +30,8 @@ AmsToolheadMenu* AmsToolheadMenu::s_active_instance_ = nullptr;
 // ============================================================================
 
 ToolheadMenuModel toolhead_menu_model(int tool_index, int mounted_tool, bool supports_park,
-                                      bool slot_present, bool can_unload, bool print_blocks_ops) {
+                                      bool slot_present, bool can_unload, bool print_blocks_ops,
+                                      bool source_is_external) {
     ToolheadMenuModel m;
     if (tool_index < 0) {
         return m;
@@ -53,7 +54,10 @@ ToolheadMenuModel toolhead_menu_model(int tool_index, int mounted_tool, bool sup
     // offering Load beside it would offer to feed an already-fed head. A lane
     // with no filament at all offers neither.
     m.show_unload = can_unload;
-    m.show_load = slot_present && !can_unload;
+    // A head fed from another unit has no Load of its own: the command names a
+    // bay, and only that bay's menu can pick one. Withdrawn as a property of
+    // the position, not a transient state -- see the header.
+    m.show_load = slot_present && !can_unload && !source_is_external;
     return m;
 }
 
@@ -200,8 +204,14 @@ bool AmsToolheadMenu::show_at(lv_obj_t* parent, lv_obj_t* anchor, lv_point_t cli
         job_state == helix::PrintJobState::PRINTING, job_state == helix::PrintJobState::PAUSED,
         backend && backend->filament_ops_self_home());
 
+    // Same question the per-slot menu asks: is this position's filament
+    // described by another unit? On multiACE an ACE-fed head answers with the
+    // ACE's unit index.
+    const bool source_is_external =
+        backend && backend->slot_identity_owner_unit(tool_index).has_value();
+
     model_ = toolhead_menu_model(tool_index, mounted, supports_park, present, can_unload,
-                                 print_blocks_ops);
+                                 print_blocks_ops, source_is_external);
 
     if (toolhead_menu_is_empty(model_)) {
         // An empty parked head on a backend that cannot park: there is no action

@@ -1244,8 +1244,8 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
             if (active >= 0 && active < NUM_TOOLS) {
                 auto* slot = system_info_.units[0].get_slot(active);
                 if (slot && slot->status != SlotStatus::EMPTY) {
-                    slot->status = loaded_at_toolhead_[active] ? SlotStatus::LOADED
-                                                               : SlotStatus::AVAILABLE;
+                    slot->status =
+                        loaded_at_toolhead_[active] ? SlotStatus::LOADED : SlotStatus::AVAILABLE;
                 }
             }
             changed = true;
@@ -1529,7 +1529,17 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                                 // killed the unload step display mid-heat
                                 // (#u1-unload-steps). Only the true terminals resolve
                                 // the action to IDLE.
-                                if (state != "preload_finish") {
+                                //
+                                // Unless this head has no unload_finish coming at
+                                // all -- an ACE-fed head ends its unload here,
+                                // because the ACE did the retract. Scoped to
+                                // UNLOADING: a load's pass through preload_finish
+                                // is still mid-sequence and must not resolve, which
+                                // is the very bug the exclusion above exists for.
+                                const bool ace_unload_ends_here =
+                                    system_info_.action == AmsAction::UNLOADING &&
+                                    preload_finish_ends_unload(i);
+                                if (state != "preload_finish" || ace_unload_ends_here) {
                                     if (system_info_.action == AmsAction::LOADING ||
                                         system_info_.action == AmsAction::UNLOADING) {
                                         system_info_.action = AmsAction::IDLE;

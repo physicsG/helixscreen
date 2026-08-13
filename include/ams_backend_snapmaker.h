@@ -295,6 +295,31 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
         return "[AMS Snapmaker]";
     }
 
+    /// Is `preload_finish` the LAST channel_state an unload of head @p head
+    /// will produce?
+    ///
+    /// On a stock feeder head it is not: an unload passes through
+    /// preload_finish (lane staged in the buffer) while the nozzle is still
+    /// heating, and resolving the action to IDLE there killed the step display
+    /// mid-heat (#u1-unload-steps). Only `unload_finish` ends it, so the parse
+    /// deliberately excludes preload_finish from the terminal branch.
+    ///
+    /// On an ACE-fed head there is no `unload_finish` to wait for. The ACE
+    /// performs the retract, the U1's own sequence runs
+    /// unload_picking → unload_heating → unload_doing → preload_finish and
+    /// stops, and the action stayed UNLOADING forever — which reads as "system
+    /// busy" and greys out Load/Unload on every slot of every unit, including
+    /// the ACE's own bays. Observed on hardware: `ACE_UNLOAD_HEAD HEAD=3`
+    /// dispatched correctly, the ACE came back `status: ready` with the bay
+    /// empty, and the UI sat on Unloading for 20 minutes.
+    ///
+    /// Default false — the stock behaviour, unchanged. AmsBackendMultiAce
+    /// answers true for heads it knows are ACE-fed.
+    [[nodiscard]] virtual bool preload_finish_ends_unload(int head) const {
+        (void)head;
+        return false;
+    }
+
     /// The U1's fixed head count. Protected rather than private because
     /// AmsBackendMultiAce derives from this backend and indexes the same four
     /// heads; it is a compile-time constant of the hardware, not mutable state.

@@ -84,9 +84,10 @@ TEST_CASE("Toolhead menu offers nothing while a print owns the toolhead",
     // Select, Park, Load and Unload all move the carriage or the filament, and
     // the backend refuses every one of them mid-print. A menu of four buttons
     // that each answer with a refusal is worse than no menu.
-    auto printing = toolhead_menu_model(/*tool_index=*/3, /*mounted_tool=*/3, /*supports_park=*/true,
-                                        /*slot_present=*/true, /*can_unload=*/true,
-                                        /*print_blocks_ops=*/true);
+    auto printing =
+        toolhead_menu_model(/*tool_index=*/3, /*mounted_tool=*/3, /*supports_park=*/true,
+                            /*slot_present=*/true, /*can_unload=*/true,
+                            /*print_blocks_ops=*/true);
     CHECK(toolhead_menu_is_empty(printing));
 
     // The identical head is fully actionable once the print is not blocking —
@@ -94,4 +95,54 @@ TEST_CASE("Toolhead menu offers nothing while a print owns the toolhead",
     auto idle = toolhead_menu_model(3, 3, true, true, true, /*print_blocks_ops=*/false);
     CHECK(idle.show_park);
     CHECK(idle.show_unload);
+}
+
+// =============================================================================
+// A head fed from another unit has no Load of its own
+//
+// The nozzle menu was the one surface still offering it. On a multiACE U1 the
+// per-slot menu already withdrew Load for the ACE-fed position (the command
+// names a bay and only that bay can pick one), but tapping the same head's
+// NOZZLE still offered it -- and because that head is the one the ACE keeps
+// empty, it was often the only Load on screen.
+// =============================================================================
+
+TEST_CASE("An externally-fed toolhead offers Unload but not Load",
+          "[ams][toolhead_menu][multiace]") {
+    using helix::ui::toolhead_menu_model;
+
+    SECTION("filament waiting in the source unit does not put Load on this head") {
+        // slot_present (the ACE bay holds filament) + nothing at the head is
+        // exactly the state that produced the stray Load.
+        const auto stock = toolhead_menu_model(3, 3, false, /*slot_present=*/true,
+                                               /*can_unload=*/false, false,
+                                               /*source_is_external=*/false);
+        CHECK(stock.show_load);
+
+        const auto fed = toolhead_menu_model(3, 3, false, /*slot_present=*/true,
+                                             /*can_unload=*/false, false,
+                                             /*source_is_external=*/true);
+        CHECK_FALSE(fed.show_load);
+    }
+
+    SECTION("Unload survives — it needs no bay") {
+        // ACE_UNLOAD_HEAD takes only the head, so this half stays available.
+        const auto fed = toolhead_menu_model(3, 3, false, /*slot_present=*/true,
+                                             /*can_unload=*/true, false,
+                                             /*source_is_external=*/true);
+        CHECK(fed.show_unload);
+        CHECK_FALSE(fed.show_load);
+    }
+
+    SECTION("it is a property of the position, not a transient state") {
+        for (bool mounted : {false, true}) {
+            for (bool present : {false, true}) {
+                INFO("mounted=" << mounted << " present=" << present);
+                const auto m = toolhead_menu_model(3, mounted ? 3 : 0, true, present,
+                                                   /*can_unload=*/false, false,
+                                                   /*source_is_external=*/true);
+                CHECK_FALSE(m.show_load);
+            }
+        }
+    }
 }

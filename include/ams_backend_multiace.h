@@ -95,6 +95,15 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// How head @p head is fed, per the last `ace` frame.
     [[nodiscard]] HeadSource head_source_kind(int head) const;
 
+    /// See AmsBackendSnapmaker::preload_finish_ends_unload(). True for an
+    /// ACE-fed head: `ACE_UNLOAD_HEAD` hands the retract to the ACE, so the
+    /// U1's channel_state stops at preload_finish and `unload_finish` never
+    /// arrives. A feeder or manual head still runs the native sequence and
+    /// keeps the stock answer.
+    [[nodiscard]] bool preload_finish_ends_unload(int head) const override {
+        return head_source_kind(head) == HeadSource::ACE;
+    }
+
     // Every ACE reports temperature and humidity. Answered at the BACKEND level,
     // as the interface asks it: unit 0 is the U1 itself and has no sensor, but
     // the per-unit `ams_env_ind_<n>_visible` subject already hides the indicator

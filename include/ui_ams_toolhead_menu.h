@@ -62,6 +62,13 @@ struct ToolheadMenuModel {
  * @param supports_park Backend answers supports_toolhead_park()
  * @param slot_present  This head's lane holds filament (filament_exist)
  * @param can_unload    Backend answers can_unload_from_toolhead(tool_index)
+ * @param source_is_external This head's filament comes from another unit, so
+ *        there is no "load" that names a source here: an ACE-fed U1 head loads
+ *        with `ACE_LOAD_HEAD HEAD=n ACE=a SLOT=s`, which picks a specific bay.
+ *        The choice belongs to that bay's menu on the ACE's own page. Unload
+ *        needs no bay (`ACE_UNLOAD_HEAD HEAD=n`) and stays offered, which is
+ *        the asymmetry this models -- the same one the per-slot menu applies
+ *        via AmsContextMenu::decide_can_load()'s source_external.
  * @param print_blocks_ops A running print refuses toolhead motion
  *        (helix::ui::print_blocks_filament_op). EVERY entry here moves the
  *        carriage or the filament, so this empties the menu outright rather
@@ -78,7 +85,8 @@ struct ToolheadMenuModel {
  */
 [[nodiscard]] ToolheadMenuModel toolhead_menu_model(int tool_index, int mounted_tool,
                                                     bool supports_park, bool slot_present,
-                                                    bool can_unload, bool print_blocks_ops = false);
+                                                    bool can_unload, bool print_blocks_ops = false,
+                                                    bool source_is_external = false);
 
 /// True when the model has no entries — nothing to show, so show nothing.
 [[nodiscard]] inline bool toolhead_menu_is_empty(const ToolheadMenuModel& m) {

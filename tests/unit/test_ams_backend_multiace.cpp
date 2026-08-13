@@ -853,3 +853,52 @@ TEST_CASE("multiACE inherits the U1's no-homing answer", "[ams][multiace][homing
     CapturingMultiAce backend;
     CHECK_FALSE(backend.filament_ops_may_home());
 }
+
+// =============================================================================
+// An ACE-fed head's unload ends at preload_finish
+//
+// Observed on hardware, not theorised: `ACE_UNLOAD_HEAD HEAD=3` dispatched
+// correctly and the ACE came back `status: ready` with the bay empty, but the
+// U1's own channel_state ran unload_picking -> unload_heating -> unload_doing
+// -> preload_finish and stopped. `unload_finish` never arrives, because the ACE
+// performed the retract. The action stayed UNLOADING for twenty minutes, which
+// reads as "system busy" and greys out Load AND Unload on every slot of every
+// unit -- including the ACE's own bays, so the machine could not be driven at
+// all without a restart.
+//
+// Pinned at the predicate rather than by driving a `filament_feed` frame through
+// the whole Snapmaker parse: that path reaches PostOpCooldownManager and the
+// UpdateQueue and stalls under the unit-test harness, though it runs fine in the
+// app against the real printer. The parse's use of it is verified on hardware.
+// =============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "only an ACE-fed head ends its unload at preload_finish",
+                 "[ams][multiace][1229]") {
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    // The captured machine: T0-T2 on stock feeders, T3 fed by the ACE.
+    REQUIRE(backend.head_source_kind(3) == HeadSource::ACE);
+    CHECK(backend.preload_finish_ends_unload(3));
+
+    // The other half of the rule, and the reason it is not simply "preload_finish
+    // always ends an unload": on a stock feeder head that state occurs mid-
+    // sequence with the nozzle still heating, and resolving there killed the
+    // unload step display (#u1-unload-steps).
+    for (int head : {0, 1, 2}) {
+        INFO("head " << head);
+        REQUIRE(backend.head_source_kind(head) == HeadSource::FEEDER);
+        CHECK_FALSE(backend.preload_finish_ends_unload(head));
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "before any ace frame no head ends early",
+                 "[ams][multiace][1229]") {
+    // UNKNOWN is not ACE. Guessing otherwise would resolve a native unload to
+    // IDLE at preload_finish on a head we know nothing about yet -- the exact
+    // regression the stock exclusion exists to prevent.
+    CapturingMultiAce backend;
+    for (int head = 0; head < 4; ++head) {
+        CHECK_FALSE(backend.preload_finish_ends_unload(head));
+    }
+}
