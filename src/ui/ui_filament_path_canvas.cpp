@@ -730,9 +730,18 @@ namespace helix::ui::fpath {
 
 void format_tool_badge_label(const FilamentPathData* data, int lane, int fallback_tool, char* out,
                              size_t out_size) {
+    // Always "T<n>" — a toolhead is what this labels, and T is what every
+    // surface that talks about one calls it (the U1's own UI, ACE_LOAD_HEAD
+    // HEAD=n, print_task_config's per-tool arrays). "E<n>" said extruder while
+    // pointing at a toolhead, and sat next to spool badges that said T, so the
+    // two letters read as two different numbering schemes for one thing.
+    //
+    // The extruder-derived NUMBER is still preferred, which is the half of
+    // #1229 that mattered: AFC's mapped_tool is a *virtual* lane alias and can
+    // disagree with the physical toolhead, while the extruder name cannot.
     if (data && data->use_extruder_identity && lane >= 0 && lane < FilamentPathData::MAX_SLOTS &&
         data->extruder_tool[lane] >= 0) {
-        snprintf(out, out_size, "E%d", data->extruder_tool[lane]);
+        snprintf(out, out_size, "T%d", data->extruder_tool[lane]);
         return;
     }
     snprintf(out, out_size, "T%d", fallback_tool);

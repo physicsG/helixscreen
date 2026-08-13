@@ -694,7 +694,11 @@ ToolBadgeLabels compute_tool_badge_labels(const SystemToolLayout& layout, const 
     ToolBadgeLabels out;
 
     if (layout_has_extruder_identity(layout)) {
-        out.prefix = 'E';
+        // 'T', not 'E': this labels a TOOLHEAD, which is what every other
+        // surface calls it. The extruder name is still what supplies the NUMBER
+        // — that is the part of #1229 that mattered, since a virtual lane alias
+        // can disagree with the physical toolhead and an extruder name cannot.
+        out.prefix = 'T';
         out.numbers.reserve(layout.physical_to_extruder_name.size());
         for (const auto& name : layout.physical_to_extruder_name) {
             out.numbers.push_back(*helix::tool_number_for_extruder(name));
