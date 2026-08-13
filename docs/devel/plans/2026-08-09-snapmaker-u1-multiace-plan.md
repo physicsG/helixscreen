@@ -18,11 +18,9 @@
 >
 > ### Open, in the order I would take them
 >
-> 1. **Auto-dry toggle.** `ACE_SET_AUTO_DRY` exists and is "live + persist", so the toggle is
->    buildable — but its parameter names are unknown. multiACE's bundled docs predate it and
->    OrcaSlicer never calls it. **Run `ACE_SET_AUTO_DRY` bare in a Fluidd console once**; the
->    usage string is the whole blocker. Live shape: `auto_dry {enabled, rh_start, rh_end, temp,
->    master, add_time}`. Do NOT probe it blind — it persists.
+> 1. **Auto-dry toggle — ✅ unblocked and built (2026-08-11).** The parameter names are no
+>    longer unknown; see § "Auto-dry" below for the full surface. No hardware probe was
+>    needed and none should be run.
 > 2. **§10.2 stuck unload — fixed but never re-observed.** The dispatch is unit-tested against
 >    the captured payload; nobody has run an actual unload on T3 since. Confirm before closing.
 > 3. **Stale spool duplicates in Moonraker's DB.** `5122216e5` stops an empty MMU bay claiming
@@ -71,8 +69,18 @@
 > "Missing icon codepoints" (needs `./scripts/regen_mdi_fonts.sh`); every gate this branch can
 > affect is clean, with the imperative-UI ratchet held at its 384 baseline.
 >
-> **Not run this session:** `clang-format` is not installed on this box, so nothing here has
-> been formatter-checked. CI enforces clang-format 14 — expect a formatting pass.
+> **Formatting — the old note here was wrong twice.** CI pins **clang-format 18.1.8**, not 14
+> (`requirements.txt`), and the CI check is **non-blocking** — `scripts/quality-checks.sh` has
+> `EXIT_CODE=1` commented out under "Don't fail CI for formatting". So drift will not reject a
+> PR; it just gets reflowed by the next machine whose pre-commit hook has the binary.
+>
+> The binary is now available (2026-08-11): `python3 -m venv .venv && .venv/bin/pip install -r
+> requirements.txt`, which needed `sudo apt install python3.14-venv` first. `.venv` is
+> gitignored. **The branch has real drift in 18 of its touched files** — 31 commits were made
+> with no formatter present. Fix it as its OWN commit and add that SHA to
+> `.git-blame-ignore-revs`, the way `54650149f` (the tree-wide 18.1.8 reflow, an ancestor of
+> this branch) is recorded. The baseline itself is clean; `include/filament_database.h` is the
+> one exception and is long string literals clang-format cannot break.
 >
 > **Driving the real printer from a dev box** (no deploy, no SSH — this is the whole loop):
 > ```bash
@@ -357,6 +365,181 @@ service, no second HTTP client, no auth story.
 Control surface, all plain gcode: `ACE_SWAP_HEAD HEAD=h ACE=a [SLOT=s]`, `ACE_LOAD_HEAD` /
 `ACE_UNLOAD_HEAD`, `ACE_SWITCH TARGET=n`, `ACE_SET_HEAD_ACE|FEEDER|MANUAL`, `ACE_BG_SWAP`,
 `ACED__Dry_Start_0..3` / `ACED__Dry_Stop`.
+
+### Auto-dry — `ACE_SET_AUTO_DRY`, the full surface
+
+Read off **multiACE's own web UI on the machine**, not guessed and not probed:
+`http://192.168.2.242/multiace/app.js` (`setAutoDry`, `_AUTO_DRY_RANGE`, `autoDryPairInvalid`)
+plus the template in `.../multiace/`. That UI is the FastAPI service nginx mounts at
+`/multiace/`; the local `multiACE/` checkout is **older than the installed firmware** and has
+no auto-dry at all, so do not read it for this.
+
+```
+ACE_SET_AUTO_DRY ACE=<idx> [ENABLE=0|1] [TEMP=35..80] [RH_START=5..95]
+                           [RH_END=1..94] [MASTER=<ace idx|-1>] [ADD_TIME=0..600]
+```
+
+- **Every field is independent.** The web UI sends one per edit. Arming must therefore send
+  `ENABLE` *alone* — restating a threshold would silently overwrite one set elsewhere, and the
+  setting persists.
+- **`RH_END` must be strictly below `RH_START`.** The firmware rejects the pair otherwise
+  (`autoDryPairInvalid` is `end >= start`), and the UI refuses to send it.
+- **`TEMP` is not auto-dry-only** — it is the unit's one drying temperature, shared with the
+  manual `ACE_DRY`. multiACE's own UI puts it in the manual row for that reason.
+- **v2 vs v1 is the real split.** Only the ACE 2 Pro (`protocol: v2`) has a humidity sensor, so
+  only it evaluates thresholds. A v1 unit FOLLOWS a v2 unit's cycle instead: `MASTER` +
+  `ADD_TIME`, and it cannot be armed until a master is picked. `ace.auto_dry_masters` (live
+  `[0]`) lists the units eligible to be one.
+
+Live shape, confirmed against the machine and present in the committed fixture:
+`ace.aces[i].auto_dry = {enabled, rh_start, rh_end, temp, master, add_time}`, plus the
+**sibling** `ace.aces[i].auto_dry_running` — a separate key, not a field inside the block, so
+it needs its own parse or a frame carrying only it is dropped.
+
+Built 2026-08-11 as `AutoDryInfo` + `get_auto_dry_info()` / `set_auto_dry_enabled()` on
+`AmsBackend`, overridden in `AmsBackendMultiAce`, with a `compact_toggle_row` in the stock
+`ams_environment_overlay` gated on its own visibility subject. Deliberately a **toggle only** —
+thresholds are displayed, not editable, keeping that upstream-stock panel close to stock.
+
+**Closed, not open: how auto-dry and Start/Stop interact.** Per Gordian (2026-08-11), the
+current behaviour is fine and is not to be changed. For the record, so nobody "fixes" it
+again: while the rule is armed and humidity is above `rh_start` it will restart a cycle that
+Stop has just ended; the panel's Temp box is a local value while the rule uses its own
+persisted `auto_dry.temp`; and the countdown is drawn from `duration`/`remain_time`, which do
+not govern a humidity-ended cycle (`auto_dry_running` is what distinguishes one). All known,
+all accepted.
+
+### Binding a spool used to pin a material forever (2026-08-12)
+
+The SnapSwap panel showed materials the printer disagreed with — a head reporting PLA read
+PETG, an empty head read PLA — and it survived every restart. Four links, each of which had to
+be broken:
+
+1. Binding a Spoolman spool routes through `apply_spool_to_slot()`, which writes the **spool's**
+   material into `SlotInfo`.
+2. `set_slot_info(persist=true)` then stamped `user_locked_material = !material.empty()`, so
+   **linking a spool manufactured a material lock** the user never asked for.
+3. That override persists to **Moonraker's `lane_data` namespace on the printer**, not just to
+   the local config dir.
+4. `apply_overrides()` applied material unconditionally, never consulting the lock, so it
+   replayed over `print_task_config` on every parse.
+
+**A clean local config dir does NOT clear this** — link 3 is why. A "clean config" run that
+still shows the wrong material is not evidence the override store is innocent; check
+`curl '<printer>:7125/server/database/item?namespace=lane_data'` before concluding anything.
+That mistake cost several rounds here.
+
+Fixed by making `apply_overrides()` lock-aware (firmware's material wins unless the user
+genuinely locked one — ACE bays are unaffected because firmware states nothing for them), and
+by comparing against `last_firmware_material_` when stamping the lock, so a bind that agrees
+with firmware locks nothing. Mirrors AD5X's `last_firmware_color_` guard (#965).
+
+**How it was found:** four temporary `spdlog::info` probes — one at each writer of
+`slot->material` (ptc / RFID / override) and one where `AmsState` publishes the subject, each
+logging *old → new*. One run named the overwriter outright. Worth repeating for any
+"where does this value come from" question; inference had been wrong twice by then.
+
+### A bay's spool identity is in the TABLE, not in `slots[]` (2026-08-11)
+
+`aces[].slots[]` carries `material`, `brand`, `color` — and on real hardware they are all
+**empty**, because those fields are filled from RFID only. Everything a user types into
+multiACE's web UI lands in a spool table instead:
+
+```
+ace.spool_binding = {"0_0": "15", "0_1": "10", "0_3": "16"}   # "<ace>_<slot>" -> spool id
+ace.spools        = { "15": {material, vendor, color, label, weight_g, sku, spoolman_id}, ... }
+```
+
+Reading only `slots[]` meant the ACE panel showed none of it, falling back to HelixScreen's
+own override store — so the panel disagreed with the machine entirely. Four traps, each
+pinned by a test in `[spools]`:
+
+- **`spoolman_id` is a STRING here**, an int everywhere else in this codebase.
+- **`color` is bare hex with no `#`**, while `slots[].color` is an `[r,g,b]` array.
+- **Unbinding DELETES the key** rather than nulling it, so `spool_binding` must be replaced
+  wholesale — merging strands a removed spool forever.
+- **The table and the bindings are INDEPENDENT deltas.** Moving a spool between bays sends
+  `spool_binding` with no `spools`, so they must be cached separately; resolving them in one
+  pass threw every description away on the next binding change.
+
+multiACE's table deliberately **outranks** the local override store for a bay it has a binding
+for — the same doctrine `slot_identity_owner_unit()` states — or a stale local edit keeps
+masking what the user typed. And `SlotInfo` objects are reused across rebuilds (only a change
+in unit COUNT reallocates them), so `spool_name`/`brand`/`spoolman_id`/`remaining_weight_g`
+must be cleared each pass or a bay keeps the name of the spool taken out of it.
+
+**There are THREE identity layers, and only two are on the WebSocket.** In precedence order,
+lowest first:
+
+| Layer | Where | Covers |
+|---|---|---|
+| `aces[].slots[]` | `ace` object | RFID only — **empty** for every hand-entered spool |
+| `spools` + `spool_binding` | `ace` object | bays with a spool bound; carries `spoolman_id` |
+| `slot_overrides.json` | **a FILE** | material/brand/subtype/colour, incl. bays with NO spool bound |
+
+multiACE's own web UI resolves from the top one — every bay it reports comes back
+`source: "override"`. The file is **not published in the `ace` object at all**, which is why a
+bay carrying a material and colour but no spool binding read as empty here.
+
+It is reachable through Moonraker's file API at
+`config/extended/multiace/slot_overrides.json`, so this needs nothing beyond multiACE — the
+optional FastAPI service stays unnecessary, as § 4 intended. Nothing in the `ace` object can
+say the file changed, so the fetch is triggered off `event_seq` (multiACE's
+bump-on-any-state-change counter) with the first frame fetching it at all.
+
+**Colour is encoded three different ways across these layers** — `"#RRGGBB"` in the override
+file, bare `"RRGGBB"` in the spool table, `[r,g,b]` in `slots[]`. All three are parsed.
+
+**Weights come from SPOOLMAN, not multiACE.** Its `weight_g` is a local copy, so taking
+remaining from it while total came from Spoolman computed a percentage across two sources.
+Only `spoolman_id` is taken from the table; `tracks_weight_locally()` stays false so
+SpoolmanManager fills remaining AND total as one pair. Both are cleared each rebuild —
+clearing only remaining left a stale total behind a wrong percentage.
+
+**Still open — the SnapSwap side.** `helix-screen/tool_spool_assignments` in Moonraker's DB
+holds assignments for all four heads (0=Red/23, 1=SIlver/15, 2=Black/3, 3=Gray/10) while
+`print_task_config.filament_exist` reads `[true,false,false,true]`, so T1/T2 display filament
+that is not there — and spool 15 is claimed by both tool 1 and ACE bay 0. This is § 10's open
+item 3. Two separable questions: clearing the stale rows (a write to the user's DB), and
+whether an assignment should display at all once the head reports empty — note
+`slot_has_retained_identity()` is a deliberate feature, so today's behaviour may be intended.
+
+### Spool numbering — the label is not the index (2026-08-11)
+
+The ACE's bays were badged **5-8** for a rig with seven spools. Global slot indices are dense
+over every *addressable* slot — the U1's four heads take 0-3, so the ACE starts at 4 — while
+the badge should count *spools*, and the ACE-fed head and the bay behind it are one spool
+counted twice.
+
+`owned_spool_slots()` already existed and already answered this (`[0,1,2,4,5,6,7]`); nothing
+labelled from it. Added `AmsBackend::spool_display_number()` plus
+`slot_identity_owner_slot()` — the companion to the existing `slot_identity_owner_unit()`,
+resolving a viewing slot to the slot that actually holds the spool. The U1's heads now read
+1,2,3 and the ACE's bays 4,5,6,7; T3 shares **4** with the bay feeding it rather than
+consuming a number.
+
+**Do not "fix" this by changing `first_slot_global_index`.** The index is the addressing key —
+subjects, `get_slot_info()`, load/unload dispatch and the active/target comparison all use it,
+and two slots cannot share one. Presentation and addressing are separate on purpose. Backends
+whose slots all own their spools are unaffected: `owned_spool_slots()` is then every slot in
+order and the number is `slot_index + 1` exactly.
+
+### Numeric keyboard — the default one existed and was dead (2026-08-11)
+
+`keyboard_hint="numeric"` routed to the `?123` symbol page. The intended numpad
+(`kb_map_num_improved`) was registered against LVGL's `LV_KEYBOARD_MODE_NUMBER` and **never
+displayed** — nothing calls `lv_keyboard_set_mode()` with that mode, because KeyboardManager
+drives the button matrix directly. Two things had therefore never been exercised:
+
+- **`LV_KEYBOARD_CTRL_BUTTON_FLAGS` does not include `CUSTOM_1`**, which is this codebase's
+  non-printing marker. Every action key on that map would have inserted its raw icon bytes.
+- **Four keys had no handler at all** (`+/-`, `ICON_CHECK`, both chevrons).
+
+Now lives in `keyboard_layout_provider.cpp` as `KEYBOARD_LAYOUT_NUMERIC` with both fixed.
+
+**Trap worth keeping:** `LV_BUTTONMATRIX_WIDTH_MASK` is `0x000F` — a key width above **15**
+overflows into the flag bits and silently drops keys from the rendered row rather than failing.
+A first attempt used widths of 16 and 20 and lost a whole row. Pinned by a test.
 
 ### Phase 3 — head-major layout
 
