@@ -95,6 +95,16 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// How head @p head is fed, per the last `ace` frame.
     [[nodiscard]] HeadSource head_source_kind(int head) const;
 
+    // Every ACE reports temperature and humidity. Answered at the BACKEND level,
+    // as the interface asks it: unit 0 is the U1 itself and has no sensor, but
+    // the per-unit `ams_env_ind_<n>_visible` subject already hides the indicator
+    // there. Inherited from AmsBackendSnapmaker this was false, which hard-hid
+    // the indicator on the unit detail page -- and with it the only route to the
+    // dryer and auto-dry controls for a drilled-into ACE.
+    [[nodiscard]] bool has_environment_sensors() const override {
+        return true;
+    }
+
     // Dryer. multiACE exposes parameterised commands -- ACE_DRY ACE=n [TEMP=]
     // [DURATION=] and ACE_STOP_DRYING [ACE=n] -- so temperature and duration are
     // set live, with no config edit and no Klipper restart. (The ACED__DRY_START_n

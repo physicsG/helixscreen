@@ -9,6 +9,7 @@
 
 #include "../helix_test_fixture.h"
 #include "ams_backend_multiace.h"
+#include "ams_backend_snapmaker.h"
 #include "ams_types.h"
 
 #include <algorithm>
@@ -819,4 +820,23 @@ TEST_CASE_METHOD(HelixTestFixture, "multiACE before any ace frame keeps the nati
     CHECK(err.success());
     REQUIRE(backend.captured_gcodes.size() == 1);
     CHECK(backend.captured_gcodes[0].find("ACE_") == std::string::npos);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "multiACE reports environment sensors", "[ams][multiace]") {
+    // Inherited from AmsBackendSnapmaker this answered false, and the unit
+    // detail page uses it as a hard gate: ams_detail_pre_show_env_indicator()
+    // adds LV_OBJ_FLAG_HIDDEN outright when the backend says no. That hid the
+    // temperature/humidity badge on a drilled-into ACE, and with it the only
+    // route to that unit's dryer and auto-dry controls.
+    //
+    // The answer is a backend-wide capability, as the interface asks it. Unit 0
+    // is the U1 itself and has no sensor; the per-unit ams_env_ind_<n>_visible
+    // subject is what hides the badge there.
+    CapturingMultiAce backend;
+    CHECK(backend.has_environment_sensors());
+
+    // True before any frame too — the gate runs on panel show, which can beat
+    // the first `ace` update, and a false there would hide the badge for good.
+    AmsBackendSnapmaker plain(nullptr, nullptr);
+    CHECK_FALSE(plain.has_environment_sensors()); // a stock U1 still has none
 }

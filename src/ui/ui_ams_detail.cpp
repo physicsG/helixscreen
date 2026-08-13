@@ -667,7 +667,14 @@ void ams_detail_pre_show_env_indicator(AmsDetailWidgets& w, int unit_index) {
     lv_obj_set_user_data(w.env_indicator, reinterpret_cast<void*>(static_cast<intptr_t>(u)));
 
     auto* backend = AmsState::instance().get_backend();
-    if (backend && backend->has_environment_sensors()) {
+    // Backend capability alone is not enough once units within one system
+    // differ: on multiACE the ACEs have sensors and the U1 itself does not.
+    // The component already hides itself via bind_flag_if_eq on $visible, so
+    // showing unconditionally here would UNDO that binding for a sensor-less
+    // unit and leave an empty badge until the subject next changed.
+    lv_subject_t* vis = AmsState::instance().get_env_ind_visible_subject(u);
+    const bool unit_has_env = !vis || lv_subject_get_int(vis) != 0;
+    if (backend && backend->has_environment_sensors() && unit_has_env) {
         lv_obj_remove_flag(w.env_indicator, LV_OBJ_FLAG_HIDDEN);
         // Force layout on the root (flex row container) so the indicator's
         // content width is resolved before slot creation reads available_width.
