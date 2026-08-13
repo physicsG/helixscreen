@@ -164,7 +164,8 @@ class KeyboardManager {
         MODE_ALPHA_LC,        // Lowercase alphabet
         MODE_ALPHA_UC,        // Uppercase alphabet
         MODE_NUMBERS_SYMBOLS, // Numbers and symbols (?123)
-        MODE_ALT_SYMBOLS      // Alternative symbols (#+= mode)
+        MODE_ALT_SYMBOLS,     // Alternative symbols (#+= mode)
+        MODE_NUMERIC          // Digits only — keyboard_hint="numeric" fields
     };
 
     // Long-press state machine
