@@ -30,10 +30,13 @@ class AmsContextMenuTestAccess {
                                                   supports_force_eject, slot_empty);
     }
 
+    // source_external defaults to false — the ordinary slot that holds its own
+    // spool, which is what every case below except the ACE-fed ones is about.
     static bool decide_can_load(bool system_busy, bool toolhead_unload,
-                                std::optional<bool> slot_has_filament, bool print_active) {
+                                std::optional<bool> slot_has_filament, bool print_active,
+                                bool source_external = false) {
         return AmsContextMenu::decide_can_load(system_busy, toolhead_unload, slot_has_filament,
-                                               print_active);
+                                               print_active, source_external);
     }
 
     static bool decide_unload_enabled(bool system_busy, UnloadMode mode, bool print_active,
@@ -317,5 +320,47 @@ TEST_CASE("AmsContextMenu::decide_unload_enabled blocks only the toolhead unload
             AmsContextMenuTestAccess::decide_unload_enabled(true, UnloadMode::Eject, false));
         CHECK_FALSE(
             AmsContextMenuTestAccess::decide_unload_enabled(false, UnloadMode::Unavailable, false));
+    }
+}
+
+// ============================================================================
+// A position fed from another unit has no Load of its own
+//
+// An ACE-fed U1 head is loaded with `ACE_LOAD_HEAD HEAD=n ACE=a SLOT=s`, which
+// names a specific bay — so the choice belongs to the bay's menu, not the
+// head's. Unload needs no bay (`ACE_UNLOAD_HEAD HEAD=n`) and stays available,
+// which is the asymmetry these cases pin.
+// ============================================================================
+
+TEST_CASE("AmsContextMenu::decide_can_load withdraws Load for a slot fed from another unit",
+          "[ams][context_menu][source_external]") {
+    SECTION("otherwise-loadable slot loses Load when it is externally fed") {
+        // Idle, not seated, filament available: Load would be offered on any
+        // ordinary slot.
+        REQUIRE(AmsContextMenuTestAccess::decide_can_load(false, false, true, false,
+                                                          /*source_external=*/false));
+        CHECK_FALSE(AmsContextMenuTestAccess::decide_can_load(false, false, true, false,
+                                                              /*source_external=*/true));
+    }
+
+    SECTION("it is a property of the position, not a transient state") {
+        // Every combination stays false — this is "no such action here", not
+        // "not right now", so no amount of idling re-enables it.
+        for (bool busy : {false, true}) {
+            for (bool seated : {false, true}) {
+                for (bool printing : {false, true}) {
+                    INFO("busy=" << busy << " seated=" << seated << " printing=" << printing);
+                    CHECK_FALSE(AmsContextMenuTestAccess::decide_can_load(busy, seated, true,
+                                                                          printing,
+                                                                          /*external=*/true));
+                }
+            }
+        }
+    }
+
+    SECTION("an ordinary slot is untouched") {
+        // The default-argument path every other case in this file exercises.
+        CHECK(AmsContextMenuTestAccess::decide_can_load(false, false, true, false));
+        CHECK_FALSE(AmsContextMenuTestAccess::decide_can_load(true, false, true, false));
     }
 }

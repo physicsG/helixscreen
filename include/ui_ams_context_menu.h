@@ -240,8 +240,15 @@ class AmsContextMenu : public ContextMenu {
     // directions — offering what will be refused strands a runout-paused user
     // (bundle JX2FVRB9), and refusing what the backend accepts hides the
     // pause-then-swap recovery Klipper just told them to perform.
+    // `source_external` is slot_identity_owner_unit().has_value(): the position
+    // is fed from ANOTHER unit rather than holding a spool of its own. Load is
+    // meaningless there and is withdrawn outright — an ACE-fed U1 head is
+    // loaded with `ACE_LOAD_HEAD HEAD=n ACE=a SLOT=s`, which names a specific
+    // bay, so the choice belongs to the bay's own menu. Unload is unaffected:
+    // `ACE_UNLOAD_HEAD HEAD=n` needs no bay and is exactly what the head can do.
     static bool decide_can_load(bool system_busy, bool toolhead_unload,
-                                std::optional<bool> slot_has_filament, bool print_blocks_op);
+                                std::optional<bool> slot_has_filament, bool print_blocks_op,
+                                bool source_external);
 
     // Pure: whether the Unload button is offered for the open slot.
     //

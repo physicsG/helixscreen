@@ -378,8 +378,8 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // enabled. For non-AD5X backends slot_unloads_to_toolhead() returns the hint
     // unchanged, so !toolhead_unload == !is_loaded and behavior is unaffected.
     // Disable Load if: system busy, slot empty, OR filament is already at the head.
-    bool can_load =
-        decide_can_load(system_busy, toolhead_unload, slot_has_filament, print_blocks_op);
+    bool can_load = decide_can_load(system_busy, toolhead_unload, slot_has_filament,
+                                    print_blocks_op, source_owner_unit_ >= 0);
     lv_subject_set_int(&slot_can_load_subject_, can_load ? 1 : 0);
     if (!can_load) {
         spdlog::debug("[AmsContextMenu] Load disabled for slot {}: busy={}, loaded={} "
@@ -429,11 +429,34 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
         }
     }
 
-    // Update the slot header text (1-based for user display)
+    // Update the slot header text. Uses the SPOOL number the slot's badge shows,
+    // not slot_index + 1 — those diverge once one slot views another's spool, and
+    // a menu headed "Slot 5" opened from a badge reading "4" names nothing the
+    // user can see. A single number rather than the badge's range: the menu acts
+    // on this one slot.
+    //
+    // A position fed from ANOTHER unit is headed with that unit instead. It has
+    // no slot number of its own — its badge is a range ("4-7"), because in head
+    // mode every bay of the bound ACE feeds it — so "Slot 4" named a spool
+    // position that does not exist. The unit's own display name ("ACE 2 Pro",
+    // or "ACE 2" when several are attached) is the thing the user can point at.
     lv_obj_t* slot_header = lv_obj_find_by_name(menu_obj, "slot_header");
     if (slot_header) {
-        char header_text[32];
-        snprintf(header_text, sizeof(header_text), lv_tr("Slot %d"), slot_index + 1);
+        char header_text[48];
+        std::string owner_name;
+        if (backend_ && source_owner_unit_ >= 0) {
+            const AmsSystemInfo info = backend_->get_system_info();
+            if (source_owner_unit_ < static_cast<int>(info.units.size())) {
+                owner_name = info.units[static_cast<size_t>(source_owner_unit_)].display_name;
+            }
+        }
+        if (!owner_name.empty()) {
+            snprintf(header_text, sizeof(header_text), "%s", owner_name.c_str());
+        } else {
+            const int shown =
+                backend_ ? backend_->spool_display_number(slot_index) : slot_index + 1;
+            snprintf(header_text, sizeof(header_text), lv_tr("Slot %d"), shown);
+        }
         lv_label_set_text(slot_header, header_text);
     }
 
@@ -558,7 +581,14 @@ AmsContextMenu::decide_unload_mode(bool toolhead_unload, bool can_recover, bool 
 }
 
 bool AmsContextMenu::decide_can_load(bool system_busy, bool toolhead_unload,
-                                     std::optional<bool> slot_has_filament, bool print_blocks_op) {
+                                     std::optional<bool> slot_has_filament, bool print_blocks_op,
+                                     bool source_external) {
+    // Checked before the shared gating, not folded into it: this is not a
+    // "cannot right now" like busy or mid-print, it is "this position has no
+    // such action". See the header.
+    if (source_external) {
+        return false;
+    }
     helix::ui::OpButtonState state;
     state.system_busy = system_busy;
     state.print_blocks_op = print_blocks_op;
@@ -953,7 +983,10 @@ std::string AmsContextMenu::build_backup_options() const {
     // Mark incompatible materials
     for (int i = 0; i < total_slots_; ++i) {
         if (i != get_item_index()) {
-            std::string slot_option = "\n" + fmt::format(lv_tr("Slot {}"), i + 1);
+            // Same spool number the badges show — a backup list offering "Slot 8"
+            // when no badge reads 8 names nothing the user can point at.
+            const int shown = backend_ ? backend_->spool_display_number(i) : i + 1;
+            std::string slot_option = "\n" + fmt::format(lv_tr("Slot {}"), shown);
 
             // Check material compatibility if we have a current material
             if (backend_ && !current_material.empty()) {

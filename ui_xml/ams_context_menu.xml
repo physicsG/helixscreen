@@ -60,6 +60,12 @@
                      height="#button_height_sm" icon="z_closer" text="Load" translation_tag="Load" variant="ghost"
                      clickable="true" style_flex_main_place="start">
             <bind_state_if_eq subject="ams_slot_can_load" state="disabled" ref_value="0"/>
+            <!-- Withdrawn entirely for a position fed from another unit, not
+                 merely greyed: loading an ACE-fed head takes ACE_LOAD_HEAD
+                 HEAD=n ACE=a SLOT=s, which names a BAY, so the action belongs to
+                 the bay's own menu. A disabled button there suggests a "not
+                 right now" that no amount of waiting resolves. -->
+            <bind_flag_if_eq subject="ams_slot_source_external" flag="hidden" ref_value="1"/>
             <event_cb trigger="clicked" callback="ams_context_load_cb"/>
           </ui_button>
           <!-- Unload Button (disabled when slot is not loaded) -->
