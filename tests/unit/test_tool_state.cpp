@@ -1569,3 +1569,109 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: saving through a symlink preserve
 
     ts.deinit_subjects();
 }
+
+// ============================================================================
+// Forward sync attribution when several slots feed ONE tool
+// ============================================================================
+
+namespace {
+/// Exposes handle_status_update so a frame can be fed in directly.
+class SyncMultiAce : public AmsBackendMultiAce {
+  public:
+    SyncMultiAce() : AmsBackendMultiAce(nullptr, nullptr) {}
+    using AmsBackendMultiAce::handle_status_update;
+};
+
+/// One ACE bound to head 3 with three bays holding spools. `seated` is the bay
+/// currently loaded at the head, or -1 for an empty head.
+nlohmann::json ace_frame_with_seat(int seated) {
+    nlohmann::json head_source = {{"0", nullptr}, {"1", nullptr}, {"2", nullptr}, {"3", nullptr}};
+    if (seated >= 0) {
+        head_source["3"] = nlohmann::json{{"ace_index", 0}, {"slot", seated}};
+    }
+    return nlohmann::json{
+        {"ace",
+         {{"mode", "head"},
+          {"device_count", 1},
+          {"head_ace", {{"0", 0}, {"1", 1}, {"2", 2}, {"3", 0}}},
+          {"head_feeder", {{"0", true}, {"1", true}, {"2", true}, {"3", false}}},
+          {"head_manual", {{"0", false}, {"1", false}, {"2", false}, {"3", false}}},
+          {"head_source", head_source},
+          // Bays 0, 1 and 3 all hold filament — the case presence cannot resolve.
+          {"aces", nlohmann::json::array(
+                       {nlohmann::json{{"idx", 0},
+                                       {"connected", true},
+                                       {"protocol", "v2"},
+                                       {"gate_status", nlohmann::json::array({1, 1, 0, 1})}}})},
+          {"spool_binding", {{"0_0", "15"}, {"0_1", "10"}, {"0_3", "16"}}},
+          {"spools",
+           {{"15",
+             nlohmann::json{
+                 {"id", "15"}, {"material", "PETG"}, {"label", "SIlver"}, {"spoolman_id", "15"}}},
+            {"10",
+             nlohmann::json{
+                 {"id", "10"}, {"material", "PETG"}, {"label", "Gray"}, {"spoolman_id", "10"}}},
+            {"16", nlohmann::json{{"id", "16"},
+                                  {"material", "PETG"},
+                                  {"label", "Orange"},
+                                  {"spoolman_id", "17"}}}}}}}};
+}
+} // namespace
+
+TEST_CASE_METHOD(ToolStateFixture, "ToolState: the SEATED bay claims a tool several bays map to",
+                 "[tool][tool-state][spool][ams][multiace]") {
+    // In head mode every bay of the bound ACE maps to the one head it feeds, so
+    // assign_spool() — keyed by tool — was called once per occupied bay and the
+    // highest-numbered one won by loop order alone. On the live rig that wrote
+    // bay 3's "Orange" against tool 3 while a different bay was loaded, and
+    // ToolState persists to Moonraker's DB, so it outlived restarts.
+    lv_init_safe();
+
+    auto& ts = ToolState::instance();
+    ts.deinit_subjects();
+    ts.init_subjects(false);
+
+    PrinterDiscovery hw;
+    hw.parse_objects(nlohmann::json::array({"toolchanger", "tool T0", "tool T1", "tool T2",
+                                            "tool T3", "extruder", "extruder1", "extruder2",
+                                            "extruder3", "heater_bed", "gcode_move"}));
+    ts.init_tools(hw);
+
+    auto& ams = AmsState::instance();
+    ams.deinit_subjects();
+    ams.init_subjects(false);
+
+    SECTION("bay 1 seated: tool 3 gets bay 1's spool, not the last bay's") {
+        auto backend = std::make_unique<SyncMultiAce>();
+        auto* raw = backend.get();
+        raw->handle_status_update(ace_frame_with_seat(1));
+        ams.set_backend(std::move(backend));
+        ams.sync_from_backend();
+
+        const auto& tools = ts.tools();
+        REQUIRE(tools.size() > 3);
+        // Bay 1 is spool 10 "Gray". Bay 3 ("Orange", spoolman_id 17) is the one
+        // the old loop-order behaviour picked, so it is the assertion that fails
+        // if this regresses.
+        CHECK(tools[3].spoolman_id == 10);
+        CHECK(tools[3].spool_name == "Gray");
+    }
+
+    SECTION("nothing seated: the tool is cleared, not given an arbitrary bay") {
+        auto backend = std::make_unique<SyncMultiAce>();
+        auto* raw = backend.get();
+        raw->handle_status_update(ace_frame_with_seat(1));
+        ams.set_backend(std::move(backend));
+        ams.sync_from_backend();
+        REQUIRE(ts.tools()[3].spoolman_id == 10);
+
+        // The filament leaves the head; the bays still hold their spools.
+        raw->handle_status_update(ace_frame_with_seat(-1));
+        ams.sync_from_backend();
+        CHECK(ts.tools()[3].spoolman_id == 0);
+    }
+
+    ams.set_backend(nullptr);
+    ams.deinit_subjects();
+    ts.deinit_subjects();
+}

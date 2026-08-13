@@ -1259,6 +1259,54 @@ namespace {
 /// Guards the tool<-slot spool attribution when several slots share one tool,
 /// which is what an MMU in head mode looks like: every bay maps to the head it
 /// is bound to. Without this the attribution is decided by loop order.
+/// Which slot is actually SEATED at @p tool, when the tool is fed through a
+/// viewing position rather than holding a spool itself.
+///
+/// An ACE-fed U1 head is such a position: in head mode every bay of the bound
+/// ACE maps to that one head, so presence cannot pick between them — several
+/// bays hold filament at once and only one is loaded. The backend does know,
+/// through slot_identity_owner_slot(), and that is the only thing that does.
+///
+/// Returns nullopt both when no slot on this tool views another's spool (every
+/// ordinary backend, always) and when one does but nothing is seated in it —
+/// the caller has to tell those apart, which is what tool_is_fed_by_view() is
+/// for.
+std::optional<int> seated_slot_for_tool(const AmsSystemInfo& info, const AmsBackend* backend,
+                                        int tool) {
+    if (!backend) {
+        return std::nullopt;
+    }
+    for (const auto& unit : info.units) {
+        for (const auto& s : unit.slots) {
+            if (s.mapped_tool != tool || s.global_index < 0) {
+                continue;
+            }
+            if (auto owner = backend->slot_identity_owner_slot(s.global_index)) {
+                return owner;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+/// Whether @p tool is reached through a position that views another unit's
+/// spool, seated or not. Distinguishes "nothing is loaded at this head" from
+/// "this backend has no such concept".
+bool tool_is_fed_by_view(const AmsSystemInfo& info, const AmsBackend* backend, int tool) {
+    if (!backend) {
+        return false;
+    }
+    for (const auto& unit : info.units) {
+        for (const auto& s : unit.slots) {
+            if (s.mapped_tool == tool && s.global_index >= 0 &&
+                backend->slot_identity_owner_unit(s.global_index)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool tool_has_present_slot(const AmsSystemInfo& info, int tool) {
     for (const auto& unit : info.units) {
         for (const auto& s : unit.slots) {
@@ -1572,6 +1620,35 @@ void AmsState::sync_from_backend() {
         // filament can be what feeds the tool, so an empty one must not claim
         // it. (A single-slot-per-tool system is unaffected: its one slot either
         // holds filament or there is nothing to attribute anyway.)
+        // ...but presence only separates empty from occupied, and on an ACE in
+        // head mode SEVERAL bays are occupied at once while exactly one is
+        // loaded. Every one of them cleared the guard above and overwrote the
+        // same entry, so the highest-numbered occupied bay won by nothing more
+        // than loop order — tool 3 was recorded as the spool in bay 3 while the
+        // head was empty, and ToolState persists that to Moonraker's DB.
+        //
+        // Where a tool is reached through a viewing position, the SEATED slot is
+        // the only one entitled to it, and nothing seated means nothing to
+        // attribute. Backends with no such position never enter this arm:
+        // tool_is_fed_by_view() is false for them and the behaviour above stands.
+        if (tool_is_fed_by_view(info, backend, slot->mapped_tool)) {
+            const auto seated = seated_slot_for_tool(info, backend, slot->mapped_tool);
+            if (!seated) {
+                // Head empty. Clear once, from the viewing position itself, so
+                // the stale spool does not outlive the filament that left.
+                if (backend->slot_identity_owner_unit(i)) {
+                    ToolState::instance().clear_spool(slot->mapped_tool);
+                }
+                continue;
+            }
+            if (*seated != i) {
+                continue;
+            }
+        } else if (backend->slot_identity_owner_unit(i)) {
+            // A viewing position with no seated source of its own describes
+            // another unit's spool; it is not a spool position to attribute.
+            continue;
+        }
         if (!slot->is_present() && tool_has_present_slot(info, slot->mapped_tool)) {
             continue;
         }
