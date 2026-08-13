@@ -1169,6 +1169,103 @@ class AmsBackend {
     }
 
     /**
+     * @brief Which slot holds the spool that @p slot_index is showing.
+     *
+     * The companion to slot_identity_owner_unit(): that says WHICH UNIT
+     * describes the filament, this says which slot of it. An ACE-fed head and
+     * the ACE bay behind it are one spool, so the head resolves to the bay.
+     *
+     * @param slot_index Global slot index.
+     * @return Global index of the owning slot, or nullopt when the slot holds
+     *         its own spool (every backend except multiACE, always).
+     */
+    [[nodiscard]] virtual std::optional<int> slot_identity_owner_slot(int slot_index) const {
+        (void)slot_index;
+        return std::nullopt;
+    }
+
+    /**
+     * @brief The 1-based number a slot should be LABELLED with.
+     *
+     * Not the same as the global index, and deliberately so. Global indices are
+     * the addressing key and must stay dense over every addressable slot; the
+     * label counts SPOOLS. On a U1 with one ACE those disagree: the U1's four
+     * heads take global 0-3, so the ACE's bays start at global 4 and used to be
+     * labelled 5-8 — eight numbers for seven spools, because the ACE-fed head
+     * and the bay feeding it are the same spool counted twice.
+     *
+     * A slot that only views another slot's spool resolves to it, so the head
+     * and its bay share one number instead of consuming two.
+     *
+     * Backends whose slots all own their spools are unaffected: owned_spool_slots()
+     * is then every slot in order, and this returns slot_index + 1 exactly.
+     */
+    [[nodiscard]] int spool_display_number(int slot_index) const {
+        const int target = slot_identity_owner_slot(slot_index).value_or(slot_index);
+        const std::vector<int> owned = owned_spool_slots();
+        for (size_t i = 0; i < owned.size(); ++i) {
+            if (owned[i] == target) {
+                return static_cast<int>(i) + 1;
+            }
+        }
+        // Not a spool position and nothing owns it — fall back to the raw index
+        // rather than showing nothing.
+        return slot_index + 1;
+    }
+
+    /**
+     * @brief What a slot's badge should READ — a number, or a range.
+     *
+     * A slot holding its own spool is simply its number ("3").
+     *
+     * A slot that only views another unit's spools is not one spool but a
+     * position any of them can reach, so it reads as the range ("4-7"). On a U1
+     * in head mode all four ACE bays feed the one ACE-fed head; naming only the
+     * seated bay would be a number that changes under the user every time the
+     * ACE swaps, and would hide the other three entirely. In multi mode exactly
+     * one bay feeds each head, so the range collapses back to a single number
+     * with no special-casing.
+     *
+     * Unchanged for backends whose slots all own their spools.
+     */
+    [[nodiscard]] std::string spool_display_label(int slot_index) const {
+        const auto owner_unit = slot_identity_owner_unit(slot_index);
+        if (!owner_unit.has_value()) {
+            return std::to_string(spool_display_number(slot_index));
+        }
+        const AmsSystemInfo info = get_system_info();
+        if (*owner_unit < 0 || *owner_unit >= static_cast<int>(info.units.size())) {
+            return std::to_string(spool_display_number(slot_index));
+        }
+        // Which of the owner's slots can feed this position: the ones mapped to
+        // the same tool.
+        const int tool = get_slot_info(slot_index).mapped_tool;
+        const auto& unit = info.units[static_cast<size_t>(*owner_unit)];
+        int lo = -1;
+        int hi = -1;
+        for (int s = 0; s < static_cast<int>(unit.slots.size()); ++s) {
+            if (unit.slots[static_cast<size_t>(s)].mapped_tool != tool) {
+                continue;
+            }
+            const int n = spool_display_number(unit.first_slot_global_index + s);
+            if (lo < 0 || n < lo) {
+                lo = n;
+            }
+            if (hi < 0 || n > hi) {
+                hi = n;
+            }
+        }
+        if (lo < 0) {
+            // Owned by a unit that maps none of its slots here — say what we can.
+            return std::to_string(spool_display_number(slot_index));
+        }
+        if (lo == hi) {
+            return std::to_string(lo);
+        }
+        return std::to_string(lo) + "-" + std::to_string(hi);
+    }
+
+    /**
      * @brief How many slots on @p unit_index hold a spool of their own.
      * @see owned_spool_slots()
      */

@@ -1560,7 +1560,10 @@ void AmsPanel::show_context_menu(int slot_index, lv_obj_t* near_widget, lv_point
                     }
 #endif
                     AmsState::instance().sync_from_backend();
-                    NOTIFY_INFO(lv_tr("Slot {} spool cleared"), slot + 1);
+                    // The badge's spool number, not slot + 1 — see
+                    // AmsBackend::spool_display_number().
+                    NOTIFY_INFO(lv_tr("Slot {} spool cleared"),
+                                backend ? backend->spool_display_number(slot) : slot + 1);
                 } else {
                     helix::ui::notify_ams_error(error, lv_tr("Clear failed"));
                 }
@@ -1653,7 +1656,9 @@ void AmsPanel::show_edit_modal(int slot_index, bool open_on_picker) {
                     // subject re-notification needed.
                     AmsState::instance().sync_from_backend();
 
-                    NOTIFY_INFO(lv_tr("Slot {} updated"), result.slot_index + 1);
+                    // The badge's spool number — see spool_display_number().
+                    NOTIFY_INFO(lv_tr("Slot {} updated"),
+                                backend->spool_display_number(result.slot_index));
                 }
             }
         },
