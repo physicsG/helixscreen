@@ -101,7 +101,12 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// arrives. A feeder or manual head still runs the native sequence and
     /// keeps the stock answer.
     [[nodiscard]] bool preload_finish_ends_unload(int head) const override {
-        return head_source_kind(head) == HeadSource::ACE;
+        // Reads head_kind_ DIRECTLY. The caller is the channel_state parse,
+        // which already holds mutex_, and head_source_kind() takes it again --
+        // a non-recursive std::mutex, so that self-deadlocked the main thread
+        // the first time an ACE-fed head reached preload_finish, i.e. on the
+        // first real unload. The whole UI froze.
+        return head >= 0 && head < NUM_TOOLS && head_kind_[head] == HeadSource::ACE;
     }
 
     /// See AmsBackend::change_tool_completes_load(). True for the U1's own four

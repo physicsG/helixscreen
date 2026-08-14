@@ -315,6 +315,15 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     ///
     /// Default false — the stock behaviour, unchanged. AmsBackendMultiAce
     /// answers true for heads it knows are ACE-fed.
+    ///
+    /// @warning CALLED WITH mutex_ HELD, from inside the channel_state parse.
+    /// An override MUST read state directly and MUST NOT call a public accessor
+    /// that locks — mutex_ is a plain std::mutex, so re-entering it deadlocks
+    /// the calling thread outright. That thread is the main one (the parse runs
+    /// from UpdateQueue::process_pending), so the whole UI freezes. This hook
+    /// only fires when a head reports preload_finish, which is the end of a
+    /// real unload — so the first override to get it wrong froze on hardware
+    /// and in no test.
     [[nodiscard]] virtual bool preload_finish_ends_unload(int head) const {
         (void)head;
         return false;
