@@ -195,3 +195,63 @@ TEST_CASE("Step operation: non-IDLE to active does not trigger initial detection
                                         StepOperationType::LOAD_FRESH, true, true);
     REQUIRE_FALSE(result.should_recreate);
 }
+
+// =============================================================================
+// A UI-initiated unload keeps its unload bar
+//
+// Pressing Unload built the 4-step unload bar and then, ~450ms later, replaced
+// it with the 5-step LOAD bar parked on "Feed filament" — which is what the
+// user saw for the rest of the operation. Traced on hardware to the
+// external-start arm: UNLOADING with filament loaded reads as "the unload half
+// of a swap".
+//
+// The arm's guards do not exclude it. `is_external` means target_load_slot_ < 0,
+// which the sidebar clears on any non-progress action, so one transient IDLE
+// mid-unload makes the UI's own operation look foreign — and that same
+// transient is what leaves prev_action at IDLE.
+// =============================================================================
+
+TEST_CASE("An in-progress explicit unload is not reinterpreted as a swap",
+          "[ams][step_operation][1229]") {
+    SECTION("the exact hardware shape: unload misread as a swap") {
+        // is_external and prev_action=IDLE both come from the transient, and
+        // filament_loaded is true because the filament has not left yet.
+        const auto r =
+            detect_step_operation(AmsAction::UNLOADING, AmsAction::IDLE, StepOperationType::UNLOAD,
+                                  /*is_external=*/true, /*filament_loaded=*/true);
+        CHECK_FALSE(r.should_recreate); // keep the 4-step unload bar
+    }
+
+    SECTION("still true however it is observed") {
+        for (bool external : {false, true}) {
+            for (bool loaded : {false, true}) {
+                for (auto prev : {AmsAction::IDLE, AmsAction::HEATING, AmsAction::UNLOADING}) {
+                    INFO("external=" << external << " loaded=" << loaded);
+                    const auto r = detect_step_operation(
+                        AmsAction::UNLOADING, prev, StepOperationType::UNLOAD, external, loaded);
+                    CHECK_FALSE(r.should_recreate);
+                }
+            }
+        }
+    }
+
+    SECTION("a genuine swap still upgrades when loading starts") {
+        // The designed route, and the reason the guard is scoped to UNLOADING:
+        // once the machine starts FEEDING, this really is a swap.
+        const auto r = detect_step_operation(AmsAction::LOADING, AmsAction::UNLOADING,
+                                             StepOperationType::UNLOAD,
+                                             /*is_external=*/true, /*filament_loaded=*/false);
+        CHECK(r.should_recreate);
+        CHECK(r.op_type == StepOperationType::LOAD_SWAP);
+    }
+
+    SECTION("an externally-started unload is still detected") {
+        // Nothing was declared by the UI, so the guess is all there is — a swap
+        // guess here is still correct behaviour and must not regress.
+        const auto r = detect_step_operation(AmsAction::UNLOADING, AmsAction::IDLE,
+                                             StepOperationType::LOAD_FRESH,
+                                             /*is_external=*/true, /*filament_loaded=*/true);
+        CHECK(r.should_recreate);
+        CHECK(r.op_type == StepOperationType::LOAD_SWAP);
+    }
+}

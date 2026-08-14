@@ -58,6 +58,28 @@ inline StepOperationResult detect_step_operation(AmsAction action, AmsAction pre
                              action == AmsAction::FORMING_TIP || action == AmsAction::UNLOADING ||
                              action == AmsAction::LOADING);
 
+    // An explicit UNLOAD that is currently unloading is never reinterpreted.
+    //
+    // Everything below guesses at an operation nobody told us about, and the
+    // guess is only safe while there is nothing better to go on. Here there is:
+    // the caller already built an UNLOAD bar. Without this, an ordinary Unload
+    // press landed in the swap arm below — UNLOADING with filament loaded reads
+    // as "the unload half of a swap" — and the 4-step unload bar was rebuilt as
+    // the 5-step load one, parked on "Feed filament" for the rest of the
+    // operation.
+    //
+    // `is_external` cannot be trusted to exclude it: it means "target_load_slot_
+    // < 0", and the caller clears that on any non-progress action, so a single
+    // transient IDLE mid-unload makes the UI's own operation look foreign. That
+    // same transient is what puts prev_action at IDLE, so both conditions of the
+    // arm below are met by a UI-initiated unload.
+    //
+    // A real swap still arrives: LOADING while current_op is UNLOAD hits the
+    // upgrade arm at the bottom, which is the designed route for exactly that.
+    if (current_op == StepOperationType::UNLOAD && action == AmsAction::UNLOADING) {
+        return result; // no change — keep the unload bar
+    }
+
     // External operation just started (transitioned from IDLE to any active action)
     if (is_external && is_active_action && prev_action == AmsAction::IDLE) {
         result.should_recreate = true;

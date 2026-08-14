@@ -131,6 +131,18 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// nullopt when @p slot_index is a head rather than a bay, or out of range.
     [[nodiscard]] std::optional<BaySource> bay_source(int slot_index) const;
 
+    /// The U1's own step model, with the unload's last step naming its
+    /// destination when the head being unloaded is ACE-fed.
+    ///
+    /// The filament does not just leave the nozzle, it travels back into the
+    /// ACE, and "Retract" alone gave no sign of that -- the step sits there for
+    /// the length of the whole retract, which is most of the operation.
+    ///
+    /// A RENAME, not an added step: the firmware drives the step index (phase 3
+    /// for unload_doing), so a fifth step would have nothing to advance it and
+    /// would sit Pending forever.
+    [[nodiscard]] OperationStepModel get_operation_step_model(StepOperationType op) const override;
+
     /// A BAY is actively loaded when it is the one currently feeding a head.
     ///
     /// The base rule is `slot_index == get_current_slot()`, and the current slot

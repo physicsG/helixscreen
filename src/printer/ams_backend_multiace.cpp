@@ -895,6 +895,35 @@ AmsError AmsBackendMultiAce::set_auto_dry_enabled(bool enabled, int unit) {
 // Filament ops — ACE-fed heads take the ACE path
 // ============================================================================
 
+AmsBackend::OperationStepModel
+AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
+    AmsBackend::OperationStepModel model = AmsBackendSnapmaker::get_operation_step_model(op);
+    if (op != StepOperationType::UNLOAD || model.steps.empty()) {
+        return model;
+    }
+    // Which head this unload is about. current_slot is the head for a U1-side
+    // op; a bay index resolves to the head its ACE feeds, so both entry points
+    // (the sidebar's Unload and a bay's context menu) get the same answer.
+    int head = -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        head = system_info_.current_slot;
+    }
+    if (head >= NUM_TOOLS) {
+        if (auto bay = bay_source(head)) { // takes mutex_ itself — not nested
+            head = bay->head;
+        }
+    }
+    if (head < 0 || head >= NUM_TOOLS) {
+        return model;
+    }
+    if (head_source_kind(head) != HeadSource::ACE) {
+        return model; // a stock feeder head retracts to its own buffer
+    }
+    model.steps.back().label = lv_tr("Retract to ACE");
+    return model;
+}
+
 std::optional<AmsBackendMultiAce::BaySource> AmsBackendMultiAce::bay_source(int slot_index) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (slot_index < NUM_TOOLS) {

@@ -1118,3 +1118,44 @@ TEST_CASE_METHOD(LVGLTestFixture, "a feeder head still waits for unload_finish",
     CHECK(backend.get_current_action() == AmsAction::IDLE);
     helix::ui::UpdateQueue::instance().drain();
 }
+
+TEST_CASE_METHOD(HelixTestFixture, "the unload step names the ACE as the destination",
+                 "[ams][multiace][bay_load]") {
+    // "Retract" alone said nothing about where the filament goes, and on an
+    // ACE-fed head it travels all the way back into the ACE -- which is most of
+    // the operation's duration, spent on that one step.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    // Head 3 is the ACE-fed one in the captured frame; make it the current slot
+    // so the model knows which head the unload is about.
+    backend.handle_status_update(json{{"toolhead", {{"extruder", "extruder3"}}}});
+    REQUIRE(backend.get_system_info().current_slot == 3);
+
+    const auto unload = backend.get_operation_step_model(StepOperationType::UNLOAD);
+    REQUIRE_FALSE(unload.steps.empty());
+    CHECK(unload.steps.back().label == std::string("Retract to ACE"));
+    // A rename, not an extra step: the firmware drives the index (phase 3), so a
+    // fifth step would sit Pending forever.
+    CHECK(unload.steps.size() == 4);
+    CHECK(unload.steps.back().phase_id == 3);
+
+    // The load direction is untouched.
+    const auto load = backend.get_operation_step_model(StepOperationType::LOAD_FRESH);
+    CHECK(load.steps.size() == 5);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "a feeder head's unload keeps the plain Retract label",
+                 "[ams][multiace][bay_load]") {
+    // T0 is on its stock feeder: the filament goes back to the U1's own buffer,
+    // so naming the ACE there would be a lie.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    backend.handle_status_update(json{{"toolhead", {{"extruder", "extruder"}}}});
+    REQUIRE(backend.get_system_info().current_slot == 0);
+    REQUIRE(backend.head_source_kind(0) == HeadSource::FEEDER);
+
+    const auto unload = backend.get_operation_step_model(StepOperationType::UNLOAD);
+    REQUIRE_FALSE(unload.steps.empty());
+    CHECK(unload.steps.back().label == std::string("Retract"));
+}
