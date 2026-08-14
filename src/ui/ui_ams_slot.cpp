@@ -550,7 +550,6 @@ static void apply_current_slot_highlight(AmsSlotData* data, int current_slot) {
         lv_obj_set_style_border_width(highlight_target, 0, LV_PART_MAIN);
         lv_obj_set_style_shadow_width(highlight_target, 0, LV_PART_MAIN);
         lv_obj_set_style_shadow_opa(highlight_target, LV_OPA_TRANSP, LV_PART_MAIN);
-
     }
 
     // A slot fed from another unit is showing that unit's spool, not one of its
@@ -856,19 +855,13 @@ static void apply_source_bars(AmsSlotData* data) {
         ams_draw::style_slot_bar(col, params, ams_draw::MINI_BAR_RADIUS_PX);
     }
 
-    // The number badge is withdrawn by apply_slot_status(), which owns badge
-    // visibility and would undo a hide made here on its next run. The TOOL badge
-    // stays either way: it is the only thing identifying which head this is.
-
-    // Badges are created by XML before this row, so lift them back on top.
-    if (data->tool_badge_bg) {
-        lv_obj_move_to_index(data->tool_badge_bg, -1);
-    }
-
     // Re-run the rules that read source_bars. The status observer may already
     // have fired for this slot before the bars existed, in which case it drew
-    // the spool and the tool badge; without this they stay until whatever
-    // happens to update the slot next.
+    // the spool; without this it stays until whatever happens to update the
+    // slot next. Only the status rule needs re-running: apply_tool_badge() hides
+    // the tool badge outright for a source-bars position (the tool letter
+    // belongs to the toolhead row below), so there is no badge to restore and
+    // no z-order to fix up.
     if (auto* status_subject = AmsState::instance().get_slot_status_subject(data->slot_index)) {
         apply_slot_status(data, lv_subject_get_int(status_subject));
     }

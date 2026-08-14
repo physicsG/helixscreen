@@ -1422,6 +1422,18 @@ void AmsOverviewPanel::on_toolhead_clicked(int tool_index, void* user_data) {
     if (!self || !self->system_path_) {
         return;
     }
+
+    // The canvas hands back the VIRTUAL tool number off the badge, and every
+    // backend call below is slot-indexed — so it has to be in range before it
+    // reaches get_slot_info(). AmsPanel::on_path_toolhead_clicked() has always
+    // checked this; the check was lost when that handler was copied here.
+    const int slot_count = lv_subject_get_int(AmsState::instance().get_slot_count_subject());
+    if (tool_index < 0 || tool_index >= slot_count) {
+        spdlog::warn("[AmsOverview] Ignoring toolhead click - invalid tool {} (slot_count={})",
+                     tool_index, slot_count);
+        return;
+    }
+
     AmsBackend* backend = AmsState::instance().get_backend();
     if (!backend) {
         return;

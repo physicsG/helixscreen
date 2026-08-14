@@ -1224,8 +1224,17 @@ class AmsBackend {
      * question needs nothing further.
      */
     [[nodiscard]] std::vector<int> owned_spool_slots() const {
+        return owned_spool_slots(get_system_info());
+    }
+
+    /// Overload for callers that already hold the system info.
+    ///
+    /// get_system_info() returns BY VALUE under the backend mutex — every unit,
+    /// every SlotInfo, every std::string in them. These helpers are called per
+    /// slot and per frame, so re-fetching it inside each one was the dominant
+    /// cost of drawing a badge. Callers with `info` in hand should pass it.
+    [[nodiscard]] std::vector<int> owned_spool_slots(const AmsSystemInfo& info) const {
         std::vector<int> out;
-        const AmsSystemInfo info = get_system_info();
         out.reserve(static_cast<size_t>(info.total_slots));
         for (int i = 0; i < info.total_slots; ++i) {
             if (!slot_identity_owner_unit(i).has_value()) {
@@ -1268,8 +1277,23 @@ class AmsBackend {
      * is then every slot in order, and this returns slot_index + 1 exactly.
      */
     [[nodiscard]] int spool_display_number(int slot_index) const {
+        return spool_number_in(owned_spool_slots(), slot_index);
+    }
+
+    /// Overload for callers that already hold the system info — see
+    /// owned_spool_slots(const AmsSystemInfo&).
+    [[nodiscard]] int spool_display_number(int slot_index, const AmsSystemInfo& info) const {
+        return spool_number_in(owned_spool_slots(info), slot_index);
+    }
+
+    /// The badge number for @p slot_index given a PRE-BUILT owned-slot list.
+    ///
+    /// Split out so spool_display_label() can build that list once instead of
+    /// once per candidate slot — it used to call spool_display_number() inside
+    /// its loop, and each call deep-copied the whole AmsSystemInfo and took the
+    /// backend mutex once per slot.
+    [[nodiscard]] int spool_number_in(const std::vector<int>& owned, int slot_index) const {
         const int target = slot_identity_owner_slot(slot_index).value_or(slot_index);
-        const std::vector<int> owned = owned_spool_slots();
         for (size_t i = 0; i < owned.size(); ++i) {
             if (owned[i] == target) {
                 return static_cast<int>(i) + 1;
@@ -1296,13 +1320,18 @@ class AmsBackend {
      * Unchanged for backends whose slots all own their spools.
      */
     [[nodiscard]] std::string spool_display_label(int slot_index) const {
+        // ONE system fetch and ONE owned-slot build for the whole function. This
+        // used to fetch per call and again per loop iteration — roughly five deep
+        // copies of AmsSystemInfo and fifty mutex acquisitions to render one badge.
+        const AmsSystemInfo info = get_system_info();
+        const std::vector<int> owned = owned_spool_slots(info);
+
         const auto owner_unit = slot_identity_owner_unit(slot_index);
         if (!owner_unit.has_value()) {
-            return std::to_string(spool_display_number(slot_index));
+            return std::to_string(spool_number_in(owned, slot_index));
         }
-        const AmsSystemInfo info = get_system_info();
         if (*owner_unit < 0 || *owner_unit >= static_cast<int>(info.units.size())) {
-            return std::to_string(spool_display_number(slot_index));
+            return std::to_string(spool_number_in(owned, slot_index));
         }
         // Which of the owner's slots can feed this position: the ones mapped to
         // the same tool.
@@ -1314,7 +1343,7 @@ class AmsBackend {
             if (unit.slots[static_cast<size_t>(s)].mapped_tool != tool) {
                 continue;
             }
-            const int n = spool_display_number(unit.first_slot_global_index + s);
+            const int n = spool_number_in(owned, unit.first_slot_global_index + s);
             if (lo < 0 || n < lo) {
                 lo = n;
             }
@@ -1324,7 +1353,7 @@ class AmsBackend {
         }
         if (lo < 0) {
             // Owned by a unit that maps none of its slots here — say what we can.
-            return std::to_string(spool_display_number(slot_index));
+            return std::to_string(spool_number_in(owned, slot_index));
         }
         if (lo == hi) {
             return std::to_string(lo);
@@ -1337,7 +1366,12 @@ class AmsBackend {
      * @see owned_spool_slots()
      */
     [[nodiscard]] int unit_spool_slot_count(int unit_index) const {
-        const AmsSystemInfo info = get_system_info();
+        return unit_spool_slot_count(unit_index, get_system_info());
+    }
+
+    /// Overload for callers that already hold the system info — the overview
+    /// builds one card per unit and had been re-fetching for each.
+    [[nodiscard]] int unit_spool_slot_count(int unit_index, const AmsSystemInfo& info) const {
         if (unit_index < 0 || unit_index >= static_cast<int>(info.units.size())) {
             return 0;
         }

@@ -114,9 +114,11 @@ class AmsToolheadMenu : public ContextMenu {
     AmsToolheadMenu(const AmsToolheadMenu&) = delete;
     AmsToolheadMenu& operator=(const AmsToolheadMenu&) = delete;
 
-    // Movable
-    AmsToolheadMenu(AmsToolheadMenu&& other) noexcept;
-    AmsToolheadMenu& operator=(AmsToolheadMenu&& other) noexcept;
+    // Non-movable. Both panels hold this in a unique_ptr and nothing moves it;
+    // the move bodies existed only to re-init subjects and fix up the static
+    // active-instance pointer, which is 40 lines of unreachable subtlety.
+    AmsToolheadMenu(AmsToolheadMenu&&) = delete;
+    AmsToolheadMenu& operator=(AmsToolheadMenu&&) = delete;
 
     /**
      * @brief Show the toolhead context menu near the tapped nozzle

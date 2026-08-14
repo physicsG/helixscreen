@@ -109,47 +109,6 @@ AmsToolheadMenu::~AmsToolheadMenu() {
     spdlog::trace("[AmsToolheadMenu] Destroyed");
 }
 
-AmsToolheadMenu::AmsToolheadMenu(AmsToolheadMenu&& other) noexcept
-    : ContextMenu(std::move(other)), action_callback_(std::move(other.action_callback_)),
-      backend_(other.backend_), tool_index_(other.tool_index_), model_(other.model_) {
-    if (s_active_instance_ == &other) {
-        s_active_instance_ = this;
-    }
-    // Subjects are not moved: they hold registered pointers into `other`'s own
-    // storage, and title_buf_ is an inline array the string subject points at.
-    // Re-init ours instead and let the moved-from object release its own.
-    init_subjects();
-    publish_model();
-    other.backend_ = nullptr;
-    other.tool_index_ = -1;
-}
-
-AmsToolheadMenu& AmsToolheadMenu::operator=(AmsToolheadMenu&& other) noexcept {
-    if (this != &other) {
-        if (s_active_instance_ == this) {
-            s_active_instance_ = nullptr;
-        }
-
-        ContextMenu::operator=(std::move(other));
-
-        action_callback_ = std::move(other.action_callback_);
-        backend_ = other.backend_;
-        tool_index_ = other.tool_index_;
-        model_ = other.model_;
-
-        if (s_active_instance_ == &other) {
-            s_active_instance_ = this;
-        }
-
-        init_subjects();
-        publish_model();
-
-        other.backend_ = nullptr;
-        other.tool_index_ = -1;
-    }
-    return *this;
-}
-
 // ============================================================================
 // Public API
 // ============================================================================
