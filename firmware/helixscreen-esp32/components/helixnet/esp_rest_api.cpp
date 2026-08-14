@@ -20,7 +20,7 @@
 //   in-memory thumbnail fetch" the Task 10 plan entry describes — Task 11
 //   ("new design" print-select) reuses this same primitive directly for real
 //   thumbnail bytes (root="gcodes", path=the resolved .thumbs/ path, capped
-//   at kHardCapBytes), it just isn't wired to a UI yet.
+//   at HARD_CAP_BYTES), it just isn't wired to a UI yet.
 //
 // ITransfersAPI::get_file_metadata / metascan_file are IFilesAPI (NOT this
 // file) and are already real: they're pure JSON-RPC over the WebSocket
@@ -163,11 +163,11 @@ bool esp_reject_invalid_file_root(const std::string& root, const char* method,
 // becomes %XX. libhv's HUrl isn't part of the ESP32 build, so this is a small
 // standalone equivalent (no ESP-IDF/libhv dependency, just <cctype>/<cstdio>).
 std::string esp_url_escape_path(const std::string& path) {
-    static constexpr char kUnreserved[] = "/.-_";
+    static constexpr char UNRESERVED[] = "/.-_";
     std::string out;
     out.reserve(path.size());
     for (unsigned char c : path) {
-        if (std::isalnum(c) || std::strchr(kUnreserved, static_cast<char>(c)) != nullptr) {
+        if (std::isalnum(c) || std::strchr(UNRESERVED, static_cast<char>(c)) != nullptr) {
             out += static_cast<char>(c);
         } else {
             char buf[4];
@@ -217,7 +217,7 @@ bool esp_is_safe_endpoint(const std::string& endpoint) {
 // (a handful of scalar fields + a small slots array) without being wasteful
 // of the lane's PSRAM accumulation buffer. EspHttpLane fails loud rather than
 // silently truncating an over-cap response (see esp_http_lane.cpp).
-constexpr size_t kRestGetCapBytes = 16 * 1024;
+constexpr size_t REST_GET_CAP_BYTES = 16 * 1024;
 } // namespace
 
 // ============================================================================
@@ -347,7 +347,7 @@ void MoonrakerRestAPI::call_rest_get(const std::string& endpoint, RestCallback o
     ESP_LOGD(TAG, "call_rest_get: %s", url.c_str());
 
     bool queued = helix::http::EspHttpLane::instance().submit_get(
-        url, kRestGetCapBytes,
+        url, REST_GET_CAP_BYTES,
         [on_complete](const uint8_t* data, size_t size) {
             RestResponse resp;
             resp.success = true;

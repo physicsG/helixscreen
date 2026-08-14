@@ -360,7 +360,7 @@ inline AmsAction ams_action_from_string(std::string_view action_str,
     };
     // Known vocabulary, normalized. Happy Hare and AFC share this table; a
     // token appearing in only one firmware is harmless to the other.
-    static constexpr Entry kExact[] = {
+    static constexpr Entry EXACT[] = {
         {"idle", AmsAction::IDLE},
         {"initialized", AmsAction::IDLE},
         {"loading", AmsAction::LOADING},
@@ -388,7 +388,7 @@ inline AmsAction ams_action_from_string(std::string_view action_str,
         {"paused", AmsAction::PAUSED},
         {"error", AmsAction::ERROR},
     };
-    for (const auto& e : kExact) {
+    for (const auto& e : EXACT) {
         if (t == e.token) {
             recognize(true);
             return e.action;
@@ -1432,14 +1432,14 @@ namespace helix {
  * @return Tool number, or nullopt if @p ext_name is not a valid extruder name
  */
 [[nodiscard]] inline std::optional<int> tool_number_for_extruder(std::string_view ext_name) {
-    constexpr std::string_view kPrefix = "extruder";
-    if (ext_name == kPrefix) {
+    constexpr std::string_view PREFIX = "extruder";
+    if (ext_name == PREFIX) {
         return 0;
     }
-    if (ext_name.size() <= kPrefix.size() || ext_name.substr(0, kPrefix.size()) != kPrefix) {
+    if (ext_name.size() <= PREFIX.size() || ext_name.substr(0, PREFIX.size()) != PREFIX) {
         return std::nullopt;
     }
-    const std::string_view digits = ext_name.substr(kPrefix.size());
+    const std::string_view digits = ext_name.substr(PREFIX.size());
     // No real machine has a four-digit extruder index; the bound also keeps the
     // accumulate below well clear of overflow without pulling in <climits>.
     if (digits.size() > 3 || !std::all_of(digits.begin(), digits.end(),

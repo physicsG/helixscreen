@@ -179,15 +179,15 @@ spdlog::level::level_enum g_effective_log_level = spdlog::level::warn;
 // is the historical fixed size, kept as the floor so the smallest boards (AD5M
 // at ~107 MB) keep exactly what they had: ~2000 lines ≈ 300 KB at typical line
 // lengths. Tunable in both directions via HELIX_LOG_RING_LINES.
-constexpr size_t kMinRingLines = 2000;
+constexpr size_t MIN_RING_LINES = 2000;
 
 /// Upper bound: past a few thousand lines a bundle reader is scrolling, not
 /// diagnosing, and the memory stops paying for itself.
-constexpr size_t kMaxRingLines = 20000;
+constexpr size_t MAX_RING_LINES = 20000;
 
 /// ~150 bytes per retained line (≈119 bytes of text plus std::string overhead,
 /// measured against real AD5X bundles), so 16 lines/MB budgets ~0.24% of RAM.
-constexpr size_t kRingLinesPerMb = 16;
+constexpr size_t RING_LINES_PER_MB = 16;
 
 size_t resolve_ring_capacity() {
     // Explicit override always wins — a constrained board can pin it down and a
@@ -446,8 +446,8 @@ bool is_clock_step(double wall_delta_s, double mono_delta_s) {
     // adjtime() slews at most ~500 ppm, so over any interval the honest
     // wall-vs-monotonic disagreement stays under 0.05% of the interval. One
     // full second is orders of magnitude beyond that and cannot be slew.
-    constexpr double kStepThresholdSeconds = 1.0;
-    return std::fabs(wall_delta_s - mono_delta_s) > kStepThresholdSeconds;
+    constexpr double STEP_THRESHOLD_SECONDS = 1.0;
+    return std::fabs(wall_delta_s - mono_delta_s) > STEP_THRESHOLD_SECONDS;
 }
 
 std::unique_ptr<spdlog::formatter> make_formatter(SinkKind kind) {
@@ -659,10 +659,10 @@ size_t ring_capacity_for_ram(size_t total_ram_mb) {
     // total_ram_mb == 0 means detection failed (non-Linux, unreadable
     // /proc/meminfo); fall back to the historical size rather than guessing.
     if (total_ram_mb == 0) {
-        return kMinRingLines;
+        return MIN_RING_LINES;
     }
-    const size_t scaled = total_ram_mb * kRingLinesPerMb;
-    return std::clamp(scaled, kMinRingLines, kMaxRingLines);
+    const size_t scaled = total_ram_mb * RING_LINES_PER_MB;
+    return std::clamp(scaled, MIN_RING_LINES, MAX_RING_LINES);
 }
 
 LogTarget parse_log_target(const std::string& str) {

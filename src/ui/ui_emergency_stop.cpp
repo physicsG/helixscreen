@@ -12,6 +12,7 @@
 
 #include "abort_manager.h"
 #include "app_globals.h"
+#include "fault_modal_registry.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "printer_recovery_service.h"
@@ -137,6 +138,16 @@ void EmergencyStopOverlay::deinit_subjects() {
     confirmation_dialog_ = nullptr;
     recovery_reason_ = RecoveryReason::NONE;
 
+    // create() subscribed these to PrinterState's subjects, not to subjects_, so
+    // deinit_all() above does not touch them. In the app that has been harmless
+    // — singleton and PrinterState both live for the process — but it leaves the
+    // guards pointing at subjects they do not own, and create() is documented as
+    // re-runnable (soft restart after Add Printer). Releasing here makes the
+    // pair symmetric.
+    print_state_observer_.reset();
+    print_start_phase_observer_.reset();
+    klippy_state_observer_.reset();
+
     spdlog::debug("[EmergencyStop] Subjects deinitialized");
 }
 
@@ -206,6 +217,16 @@ void EmergencyStopOverlay::create() {
                 helix::ui::async_call(
                     [](void*) {
                         auto& inst = EmergencyStopOverlay::instance();
+
+                        // Klipper is back, so any "Printer Error" alert raised
+                        // while it was down describes a condition that no longer
+                        // exists. Leaving them up made a recovered printer look
+                        // broken and forced an OK per cascaded fault (#1266).
+                        // Independent of recovery_dialog_ below: the user may
+                        // have recovered from another client without HelixScreen
+                        // ever showing its own recovery dialog.
+                        helix::ui::dismiss_fault_modals();
+
                         // Guard against async callback firing after display destruction
                         if (inst.recovery_dialog_) {
                             if (!ModalStack::instance().backdrop_for(inst.recovery_dialog_)) {

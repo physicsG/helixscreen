@@ -50,12 +50,20 @@ struct TempDisplayData {
     bool show_target = false;                 // Default: hide target (opt-in via prop)
     bool has_target_binding = false;          // True if bind_target was set (heater mode)
     bool target_subjects_initialized = false; // True if target subject was created
+    // hide_target_when_off: the separator+target are built, but stay hidden while
+    // the heater is off. Home-screen tiles want the target only when it means
+    // something; control surfaces (controls panel, temp graph) leave this off so
+    // the "—" placeholder still reads as "this heater is off".
+    bool hide_target_when_off = false;
     // Chamber-mode awareness (opt-in via bind_mode). In Maintaining mode the
     // target is a cooling CEILING, not a heat goal, so heating-red is wrong.
     int current_mode = helix::ChamberMode::Heating; // Default: existing heating behavior
     bool has_mode_binding = false;                  // True if bind_mode was set
     // Responsive hide of separator+target labels below this breakpoint (-1 = never).
     int hide_target_below_bp = -1;
+    // Last value seen from the ui_breakpoint subject. Only meaningful when
+    // hide_target_below_bp >= 0 — that is the only case that subscribes.
+    int current_bp = 0;
 
     // Child label pointers for efficient updates
     lv_obj_t* current_label = nullptr;
@@ -98,12 +106,14 @@ static const lv_font_t* get_font_for_size(const char* size) {
     return font ? font : &noto_sans_18;
 }
 
-/** Apply current breakpoint to separator+target visibility. Safe to call when
-    those labels don't exist (no-op for show_target="false" widgets). */
-static void apply_target_visibility(TempDisplayData* data, int current_bp) {
-    if (!data || data->hide_target_below_bp < 0)
+/** Apply breakpoint + heater-off rules to separator+target visibility. Safe to
+    call when those labels don't exist (no-op for show_target="false" widgets). */
+static void apply_target_visibility(TempDisplayData* data) {
+    if (!data)
         return;
-    bool hide = current_bp < data->hide_target_below_bp;
+    bool hide =
+        (data->hide_target_below_bp >= 0 && data->current_bp < data->hide_target_below_bp) ||
+        (data->hide_target_when_off && data->target_temp == 0);
     if (data->separator_label) {
         if (hide)
             lv_obj_add_flag(data->separator_label, LV_OBJ_FLAG_HIDDEN);
@@ -125,7 +135,8 @@ static void bp_observer_cb(lv_observer_t* observer, lv_subject_t* subject) {
     auto* data = get_data(container);
     if (!data)
         return;
-    apply_target_visibility(data, lv_subject_get_int(subject));
+    data->current_bp = lv_subject_get_int(subject);
+    apply_target_visibility(data);
 }
 
 /**
@@ -204,6 +215,10 @@ static void update_display(TempDisplayData* data) {
 
     // Update target temp via subject (shows "--" when heater off)
     format_target_text(data);
+
+    // hide_target_when_off drops the separator+target entirely once the heater
+    // is off, so the tile falls back to a bare current reading.
+    apply_target_visibility(data);
 
     // Update heating accent color
     update_heating_color(data);
@@ -318,6 +333,10 @@ static void target_temp_observer_cb(lv_observer_t* observer, lv_subject_t* subje
     // Update target text (shows "--" when heater off, actual value when on)
     format_target_text(data);
 
+    // hide_target_when_off keys off target_temp, so re-evaluate here rather than
+    // in update_display() — the XML-bound path never goes through it.
+    apply_target_visibility(data);
+
     // Update color based on 4-state logic
     update_heating_color(data);
 }
@@ -388,6 +407,13 @@ static void* ui_temp_display_create_cb(lv_xml_parser_state_t* state, const char*
         data_ptr->show_target = true;
     }
 
+    // Parse hide_target_when_off — build the target labels but keep them hidden
+    // while target == 0. Meaningless without show_target, same as the bp variant.
+    const char* hide_when_off_str = lv_xml_get_value_of(attrs, "hide_target_when_off");
+    if (hide_when_off_str && strcmp(hide_when_off_str, "true") == 0) {
+        data_ptr->hide_target_when_off = true;
+    }
+
     // Parse hide_target_below_bp — drop separator+target on small screens.
     // Value is a breakpoint name (micro|tiny|small|medium|large|xlarge|xxlarge).
     const char* hide_below_str = lv_xml_get_value_of(attrs, "hide_target_below_bp");
@@ -445,9 +471,12 @@ static void* ui_temp_display_create_cb(lv_xml_parser_state_t* state, const char*
     if (registered->hide_target_below_bp >= 0) {
         if (lv_subject_t* bp_subj = theme_manager_get_breakpoint_subject()) {
             lv_subject_add_observer_obj(bp_subj, bp_observer_cb, container, nullptr);
-            apply_target_visibility(registered, lv_subject_get_int(bp_subj));
+            registered->current_bp = lv_subject_get_int(bp_subj);
         }
     }
+    // Seed visibility from the initial state — with hide_target_when_off that
+    // means starting hidden, since target_temp is 0 until the first update.
+    apply_target_visibility(registered);
 
     spdlog::trace("[temp_display] Created widget (size={}, show_target={})", size ? size : "md",
                   registered->show_target);

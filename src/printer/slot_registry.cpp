@@ -6,7 +6,7 @@
 namespace helix::printer {
 
 // Static sentinel for invalid unit access
-static const RegistryUnit kInvalidUnit{"", -1, 0};
+static const RegistryUnit INVALID_UNIT{"", -1, 0};
 
 void SlotRegistry::initialize(const std::string& unit_name,
                               const std::vector<std::string>& slot_names) {
@@ -167,7 +167,7 @@ int SlotRegistry::unit_count() const {
 
 const RegistryUnit& SlotRegistry::unit(int unit_index) const {
     if (unit_index < 0 || unit_index >= static_cast<int>(units_.size())) {
-        return kInvalidUnit;
+        return INVALID_UNIT;
     }
     return units_[unit_index];
 }
@@ -198,9 +198,19 @@ int SlotRegistry::slot_for_tool(int tool_number) const {
     return tool_to_slot_[tool_number];
 }
 
-void SlotRegistry::set_tool_mapping(int global_index, int tool_number) {
+void SlotRegistry::set_tool_mapping(int global_index, int tool_number, MappingSource source) {
     if (!is_valid_index(global_index) || tool_number < 0)
         return;
+
+    // Bump before the early-outs below can't happen (there are none past this
+    // point) but after validation, so a rejected write never counts as
+    // confirmation. Counted per accepted firmware write rather than per
+    // changed value: a firmware report that MATCHES what we optimistically
+    // wrote is still proof the printer applied it, and is the common case for
+    // a restore that worked.
+    if (source == MappingSource::Firmware) {
+        ++firmware_mapping_generation_;
+    }
 
     // Clear any previous tool on this slot, but only if the reverse map
     // still points to this slot (another slot may have already claimed it)
@@ -245,7 +255,14 @@ void SlotRegistry::clear_tool_mapping(int global_index) {
     slots_[global_index].info.mapped_tool = -1;
 }
 
-void SlotRegistry::set_tool_map(const std::vector<int>& tool_to_slot) {
+void SlotRegistry::set_tool_map(const std::vector<int>& tool_to_slot, MappingSource source) {
+    // One bump per accepted bulk write: Happy Hare reports the ENTIRE ttg_map in
+    // every status update, so a single call is the whole firmware truth rather
+    // than one lane's worth of it.
+    if (source == MappingSource::Firmware) {
+        ++firmware_mapping_generation_;
+    }
+
     // Clear all existing mappings
     for (auto& slot : slots_) {
         slot.info.mapped_tool = -1;
@@ -264,6 +281,10 @@ void SlotRegistry::set_tool_map(const std::vector<int>& tool_to_slot) {
 
 const std::vector<int>& SlotRegistry::tool_map() const {
     return tool_to_slot_;
+}
+
+uint64_t SlotRegistry::firmware_mapping_generation() const {
+    return firmware_mapping_generation_;
 }
 
 int SlotRegistry::backup_for_slot(int global_index) const {

@@ -14,6 +14,7 @@
 #include "wifi_manager.h"
 
 #include "ui_error_reporting.h"
+#include "ui_timer_guard.h"
 #include "ui_update_queue.h"
 
 #include "http_executor.h"
@@ -57,7 +58,7 @@ void WiFiManager::mark_association_change() {
 bool WiFiManager::in_association_grace() const {
     if (last_association_change_.time_since_epoch().count() == 0)
         return false;
-    return (std::chrono::steady_clock::now() - last_association_change_) < kAssociationGrace;
+    return (std::chrono::steady_clock::now() - last_association_change_) < ASSOCIATION_GRACE;
 }
 
 // Overridable in tests via WiFiManagerTestAccess so has_non_wifi_network_path()
@@ -275,6 +276,10 @@ WiFiManager::~WiFiManager() {
     }
     auth_fail_grace_timer_ = nullptr;
 
+    // Same for the connect watchdog: StaticPanelRegistry::destroy_all() runs before
+    // lv_deinit(), so an armed timer would still be in LVGL's list holding a freed `this`.
+    cancel_connect_timeout();
+
     // Clear callbacks BEFORE stopping backend
     // Pending lv_async_call operations check for null callbacks before invoking
     {
@@ -340,8 +345,8 @@ void WiFiManager::start_scan(
     spdlog::debug("[WiFiManager] Scan callback registered");
 
     spdlog::info("[WiFiManager] Starting periodic network scan (interval backs off {}ms-{}ms)",
-                 helix::wifi::ScanScheduler::kBaseIntervalMs,
-                 helix::wifi::ScanScheduler::kMaxIntervalMs);
+                 helix::wifi::ScanScheduler::BASE_INTERVAL_MS,
+                 helix::wifi::ScanScheduler::MAX_INTERVAL_MS);
 
     // A fresh scan session (e.g. the user opening network settings) is a
     // manual refresh: clear any suppression/backoff left over from a prior
@@ -353,7 +358,7 @@ void WiFiManager::start_scan(
 
     // Create timer for periodic scanning
     scan_timer_ =
-        lv_timer_create(scan_timer_callback, helix::wifi::ScanScheduler::kBaseIntervalMs, this);
+        lv_timer_create(scan_timer_callback, helix::wifi::ScanScheduler::BASE_INTERVAL_MS, this);
     spdlog::debug("[WiFiManager] Timer created: {}", (void*)scan_timer_);
 
     // Trigger immediate scan
@@ -395,7 +400,7 @@ void WiFiManager::start_scan(
         } else if (in_association_grace()) {
             spdlog::debug("[WiFiManager] Scan trigger failed within {}s of an association change "
                           "we initiated — suppressing user warning",
-                          kAssociationGrace.count());
+                          ASSOCIATION_GRACE.count());
         } else {
             NOTIFY_WARNING("WiFi scan failed. Try again.");
         }
@@ -486,8 +491,10 @@ void WiFiManager::connect(const std::string& ssid, const std::string& password,
     mark_association_change();
 
     // Drop any grace timer left over from a prior attempt so it can't deliver a stale
-    // failure against this new connect (helixscreen#1050).
+    // failure against this new connect (helixscreen#1050). Same for the watchdog: a
+    // leftover one would time out this attempt on the previous attempt's schedule.
     cancel_auth_fail_grace();
+    cancel_connect_timeout();
 
     {
         std::lock_guard<std::mutex> lock(callback_mutex_);
@@ -512,8 +519,11 @@ void WiFiManager::connect(const std::string& ssid, const std::string& password,
         if (cb) {
             cb(false, result.user_msg.empty() ? result.technical_msg : result.user_msg);
         }
+        return; // the callback is already delivered — nothing left for the watchdog to guard
     }
-    // Success/failure will be reported via CONNECTED/AUTH_FAILED events
+    // Success/failure will be reported via CONNECTED/AUTH_FAILED events — or, when the
+    // backend never produces either, by the watchdog armed here.
+    start_connect_timeout();
 }
 
 void WiFiManager::disconnect() {
@@ -524,6 +534,22 @@ void WiFiManager::disconnect() {
 
     spdlog::info("[WiFiManager] Disconnecting");
     mark_association_change();
+
+    // An explicit disconnect aborts whatever connect is in flight. Leaving
+    // connecting_in_progress_ set would make handle_disconnected() swallow the very
+    // DISCONNECTED this call is about to produce, latching the state machine with no
+    // event left that can clear it. The user cancelled deliberately, so the pending
+    // callback is dropped rather than invoked with a failure. Both pending resolvers go
+    // with it: an armed grace window would otherwise still fire ~4s later against an
+    // attempt the user already abandoned.
+    cancel_connect_timeout();
+    cancel_auth_fail_grace();
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        connecting_in_progress_ = false;
+        connect_callback_ = nullptr;
+    }
+
     WiFiError result = backend_->disconnect_network();
     if (!result.success()) {
         NOTIFY_WARNING("Could not disconnect from WiFi");
@@ -932,6 +958,8 @@ void WiFiManager::handle_connected(const std::string& event_data) {
                 // CONNECTED is the real outcome, so cancel it before delivering success
                 // (helixscreen#1050).
                 manager->cancel_auth_fail_grace();
+                // The attempt resolved — disarm the watchdog before delivering success.
+                manager->cancel_connect_timeout();
                 std::function<void(bool, const std::string&)> cb;
                 {
                     std::lock_guard<std::mutex> lock(manager->callback_mutex_);
@@ -1085,6 +1113,9 @@ constexpr uint32_t AUTH_FAIL_GRACE_MS = 4000;
 
 void WiFiManager::start_auth_fail_grace(const std::string& error) {
     pending_auth_error_ = error;
+    // The grace window now owns resolving this attempt (either a CONNECTED preempts it or
+    // deliver_auth_failure() reports the failure), so the watchdog must stand down.
+    cancel_connect_timeout();
     if (auth_fail_grace_timer_) {
         lv_timer_delete(auth_fail_grace_timer_);
         auth_fail_grace_timer_ = nullptr;
@@ -1097,8 +1128,10 @@ void WiFiManager::start_auth_fail_grace(const std::string& error) {
 
 void WiFiManager::cancel_auth_fail_grace() {
     if (auth_fail_grace_timer_) {
-        spdlog::debug("[WiFiManager] CONNECTED preempted pending AUTH_FAILED — transient "
-                      "handshake failure ignored");
+        // Reached from handle_connected() (a CONNECTED preempted the failure, so it was
+        // a transient handshake error), from connect() (a new attempt supersedes it), and
+        // from disconnect() (the user abandoned the attempt). Kept neutral for all three.
+        spdlog::debug("[WiFiManager] Pending AUTH_FAILED grace window cancelled");
         lv_timer_delete(auth_fail_grace_timer_);
         auth_fail_grace_timer_ = nullptr;
     }
@@ -1132,6 +1165,70 @@ void WiFiManager::auth_fail_grace_timer_cb(lv_timer_t* timer) {
     // One-shot: LVGL deletes the timer after this callback returns, so just drop our handle.
     self->auth_fail_grace_timer_ = nullptr;
     self->deliver_auth_failure();
+}
+
+// ----------------------------------------------------------------------------
+// Connect watchdog — UI thread only
+// ----------------------------------------------------------------------------
+
+namespace {
+// Upper bound on how long a connect may stay pending with no terminal event. A
+// wpa_supplicant association plus DHCP on a slow embedded radio can legitimately take
+// ~30s, so anything tighter would abort connects that were about to succeed; 45s clears
+// that comfortably without leaving the user staring at a spinner that never resolves.
+constexpr uint32_t CONNECT_TIMEOUT_MS = 45000;
+} // namespace
+
+void WiFiManager::start_connect_timeout() {
+    cancel_connect_timeout();
+    connect_timeout_timer_ = lv_timer_create(connect_timeout_timer_cb, CONNECT_TIMEOUT_MS, this);
+    lv_timer_set_repeat_count(connect_timeout_timer_, 1); // one-shot
+    spdlog::debug("[WiFiManager] Connect watchdog armed ({}ms)", CONNECT_TIMEOUT_MS);
+}
+
+void WiFiManager::cancel_connect_timeout() {
+    if (connect_timeout_timer_) {
+        helix::ui::lv_timer_cancel_safe(connect_timeout_timer_);
+        connect_timeout_timer_ = nullptr;
+    }
+}
+
+void WiFiManager::deliver_connect_timeout() {
+    // Neither CONNECTED nor AUTH_FAILED ever arrived. Resolve the attempt as a failure so
+    // the caller stops waiting, and clear connecting_in_progress_ so a later DISCONNECTED
+    // is no longer swallowed by handle_disconnected().
+    bool was_pending = false;
+    std::function<void(bool, const std::string&)> cb;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        was_pending = connecting_in_progress_ || static_cast<bool>(connect_callback_);
+        if (was_pending) {
+            connecting_in_progress_ = false;
+            cb = std::move(connect_callback_);
+            connect_callback_ = nullptr;
+        }
+    }
+    if (!was_pending) {
+        return; // resolved between the timer firing and this callback running
+    }
+
+    LOG_WARN_INTERNAL("Connect produced no terminal event within {}ms — reporting timeout",
+                      CONNECT_TIMEOUT_MS);
+    notify_state_observers();
+    // Invoke OUTSIDE callback_mutex_ — the callback re-enters WiFiManager.
+    if (cb) {
+        cb(false, lv_tr("Connection timeout"));
+    }
+}
+
+void WiFiManager::connect_timeout_timer_cb(lv_timer_t* timer) {
+    auto* self = static_cast<WiFiManager*>(lv_timer_get_user_data(timer));
+    if (!self) {
+        return;
+    }
+    // One-shot: LVGL deletes the timer after this callback returns, so just drop our handle.
+    self->connect_timeout_timer_ = nullptr;
+    self->deliver_connect_timeout();
 }
 
 // ============================================================================

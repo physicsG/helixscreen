@@ -597,8 +597,8 @@ bool updates_externally_managed() {
 // from the main thread during startup, so poll for the child instead of a
 // blocking waitpid() and treat "still running at the deadline" as no.
 static bool probe_passwordless_sudo() {
-    constexpr int kTimeoutMs = 2000;
-    constexpr int kPollIntervalMs = 20;
+    constexpr int TIMEOUT_MS = 2000;
+    constexpr int POLL_INTERVAL_MS = 20;
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -626,7 +626,7 @@ static bool probe_passwordless_sudo() {
         _exit(127); // no sudo binary
     }
 
-    for (int waited_ms = 0; waited_ms < kTimeoutMs; waited_ms += kPollIntervalMs) {
+    for (int waited_ms = 0; waited_ms < TIMEOUT_MS; waited_ms += POLL_INTERVAL_MS) {
         int status = 0;
         const pid_t done = waitpid(pid, &status, WNOHANG);
         if (done == pid) {
@@ -635,11 +635,11 @@ static bool probe_passwordless_sudo() {
         if (done < 0) {
             return false; // child vanished (SIGCHLD reaped elsewhere) — assume no
         }
-        usleep(kPollIntervalMs * 1000);
+        usleep(POLL_INTERVAL_MS * 1000);
     }
 
     spdlog::warn("[Updates] sudo probe did not finish in {}ms — assuming no escalation",
-                 kTimeoutMs);
+                 TIMEOUT_MS);
     kill(pid, SIGKILL);
     waitpid(pid, nullptr, 0);
     return false;

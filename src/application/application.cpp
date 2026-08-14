@@ -2241,10 +2241,10 @@ bool Application::run_wizard() {
     // initial_step is a raw CLI/config int (--wizard-step) — a genuine int seam.
     // Clamp to a valid StepId range so an out-of-range debug value lands on a real
     // step (the last one) instead of a blank wizard from a bogus enum cast.
-    if (initial_step < 0 || initial_step >= helix::wizard::kStepCount) {
+    if (initial_step < 0 || initial_step >= helix::wizard::STEP_COUNT) {
         spdlog::warn("[Application] --wizard-step {} out of range [0,{}); clamping", initial_step,
-                     helix::wizard::kStepCount);
-        initial_step = (initial_step < 0) ? 0 : helix::wizard::kStepCount - 1;
+                     helix::wizard::STEP_COUNT);
+        initial_step = (initial_step < 0) ? 0 : helix::wizard::STEP_COUNT - 1;
     }
     // Map it to a StepId for the registry-driven wizard.
     ui_wizard_navigate_to_step(static_cast<helix::wizard::StepId>(initial_step));
@@ -3087,7 +3087,11 @@ void Application::setup_discovery_callbacks() {
                     // channel from it (invalidate first: cache_identity() is
                     // insert-if-absent, so a stale entry would win otherwise).
                     SpoolmanManager::invalidate_identity(spool.id);
-                    SpoolmanManager::cache_identity(spool);
+                    if (SpoolmanManager::cache_identity(spool)) {
+                        // Tell the label consumers a name they could not resolve
+                        // before is available now (#1264).
+                        AmsState::instance().bump_slots_version();
+                    }
 
                     SlotInfo slot;
                     slot.slot_index = -2;

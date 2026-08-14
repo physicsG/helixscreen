@@ -698,6 +698,18 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      */
     void set_connection_state(ConnectionState new_state);
 
+    /**
+     * @brief Record the URL of the current connection
+     *
+     * connect() does this for a real connection. A subclass that simulates
+     * connecting must call it too, or get_last_url() reports no connection and
+     * every consumer that asks "which host are we talking to" gets the wrong
+     * answer rather than an obviously missing one.
+     *
+     * @param url URL passed to connect()
+     */
+    void set_last_url(const std::string& url);
+
     // Notification callbacks (protected to allow mock to trigger notifications)
     // Map of subscription ID -> callback for O(1) unsubscription
     std::map<SubscriptionId, std::function<void(const json&)>> notify_callbacks_;

@@ -238,6 +238,7 @@ void AmsState::init_subjects(bool register_xml) {
 
     // Backend selector subjects
     INIT_SUBJECT_INT(backend_count, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(ams_data_revision, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(active_backend, 0, subjects_, register_xml);
 
     // System-level subjects
@@ -2053,6 +2054,13 @@ void AmsState::on_backend_event(int backend_index, const std::string& event,
                 } else {
                     AmsState::instance().update_slot_for_backend(backend_index, slot_index);
                 }
+
+                // Wake anything watching for backend data to land. Bumped AFTER
+                // the sync so an observer that re-reads backend state sees the
+                // synced values, not the previous ones. Main thread already (we
+                // are inside the queue_update body), so the subject write is safe.
+                auto* rev = AmsState::instance().get_ams_data_revision_subject();
+                lv_subject_set_int(rev, lv_subject_get_int(rev) + 1);
             });
     };
 

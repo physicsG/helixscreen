@@ -153,7 +153,7 @@ records. For AFC that is not merely etiquette: `AFC.py` `delete_lane_data()`
 wipes the whole namespace at the start of every PREP and refills it one lane at
 a time, so the namespace is non-durable across reboots *and* transiently
 incomplete during them. AFC/HH overrides go to a private namespace
-(`kOverrideNamespace`) — see prestonbrown/helixscreen#1158.
+(`OVERRIDE_NAMESPACE`) — see prestonbrown/helixscreen#1158.
 
 ---
 

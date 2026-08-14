@@ -1090,9 +1090,9 @@ void DisplayManager::check_display_sleep() {
         bool dismiss_on_activity = activity_detected;
 #ifdef HELIX_ENABLE_SCREENSAVER
         if (m_screensaver_is_preview) {
-            constexpr uint32_t kPreviewGraceMs = 750;
+            constexpr uint32_t PREVIEW_GRACE_MS = 750;
             uint32_t elapsed = get_ticks() - m_preview_start_tick_ms;
-            if (elapsed < kPreviewGraceMs) {
+            if (elapsed < PREVIEW_GRACE_MS) {
                 dismiss_on_activity = false;
             }
         }
@@ -1574,15 +1574,15 @@ bool DisplayManager::try_drm_to_fbdev_fallback(lv_display_rotation_t rot, bool s
 }
 
 void DisplayManager::warn_fbdev_high_dpi() {
-    static constexpr int kHighDpiThreshold = 1920;
-    if (m_width <= kHighDpiThreshold && m_height <= kHighDpiThreshold) {
+    static constexpr int HIGH_DPI_THRESHOLD = 1920;
+    if (m_width <= HIGH_DPI_THRESHOLD && m_height <= HIGH_DPI_THRESHOLD) {
         return;
     }
     spdlog::warn("[DisplayManager] Fbdev resolution {}x{} exceeds {}px on one axis. "
                  "Cannot auto-downscale in fbdev mode. Configure a lower resolution "
                  "via kernel parameters (e.g., framebuffer_width/framebuffer_height "
                  "in /boot/firmware/config.txt on Raspberry Pi) and reboot.",
-                 m_width, m_height, kHighDpiThreshold);
+                 m_width, m_height, HIGH_DPI_THRESHOLD);
     char toast_msg[256];
     snprintf(toast_msg, sizeof(toast_msg),
              lv_tr("Display resolution is very high (%dx%d). Text may appear small. "

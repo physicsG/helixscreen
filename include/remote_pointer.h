@@ -47,11 +47,11 @@ namespace helix::remote {
 /// Clamped at the bottom so a nonsense setting cannot produce a hold that could
 /// never register as a long press.
 constexpr int32_t pointer_long_press_hold_ms(int32_t long_press_time_ms) {
-    constexpr int32_t kMargin = 250;
-    constexpr int32_t kFloor = 300;
+    constexpr int32_t MARGIN = 250;
+    constexpr int32_t FLOOR = 300;
     const int32_t base = long_press_time_ms > 0 ? long_press_time_ms : 500;
-    const int32_t hold = base + kMargin;
-    return hold < kFloor + kMargin ? kFloor + kMargin : hold;
+    const int32_t hold = base + MARGIN;
+    return hold < FLOOR + MARGIN ? FLOOR + MARGIN : hold;
 }
 
 class RemotePointer {

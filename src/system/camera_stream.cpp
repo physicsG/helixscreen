@@ -20,8 +20,8 @@
 #include <string_view>
 
 // TurboJPEG pixel format and flag constants (avoid header dependency)
-static constexpr int kTJPF_BGR = 1;
-static constexpr int kTJFLAG_FASTDCT = 2048;
+static constexpr int TJ_PIXELFORMAT_BGR = 1;
+static constexpr int TJ_FLAG_FASTDCT = 2048;
 
 namespace helix {
 
@@ -156,7 +156,7 @@ void CameraStream::start(const std::string& stream_url, const std::string& snaps
         spdlog::info("[CameraStream] Using MJPEG streaming mode");
         stream_thread_ = std::thread(&CameraStream::stream_thread_func, this);
     } else if (!snapshot_url_.empty()) {
-        spdlog::info("[CameraStream] Using snapshot mode (interval={}ms)", kSnapshotIntervalMs);
+        spdlog::info("[CameraStream] Using snapshot mode (interval={}ms)", SNAPSHOT_INTERVAL_MS);
         stream_thread_ = std::thread(&CameraStream::snapshot_poll_loop, this);
     } else {
         spdlog::warn("[CameraStream] No stream or snapshot URL provided");
@@ -214,9 +214,9 @@ void CameraStream::stop() {
             thread_detached_ = true;
         }
         if (helper_spawned) {
-            constexpr auto kJoinTimeout = std::chrono::seconds(5);
-            constexpr auto kCancelInterval = std::chrono::milliseconds(200);
-            auto deadline = std::chrono::steady_clock::now() + kJoinTimeout;
+            constexpr auto JOIN_TIMEOUT = std::chrono::seconds(5);
+            constexpr auto CANCEL_INTERVAL = std::chrono::milliseconds(200);
+            auto deadline = std::chrono::steady_clock::now() + JOIN_TIMEOUT;
 
             while (!joined->load()) {
                 if (std::chrono::steady_clock::now() > deadline) {
@@ -236,7 +236,7 @@ void CameraStream::stop() {
                         req->Cancel();
                     }
                 }
-                std::this_thread::sleep_for(kCancelInterval);
+                std::this_thread::sleep_for(CANCEL_INTERVAL);
             }
 
             if (join_helper.joinable()) {
@@ -333,14 +333,14 @@ void CameraStream::stream_thread_func() {
         got_stream_data_.store(false);
         bool ever_connected = false;
 
-        while (running_.load() && stream_fail_count_ < kMaxStreamFailures) {
+        while (running_.load() && stream_fail_count_ < MAX_STREAM_FAILURES) {
             auto req = std::make_shared<HttpRequest>();
             req->method = HTTP_GET;
             req->url = stream_url_;
             // Short timeout until the first successful connection, then long
             // timeout for the persistent stream. MJPEG responses are infinite —
             // the timeout just drives periodic reconnection.
-            int timeout = ever_connected ? kStreamTimeoutSec : kStreamConnectTimeoutSec;
+            int timeout = ever_connected ? STREAM_TIMEOUT_SEC : STREAM_CONNECT_TIMEOUT_SEC;
             req->timeout = timeout;
             spdlog::debug(
                 "[CameraStream] Attempting stream connection to {} (timeout={}s, attempt={})",
@@ -443,7 +443,7 @@ void CameraStream::stream_thread_func() {
             boundary_.clear();
             got_stream_data_.store(false);
 
-            if (running_.load() && stream_fail_count_ < kMaxStreamFailures) {
+            if (running_.load() && stream_fail_count_ < MAX_STREAM_FAILURES) {
                 // Brief backoff before reconnecting
                 int backoff_ms = std::min(1000 * stream_fail_count_, 5000);
                 if (backoff_ms > 0) {
@@ -455,7 +455,7 @@ void CameraStream::stream_thread_func() {
         }
 
         // Fall back to snapshot mode if streaming failed
-        if (running_.load() && stream_fail_count_ >= kMaxStreamFailures) {
+        if (running_.load() && stream_fail_count_ >= MAX_STREAM_FAILURES) {
             spdlog::warn("[CameraStream] Stream failed {} times, falling back to snapshot mode",
                          stream_fail_count_);
             if (!snapshot_url_.empty()) {
@@ -563,12 +563,13 @@ void CameraStream::snapshot_poll_loop() {
     // destroyed, the token detects invalidation for safe checking.
     auto poll_token = lifetime_.token();
 
-    spdlog::info("[CameraStream] Starting snapshot poll loop (interval={}ms)", kSnapshotIntervalMs);
+    spdlog::info("[CameraStream] Starting snapshot poll loop (interval={}ms)",
+                 SNAPSHOT_INTERVAL_MS);
 
     while (!poll_token.expired() && running_.load()) {
         fetch_snapshot();
         // Sleep in small increments to check running_ flag
-        for (int i = 0; i < kSnapshotIntervalMs / 100 && !poll_token.expired() && running_.load();
+        for (int i = 0; i < SNAPSHOT_INTERVAL_MS / 100 && !poll_token.expired() && running_.load();
              i++) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -605,7 +606,7 @@ void CameraStream::fetch_snapshot() {
     auto req = std::make_shared<HttpRequest>();
     req->method = HTTP_GET;
     req->url = snapshot_url_;
-    req->timeout = kStreamTimeoutSec;
+    req->timeout = STREAM_TIMEOUT_SEC;
 
     // Store weak reference for cancellation by stop()
     {
@@ -829,9 +830,9 @@ bool CameraStream::decode_jpeg(const uint8_t* data, size_t len) {
     // A valid JPEG needs SOI (2) + at least one marker segment (4) + EOI (2) = 8 bytes minimum.
     // In practice, camera frames should be much larger — reject suspiciously tiny payloads
     // that can cause NULL dereferences inside turbojpeg (see issue #552).
-    constexpr size_t kMinJpegSize = 64;
-    if (len < kMinJpegSize || data[0] != 0xFF || data[1] != 0xD8) {
-        spdlog::debug("[CameraStream] Invalid JPEG data (len={}, need >= {})", len, kMinJpegSize);
+    constexpr size_t MIN_JPEG_SIZE = 64;
+    if (len < MIN_JPEG_SIZE || data[0] != 0xFF || data[1] != 0xD8) {
+        spdlog::debug("[CameraStream] Invalid JPEG data (len={}, need >= {})", len, MIN_JPEG_SIZE);
         return false;
     }
     // After SOI, the next byte must be 0xFF (start of a marker segment).
@@ -887,7 +888,7 @@ bool CameraStream::decode_jpeg_turbojpeg(const uint8_t* data, size_t len) {
         auto* dst = static_cast<uint8_t*>(back_buf_->data);
         int dst_stride = static_cast<int>(back_buf_->header.stride);
         if (fn_decompress_(tj_, data, static_cast<unsigned long>(len), dst, decode_w, dst_stride,
-                           decode_h, kTJPF_BGR, kTJFLAG_FASTDCT) != 0) {
+                           decode_h, TJ_PIXELFORMAT_BGR, TJ_FLAG_FASTDCT) != 0) {
             spdlog::debug("[CameraStream] JPEG decode failed: {}", fn_get_error_(tj_));
             return false;
         }
@@ -901,7 +902,7 @@ bool CameraStream::decode_jpeg_turbojpeg(const uint8_t* data, size_t len) {
         }
 
         if (fn_decompress_(tj_, data, static_cast<unsigned long>(len), decode_temp_.get(), decode_w,
-                           src_stride, decode_h, kTJPF_BGR, kTJFLAG_FASTDCT) != 0) {
+                           src_stride, decode_h, TJ_PIXELFORMAT_BGR, TJ_FLAG_FASTDCT) != 0) {
             spdlog::debug("[CameraStream] JPEG decode failed: {}", fn_get_error_(tj_));
             return false;
         }

@@ -27,8 +27,8 @@ namespace {
 /// The two printer.mmu filament_pos values Happy Hare's own check_if_loaded()
 /// treats as "not loaded" (mmu.py FILAMENT_POS_UNKNOWN / FILAMENT_POS_UNLOADED).
 /// Every other position, including the intermediate ones, is refused.
-constexpr int kHappyHarePosUnknown = -1;
-constexpr int kHappyHarePosUnloaded = 0;
+constexpr int HAPPY_HARE_POS_UNKNOWN = -1;
+constexpr int HAPPY_HARE_POS_UNLOADED = 0;
 
 } // namespace
 
@@ -927,9 +927,13 @@ void AmsBackendHappyHare::parse_mmu_state(const nlohmann::json& mmu_data) {
             }
         }
 
-        // Update both legacy and registry tool maps
+        // Update both legacy and registry tool maps. Firmware-sourced: HH
+        // publishes the whole ttg_map in get_status() (mmu.py get_status), so
+        // this array IS what the MMU currently believes, not our intent. The
+        // optimistic counterpart is set_tool_mapping()'s own write below, which
+        // precedes the MMU_TTG_MAP send (#1270).
         system_info_.tool_to_slot_map = ttg_vec;
-        slots_.set_tool_map(ttg_vec);
+        slots_.set_tool_map(ttg_vec, helix::printer::SlotRegistry::MappingSource::Firmware);
     }
 
     // Parse sensors dict: printer.mmu.sensors
@@ -2607,6 +2611,11 @@ AmsError AmsBackendHappyHare::set_slot_info(int slot_index, const SlotInfo& info
     return AmsErrorHelper::success();
 }
 
+uint64_t AmsBackendHappyHare::firmware_tool_mapping_generation() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return slots_.firmware_mapping_generation();
+}
+
 AmsError AmsBackendHappyHare::set_tool_mapping(int tool_number, int slot_index) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2674,7 +2683,7 @@ AmsError AmsBackendHappyHare::enable_bypass() {
         // that flag is set solely from filament == "Loaded" — Happy Hare refuses
         // at every position except UNLOADED and UNKNOWN, so an intermediate
         // position (mid-bowden, mid-unload) has to refuse here too.
-        if (filament_pos_ != kHappyHarePosUnloaded && filament_pos_ != kHappyHarePosUnknown) {
+        if (filament_pos_ != HAPPY_HARE_POS_UNLOADED && filament_pos_ != HAPPY_HARE_POS_UNKNOWN) {
             return AmsError(AmsResult::WRONG_STATE, "Unload filament first",
                             "Filament is still loaded. Unload it before enabling bypass.", "");
         }

@@ -86,7 +86,7 @@ class CountingPanel : public PanelBase {
     int deactivates = 0;
 };
 
-constexpr helix::PanelId kTestPanel = helix::PanelId::Home;
+constexpr helix::PanelId TEST_PANEL = helix::PanelId::Home;
 
 /**
  * @brief Application + a NavigationManager seeded the way the running app has it
@@ -127,8 +127,8 @@ class BackgroundResumeFixture : public ApplicationTestFixture {
             p = lv_obj_create(lv_screen_active());
         }
         nav.set_panels(root_panels_.data());
-        nav.register_panel_instance(kTestPanel, &panel_);
-        nav.set_active(kTestPanel);
+        nav.register_panel_instance(TEST_PANEL, &panel_);
+        nav.set_active(TEST_PANEL);
         helix::ui::UpdateQueue::instance().drain();
 
         // NavigationManager is a process singleton and suspend/resume is latched on
@@ -156,7 +156,7 @@ class BackgroundResumeFixture : public ApplicationTestFixture {
         auto& nav = NavigationManager::instance();
         // Leave the suspend latch cleared for the next test, whatever this one did.
         nav.resume_active();
-        nav.register_panel_instance(kTestPanel, nullptr);
+        nav.register_panel_instance(TEST_PANEL, nullptr);
         helix::ui::UpdateQueue::instance().drain();
         nav.deinit_subjects();
         get_runtime_config()->disable_sound = sound_was_disabled_;

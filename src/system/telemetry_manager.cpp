@@ -17,6 +17,7 @@
 #include "display_manager.h"
 #include "display_settings_manager.h"
 #include "filament_sensor_manager.h"
+#include "helix_plugin_installer.h"
 #include "hv/requests.h"
 #include "i_moonraker_api.h"
 #include "json_utils.h"
@@ -290,6 +291,20 @@ static std::string sha256_hex(const std::string& input) {
 TelemetryManager& TelemetryManager::instance() {
     static TelemetryManager inst;
     return inst;
+}
+
+std::optional<bool>
+TelemetryManager::classify_moonraker_locality(const std::string& websocket_url) {
+    if (websocket_url.empty()) {
+        return std::nullopt;
+    }
+
+    const std::string host = helix::extract_host_from_websocket_url(websocket_url);
+    if (host.empty()) {
+        return std::nullopt;
+    }
+
+    return helix::is_local_host(host);
 }
 
 TelemetryManager::~TelemetryManager() {
@@ -1961,6 +1976,16 @@ nlohmann::json TelemetryManager::build_hardware_profile_event() const {
             const auto& ptype = get_printer_state().get_printer_type();
             if (!ptype.empty()) {
                 printer["detected_model"] = ptype;
+            }
+        }
+
+        // ---- Moonraker topology ----
+        // Whether HelixScreen runs on the printer or drives it over the network.
+        // Omitted, never guessed, when no URL is known: absent has to stay
+        // distinguishable from a measured "remote".
+        if (auto* topology_api = get_moonraker_api()) {
+            if (auto is_local = classify_moonraker_locality(topology_api->get_websocket_url())) {
+                event["moonraker_is_local"] = *is_local;
             }
         }
 

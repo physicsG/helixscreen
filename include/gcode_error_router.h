@@ -114,7 +114,7 @@ class GcodeErrorRouter {
     ///   - the age cannot be positively determined (`entry_time <= 0`, an
     ///     absent/zero timestamp) -- we never suppress a possibly-fresh
     ///     error on missing data, or
-    ///   - the error is recent (age <= kReplayMaxAgeSeconds).
+    ///   - the error is recent (age <= REPLAY_MAX_AGE_SECONDS).
     /// Returns `false` (suppress, log at debug) only when age is positively
     /// known to exceed the threshold -- the stale-after-restart case.
     static bool should_surface_replay(double entry_time, double now);

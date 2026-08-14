@@ -40,7 +40,7 @@ void FilamentConsumptionTracker::start() {
     // Per-extruder filament_used_mm observers. These are dynamic subjects
     // ([L077]) and share one lifetime token so a single reset() in stop()
     // invalidates every observer before the subjects are deinit'd.
-    for (int idx = 0; idx < kMaxTrackedExtruders; ++idx) {
+    for (int idx = 0; idx < MAX_TRACKED_EXTRUDERS; ++idx) {
         auto* subj = printer.get_extruder_filament_used_subject(idx, extruder_lifetime_);
         if (!subj) {
             continue;
@@ -220,7 +220,7 @@ void FilamentConsumptionTracker::on_filament_used_changed(int filament_mm) {
         // Skip if ANY extruder on this backend claims a slot mapping — the
         // per-extruder routing path owns this backend.
         bool has_mapping = false;
-        for (int e = 0; e < kMaxTrackedExtruders; ++e) {
+        for (int e = 0; e < MAX_TRACKED_EXTRUDERS; ++e) {
             if (backend->slot_for_extruder(e)) {
                 has_mapping = true;
                 break;

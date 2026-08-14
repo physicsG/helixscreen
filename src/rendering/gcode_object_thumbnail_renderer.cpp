@@ -16,7 +16,7 @@
 namespace helix::gcode {
 
 // Check cancellation every N layers to avoid overhead
-static constexpr int kCancelCheckInterval = 10;
+static constexpr int CANCEL_CHECK_INTERVAL = 10;
 
 // ============================================================================
 // CONSTRUCTION / DESTRUCTION
@@ -129,7 +129,7 @@ GCodeObjectThumbnailRenderer::render_impl(const ParsedGCodeFile* gcode, int thum
     size_t segments_rendered = 0;
     for (size_t layer_idx = 0; layer_idx < gcode->layers.size(); ++layer_idx) {
         // Periodic cancellation check
-        if ((layer_idx % kCancelCheckInterval) == 0 && cancel_.load(std::memory_order_relaxed)) {
+        if ((layer_idx % CANCEL_CHECK_INTERVAL) == 0 && cancel_.load(std::memory_order_relaxed)) {
             spdlog::debug("[ObjectThumbnail] Cancelled at layer {}/{}", layer_idx,
                           gcode->layers.size());
             return result;
@@ -207,7 +207,7 @@ GCodeObjectThumbnailRenderer::build_contexts(const ParsedGCodeFile* gcode, int t
     }
 
     // Padding factor for auto-fit (5% each side, matching layer renderer)
-    constexpr float kPadding = 0.05f;
+    constexpr float PADDING = 0.05f;
 
     for (const auto& [name, obj] : gcode->objects) {
         const auto& bbox = obj.bounding_box;
@@ -218,7 +218,7 @@ GCodeObjectThumbnailRenderer::build_contexts(const ParsedGCodeFile* gcode, int t
         }
 
         // Use shared auto-fit with FRONT projection (isometric view)
-        auto fit = compute_auto_fit(bbox, ViewMode::FRONT, thumb_width, thumb_height, kPadding);
+        auto fit = compute_auto_fit(bbox, ViewMode::FRONT, thumb_width, thumb_height, PADDING);
 
         ObjectRenderContext ctx;
         ctx.name = name;

@@ -2270,11 +2270,11 @@ void PrintStatusPanel::recompute_fans_density() {
     // value ("100%") — the visible label changes when the mock's auto heater
     // fan trips, so the cached natural width can be measured against either
     // "0%" or "100%" and we need both to fit.
-    constexpr int kDensitySlack = 8;
+    constexpr int DENSITY_SLACK = 8;
     int next_density = 2;
-    if (controls_w >= fan_row_natural_width_[0] + kDensitySlack)
+    if (controls_w >= fan_row_natural_width_[0] + DENSITY_SLACK)
         next_density = 0;
-    else if (controls_w >= fan_row_natural_width_[1] + kDensitySlack)
+    else if (controls_w >= fan_row_natural_width_[1] + DENSITY_SLACK)
         next_density = 1;
 
     int current = lv_subject_get_int(&fan_row_density_subject_);
@@ -2393,7 +2393,8 @@ void PrintStatusPanel::recompute_graph_fits() {
 
     if (static_cast<int>(next) != current) {
         spdlog::debug("[{}] graph_fits {} -> {} (slack={}, needed={})", get_name(), current,
-                      static_cast<int>(next), preview_slack_h_, helix::ui::kMinTempGraphHeightPx);
+                      static_cast<int>(next), preview_slack_h_,
+                      helix::ui::MIN_TEMP_GRAPH_HEIGHT_PX);
         lv_subject_set_int(&graph_fits_subject_, next ? 1 : 0);
     }
 }

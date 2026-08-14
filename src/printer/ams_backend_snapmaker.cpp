@@ -32,11 +32,11 @@ namespace {
 // #991 post-runout SET_PRINT_FILAMENT_CONFIG re-assert must only treat
 // spool_name as a SUB_TYPE when it matches one of these — a single source of
 // truth for "is this a real product line?".
-constexpr std::array<std::string_view, 8> kKnownSubTypes = {
+constexpr std::array<std::string_view, 8> KNOWN_SUB_TYPES = {
     "Basic", "Matte", "SnapSpeed", "Silk", "Support", "HF", "95A", "95A HF"};
 
 [[nodiscard]] bool is_known_subtype(const std::string& s) {
-    for (const auto& st : kKnownSubTypes) {
+    for (const auto& st : KNOWN_SUB_TYPES) {
         if (s == st) {
             return true;
         }
@@ -114,7 +114,7 @@ struct ChannelStateInfo {
     // directly off the reference table. Unknown/future states fall through to
     // the prefix/suffix heuristic below so we degrade gracefully rather than
     // silently mis-classify.
-    static const std::unordered_map<std::string, ChannelStateInfo> kTable = [] {
+    static const std::unordered_map<std::string, ChannelStateInfo> TABLE = [] {
         std::unordered_map<std::string, ChannelStateInfo> m;
         auto add = [&](const char* s, ChannelStateInfo info) { m.emplace(s, info); };
         constexpr auto LOAD = AmsAction::LOADING;
@@ -171,8 +171,8 @@ struct ChannelStateInfo {
         return m;
     }();
 
-    auto it = kTable.find(state);
-    if (it != kTable.end()) {
+    auto it = TABLE.find(state);
+    if (it != TABLE.end()) {
         return it->second;
     }
 

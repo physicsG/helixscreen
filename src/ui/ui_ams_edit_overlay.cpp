@@ -158,7 +158,7 @@ bool AmsEditOverlay::show_for_slot(lv_obj_t* parent, int slot_index, const SlotI
 
     // Reset per-session view state HERE (covered-safe — on_deactivate must not
     // touch it, since it also fires when the QR scanner merely covers us).
-    set_view(open_on_picker ? kViewSpoolPicker : kViewOverview);
+    set_view(open_on_picker ? VIEW_SPOOL_PICKER : VIEW_OVERVIEW);
     if (open_on_picker) {
         populate_picker();
     }
@@ -366,7 +366,7 @@ void AmsEditOverlay::init_subjects() {
                                sizeof(remaining_pct_buf_), "\xE2\x80\x94");
         subjects_.register_subject(&remaining_pct_subject_);
 
-        // View state (kViewOverview..kViewColor) - registered globally
+        // View state (VIEW_OVERVIEW..VIEW_COLOR) - registered globally
         UI_MANAGED_SUBJECT_INT(view_mode_subject_, 0, "ams_edit_view", subjects_);
 
         // Picker state (0=loading, 1=empty, 2=content) - registered globally
@@ -425,7 +425,7 @@ void AmsEditOverlay::set_view(int view) {
     // Header Save is visible on the overview AND the spool-edit view (where it
     // finishes the whole edit and closes). The picker and color views hide it.
     lv_subject_set_int(&save_hidden_subject_,
-                       (view == kViewOverview || view == kViewSpoolEdit) ? 0 : 1);
+                       (view == VIEW_OVERVIEW || view == VIEW_SPOOL_EDIT) ? 0 : 1);
     // Refresh the enabled/disabled gate for the new view: spool-edit forces it
     // enabled (edits live in widgets, not yet staged); the overview keeps the
     // is_dirty() gating. update_sync_button_state() reads the view subject we
@@ -444,7 +444,7 @@ void AmsEditOverlay::switch_to_picker() {
     // selection returns to the overview for review, so drop the picker-entry
     // one-tap-commit shortcut (task #13).
     opened_on_picker_ = false;
-    set_view(kViewSpoolPicker);
+    set_view(VIEW_SPOOL_PICKER);
     populate_picker();
 }
 
@@ -452,7 +452,7 @@ void AmsEditOverlay::switch_to_form() {
     if (!subjects_initialized_) {
         return;
     }
-    set_view(kViewOverview);
+    set_view(VIEW_OVERVIEW);
     spdlog::debug("[AmsEditOverlay] Switched to form view");
 }
 
@@ -718,13 +718,13 @@ void AmsEditOverlay::repopulate() {
     // on_activate() refreshes it.
     const int view = lv_subject_get_int(&view_mode_subject_);
     switch (view) {
-    case kViewSpoolPicker:
+    case VIEW_SPOOL_PICKER:
         populate_picker();
         break;
-    case kViewSpoolEdit:
+    case VIEW_SPOOL_EDIT:
         populate_spool_edit_view();
         break;
-    case kViewColor:
+    case VIEW_COLOR:
         // Reached from spool-edit, which stays built underneath it.
         populate_spool_edit_view();
         populate_color_view();
@@ -789,7 +789,7 @@ void AmsEditOverlay::enter_spool_edit() {
     // hidden flag to `label_printer_configured` in ams_edit_overlay.xml, so
     // pairing a printer while this view is open reveals the button live.
 
-    set_view(kViewSpoolEdit);
+    set_view(VIEW_SPOOL_EDIT);
 
     // Managed slots: refresh logistics from Spoolman (fresh data on view entry
     // rather than trusting cached_spools_ — review §3). Untracked slots, and
@@ -1577,7 +1577,7 @@ void AmsEditOverlay::update_sync_button_state() {
     // can't see them. Overview: dirty-gated (replaces the modal's Save/Close text
     // morph). Reads (never writes) the view subject.
     const int view = lv_subject_get_int(&view_mode_subject_);
-    const bool disabled = (view == kViewSpoolEdit) ? false : !is_dirty();
+    const bool disabled = (view == VIEW_SPOOL_EDIT) ? false : !is_dirty();
     lv_subject_set_int(&save_disabled_subject_, disabled ? 1 : 0);
 }
 
@@ -1589,7 +1589,7 @@ void AmsEditOverlay::open_color_view() {
         custom_color_ = 0x808080;
     }
     populate_color_view();
-    set_view(kViewColor);
+    set_view(VIEW_COLOR);
     spdlog::debug("[AmsEditOverlay] Color view opened (returns to spool-edit)");
 }
 
@@ -1620,7 +1620,7 @@ void AmsEditOverlay::apply_color(uint32_t rgb) {
     if (preview) {
         helix::ui::apply_swatch_color(preview, rgb, {});
     }
-    set_view(kViewSpoolEdit);
+    set_view(VIEW_SPOOL_EDIT);
 }
 
 void AmsEditOverlay::handle_color_swatch(lv_obj_t* swatch) {
@@ -1724,21 +1724,21 @@ void AmsEditOverlay::close_editor(bool saved) {
 void AmsEditOverlay::handle_back() {
     int view = lv_subject_get_int(&view_mode_subject_);
     switch (view) {
-    case kViewSpoolPicker:
+    case VIEW_SPOOL_PICKER:
         switch_to_form();
         break;
-    case kViewSpoolEdit:
+    case VIEW_SPOOL_EDIT:
         // Leave without applying (Save is the apply path)
         details_selector_.detach();
         details_selector_.clear_catalog();
         switch_to_form();
         break;
-    case kViewColor:
+    case VIEW_COLOR:
         // Leave without applying; the color view is only reachable from
         // spool-edit, so it always pops back there.
-        set_view(kViewSpoolEdit);
+        set_view(VIEW_SPOOL_EDIT);
         break;
-    case kViewOverview:
+    case VIEW_OVERVIEW:
     default:
         // Back on the overview = Cancel: discard changes, close (spec §13.3)
         spdlog::debug("[AmsEditOverlay] Back on overview - cancelling");
@@ -1778,7 +1778,7 @@ void AmsEditOverlay::handle_save() {
     // view's identity/color/logistics edits first (may go async for a tracked
     // slot's two-PATCH), then the apply path routes into commit_and_close().
     // Validation failure keeps the user on the view.
-    if (lv_subject_get_int(&view_mode_subject_) == kViewSpoolEdit) {
+    if (lv_subject_get_int(&view_mode_subject_) == VIEW_SPOOL_EDIT) {
         handle_spool_edit_save(/*finish=*/true);
         return;
     }
@@ -1969,7 +1969,7 @@ void AmsEditOverlay::on_identity_cancel_cb(lv_event_t* /*e*/) {
     // reattach_details_selector()'s doc comment for why). Abort leaves the
     // user ON the spool-edit view, so revive the selector or the vendor/
     // type/product picker goes dead.
-    if (lv_subject_get_int(&overlay.view_mode_subject_) == kViewSpoolEdit) {
+    if (lv_subject_get_int(&overlay.view_mode_subject_) == VIEW_SPOOL_EDIT) {
         overlay.reattach_details_selector();
     }
 }
@@ -2061,7 +2061,7 @@ void AmsEditOverlay::maybe_merge_spoolman_vendors() {
             tok.defer("AmsEditOverlay::merge_spoolman_vendors_apply",
                       [this, names = std::move(names)]() mutable {
                           // Only meaningful while the spool-edit view is still up.
-                          if (lv_subject_get_int(&view_mode_subject_) != kViewSpoolEdit) {
+                          if (lv_subject_get_int(&view_mode_subject_) != VIEW_SPOOL_EDIT) {
                               return;
                           }
                           details_selector_.set_additional_vendors(std::move(names));

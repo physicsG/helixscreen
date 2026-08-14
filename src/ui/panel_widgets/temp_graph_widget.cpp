@@ -101,13 +101,13 @@ void TempGraphWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     // immediately after attach() returns, in the same synchronous loop
     // iteration and before any paint (panel_widget_manager.cpp:862-868), so
     // this seed only lives for the width of that one function call.
-    constexpr int kSeedWidthPx = 233;
-    constexpr int kSeedHeightPx = 230;
+    constexpr int SEED_WIDTH_PX = 233;
+    constexpr int SEED_HEIGHT_PX = 230;
 
     TempGraphControllerConfig ctrl_config;
     ctrl_config.point_count = 300; // 5-minute window at 1Hz (matches mini graph)
     ctrl_config.axis_size = "xs";
-    ctrl_config.initial_features = features_for_size(kSeedWidthPx, kSeedHeightPx);
+    ctrl_config.initial_features = features_for_size(SEED_WIDTH_PX, SEED_HEIGHT_PX);
     // Uses default TempGraphScaleParams (same as mini graph and overlay)
     ctrl_config.series = build_series_from_config();
     applied_visibility_signature_ = current_visibility_signature();
@@ -140,8 +140,8 @@ void TempGraphWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         lv_obj_set_style_bg_opa(widget_obj_, LV_OPA_COVER, 0);
     }
 
-    spdlog::debug("[TempGraphWidget] Attached '{}' (seed {}x{}px)", instance_id_, kSeedWidthPx,
-                  kSeedHeightPx);
+    spdlog::debug("[TempGraphWidget] Attached '{}' (seed {}x{}px)", instance_id_, SEED_WIDTH_PX,
+                  SEED_HEIGHT_PX);
 }
 
 void TempGraphWidget::detach() {

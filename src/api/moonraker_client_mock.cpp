@@ -35,21 +35,21 @@ using namespace helix;
 // Spreads objects in a grid inset from the edges of the mock bed, matching the
 // `center` + `polygon` shape Moonraker reports for EXCLUDE_OBJECT_DEFINE.
 static json mock_object_entry(const std::string& name, int index, int total) {
-    constexpr float kInset = 20.0f; // keep the plate margin visible in the map
+    constexpr float INSET = 20.0f; // keep the plate margin visible in the map
     const float bed_w =
         static_cast<float>(mock_internal::MOCK_BED_X_MAX - mock_internal::MOCK_BED_X_MIN) -
-        2.0f * kInset;
+        2.0f * INSET;
     const float bed_h =
         static_cast<float>(mock_internal::MOCK_BED_Y_MAX - mock_internal::MOCK_BED_Y_MIN) -
-        2.0f * kInset;
+        2.0f * INSET;
     int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(std::max(1, total)))));
     int rows = std::max(1, (total + cols - 1) / cols);
     int row = index / cols, col = index % cols;
     float cell_w = bed_w / static_cast<float>(cols);
     float cell_h = bed_h / static_cast<float>(rows);
-    float cx = static_cast<float>(mock_internal::MOCK_BED_X_MIN) + kInset +
+    float cx = static_cast<float>(mock_internal::MOCK_BED_X_MIN) + INSET +
                (static_cast<float>(col) + 0.5f) * cell_w;
-    float cy = static_cast<float>(mock_internal::MOCK_BED_Y_MIN) + kInset +
+    float cy = static_cast<float>(mock_internal::MOCK_BED_Y_MIN) + INSET +
                (static_cast<float>(row) + 0.5f) * cell_h;
     float hw = cell_w * 0.35f, hh = cell_h * 0.35f;
     return {{"name", name},
@@ -63,18 +63,18 @@ namespace {
 /// Slicer-style plate names for HELIX_MOCK_EXCLUDE_OBJECTS. Real slicers emit
 /// `<model>_id_<n>_copy_<n>`, so these are long enough to exercise label
 /// truncation/wrapping in the side list rather than flattering it.
-constexpr const char* kMockExcludeObjectNames[] = {
+constexpr const char* MOCK_EXCLUDE_OBJECT_NAMES[] = {
     "Benchy_id_0_copy_0",        "Calibration_Cube_id_1_copy_0", "Bracket_Left_id_2_copy_0",
     "Bracket_Right_id_3_copy_0", "Gear_Housing_id_4_copy_0",     "Vase_id_5_copy_0",
     "Spool_Holder_id_6_copy_0",  "Cable_Clip_id_7_copy_0",       "Hinge_Pin_id_8_copy_0",
     "Knob_id_9_copy_0",          "Fan_Duct_id_10_copy_0",        "Strain_Relief_id_11_copy_0"};
 
-constexpr int kMaxMockExcludeObjectCount =
-    static_cast<int>(sizeof(kMockExcludeObjectNames) / sizeof(kMockExcludeObjectNames[0]));
+constexpr int MAX_MOCK_EXCLUDE_OBJECT_COUNT =
+    static_cast<int>(sizeof(MOCK_EXCLUDE_OBJECT_NAMES) / sizeof(MOCK_EXCLUDE_OBJECT_NAMES[0]));
 
 /// Objects published for a bare `HELIX_MOCK_EXCLUDE_OBJECTS=1`. Enough to fill a
 /// side list past one screen on the short landscape panel without being absurd.
-constexpr int kDefaultMockExcludeObjectCount = 5;
+constexpr int DEFAULT_MOCK_EXCLUDE_OBJECT_COUNT = 5;
 
 } // namespace
 
@@ -134,9 +134,9 @@ MoonrakerClientMock::MoonrakerClientMock(PrinterType type, double speedup_factor
         // object" — one object would leave the button hidden, which is the very
         // thing the flag exists to defeat.
         if (requested <= 1) {
-            requested = kDefaultMockExcludeObjectCount;
+            requested = DEFAULT_MOCK_EXCLUDE_OBJECT_COUNT;
         }
-        mock_exclude_object_count_ = std::clamp(requested, 2, kMaxMockExcludeObjectCount);
+        mock_exclude_object_count_ = std::clamp(requested, 2, MAX_MOCK_EXCLUDE_OBJECT_COUNT);
         spdlog::info("[MoonrakerClientMock] HELIX_MOCK_EXCLUDE_OBJECTS={} — will publish {} "
                      "synthetic exclude_object entries at print start",
                      exclude_env, mock_exclude_object_count_);
@@ -275,6 +275,12 @@ MoonrakerClientMock::~MoonrakerClientMock() {
 int MoonrakerClientMock::connect(const char* url, std::function<void()> on_connected,
                                  [[maybe_unused]] std::function<void()> on_disconnected) {
     spdlog::debug("[MoonrakerClientMock] Simulating connection to: {}", url ? url : "(null)");
+
+    // Record the URL exactly as the real connect() does. Without this,
+    // get_last_url() stays empty for the whole life of a mock session and
+    // anything asking which host we are talking to -- is_local_moonraker(),
+    // telemetry topology -- silently reads "no connection".
+    set_last_url(url ? url : "");
 
     // Simulate connection state change (same as real client)
     set_connection_state(ConnectionState::CONNECTING);
@@ -2901,7 +2907,7 @@ bool MoonrakerClientMock::start_print_internal(const std::string& filename) {
         names.reserve(static_cast<size_t>(total));
         json objects_array = json::array();
         for (int i = 0; i < total; ++i) {
-            names.emplace_back(kMockExcludeObjectNames[i]);
+            names.emplace_back(MOCK_EXCLUDE_OBJECT_NAMES[i]);
             objects_array.push_back(mock_object_entry(names.back(), i, total));
         }
 

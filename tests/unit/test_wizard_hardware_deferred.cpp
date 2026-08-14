@@ -68,12 +68,12 @@ class DeferredHardwareFixture : public HelixTestFixture {
 
     bool marker_key_present() {
         return ConfigTestAccess::data(config).contains(
-            json::json_pointer(config.df() + helix::kWizardHardwareSetupDeferred));
+            json::json_pointer(config.df() + helix::WIZARD_HARDWARE_SETUP_DEFERRED));
     }
 
     static std::vector<helix::StepSkip> all_visible() {
         std::vector<helix::StepSkip> v;
-        for (int i = 0; i < helix::wizard::kStepCount; ++i) {
+        for (int i = 0; i < helix::wizard::STEP_COUNT; ++i) {
             v.push_back({static_cast<StepId>(i), false});
         }
         return v;
@@ -160,9 +160,9 @@ TEST_CASE_METHOD(DeferredHardwareFixture,
 
     // Storage lives under the printer node, with nothing at the root.
     CHECK(config.get<bool>(
-        std::string("/printers/printer-a/") + helix::kWizardHardwareSetupDeferred, false));
-    CHECK_FALSE(
-        ConfigTestAccess::data(config).contains(std::string(helix::kWizardHardwareSetupDeferred)));
+        std::string("/printers/printer-a/") + helix::WIZARD_HARDWARE_SETUP_DEFERRED, false));
+    CHECK_FALSE(ConfigTestAccess::data(config).contains(
+        std::string(helix::WIZARD_HARDWARE_SETUP_DEFERRED)));
 }
 
 TEST_CASE_METHOD(DeferredHardwareFixture,

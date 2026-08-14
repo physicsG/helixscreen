@@ -964,8 +964,8 @@ AmsError AmsBackendMock::set_tool_mapping(int tool_number, int slot_index) {
     // slicer files often reference T0..T7 even when only 4 lanes exist. The
     // sentinel for "too large" is arbitrary; 64 is generous and matches the
     // production slot_registry behavior of growing on demand.
-    constexpr int kMaxToolIndex = 64;
-    if (tool_number < 0 || tool_number >= kMaxToolIndex) {
+    constexpr int MAX_TOOL_INDEX = 64;
+    if (tool_number < 0 || tool_number >= MAX_TOOL_INDEX) {
         return AmsError(AmsResult::INVALID_TOOL,
                         "Tool " + std::to_string(tool_number) + " out of range",
                         "Invalid tool number", "");
@@ -1633,7 +1633,14 @@ void AmsBackendMock::set_afc_mode(bool enabled) {
             entry->info.slot_index = i;
             entry->info.global_index = i;
             entry->info.material = d.material;
-            entry->info.brand = d.brand;
+            // No brand: AFC does not report a vendor. read_vendor() in
+            // ams_backend_afc.cpp looks for vendor_name/vendor/brand, but
+            // upstream AFC #808 has not shipped, so the payload never carries
+            // any of them and a real lane's brand stays empty unless the user
+            // sets an override. The vendor in sample_data is what the Spoolman
+            // identity cache supplies for the linked lanes, not what firmware
+            // reports -- seeding it onto the slot made mock mode render a brand
+            // real hardware never produces, which is what hid #1264.
             entry->info.color_rgb = d.color;
             entry->info.color_name = d.color_name;
             entry->info.status = (i == 0) ? SlotStatus::LOADED : d.status;

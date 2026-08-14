@@ -1492,7 +1492,7 @@ static void theme_manager_register_object_colors(lv_xml_component_scope_t* scope
     static const struct {
         const char* name;
         uint32_t hex;
-    } kObjectColors[] = {
+    } OBJECT_COLORS[] = {
         {"object_color_1", 0x7c8aff}, // periwinkle blue
         {"object_color_2", 0x4ecdc4}, // teal
         {"object_color_3", 0xf9c74f}, // golden yellow
@@ -1503,13 +1503,13 @@ static void theme_manager_register_object_colors(lv_xml_component_scope_t* scope
         {"object_color_8", 0x60a5fa}, // sky blue
     };
 
-    for (const auto& entry : kObjectColors) {
+    for (const auto& entry : OBJECT_COLORS) {
         char buf[8];
         snprintf(buf, sizeof(buf), "#%06x", entry.hex);
         lv_xml_register_const(scope, entry.name, buf);
     }
 
-    spdlog::debug("[Theme] Registered {} object color palette tokens", std::size(kObjectColors));
+    spdlog::debug("[Theme] Registered {} object color palette tokens", std::size(OBJECT_COLORS));
 }
 
 /**
@@ -2381,9 +2381,9 @@ lv_color_t theme_manager_get_color(const char* base_name) {
 }
 
 lv_color_t theme_manager_get_object_palette_color(int index) {
-    constexpr int kObjectPaletteSize = 8;
+    constexpr int OBJECT_PALETTE_SIZE = 8;
     char token[32];
-    snprintf(token, sizeof(token), "object_color_%d", (index % kObjectPaletteSize) + 1);
+    snprintf(token, sizeof(token), "object_color_%d", (index % OBJECT_PALETTE_SIZE) + 1);
     return theme_manager_get_color(token);
 }
 

@@ -836,13 +836,13 @@ constexpr float HINT_MAX_KEY_FRACTION = 0.32f;
 /// when even the smallest is too big, in which case the caller draws no hint rather
 /// than one that overlaps the key's letter.
 const lv_font_t* pick_hint_font(int32_t btn_h, int32_t btn_w) {
-    static const char* const kCandidates[] = {"font_xs", "font_small", "font_body", "font_heading"};
+    static const char* const CANDIDATES[] = {"font_xs", "font_small", "font_body", "font_heading"};
 
     const int32_t max_h = static_cast<int32_t>(static_cast<float>(btn_h) * HINT_MAX_KEY_FRACTION);
     const lv_font_t* chosen = nullptr;
     const lv_font_t* smallest = nullptr;
 
-    for (const char* token : kCandidates) {
+    for (const char* token : CANDIDATES) {
         const lv_font_t* font = theme_manager_get_font(token);
         if (!font) {
             continue;
@@ -1080,9 +1080,9 @@ void KeyboardManager::init(lv_obj_t* parent) {
     // transition anims. Passing nullptr instead is a crash: update_obj_state
     // dereferences the descriptor without a NULL check (LoadProhibited on the
     // first key press, on-device).
-    static const lv_style_prop_t kNoTransitionProps[] = {LV_STYLE_PROP_INV};
+    static const lv_style_prop_t NO_TRANSITION_PROPS[] = {LV_STYLE_PROP_INV};
     static lv_style_transition_dsc_t s_no_transition;
-    lv_style_transition_dsc_init(&s_no_transition, kNoTransitionProps, lv_anim_path_linear, 0, 0,
+    lv_style_transition_dsc_init(&s_no_transition, NO_TRANSITION_PROPS, lv_anim_path_linear, 0, 0,
                                  nullptr);
     lv_obj_set_style_transition(keyboard_, &s_no_transition, LV_PART_MAIN);
     lv_obj_set_style_transition(keyboard_, &s_no_transition, LV_PART_MAIN | LV_STATE_PRESSED);

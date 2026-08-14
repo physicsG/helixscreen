@@ -195,7 +195,7 @@ void HomePanel::build_carousel() {
     }
 
     // Add "+" tile for adding new pages
-    if (num_pages < kMaxPages) {
+    if (num_pages < MAX_PAGES) {
         add_page_tile_ = lv_obj_create(carousel_host_);
         lv_obj_set_size(add_page_tile_, LV_PCT(100), LV_PCT(100));
         lv_obj_set_style_bg_opa(add_page_tile_, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -562,8 +562,8 @@ void HomePanel::on_page_changed(int new_page) {
 
 void HomePanel::on_add_page_clicked() {
     auto& config = helix::PanelWidgetManager::instance().get_widget_config("home");
-    if (static_cast<int>(config.page_count()) >= kMaxPages) {
-        spdlog::info("[{}] Max page count reached ({})", get_name(), kMaxPages);
+    if (static_cast<int>(config.page_count()) >= MAX_PAGES) {
+        spdlog::info("[{}] Max page count reached ({})", get_name(), MAX_PAGES);
         return;
     }
 

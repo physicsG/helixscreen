@@ -55,7 +55,7 @@ constexpr const char* VARIANT_AFFIXES[] = {
 /// PPA-based PAHT-CF under the same type string, at PPA temperatures and
 /// needing a hardened nozzle and sealed enclosure: verify the base resin before
 /// adding a PAHT product from a new vendor rather than assuming this mapping.
-constexpr const char* kPahtFamily = "PA";
+constexpr const char* PAHT_FAMILY = "PA";
 
 /// Explicit family mapping for names that affix-stripping alone cannot reduce,
 /// because the modifier is fused to the polymer name with no separator.
@@ -76,7 +76,7 @@ constexpr FamilyOverride FAMILY_OVERRIDES[] = {
     {"PA12", "PA"},
     {"PA66", "PA"},
     {"PA612", "PA"},
-    {"PAHT", kPahtFamily},
+    {"PAHT", PAHT_FAMILY},
     // STOP: PPA (polyphthalamide) must NEVER be normalized or aliased to PA.
     // The names are one letter apart, but it is a semi-aromatic polyamide in a
     // different processing regime — 280-310C nozzle, 100-120C bed, sealed
@@ -175,16 +175,16 @@ bool g_orca_loaded = false;
 std::set<std::string> g_orca_library_types;
 std::map<std::string, std::string> g_orca_overrides;
 
-// Same search order as FilamentCatalog::kBuiltinPaths (filament_catalog.cpp:19).
-const char* kOrcaTablePaths[] = {"assets/filaments.json", "../assets/filaments.json",
-                                 "/opt/helixscreen/assets/filaments.json"};
+// Same search order as FilamentCatalog::BUILTIN_PATHS (filament_catalog.cpp:19).
+const char* ORCA_TABLE_PATHS[] = {"assets/filaments.json", "../assets/filaments.json",
+                                  "/opt/helixscreen/assets/filaments.json"};
 
 /// Load the tables from the first readable asset. Caller holds g_orca_mutex.
 void load_orca_tables_locked() {
     if (g_orca_loaded)
         return;
     g_orca_loaded = true; // one attempt; a missing asset must not retry per call
-    for (const char* path : kOrcaTablePaths) {
+    for (const char* path : ORCA_TABLE_PATHS) {
         std::ifstream f(path);
         if (!f.is_open())
             continue;

@@ -38,7 +38,7 @@ namespace {
 // Deliberately NOT benchy_thumbnail_white.png: that is the no-thumbnail
 // placeholder AND the subject's initial value, so publishing it would be a
 // no-op write that never fires the observer these cases are about.
-constexpr const char* kThumbPath = "A:assets/images/printer.png";
+constexpr const char* THUMB_PATH = "A:assets/images/printer.png";
 
 /// Owns a PrintStatusPanel with a thumbnail widget attached, which is what the
 /// XML build normally supplies. Without it the observer's image branch — the
@@ -82,7 +82,7 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     helix::ui::UpdateQueue::instance().drain();
 
     // A late publish belonging to the PREVIOUS print.
-    state().set_print_thumbnail("previous.gcode", kThumbPath);
+    state().set_print_thumbnail("previous.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
 
     // The stamp is the self-sealing half: claiming current.gcode is on screen
@@ -97,13 +97,13 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     panel().set_filename("current.gcode");
     helix::ui::UpdateQueue::instance().drain();
 
-    state().set_print_thumbnail("current.gcode", kThumbPath);
+    state().set_print_thumbnail("current.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
 
     // The identity check must not degenerate into ignoring everything: the
     // matching publish still has to land, and displayed_file_ must record what
     // is ACTUALLY shown.
-    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == kThumbPath);
+    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH);
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) == "current.gcode");
 }
 
@@ -113,9 +113,9 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     // PrintStartController pre-sets a USB thumbnail before the filename observer
     // fires. With no effective filename yet there is nothing to compare against,
     // so the value must still be taken.
-    state().set_print_thumbnail("usb_model.gcode", kThumbPath);
+    state().set_print_thumbnail("usb_model.gcode", THUMB_PATH);
     helix::ui::UpdateQueue::instance().drain();
 
-    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == kThumbPath);
+    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH);
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) == "usb_model.gcode");
 }

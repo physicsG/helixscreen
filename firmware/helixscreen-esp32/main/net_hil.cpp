@@ -37,12 +37,12 @@ constexpr char TAG[] = "net_hil";
 // esp-idf#14918: a TX can block 10s+ behind an in-progress RX without the
 // separate TX lock (sdkconfig.defaults sets CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK).
 // Anything above this during the probe means that class of contention is back.
-constexpr int64_t kTxLockFailThresholdMs = 2000;
-constexpr int64_t kScenarioWindowMs = 60000;
-constexpr int64_t kPingCadenceMs = 15000;
-constexpr int64_t kProbeAtMs = 30000;
-constexpr int kProbeBurstCount = 5;
-constexpr uint32_t kHeapFlatToleranceBytes = 8192;
+constexpr int64_t TX_LOCK_FAIL_THRESHOLD_MS = 2000;
+constexpr int64_t SCENARIO_WINDOW_MS = 60000;
+constexpr int64_t PING_CADENCE_MS = 15000;
+constexpr int64_t PROBE_AT_MS = 30000;
+constexpr int PROBE_BURST_COUNT = 5;
+constexpr uint32_t HEAP_FLAT_TOLERANCE_BYTES = 8192;
 
 // Counters updated from the WS task (notify callback, RPC error callbacks) and
 // read from the HIL thread — plain atomics, no ordering requirements beyond
@@ -116,7 +116,7 @@ int64_t timed_printer_info() {
 
     int64_t dt_ms = (esp_timer_get_time() - t0) / 1000;
     ESP_LOGI(TAG, "printer.info rtt=%lldms", static_cast<long long>(dt_ms));
-    if (dt_ms > kTxLockFailThresholdMs) {
+    if (dt_ms > TX_LOCK_FAIL_THRESHOLD_MS) {
         ESP_LOGE(TAG, "FAIL tx-lock latency=%lldms", static_cast<long long>(dt_ms));
     }
     return dt_ms;
@@ -253,28 +253,28 @@ void* hil_thread_main(void*) {
     s_client->register_notify_update(on_temp_notify);
 
     int64_t t_start_ms = esp_timer_get_time() / 1000;
-    int64_t next_ping_ms = kPingCadenceMs;
+    int64_t next_ping_ms = PING_CADENCE_MS;
     bool probe_done = false;
 
     while (true) {
         int64_t elapsed_ms = (esp_timer_get_time() / 1000) - t_start_ms;
-        if (elapsed_ms >= kScenarioWindowMs) {
+        if (elapsed_ms >= SCENARIO_WINDOW_MS) {
             break;
         }
-        if (!probe_done && elapsed_ms >= kProbeAtMs) {
+        if (!probe_done && elapsed_ms >= PROBE_AT_MS) {
             // TX-during-RX probe: 5 back-to-back printer.info RPCs while the
             // temp subscription is actively streaming (esp-idf#14918 class).
-            ESP_LOGI(TAG, "tx-lock probe: %d back-to-back printer.info", kProbeBurstCount);
-            for (int i = 0; i < kProbeBurstCount; ++i) {
+            ESP_LOGI(TAG, "tx-lock probe: %d back-to-back printer.info", PROBE_BURST_COUNT);
+            for (int i = 0; i < PROBE_BURST_COUNT; ++i) {
                 timed_printer_info();
             }
             probe_done = true;
-            next_ping_ms = kProbeAtMs + kPingCadenceMs;
+            next_ping_ms = PROBE_AT_MS + PING_CADENCE_MS;
             continue;
         }
         if (elapsed_ms >= next_ping_ms) {
             timed_printer_info();
-            next_ping_ms += kPingCadenceMs;
+            next_ping_ms += PING_CADENCE_MS;
             continue;
         }
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -286,7 +286,7 @@ void* hil_thread_main(void*) {
     if (heap_delta < 0) {
         heap_delta = -heap_delta;
     }
-    if (static_cast<uint32_t>(heap_delta) > kHeapFlatToleranceBytes) {
+    if (static_cast<uint32_t>(heap_delta) > HEAP_FLAT_TOLERANCE_BYTES) {
         ESP_LOGE(TAG, "FAIL heap drift=%lldB baseline=%u now=%u",
                  static_cast<long long>(heap_delta), heap_baseline, heap_now);
     } else {

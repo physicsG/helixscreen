@@ -680,10 +680,10 @@ void TempGraphOverlay::configure_control_strip() {
         helix::TemperatureController* c = temp_control_panel_->controller();
         if (c)
             c->ensure_limits(helix::HeaterType::Chamber);
-        static const char* kChamberPresetNames[MAX_PRESETS] = {
+        static const char* CHAMBER_PRESET_NAMES[MAX_PRESETS] = {
             "chamber_preset_off", "chamber_preset_1", "chamber_preset_2", "chamber_preset_3"};
         for (int i = 0; i < MAX_PRESETS; ++i) {
-            lv_obj_t* btn = lv_obj_find_by_name(active_strip, kChamberPresetNames[i]);
+            lv_obj_t* btn = lv_obj_find_by_name(active_strip, CHAMBER_PRESET_NAMES[i]);
             if (!btn) {
                 continue;
             }

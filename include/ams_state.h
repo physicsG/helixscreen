@@ -249,6 +249,27 @@ class AmsState {
     }
 
     /**
+     * @brief Get the AMS data revision subject
+     *
+     * Ticks (monotonic int) every time a backend's state or slot data is synced
+     * from a backend event. Deliberately a coarse "something changed, go look"
+     * signal rather than a precise one: it fires for optimistic local writes as
+     * well as firmware reports, so an observer must re-check the thing it
+     * actually cares about rather than treating a tick as proof.
+     *
+     * Exists because AmsBackend::set_event_callback() is single-slot and
+     * AmsState owns it (add_backend), so a second consumer cannot subscribe to
+     * backend events directly. PrintStartController uses this to re-check
+     * SlotRegistry::firmware_mapping_generation() while confirming a filament
+     * remap restore (#1270).
+     *
+     * @return Subject holding a monotonically increasing revision counter
+     */
+    lv_subject_t* get_ams_data_revision_subject() {
+        return &ams_data_revision_;
+    }
+
+    /**
      * @brief Get active backend subject
      * @return Subject holding index of the currently selected backend
      */
@@ -1364,6 +1385,7 @@ class AmsState {
     // Backend selector subjects
     lv_subject_t backend_count_;
     lv_subject_t active_backend_;
+    lv_subject_t ams_data_revision_;
 
     // System-level subjects
     lv_subject_t ams_type_;

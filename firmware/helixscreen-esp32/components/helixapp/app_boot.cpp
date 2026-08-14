@@ -575,8 +575,8 @@ void kick_moonraker_connect_once() {
 // the historical successful-assoc case with margin; the backend's own
 // assoc-timeout + bounded backoff retry (wifi_backend_esp.cpp) keep trying
 // underneath regardless of whether this wait succeeds.
-constexpr int kBootBoundedWaitMs = 20000;
-constexpr int kBootPollIntervalMs = 200;
+constexpr int BOOT_BOUNDED_WAIT_MS = 20000;
+constexpr int BOOT_POLL_INTERVAL_MS = 200;
 
 void* app_net_thread_main(void*) {
     // Opens the esp_wifi hardware bring-up gate — see wifi_backend_esp.h for
@@ -610,7 +610,7 @@ void* app_net_thread_main(void*) {
     // post-seed state (a dev sdkconfig.local Kconfig SSID, if any, has already
     // been written to NVS) rather than a never-started snapshot. If NVS still
     // has no stored SSID, stand up the SoftAP captive portal instead of
-    // silently idling for kBootBoundedWaitMs below — the shell is already up
+    // silently idling for BOOT_BOUNDED_WAIT_MS below — the shell is already up
     // (this thread starts after build_shell()), so the not-ready UI is on
     // screen throughout and the portal's own instructions modal explains what
     // to do. provisioning_run_portal() blocks until either a join succeeds
@@ -621,11 +621,11 @@ void* app_net_thread_main(void*) {
         helix::provisioning_run_portal();
     }
 
-    for (int waited_ms = 0; waited_ms < kBootBoundedWaitMs; waited_ms += kBootPollIntervalMs) {
+    for (int waited_ms = 0; waited_ms < BOOT_BOUNDED_WAIT_MS; waited_ms += BOOT_POLL_INTERVAL_MS) {
         if (wifi->is_connected()) {
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(kBootPollIntervalMs));
+        vTaskDelay(pdMS_TO_TICKS(BOOT_POLL_INTERVAL_MS));
     }
 
     if (wifi->is_connected()) {
@@ -634,7 +634,7 @@ void* app_net_thread_main(void*) {
         ESP_LOGW(TAG,
                  "app_net: no association after %dms — UI stays not-ready; backend keeps "
                  "retrying in the background",
-                 kBootBoundedWaitMs);
+                 BOOT_BOUNDED_WAIT_MS);
     }
     // Handoff is either done above or deferred to the state observer — exit
     // either way, freeing this thread's 32KB stack (R4: no permanent park).

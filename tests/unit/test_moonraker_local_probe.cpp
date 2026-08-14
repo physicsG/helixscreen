@@ -34,7 +34,7 @@ using helix::diag::split_host_port;
 
 namespace {
 
-constexpr const char* kHeader =
+constexpr const char* HEADER =
     "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout "
     "inode\n";
 
@@ -42,7 +42,7 @@ constexpr const char* kHeader =
 // these little-endian-shaped fixtures are what an x86 (or LE MIPS) kernel emits.
 std::string tcp4(const std::string& local_hex_addr, const std::string& port_hex,
                  const std::string& state) {
-    return std::string(kHeader) + "   0: " + local_hex_addr + ":" + port_hex + " 00000000:0000 " +
+    return std::string(HEADER) + "   0: " + local_hex_addr + ":" + port_hex + " 00000000:0000 " +
            state + " 00000000:00000000 00:00000000 00000000     0        0 1234 1 x\n";
 }
 
@@ -88,7 +88,7 @@ TEST_CASE("parse_listeners_for_port ignores non-listening sockets", "[bundle][ad
     }
 
     SECTION("nothing listening yields no addresses — the 'service is down' answer") {
-        CHECK(parse_listeners_for_port(kHeader, 7125, false).empty());
+        CHECK(parse_listeners_for_port(HEADER, 7125, false).empty());
     }
 
     SECTION("a header-only or empty file does not crash or match") {
@@ -98,7 +98,7 @@ TEST_CASE("parse_listeners_for_port ignores non-listening sockets", "[bundle][ad
 }
 
 TEST_CASE("parse_listeners_for_port handles tcp6", "[bundle][ad5x]") {
-    const std::string v6_header = kHeader;
+    const std::string v6_header = HEADER;
 
     SECTION("wildcard :: is the common dual-stack bind") {
         const std::string body = v6_header +

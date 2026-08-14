@@ -547,9 +547,9 @@ TEST_CASE("UpdateChecker callback is optional", "[update_checker][callback]") {
         // connect lands in ~10ms; the budget only has to exceed the request's
         // own 30s timeout so a host that silently drops (rather than refuses)
         // port 1 still reaches Error instead of flaking here.
-        constexpr int kPollIterations = 8000; // 8000 * 5ms = 40s
+        constexpr int POLL_ITERATIONS = 8000; // 8000 * 5ms = 40s
         for (int i = 0;
-             i < kPollIterations && checker.get_status() == UpdateChecker::Status::Checking; ++i) {
+             i < POLL_ITERATIONS && checker.get_status() == UpdateChecker::Status::Checking; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         // Pin that the check really ran end-to-end rather than short-circuiting

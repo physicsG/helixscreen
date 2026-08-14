@@ -1945,6 +1945,37 @@ class AmsBackend {
         return {}; // Default: empty
     }
 
+    /**
+     * @brief Does this backend echo its tool mapping back from the printer?
+     *
+     * get_tool_mapping() is written from two directions — a backend updates it
+     * optimistically inside set_tool_mapping() before the gcode is even sent,
+     * and (on some backends) the subscription parser overwrites it with what
+     * the firmware actually reports. Only the second is proof.
+     *
+     * Backends that answer true must also advance
+     * firmware_tool_mapping_generation() on every firmware-sourced write, so a
+     * caller can distinguish confirmation from its own echo.
+     *
+     * Default false: the caller must then fall back to treating a command sent
+     * to a ready Klipper as delivered. That is weaker, but it is honest — and
+     * far better than waiting forever for a confirmation that cannot arrive
+     * (which would strand the pending-remap record, #1270).
+     */
+    [[nodiscard]] virtual bool reports_firmware_tool_mapping() const {
+        return false;
+    }
+
+    /**
+     * @brief Monotonic count of firmware-sourced tool-mapping writes.
+     *
+     * Meaningful only when reports_firmware_tool_mapping() is true. Advances
+     * when the printer tells us a mapping; never when we write our own intent.
+     */
+    [[nodiscard]] virtual uint64_t firmware_tool_mapping_generation() const {
+        return 0;
+    }
+
     // ========================================================================
     // Device-Specific Actions
     // ========================================================================

@@ -475,3 +475,27 @@ EOF
   fi
   diff assets/filaments.json android/app/src/main/assets/assets/filaments.json
 }
+
+# --- Every extractable UI string is already in the translation catalogs ---
+#
+# `translation_sync.py sync` extracts from XML *and* C++, including the static
+# tables that the UI translates through a variable (lv_tr(def.display_name) and
+# friends -- see scripts/translations/cpp_tables.py). If a dry run would still
+# add keys, someone shipped a user-facing string that no locale can translate.
+# That is silent at runtime: lv_translation_get() falls back to the tag, so the
+# string renders in English in all nine languages and only a debug-level log
+# line says so. One bundle carried 1445 of those lines, 294 KB of ring buffer.
+#
+# Fix by running `make translation-sync && make translations`, then translating
+# the new keys (consult translations/GLOSSARY.md and reuse the canonical term).
+# A string that genuinely should not be translated gets `// i18n: do not
+# translate` on its line or the line above.
+
+@test "no user-facing strings are missing from the translation catalogs" {
+  if [ ! -x .venv/bin/python ]; then
+    skip "translations venv not set up (run 'make venv-setup')"
+  fi
+  run .venv/bin/python scripts/translation_sync.py sync --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"All XML strings already in YAML files"* ]]
+}

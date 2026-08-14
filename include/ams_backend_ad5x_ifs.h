@@ -125,8 +125,8 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     /// loopback HTTP GET on a 2-core board that is also feeding the MCU step
     /// queue. PAUSED keeps the fast cadence — a pause is when a user actually
     /// swaps a spool and relabels it.
-    static constexpr std::chrono::seconds kJsonPollIdle{5};
-    static constexpr std::chrono::seconds kJsonPollPrinting{30};
+    static constexpr std::chrono::seconds JSON_POLL_IDLE{5};
+    static constexpr std::chrono::seconds JSON_POLL_PRINTING{30};
 
     /// Should the JSON freshness poll fire now? (public for testing)
     ///
@@ -145,7 +145,7 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
      * types; the invariant and catalog-selector tests derive their expectations from
      * this array rather than re-typing it, so a change here propagates to its guards.
      */
-    static constexpr std::array<const char*, 7> kStockWhitelist{"PLA", "PLA-CF", "SILK",   "TPU",
+    static constexpr std::array<const char*, 7> STOCK_WHITELIST{"PLA", "PLA-CF", "SILK",   "TPU",
                                                                 "ABS", "PETG",   "PETG-CF"};
 
     /**
@@ -787,7 +787,7 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     void note_head_switch_reading_locked(bool detected);
 
     /// Stamp "a filament-moving command was just dispatched". Any head-empty
-    /// window that opens within kRunoutOpSuppression of the stamp belongs to
+    /// window that opens within RUNOUT_OP_SUPPRESSION of the stamp belongs to
     /// that operation, not to a runout. Covers the paths that leave the backend
     /// IDLE and armless: eject_lane() and the three early returns in
     /// do_unload_filament() that route to it. Caller must hold mutex_.
@@ -978,13 +978,13 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     // Per-port instant of the last optimistic eject clear. On the constrained
     // AD5X the RS-485 silk sensor lags ~1s after IFS_F11 cold-retracts a lane, so
     // the eject follow-up IFS_STATUS/GET_ZCOLOR can still read the just-ejected
-    // lane present and resurrect it. Within kEjectPresenceSuppression of the
+    // lane present and resurrect it. Within EJECT_PRESENCE_SUPPRESSION of the
     // stamp, a false->true presence transition for that lane is ignored so the
     // optimistic clear survives the settling window (#1065 — the last-ejected
     // lane had no later query to re-correct it and kept offering Unload). A
     // present->absent transition and any transition after the window still apply.
     std::array<std::chrono::steady_clock::time_point, NUM_PORTS> last_eject_time_{};
-    static constexpr std::chrono::milliseconds kEjectPresenceSuppression{4000};
+    static constexpr std::chrono::milliseconds EJECT_PRESENCE_SUPPRESSION{4000};
     int active_tool_ = -1; // Current tool (-1 = none)
     // Physically seated port from IFS_STATUS "Chan" (1-4; 0 = none). Persists at
     // the seated port while loaded-idle (when GET_ZCOLOR's "Extruder:" reads
@@ -1069,15 +1069,15 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     // fault is raised. Long enough to ride out a status-frame hiccup and to give
     // a firmware-driven sequence a chance to put filament back, short enough that
     // the user is not left staring at a stopped print with no explanation.
-    static constexpr std::chrono::seconds kRunoutConfirmDelay{30};
+    static constexpr std::chrono::seconds RUNOUT_CONFIRM_DELAY{30};
     // The lessWaste backup switchover is itself an unload + load, minutes long,
     // during which the toolhead is legitimately empty on a paused print. Wait it
     // out before claiming the runout is unattended.
-    static constexpr std::chrono::seconds kRunoutConfirmDelayWithBackup{180};
+    static constexpr std::chrono::seconds RUNOUT_CONFIRM_DELAY_WITH_BACKUP{180};
     // A head-empty window opening within this long after a filament-moving
     // dispatch is attributed to that operation. Covers eject_lane() and
     // do_unload_filament()'s early returns, which leave action IDLE.
-    static constexpr std::chrono::seconds kRunoutOpSuppression{30};
+    static constexpr std::chrono::seconds RUNOUT_OP_SUPPRESSION{30};
 
     std::array<bool, NUM_PORTS> dirty_{}; // Per-slot dirty flag to prevent stale overwrites
 

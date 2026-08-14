@@ -242,13 +242,13 @@ void GridEditMode::handle_click(lv_event_t* /*e*/) {
                 point.y >= sel_area.y1 - EDGE_HIT_MARGIN &&
                 point.y <= sel_area.y2 + EDGE_HIT_MARGIN) {
                 in_edge_zone = true;
-                spdlog::debug("[GridEditMode] handle_click: no widget at ({},{}) but within "
+                spdlog::trace("[GridEditMode] handle_click: no widget at ({},{}) but within "
                               "edge zone of selected widget — keeping selection",
                               point.x, point.y);
             }
         }
         if (!in_edge_zone) {
-            spdlog::debug("[GridEditMode] handle_click: no widget at ({},{}) — {} children checked",
+            spdlog::trace("[GridEditMode] handle_click: no widget at ({},{}) — {} children checked",
                           point.x, point.y, child_count);
             select_widget(nullptr);
         }
@@ -278,7 +278,7 @@ void GridEditMode::create_selection_chrome(lv_obj_t* widget) {
     int widget_w = lv_area_get_width(&widget_area);
     int widget_h = lv_area_get_height(&widget_area);
 
-    spdlog::debug("[GridEditMode] Chrome coords: widget_screen=({},{})→({},{}) "
+    spdlog::trace("[GridEditMode] Chrome coords: widget_screen=({},{})→({},{}) "
                   "container_screen=({},{}) pad=({},{}) rel=({},{}) size={}x{}",
                   widget_area.x1, widget_area.y1, widget_area.x2, widget_area.y2, container_area.x1,
                   container_area.y1, pad_left, pad_top, rel_x1, rel_y1, widget_w, widget_h);
@@ -509,7 +509,7 @@ void GridEditMode::create_selection_chrome(lv_obj_t* widget) {
     lv_obj_update_layout(selection_overlay_);
     lv_area_t overlay_area;
     lv_obj_get_coords(selection_overlay_, &overlay_area);
-    spdlog::debug("[GridEditMode] Chrome verify: overlay_screen=({},{})→({},{}) "
+    spdlog::trace("[GridEditMode] Chrome verify: overlay_screen=({},{})→({},{}) "
                   "widget_screen=({},{})→({},{}) delta=({},{})",
                   overlay_area.x1, overlay_area.y1, overlay_area.x2, overlay_area.y2,
                   widget_area.x1, widget_area.y1, widget_area.x2, widget_area.y2,
@@ -1686,7 +1686,7 @@ void GridEditMode::handle_resize_move(lv_event_t* /*e*/) {
     // Grid-snapped preview (shows where widget will land on release)
     update_snap_preview(result.col, result.row, result.colspan, result.rowspan, valid);
 
-    spdlog::debug("[GridEditMode] Resize preview: px=({},{} {}x{}) → grid ({},{} {}x{}) valid={}",
+    spdlog::trace("[GridEditMode] Resize preview: px=({},{} {}x{}) → grid ({},{} {}x{}) valid={}",
                   px, py, pw, ph, result.col, result.row, result.colspan, result.rowspan, valid);
 }
 

@@ -248,7 +248,7 @@ class PrinterPrintState {
      * `print_stats.filament_used` stream.
      *
      * Map entries are **pre-populated** in `init_subjects()` for all indices
-     * `0 .. kMaxExtruderScan-1`, so the map structure is frozen after init.
+     * `0 .. MAX_EXTRUDER_SCAN-1`, so the map structure is frozen after init.
      * This eliminates the WebSocket-BG-thread vs UI-thread rehash race that
      * lazy emplace would expose (only subject values change during status
      * updates, and `lv_subject_set_int` is atomic for the int value).
@@ -260,14 +260,14 @@ class PrinterPrintState {
      *
      * @param extruder_idx 0-based extruder index (0 = "extruder", 1 = "extruder1", ...)
      * @param[out] lifetime Token whose expiration signals subject death
-     * @return Non-null subject pointer for `0 <= idx < kMaxExtruderScan` once
+     * @return Non-null subject pointer for `0 <= idx < MAX_EXTRUDER_SCAN` once
      *         `init_subjects()` has run; `nullptr` otherwise (lifetime untouched).
      */
     lv_subject_t* get_extruder_filament_used_subject(int extruder_idx, SubjectLifetime& lifetime);
 
     /// Maximum number of per-extruder filament subjects pre-populated at init.
     /// Klipper toolchanger setups max out well below this.
-    static constexpr int kMaxExtruderScan = 16;
+    static constexpr int MAX_EXTRUDER_SCAN = 16;
 
     /// Current PrintStartPhase enum value
     lv_subject_t* get_print_start_phase_subject() {
@@ -703,7 +703,7 @@ class PrinterPrintState {
     lv_subject_t print_filament_used_{}; // Filament used in mm (from Moonraker print_stats)
 
     // Per-extruder filament_used (mm) — heap-allocated for stable pointers.
-    // Map entries are pre-populated by init_subjects() for indices 0..kMaxExtruderScan-1,
+    // Map entries are pre-populated by init_subjects() for indices 0..MAX_EXTRUDER_SCAN-1,
     // freezing the map structure so the WebSocket background thread cannot trigger
     // a rehash while a UI-thread caller is reading. Only the int value inside
     // each subject is mutated during status updates (atomic via lv_subject_set_int).

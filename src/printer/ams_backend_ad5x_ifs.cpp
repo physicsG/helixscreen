@@ -21,6 +21,7 @@
 #include "printer_state.h"
 #include "static_subject_registry.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -60,8 +61,8 @@ namespace {
 /// plain extruder move rather than zmod's `PURGE_FILAMENT` macro, because a bare
 /// `G1 E` needs no homing and cannot reach the loadcell `_G28` that shuts the
 /// AD5X down mid-job (see build_recovery_actions()).
-constexpr int kRunoutPurgeMm = 50;
-constexpr int kRunoutPurgeFeedrateMmMin = 10 * 60;
+constexpr int RUNOUT_PURGE_MM = 50;
+constexpr int RUNOUT_PURGE_FEEDRATE_MM_MIN = 10 * 60;
 
 } // namespace
 
@@ -597,7 +598,7 @@ bool AmsBackendAd5xIfs::should_poll_json(bool printing_now, bool was_printing,
     if (was_printing && !printing_now) {
         return true;
     }
-    return since_last >= (printing_now ? kJsonPollPrinting : kJsonPollIdle);
+    return since_last >= (printing_now ? JSON_POLL_PRINTING : JSON_POLL_IDLE);
 }
 
 void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
@@ -2006,8 +2007,8 @@ std::vector<helix::RecoveryAction> AmsBackendAd5xIfs::build_recovery_actions() c
     // extruder move, so it needs no homing (see the no-Load note below) and it
     // works on stock zMod as well as on either plugin. Obviously hot-only.
     actions.push_back({lv_tr("Purge"),
-                       "M83\nG1 E" + std::to_string(kRunoutPurgeMm) + " F" +
-                           std::to_string(kRunoutPurgeFeedrateMmMin),
+                       "M83\nG1 E" + std::to_string(RUNOUT_PURGE_MM) + " F" +
+                           std::to_string(RUNOUT_PURGE_FEEDRATE_MM_MIN),
                        "ifs::purge", "",
                        /*needs_hot_nozzle=*/true});
 
@@ -2148,8 +2149,8 @@ lv_subject_t* AmsBackendAd5xIfs::get_operation_step_index_subject(StepOperationT
 // --- Configuration ---
 
 std::optional<std::vector<std::string>> AmsBackendAd5xIfs::get_supported_materials() const {
-    // Stock AD5X firmware whitelist — see kStockWhitelist in the header.
-    std::vector<std::string> result(kStockWhitelist.begin(), kStockWhitelist.end());
+    // Stock AD5X firmware whitelist — see STOCK_WHITELIST in the header.
+    std::vector<std::string> result(STOCK_WHITELIST.begin(), STOCK_WHITELIST.end());
 
     // Append user-defined types from bambufy_custom_types (save_variables) and
     // [zmod_ifs] filament_<NAME> (mod_data/user.cfg). zmod's COLOR macro
@@ -3178,14 +3179,14 @@ void AmsBackendAd5xIfs::poll_adventurer_json() {
     // Task 15 R2 evaluation arm (CONFIG_HELIX_AMS_HTTP_POLL_BACKENDS):
     // download_file() is a hard stub on ESP32 (Task 10's HTTP lane only
     // supports bounded fetches — see esp_rest_api.cpp). Adventurer5M.json is
-    // a small generated config; kAdventurerJsonPollCapBytes is generous
+    // a small generated config; ADVENTURER_JSON_POLL_CAP_BYTES is generous
     // enough a real file rarely hits it, and download_file_partial fails
     // loud on an over-cap response rather than silently truncating (see
     // esp_http_lane.cpp) — same graceful degrade as any other poll failure
     // handled by on_error above.
-    static constexpr size_t kAdventurerJsonPollCapBytes = 32 * 1024;
+    static constexpr size_t ADVENTURER_JSON_POLL_CAP_BYTES = 32 * 1024;
     api_->transfers().download_file_partial("config", "Adventurer5M.json",
-                                            kAdventurerJsonPollCapBytes, on_content, on_error);
+                                            ADVENTURER_JSON_POLL_CAP_BYTES, on_content, on_error);
 #else
     api_->transfers().download_file("config", "Adventurer5M.json", on_content, on_error);
 #endif
@@ -4186,7 +4187,7 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
                         continue;
                     }
                     // Eject-settling suppression (#1065): a false->true transition
-                    // within kEjectPresenceSuppression of this lane's eject is the
+                    // within EJECT_PRESENCE_SUPPRESSION of this lane's eject is the
                     // silk sensor still settling clear of the just-retracted lane,
                     // not a re-insert. Ignore it so the optimistic clear survives —
                     // the last-ejected lane otherwise stayed "present" (offering
@@ -4194,7 +4195,7 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
                     // any transition after the window still apply.
                     if (!port_presence_[idx] && ports[idx] &&
                         (std::chrono::steady_clock::now() - last_eject_time_[idx]) <
-                            kEjectPresenceSuppression) {
+                            EJECT_PRESENCE_SUPPRESSION) {
                         spdlog::debug("{} Slot {} IFS_STATUS Ports reads present within eject "
                                       "settling window — ignoring as sensor lag (#1065)",
                                       backend_log_tag(), i);
@@ -5244,9 +5245,9 @@ std::chrono::seconds AmsBackendAd5xIfs::runout_confirm_delay_locked() const {
     // is always-on (no toggle), so the !has_ifs_vars_ path always qualifies;
     // plugins qualify only when variable_backup reads true.
     if (!has_ifs_vars_ || ifs_backup_variable_.value_or(false)) {
-        return kRunoutConfirmDelayWithBackup;
+        return RUNOUT_CONFIRM_DELAY_WITH_BACKUP;
     }
-    return kRunoutConfirmDelay;
+    return RUNOUT_CONFIRM_DELAY;
 }
 
 bool AmsBackendAd5xIfs::evaluate_runout_locked() {
@@ -5291,7 +5292,7 @@ bool AmsBackendAd5xIfs::evaluate_runout_locked() {
     // eject_lane() and do_unload_filament()'s three early returns leave the
     // backend IDLE and armless, so neither test above sees them. The dispatch
     // stamp does.
-    if (now - last_filament_op_dispatch_ < kRunoutOpSuppression) {
+    if (now - last_filament_op_dispatch_ < RUNOUT_OP_SUPPRESSION) {
         return false;
     }
     if (now - *head_empty_since_ < runout_confirm_delay_locked()) {
@@ -5439,16 +5440,22 @@ std::string AmsBackendAd5xIfs::build_runout_detail_locked() const {
     // the firmware-side rule is identical: ANALOG_PRUTOK (stock zMod) and
     // _RUNOUT_HEAD (lessWaste/bambufy) both require exact material AND exact
     // colour AND port-present. Only the subject of the sentence differs.
+    //
+    // Each lv_tr() below is a WHOLE sentence with the variable part as `{}`.
+    // Building these by concatenation is what the catalogs used to hold: the
+    // subject was glued on in C++ and the fragment left starting mid-clause
+    // ("is installed but ...", "matches."). No translator can place a verb from
+    // that -- German sends it to the end of the clause and Japanese reorders the
+    // whole thing -- so the fragments sat untranslated in all eight locales.
     const auto append_switchover_rule = [&](const std::string& who) {
-        detail += who + " ";
-        detail += lv_tr("will switch to a slot whose filament type AND colour both match "
-                        "the active spool and whose own port sensor reads filament present.");
+        detail += fmt::format(lv_tr("{} will switch to a slot whose filament type AND colour "
+                                    "both match the active spool and whose own port sensor "
+                                    "reads filament present."),
+                              who);
         const int backup = find_backup_slot_locked(runout_slot_);
         detail += " ";
         if (backup >= 0) {
-            detail += lv_tr("Slot");
-            detail += " " + std::to_string(backup + 1) + " ";
-            detail += lv_tr("matches.");
+            detail += fmt::format(lv_tr("Slot {} matches."), backup + 1);
         } else {
             detail += lv_tr("No slot currently matches.");
         }
@@ -5460,17 +5467,18 @@ std::string AmsBackendAd5xIfs::build_runout_detail_locked() const {
         return detail;
     }
 
+    // i18n: do not translate — plugin names as their authors spell them.
     const std::string plugin_name = (var_prefix_ == "bambufy") ? "bambufy" : "lessWaste";
     if (!ifs_backup_variable_.has_value()) {
-        detail += plugin_name + " ";
-        detail += lv_tr("is installed, but its backup-spool setting could not be read - do not "
-                        "count on an automatic swap.");
+        detail += fmt::format(lv_tr("{} is installed, but its backup-spool setting could not be "
+                                    "read - do not count on an automatic swap."),
+                              plugin_name);
         return detail;
     }
     if (!*ifs_backup_variable_) {
-        detail += plugin_name + " ";
-        detail += lv_tr("is installed but its backup-spool switching is turned off, so no "
-                        "automatic swap will happen.");
+        detail += fmt::format(lv_tr("{} is installed but its backup-spool switching is turned "
+                                    "off, so no automatic swap will happen."),
+                              plugin_name);
         return detail;
     }
 

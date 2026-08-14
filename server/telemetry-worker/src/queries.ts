@@ -438,6 +438,12 @@ export function hardwareQueries(days: number, filters?: FilterParams): string[] 
     ORDER BY ram_mb`,
     // AMS backend distribution (deduplicated by device_id)
     `SELECT blob8 as name, count(DISTINCT blob1) as count FROM ${dataset} WHERE timestamp >= NOW() - INTERVAL '${days}' DAY AND index1 = 'hardware_profile' AND blob8 != ''${f} GROUP BY name ORDER BY count DESC`,
+    // helix_macros.cfg adoption: "1" installed, "0" not. Empty is excluded, so
+    // the denominator is devices that actually reported, not all devices.
+    `SELECT blob9 as name, count(DISTINCT blob1) as count FROM ${dataset} WHERE timestamp >= NOW() - INTERVAL '${days}' DAY AND index1 = 'hardware_profile' AND blob9 != ''${f} GROUP BY name ORDER BY count DESC`,
+    // Moonraker topology: "1" on this machine, "0" over the network. Only
+    // clients new enough to report it are counted (see the blob9 note).
+    `SELECT blob10 as name, count(DISTINCT blob1) as count FROM ${dataset} WHERE timestamp >= NOW() - INTERVAL '${days}' DAY AND index1 = 'hardware_profile' AND blob10 != ''${f} GROUP BY name ORDER BY count DESC`,
   ];
 }
 

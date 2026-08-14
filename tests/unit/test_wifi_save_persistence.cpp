@@ -34,18 +34,18 @@ using helix::wifi::detail::wpa_string_is_valid;
 namespace {
 
 // A wpa_supplicant config the way the U1 leaves it: headers, no networks.
-constexpr const char* kEmptyConfig = "ctrl_interface=/var/run/wpa_supplicant\n"
+constexpr const char* EMPTY_CONFIG = "ctrl_interface=/var/run/wpa_supplicant\n"
                                      "ap_scan=1\n"
                                      "update_config=1\n";
 
-constexpr const char* kConfigWithNetwork = "ctrl_interface=/var/run/wpa_supplicant\n"
-                                           "ap_scan=1\n"
-                                           "update_config=1\n"
-                                           "\n"
-                                           "network={\n"
-                                           "\tssid=\"HomeNet\"\n"
-                                           "\tpsk=\"secretpass\"\n"
-                                           "}\n";
+constexpr const char* CONFIG_WITH_NETWORK = "ctrl_interface=/var/run/wpa_supplicant\n"
+                                            "ap_scan=1\n"
+                                            "update_config=1\n"
+                                            "\n"
+                                            "network={\n"
+                                            "\tssid=\"HomeNet\"\n"
+                                            "\tpsk=\"secretpass\"\n"
+                                            "}\n";
 
 } // namespace
 
@@ -53,48 +53,48 @@ TEST_CASE("SAVE_CONFIG OK with an unwritten config is not persistence",
           "[network][wpa][persistence][regression]") {
     // THE U1 REGRESSION. If this ever returns Persisted again, HelixScreen is
     // back to telling users their WiFi is saved when it is not.
-    REQUIRE(classify_save_result("OK\n", kEmptyConfig, "HomeNet") == SavePersistence::NotPersisted);
+    REQUIRE(classify_save_result("OK\n", EMPTY_CONFIG, "HomeNet") == SavePersistence::NotPersisted);
 }
 
 TEST_CASE("SAVE_CONFIG persistence classification", "[network][wpa][persistence]") {
     SECTION("OK plus the SSID actually on disk is persisted") {
-        REQUIRE(classify_save_result("OK\n", kConfigWithNetwork, "HomeNet") ==
+        REQUIRE(classify_save_result("OK\n", CONFIG_WITH_NETWORK, "HomeNet") ==
                 SavePersistence::Persisted);
     }
 
     SECTION("explicit FAIL is not persisted") {
-        REQUIRE(classify_save_result("FAIL\n", kConfigWithNetwork, "HomeNet") ==
+        REQUIRE(classify_save_result("FAIL\n", CONFIG_WITH_NETWORK, "HomeNet") ==
                 SavePersistence::NotPersisted);
     }
 
     SECTION("empty reply is not persisted") {
-        REQUIRE(classify_save_result("", kConfigWithNetwork, "HomeNet") ==
+        REQUIRE(classify_save_result("", CONFIG_WITH_NETWORK, "HomeNet") ==
                 SavePersistence::NotPersisted);
     }
 
     SECTION("a different SSID on disk does not count as ours") {
-        REQUIRE(classify_save_result("OK\n", kConfigWithNetwork, "SomeOtherNet") ==
+        REQUIRE(classify_save_result("OK\n", CONFIG_WITH_NETWORK, "SomeOtherNet") ==
                 SavePersistence::NotPersisted);
     }
 
     SECTION("OK without a trailing newline still parses") {
-        REQUIRE(classify_save_result("OK", kConfigWithNetwork, "HomeNet") ==
+        REQUIRE(classify_save_result("OK", CONFIG_WITH_NETWORK, "HomeNet") ==
                 SavePersistence::Persisted);
     }
 }
 
 TEST_CASE("wpa_config_has_network matches whole SSID tokens", "[network][wpa][persistence]") {
     SECTION("exact match") {
-        REQUIRE(wpa_config_has_network(kConfigWithNetwork, "HomeNet"));
+        REQUIRE(wpa_config_has_network(CONFIG_WITH_NETWORK, "HomeNet"));
     }
 
     SECTION("a prefix of a longer SSID must not match") {
         // ssid="HomeNet" on disk must not satisfy a request for "Home".
-        REQUIRE_FALSE(wpa_config_has_network(kConfigWithNetwork, "Home"));
+        REQUIRE_FALSE(wpa_config_has_network(CONFIG_WITH_NETWORK, "Home"));
     }
 
     SECTION("a longer SSID than the one on disk must not match") {
-        REQUIRE_FALSE(wpa_config_has_network(kConfigWithNetwork, "HomeNetExtra"));
+        REQUIRE_FALSE(wpa_config_has_network(CONFIG_WITH_NETWORK, "HomeNetExtra"));
     }
 
     SECTION("scan_ssid= must not be mistaken for ssid=") {
@@ -104,8 +104,8 @@ TEST_CASE("wpa_config_has_network matches whole SSID tokens", "[network][wpa][pe
     }
 
     SECTION("empty SSID never matches") {
-        REQUIRE_FALSE(wpa_config_has_network(kConfigWithNetwork, ""));
-        REQUIRE_FALSE(wpa_config_has_network(kEmptyConfig, ""));
+        REQUIRE_FALSE(wpa_config_has_network(CONFIG_WITH_NETWORK, ""));
+        REQUIRE_FALSE(wpa_config_has_network(EMPTY_CONFIG, ""));
     }
 
     SECTION("empty config never matches") {
@@ -199,12 +199,12 @@ TEST_CASE("wpa_string_is_valid rejects command-injection characters",
 TEST_CASE("classify_removal_result separates verified absence from an unread config",
           "[wifi][unit][persistence]") {
     SECTION("read the config and the SSID is gone — verified") {
-        REQUIRE(classify_removal_result(true, true, kEmptyConfig, "HomeNet") ==
+        REQUIRE(classify_removal_result(true, true, EMPTY_CONFIG, "HomeNet") ==
                 RemovalPersistence::Verified);
     }
 
     SECTION("read the config and the SSID is still there — it comes back at boot") {
-        REQUIRE(classify_removal_result(true, true, kConfigWithNetwork, "HomeNet") ==
+        REQUIRE(classify_removal_result(true, true, CONFIG_WITH_NETWORK, "HomeNet") ==
                 RemovalPersistence::StillListed);
     }
 

@@ -592,6 +592,19 @@ void ui_notification_error(const char* title, const char* message, bool modal) {
     }
 }
 
+// Feeds the same hook as ui_notification_error: to a test asserting WHAT was
+// surfaced, a printer fault is an error notification. What it cannot reproduce
+// is the real function's call to helix::ui::track_fault_modal() — no modal is
+// built here at all. Coverage of the sweep therefore drives the registry
+// directly (test_fault_modal_dismiss.cpp), which is the linked, real code.
+void ui_notification_printer_fault(const char* title, const char* message) {
+    spdlog::debug("[Test Stub] ui_notification_printer_fault: {} - {}", title ? title : "(null)",
+                  message ? message : "(null)");
+    if (g_test_error_hook) {
+        g_test_error_hook(message ? message : "");
+    }
+}
+
 // The two-line variants hand the hook the SAME text the toast renders, joined,
 // so a test can assert that the suggestion actually reached the user instead of
 // only that the message did. Matches ui_notification.cpp's history-row join.

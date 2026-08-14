@@ -449,9 +449,9 @@ void AmsBackendQidi::apply_config_settings(const nlohmann::json& settings) {
 }
 
 void AmsBackendQidi::apply_heater_status(const nlohmann::json& notification) {
-    constexpr std::string_view kHeaterPrefix = "heater_generic heater_box";
-    constexpr std::string_view kAht20Prefix = "aht20_f heater_box";
-    constexpr std::string_view kBoxTempSensorPrefix = "temperature_sensor heater_temp_";
+    constexpr std::string_view HEATER_PREFIX = "heater_generic heater_box";
+    constexpr std::string_view AHT20_PREFIX = "aht20_f heater_box";
+    constexpr std::string_view BOX_TEMP_SENSOR_PREFIX = "temperature_sensor heater_temp_";
 
     struct BoxReading {
         std::optional<float> temp;
@@ -465,10 +465,10 @@ void AmsBackendQidi::apply_heater_status(const nlohmann::json& notification) {
             continue;
         }
         const std::string& key = it.key();
-        const bool is_heater = key.rfind(kHeaterPrefix, 0) == 0;
-        const bool is_aht = key.rfind(kAht20Prefix, 0) == 0;
+        const bool is_heater = key.rfind(HEATER_PREFIX, 0) == 0;
+        const bool is_aht = key.rfind(AHT20_PREFIX, 0) == 0;
         const bool is_box_temp_sensor =
-            key.rfind(kBoxTempSensorPrefix, 0) == 0 && key.find("_box") != std::string::npos;
+            key.rfind(BOX_TEMP_SENSOR_PREFIX, 0) == 0 && key.find("_box") != std::string::npos;
         if (!is_heater && !is_aht && !is_box_temp_sensor) {
             continue;
         }

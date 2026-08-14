@@ -335,9 +335,9 @@ std::string MoonrakerMotionAPI::generate_relative_move_gcode(double dx, double d
     // here disagreed with that gate: a cross-axis reversal nets ~1e-17 of float
     // cancellation residue onto one axis while another carries a real delta, and
     // the residue was serialized as a real term ("G0 X1e-17 Y2").
-    const bool move_x = std::abs(dx) > helix::AxisMove::kEpsilonMm;
-    const bool move_y = std::abs(dy) > helix::AxisMove::kEpsilonMm;
-    const bool move_z = std::abs(dz) > helix::AxisMove::kEpsilonMm;
+    const bool move_x = std::abs(dx) > helix::AxisMove::EPSILON_MM;
+    const bool move_y = std::abs(dy) > helix::AxisMove::EPSILON_MM;
+    const bool move_z = std::abs(dz) > helix::AxisMove::EPSILON_MM;
     if (!move_x && !move_y && !move_z) {
         return ""; // includes the all-zero case
     }

@@ -39,8 +39,8 @@ using namespace helix;
 namespace {
 
 /// Connection-state subject values, mirroring setup_connection_observer().
-constexpr int kDisconnected = 0;
-constexpr int kConnected = 2;
+constexpr int CONN_DISCONNECTED = 0;
+constexpr int CONN_CONNECTED = 2;
 
 class TempGraphReattachFixture : public LVGLTestFixture {
   public:
@@ -79,9 +79,9 @@ class TempGraphReattachFixture : public LVGLTestFixture {
     static void reconnect() {
         auto* conn = get_printer_state().get_printer_connection_state_subject();
         REQUIRE(conn != nullptr);
-        lv_subject_set_int(conn, kDisconnected);
+        lv_subject_set_int(conn, CONN_DISCONNECTED);
         settle();
-        lv_subject_set_int(conn, kConnected);
+        lv_subject_set_int(conn, CONN_CONNECTED);
         settle();
     }
 };

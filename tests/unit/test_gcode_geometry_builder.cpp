@@ -1119,11 +1119,11 @@ TEST_CASE("prepare_interleaved_buffers data matches manual expansion",
 
     // Manually expand the first strip and compare against the packed layout.
     const auto& strip = geom.strips[0];
-    static constexpr int kTriIndices[6] = {0, 1, 2, 1, 3, 2};
+    static constexpr int TRI_INDICES[6] = {0, 1, 2, 1, 3, 2};
     const auto* packed = reinterpret_cast<const PackedVertex*>(buf.data.data());
 
     for (int ti = 0; ti < 6; ++ti) {
-        const auto& vert = geom.vertices[strip[static_cast<size_t>(kTriIndices[ti])]];
+        const auto& vert = geom.vertices[strip[static_cast<size_t>(TRI_INDICES[ti])]];
         glm::vec3 pos = geom.quantization.dequantize_vec3(vert.position);
 
         // Color is per-strip, not per-vertex.

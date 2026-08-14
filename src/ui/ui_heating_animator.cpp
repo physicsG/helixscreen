@@ -64,7 +64,11 @@ void HeatingIconAnimator::attach(lv_obj_t* icon) {
     lv_subject_t* theme_subject = theme_manager_get_changed_subject();
     if (theme_subject) {
         theme_observer_ = ObserverGuard(theme_subject, theme_change_cb, this);
-        spdlog::debug("[HeatingIconAnimator] Attached to icon with theme observer");
+        // trace, not debug: attach/detach pairs fire on every panel rebuild and
+        // pushed ~1400 lines through a 20k-line bundle ring with nothing ever
+        // diagnosed from them. The no-theme-subject branch below stays at debug —
+        // that one is abnormal.
+        spdlog::trace("[HeatingIconAnimator] Attached to icon with theme observer");
     } else {
         spdlog::debug("[HeatingIconAnimator] Attached to icon (no theme subject found)");
     }
@@ -91,7 +95,7 @@ void HeatingIconAnimator::detach() {
 
     // ObserverGuard::reset() removes the observer from the subject
     theme_observer_.reset();
-    spdlog::debug("[HeatingIconAnimator] Detached");
+    spdlog::trace("[HeatingIconAnimator] Detached");
 }
 
 void HeatingIconAnimator::update(int current_temp, int target_temp, helix::ChamberMode mode) {
@@ -212,7 +216,7 @@ void HeatingIconAnimator::theme_change_cb(lv_observer_t* observer, lv_subject_t*
     (void)subject;
     auto* animator = static_cast<HeatingIconAnimator*>(lv_observer_get_user_data(observer));
     if (animator) {
-        spdlog::debug("[HeatingIconAnimator] Theme changed, refreshing colors");
+        spdlog::trace("[HeatingIconAnimator] Theme changed, refreshing colors");
         animator->refresh_theme();
     }
 }

@@ -52,7 +52,7 @@ using namespace helix::ui;
 // on first call, and this runs before any test body — so tests that temporarily
 // set_asset_root() (test_asset_root.cpp) can never be the first caller and pin
 // a non-default root into the cache. Do not inline it into the fixture.
-static const std::string kNoThumb = helix::ActivePrintMediaManager::no_thumbnail_placeholder();
+static const std::string NO_THUMB = helix::ActivePrintMediaManager::no_thumbnail_placeholder();
 
 // ============================================================================
 // Test Fixture for ActivePrintMediaManager tests
@@ -424,7 +424,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     REQUIRE(get_display_filename() == "model");
 
     // No API to load from, so the file has no thumbnail of its own.
-    REQUIRE(get_thumbnail_path() == kNoThumb);
+    REQUIRE(get_thumbnail_path() == NO_THUMB);
 }
 
 TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
@@ -548,7 +548,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
         // never "".
         manager().set_thumbnail_path("cleared.gcode", "");
 
-        REQUIRE(get_thumbnail_path() == kNoThumb);
+        REQUIRE(get_thumbnail_path() == NO_THUMB);
     }
 }
 #endif
@@ -585,7 +585,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
 
     // Observer fires on registration with the initial (placeholder) value
     REQUIRE(observer_fire_count == 1);
-    REQUIRE(last_observed_path == kNoThumb);
+    REQUIRE(last_observed_path == NO_THUMB);
 
     // Setting a thumbnail path should fire the observer
     state().set_print_thumbnail("model.gcode", "A:/cache/thumb.bin");
@@ -622,7 +622,7 @@ TEST_CASE_METHOD(
 
     // Initial fire
     REQUIRE(observed_values.size() == 1);
-    REQUIRE(observed_values[0] == kNoThumb);
+    REQUIRE(observed_values[0] == NO_THUMB);
 
     // Rapid updates - observer should see each distinct value
     state().set_print_thumbnail("first.gcode", "A:/cache/first.bin");
@@ -655,7 +655,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
         set_print_filename("print_b.gcode");
         REQUIRE(get_display_filename() == "print_b");
         // The old thumbnail path should be cleared so the new one can be fetched
-        REQUIRE(get_thumbnail_path() == kNoThumb);
+        REQUIRE(get_thumbnail_path() == NO_THUMB);
     }
 
     SECTION("direct switch between prints clears old thumbnail") {
@@ -667,7 +667,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
         // Print B starts immediately (no empty filename in between)
         set_print_filename("second.gcode");
         REQUIRE(get_display_filename() == "second");
-        REQUIRE(get_thumbnail_path() == kNoThumb);
+        REQUIRE(get_thumbnail_path() == NO_THUMB);
     }
 
     SECTION("same filename reprint preserves thumbnail") {
@@ -699,7 +699,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     REQUIRE(get_display_filename() == "brand_new");
     // The leftover must be dropped, and the identity must describe the file we
     // are now loading for — not the finished print.
-    CHECK(get_thumbnail_path() == kNoThumb);
+    CHECK(get_thumbnail_path() == NO_THUMB);
     CHECK(state().get_print_thumbnail_file() != "previous.gcode");
 }
 
@@ -1129,7 +1129,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     files().fire_last(make_metadata_with_thumb(10, unique_thumb_path("superseded_publish")));
     drain();
     REQUIRE(transfers_stub().captured_downloads() == 1);
-    REQUIRE(get_thumbnail_path() == kNoThumb);
+    REQUIRE(get_thumbnail_path() == NO_THUMB);
 
     // Print B starts. process_filename() runs synchronously off the filename
     // subject write, so the load generation is bumped here — before A's
@@ -1138,14 +1138,14 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     set_print_filename_no_drain("print_b.gcode");
     drain();
     REQUIRE(files().pending_count() == 2);
-    REQUIRE(get_thumbnail_path() == kNoThumb);
+    REQUIRE(get_thumbnail_path() == NO_THUMB);
 
     // A's download finally lands and its PNG is pre-scaled. The result belongs
     // to a superseded load: publishing it would put print A's image on print B.
     transfers_stub().fire_captured_download(0);
     drain();
 
-    CHECK(get_thumbnail_path() == kNoThumb);
+    CHECK(get_thumbnail_path() == NO_THUMB);
     // Publishing also disarms recovery, so a leaked publish would additionally
     // stop B's own thumbnail from ever being retried.
     CHECK_FALSE(helix::ActivePrintMediaManagerTestAccess::thumbnail_loaded(manager()));
@@ -1168,7 +1168,7 @@ namespace {
 /// Smallest PNG both the cache and the processor accept: a 10x10 solid square.
 /// Same bytes as tests/unit/test_thumbnail_cache_request.cpp.
 // clang-format off
-const std::vector<uint8_t> kFreshnessPng = {
+const std::vector<uint8_t> FRESHNESS_PNG = {
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
     0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x0A,
     0x08, 0x02, 0x00, 0x00, 0x00, 0x02, 0x50, 0x58, 0xEA, 0x00, 0x00, 0x00,
@@ -1206,7 +1206,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
                  "ActivePrintMediaManager: a cached thumbnail older than the source is served",
                  "[ActivePrintMediaManager][async][thumbnail]") {
     const std::string key = unique_thumb_path("freshness_control");
-    const auto planted = helix::ThumbnailProcessor::instance().process_sync(kFreshnessPng, key,
+    const auto planted = helix::ThumbnailProcessor::instance().process_sync(FRESHNESS_PNG, key,
                                                                             active_print_target());
     REQUIRE(planted.success);
     REQUIRE(ThumbnailCache::is_lvgl_path(planted.output_path));
@@ -1231,7 +1231,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
                  "from cache",
                  "[ActivePrintMediaManager][async][thumbnail]") {
     const std::string key = unique_thumb_path("freshness_stale");
-    const auto planted = helix::ThumbnailProcessor::instance().process_sync(kFreshnessPng, key,
+    const auto planted = helix::ThumbnailProcessor::instance().process_sync(FRESHNESS_PNG, key,
                                                                             active_print_target());
     REQUIRE(planted.success);
     REQUIRE(ThumbnailCache::is_lvgl_path(planted.output_path));
@@ -1318,7 +1318,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     files().fire_last(make_metadata_with_thumb(42, unique_thumb_path("retry_success")));
     drain();
 
-    REQUIRE(get_thumbnail_path() != kNoThumb);
+    REQUIRE(get_thumbnail_path() != NO_THUMB);
     REQUIRE(TestAccess::thumbnail_loaded(manager()));
     REQUIRE(TestAccess::retry_count(manager()) == 0);
     REQUIRE_FALSE(TestAccess::has_pending_retry(manager()));
@@ -1354,7 +1354,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     files().fire_last(make_metadata_with_thumb(3, unique_thumb_path("dl_fail")));
     drain();
 
-    REQUIRE(get_thumbnail_path() == kNoThumb);
+    REQUIRE(get_thumbnail_path() == NO_THUMB);
     REQUIRE(TestAccess::has_pending_retry(manager()));
     REQUIRE(TestAccess::retry_count(manager()) == 1);
 
@@ -1365,7 +1365,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     files().fire_last(make_metadata_with_thumb(3, unique_thumb_path("dl_recover")));
     drain();
 
-    REQUIRE(get_thumbnail_path() != kNoThumb);
+    REQUIRE(get_thumbnail_path() != NO_THUMB);
     REQUIRE(TestAccess::thumbnail_loaded(manager()));
 }
 
@@ -1400,7 +1400,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
 
     files().fire_last(make_metadata_with_thumb(11, unique_thumb_path("filelist_reload")));
     drain();
-    REQUIRE(get_thumbnail_path() != kNoThumb);
+    REQUIRE(get_thumbnail_path() != NO_THUMB);
     REQUIRE(TestAccess::thumbnail_loaded(manager()));
 }
 
@@ -1600,7 +1600,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     files().fire_last(make_metadata_with_thumb(21, unique_thumb_path("first_try")));
     drain();
 
-    REQUIRE(get_thumbnail_path() != kNoThumb);
+    REQUIRE(get_thumbnail_path() != NO_THUMB);
     REQUIRE(TestAccess::thumbnail_loaded(manager()));
     REQUIRE_FALSE(TestAccess::has_pending_retry(manager()));
     REQUIRE(TestAccess::retry_count(manager()) == 0);
@@ -1699,7 +1699,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     // Destination metadata resolves -> thumbnail loads.
     files().fire_last(make_metadata_with_thumb(8, unique_thumb_path("moved_dest")));
     drain();
-    REQUIRE(get_thumbnail_path() != kNoThumb);
+    REQUIRE(get_thumbnail_path() != NO_THUMB);
     REQUIRE(TestAccess::thumbnail_loaded(manager()));
 }
 

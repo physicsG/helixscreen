@@ -33,12 +33,12 @@ glm::ivec2 project(const ProjectionParams& params, float x, float y, float z) {
         float dz = z - params.offset_z;
 
         // Horizontal rotation (around Z axis)
-        float rx = dx * kCosH - dy * kSinH;
-        float ry = dx * kSinH + dy * kCosH;
+        float rx = dx * COS_H - dy * SIN_H;
+        float ry = dx * SIN_H + dy * COS_H;
 
         // Elevation (tilt camera down)
         sx = rx * params.scale + half_w;
-        sy = half_h - (dz * kCosE + ry * kSinE) * params.scale;
+        sy = half_h - (dz * COS_E + ry * SIN_E) * params.scale;
         break;
     }
 
@@ -47,8 +47,8 @@ glm::ivec2 project(const ProjectionParams& params, float x, float y, float z) {
         float dx = x - params.offset_x;
         float dy = y - params.offset_y;
 
-        float iso_x = (dx - dy) * kIsoAngle;
-        float iso_y = (dx + dy) * kIsoAngle * kIsoYScale;
+        float iso_x = (dx - dy) * ISO_ANGLE;
+        float iso_y = (dx + dy) * ISO_ANGLE * ISO_Y_SCALE;
 
         sx = iso_x * params.scale + half_w;
         sy = half_h - iso_y * params.scale;
@@ -102,11 +102,11 @@ AutoFitResult compute_auto_fit(const AABB& bb, ViewMode view_mode, int canvas_wi
         float z_range = bb.max.z - bb.min.z;
 
         // Horizontal extent after 45° rotation (cos(-45°) = cos(45°) = 0.7071)
-        range_x = (xy_range_x + xy_range_y) * kCosH;
+        range_x = (xy_range_x + xy_range_y) * COS_H;
 
         // Vertical extent: Z * cos(30°) + Y_depth * sin(30°)
-        float y_depth = (xy_range_x + xy_range_y) * kCosH;
-        range_y = z_range * kCosE + y_depth * kSinE;
+        float y_depth = (xy_range_x + xy_range_y) * COS_H;
+        range_y = z_range * COS_E + y_depth * SIN_E;
 
         result.offset_z = (bb.min.z + bb.max.z) / 2.0f;
         break;
@@ -115,8 +115,8 @@ AutoFitResult compute_auto_fit(const AABB& bb, ViewMode view_mode, int canvas_wi
     case ViewMode::ISOMETRIC: {
         float xy_range_x = bb.max.x - bb.min.x;
         float xy_range_y = bb.max.y - bb.min.y;
-        range_x = (xy_range_x + xy_range_y) * kIsoAngle;
-        range_y = (xy_range_x + xy_range_y) * kIsoAngle * kIsoYScale;
+        range_x = (xy_range_x + xy_range_y) * ISO_ANGLE;
+        range_y = (xy_range_x + xy_range_y) * ISO_ANGLE * ISO_Y_SCALE;
         break;
     }
 

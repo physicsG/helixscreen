@@ -984,11 +984,11 @@ std::string PrinterDetector::apply_preset_with_variants(helix::Config* config,
     // Match the variant suffix exactly (preset name ends with `_forgex`) rather
     // than substring — a future preset whose name happens to contain "_forgex"
     // for unrelated reasons should not silently disable ZMOD detection.
-    static constexpr const char* kForgeXSuffix = "_forgex";
-    constexpr size_t kForgeXLen = 7; // strlen("_forgex")
+    static constexpr const char* FORGE_X_SUFFIX = "_forgex";
+    constexpr size_t FORGE_X_LEN = 7; // strlen("_forgex")
     bool preset_is_forgex =
-        preset.size() >= kForgeXLen &&
-        preset.compare(preset.size() - kForgeXLen, kForgeXLen, kForgeXSuffix) == 0;
+        preset.size() >= FORGE_X_LEN &&
+        preset.compare(preset.size() - FORGE_X_LEN, FORGE_X_LEN, FORGE_X_SUFFIX) == 0;
     bool is_zmod = !preset_is_forgex && std::find(objects.begin(), objects.end(),
                                                   "fan_generic fanM106") != objects.end();
 
@@ -1526,7 +1526,7 @@ PrinterDetector::get_print_start_default_phases(const std::string& printer_name)
     // Phase name → enum int. Keep in sync with PrintStartPhase in printer_state.h.
     // HEATING_* are excluded intentionally — ThermalRateModel handles heating
     // time separately, and predictor entries drop those phases on save.
-    static const std::map<std::string, int> kPhaseNames = {
+    static const std::map<std::string, int> PHASE_NAMES = {
         {"HOMING", static_cast<int>(helix::PrintStartPhase::HOMING)},
         {"QGL", static_cast<int>(helix::PrintStartPhase::QGL)},
         {"Z_TILT", static_cast<int>(helix::PrintStartPhase::Z_TILT)},
@@ -1553,8 +1553,8 @@ PrinterDetector::get_print_start_default_phases(const std::string& printer_name)
         }
         const auto& phases = printer["print_start_default_phases"];
         for (auto it = phases.begin(); it != phases.end(); ++it) {
-            auto found = kPhaseNames.find(it.key());
-            if (found == kPhaseNames.end()) {
+            auto found = PHASE_NAMES.find(it.key());
+            if (found == PHASE_NAMES.end()) {
                 spdlog::warn(
                     "[PrinterDetector] Unknown print_start_default_phase '{}' for printer '{}'",
                     it.key(), printer_name);

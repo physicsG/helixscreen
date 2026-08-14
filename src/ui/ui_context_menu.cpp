@@ -266,7 +266,7 @@ int32_t ContextMenu::screen_height_pct(int pct) const {
 }
 
 void ContextMenu::on_backdrop_clicked() {
-    dispatch_action(kActionCancelled);
+    dispatch_action(ACTION_CANCELLED);
 }
 
 void ContextMenu::on_close_clicked() {
@@ -327,7 +327,7 @@ void ContextMenu::stretch_rows_to_card(lv_obj_t* menu_card) {
     // Rows inside a column group must span their own column, not the whole card —
     // stretching them to the card width would make each one as wide as both
     // columns together and blow the row flow apart.
-    lv_obj_t* columns = lv_obj_find_by_name(menu_card, kColumnsName);
+    lv_obj_t* columns = lv_obj_find_by_name(menu_card, COLUMNS_NAME);
     if (columns) {
         uint32_t col_cnt = lv_obj_get_child_count(columns);
         for (uint32_t i = 0; i < col_cnt; i++) {
@@ -366,7 +366,7 @@ void ContextMenu::fit_card_to_screen(lv_obj_t* menu_card) {
     // A column group whose actions are all hidden would otherwise render as a
     // heading and a rule with nothing under them (external-spool mode hides every
     // lane action, for one).
-    lv_obj_t* columns = lv_obj_find_by_name(menu_card, kColumnsName);
+    lv_obj_t* columns = lv_obj_find_by_name(menu_card, COLUMNS_NAME);
     if (columns) {
         tidy_column_groups(columns);
     }
@@ -417,7 +417,7 @@ void ContextMenu::tidy_column_groups(lv_obj_t* columns) {
             lv_obj_t* row = lv_obj_get_child(col, r);
             if (row && !lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN) &&
                 lv_obj_has_flag(row, LV_OBJ_FLAG_CLICKABLE) &&
-                lv_obj_get_height(row) >= kMinTappableH) {
+                lv_obj_get_height(row) >= MIN_TAPPABLE_H) {
                 has_action = true;
             }
         }
@@ -441,7 +441,7 @@ void ContextMenu::tidy_column_groups(lv_obj_t* columns) {
         // The trigger is how many sibling groups survived on_created(), counted above
         // from live widget state. Binding it would mean every menu publishing a
         // visible-group-count subject purely to feed a generic base-class rule.
-        if (lv_obj_t* heading = lv_obj_find_by_name(col, kColumnHeadingName)) {
+        if (lv_obj_t* heading = lv_obj_find_by_name(col, COLUMN_HEADING_NAME)) {
             if (visible_cnt <= 1 && col == last_visible) {
                 // DECLARATIVE_OK: measured layout — visible sibling group count
                 lv_obj_add_flag(heading, LV_OBJ_FLAG_HIDDEN);

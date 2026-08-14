@@ -593,6 +593,23 @@ test-ui-pytest:
 	$(call report_test_result,Out-of-process UI tests)
 
 # ============================================================================
+# Moonraker Plugin Tests (pytest, moonraker-plugin/tests/)
+# ============================================================================
+# The plugin runs inside Moonraker on the printer, so nothing in the C++ suite
+# reaches it -- these are its only coverage. They need no binary and no printer;
+# the Moonraker component surface is mocked in the test file.
+
+test-plugin:
+	$(ECHO) "$(CYAN)$(BOLD)Running Moonraker plugin tests (pytest, moonraker-plugin/tests/)...$(RESET)"
+	@if [ ! -x "$(VENV_PYTHON)" ]; then \
+		echo "$(RED)$(BOLD)✗ Python venv not found — run 'make venv-setup' first$(RESET)"; \
+		exit 1; \
+	fi
+	@START_TIME=$$(date +%s); \
+	$(VENV_PYTHON) -m pytest moonraker-plugin/tests/ -v; \
+	$(call report_test_result,Moonraker plugin tests)
+
+# ============================================================================
 # Convenience Test Targets - Run tests by component
 # ============================================================================
 
@@ -1215,7 +1232,7 @@ clean-sanitizers:
 # Test Help
 # ============================================================================
 
-.PHONY: help-test test-kiauh test-shell test-xml test-ui-pytest test-serial test-hidden test-hidden-list test-asan test-tsan test-asan-one test-tsan-one clean-sanitizers
+.PHONY: help-test test-kiauh test-shell test-xml test-ui-pytest test-plugin test-serial test-hidden test-hidden-list test-asan test-tsan test-asan-one test-tsan-one clean-sanitizers
 help-test:
 	@if [ -t 1 ] && [ -n "$(TERM)" ] && [ "$(TERM)" != "dumb" ]; then \
 		B='$(BOLD)'; G='$(GREEN)'; Y='$(YELLOW)'; C='$(CYAN)'; X='$(RESET)'; \
@@ -1246,6 +1263,7 @@ help-test:
 	echo "  $${G}test-integration$${X}     - Integration tests (with mocks)"; \
 	echo "  $${G}test-xml$${X}             - helix-xml submodule suite (CMake+Unity)"; \
 	echo "  $${G}test-shell$${X}           - Shell/installer tests (bats)"; \
+	echo "  $${G}test-plugin$${X}          - Moonraker plugin tests (pytest)"; \
 	echo ""; \
 	echo "$${C}Geometry Tests:$${X}"; \
 	echo "  $${G}test-gcode-geometry$${X}  - G-code to 3D geometry test"; \

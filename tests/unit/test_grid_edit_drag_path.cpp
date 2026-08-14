@@ -128,9 +128,9 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
 
     // Container sized so every track is an exact 30px cell (no LVGL remainder
     // distribution to muddy the arithmetic): content = cols*cell + (cols-1)*gutter.
-    constexpr int kCellPx = 30;
-    const int content_w = ncols * kCellPx + (ncols - 1) * gutter;
-    const int content_h = nrows * kCellPx + (nrows - 1) * gutter;
+    constexpr int CELL_PX = 30;
+    const int content_w = ncols * CELL_PX + (ncols - 1) * gutter;
+    const int content_h = nrows * CELL_PX + (nrows - 1) * gutter;
 
     lv_obj_t* container = lv_obj_create(test_screen());
     lv_obj_remove_flag(container, LV_OBJ_FLAG_SCROLLABLE);
@@ -155,13 +155,13 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
     // per side) that its center sits comfortably outside the 18px resize-edge
     // margin (EDGE_HIT_INWARD/EDGE_HIT_MARGIN in grid_edit_mode.cpp) — this
     // test wants a plain move, not a resize.
-    constexpr int kColspan = 2;
-    constexpr int kRowspan = 2;
+    constexpr int COLSPAN = 2;
+    constexpr int ROWSPAN = 2;
     lv_obj_t* widget = lv_obj_create(container);
     lv_obj_set_name(widget, "temperature");
     lv_obj_remove_flag(widget, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_grid_cell(widget, LV_GRID_ALIGN_STRETCH, 0, kColspan, LV_GRID_ALIGN_STRETCH, 0,
-                         kRowspan);
+    lv_obj_set_grid_cell(widget, LV_GRID_ALIGN_STRETCH, 0, COLSPAN, LV_GRID_ALIGN_STRETCH, 0,
+                         ROWSPAN);
     lv_obj_update_layout(container);
 
     // Config: put the widget on a SECOND page. PanelWidgetConfig::load()
@@ -184,26 +184,26 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
                              {"enabled", true},
                              {"col", 0},
                              {"row", 0},
-                             {"colspan", kColspan},
-                             {"rowspan", kRowspan}}}}}}}});
+                             {"colspan", COLSPAN},
+                             {"rowspan", ROWSPAN}}}}}}}});
 
     auto& mgr = PanelWidgetManager::instance();
     mgr.get_widget_config(panel_id).mark_dirty();
     mgr.clear_panel_config(panel_id);
     auto& config = mgr.get_widget_config(panel_id);
-    constexpr int kPageIndex = 1; // "spy" page above
+    constexpr int PAGE_INDEX = 1; // "spy" page above
 
     // Sanity check on the config wiring itself, not the drag: "temperature" is
     // a real registered widget ID (panel_widget_registry.cpp) — an ID
     // parse_widget_array() doesn't recognize is silently dropped
     // (find_widget_def() == nullptr), which would make the drag below fail
     // with "widget not in config" rather than a snap-target mismatch.
-    const auto& spy_entries = config.page_entries(static_cast<size_t>(kPageIndex));
+    const auto& spy_entries = config.page_entries(static_cast<size_t>(PAGE_INDEX));
     REQUIRE(spy_entries.size() == 1);
     REQUIRE(spy_entries[0].id == "temperature");
 
     GridEditMode em;
-    em.enter(container, &config, kPageIndex);
+    em.enter(container, &config, PAGE_INDEX);
     em.select_widget(widget);
     REQUIRE(em.selected_widget() == widget);
 
@@ -227,16 +227,16 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
     const float pitch_correct_col =
         static_cast<float>(content_w + gutter) / static_cast<float>(ncols);
     const float pitch_buggy_col = static_cast<float>(content_w) / static_cast<float>(ncols);
-    constexpr int kExpectedCol = 3;
+    constexpr int EXPECTED_COL = 3;
     const int target_px_x = static_cast<int>(
-        std::lround((kExpectedCol + 0.5f) * (pitch_correct_col + pitch_buggy_col) / 2.0f));
+        std::lround((EXPECTED_COL + 0.5f) * (pitch_correct_col + pitch_buggy_col) / 2.0f));
 
     // Row target = 1, landing exactly on the correct track origin. The row
     // axis isn't the boundary-straddling case above (that needs only one
     // axis to prove the point) but it still exercises real gutter-aware
     // pixel math, and a bug that only broke rows would still fail it.
-    constexpr int kExpectedRow = 1;
-    const int target_px_y = kExpectedRow * (kCellPx + gutter);
+    constexpr int EXPECTED_ROW = 1;
+    const int target_px_y = EXPECTED_ROW * (CELL_PX + gutter);
 
     lv_area_t content_area;
     lv_obj_get_content_coords(container, &content_area);
@@ -277,8 +277,8 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
     // failure mode cannot be mistaken for a passing target of -1.
     REQUIRE(snap_col >= 0);
     REQUIRE(snap_row >= 0);
-    CHECK(snap_col == kExpectedCol);
-    CHECK(snap_row == kExpectedRow);
+    CHECK(snap_col == EXPECTED_COL);
+    CHECK(snap_row == EXPECTED_ROW);
 
     em.exit();
     mgr.clear_panel_config(panel_id);
@@ -317,13 +317,13 @@ TEST_CASE_METHOD(XMLTestFixture,
     // Height uses the same generous cell size for the same reason: the
     // container's single row is this height, so it must clear the edge zone
     // on its own with no gutter to help.
-    constexpr int kCellPx = 80;
-    constexpr int kColspan = 2;
-    constexpr int kRowspan = 1;
-    const int content_w = ncols * kCellPx + (ncols - 1) * gutter;
+    constexpr int CELL_PX = 80;
+    constexpr int COLSPAN = 2;
+    constexpr int ROWSPAN = 1;
+    const int content_w = ncols * CELL_PX + (ncols - 1) * gutter;
     // Exactly one row's worth of content — no interior gutter since there is
     // only one track.
-    const int content_h = kCellPx;
+    const int content_h = CELL_PX;
 
     lv_obj_t* container = lv_obj_create(test_screen());
     lv_obj_remove_flag(container, LV_OBJ_FLAG_SCROLLABLE);
@@ -345,8 +345,8 @@ TEST_CASE_METHOD(XMLTestFixture,
     lv_obj_t* widget = lv_obj_create(container);
     lv_obj_set_name(widget, "temperature");
     lv_obj_remove_flag(widget, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_grid_cell(widget, LV_GRID_ALIGN_STRETCH, 0, kColspan, LV_GRID_ALIGN_STRETCH, 0,
-                         kRowspan);
+    lv_obj_set_grid_cell(widget, LV_GRID_ALIGN_STRETCH, 0, COLSPAN, LV_GRID_ALIGN_STRETCH, 0,
+                         ROWSPAN);
     lv_obj_update_layout(container);
 
     const std::string panel_id = "test_grid_edit_drag_path_row_divergence";
@@ -363,21 +363,21 @@ TEST_CASE_METHOD(XMLTestFixture,
                              {"enabled", true},
                              {"col", 0},
                              {"row", 0},
-                             {"colspan", kColspan},
-                             {"rowspan", kRowspan}}}}}}}});
+                             {"colspan", COLSPAN},
+                             {"rowspan", ROWSPAN}}}}}}}});
 
     auto& mgr = PanelWidgetManager::instance();
     mgr.get_widget_config(panel_id).mark_dirty();
     mgr.clear_panel_config(panel_id);
     auto& config = mgr.get_widget_config(panel_id);
-    constexpr int kPageIndex = 1;
+    constexpr int PAGE_INDEX = 1;
 
-    const auto& spy_entries = config.page_entries(static_cast<size_t>(kPageIndex));
+    const auto& spy_entries = config.page_entries(static_cast<size_t>(PAGE_INDEX));
     REQUIRE(spy_entries.size() == 1);
     REQUIRE(spy_entries[0].id == "temperature");
 
     GridEditMode em;
-    em.enter(container, &config, kPageIndex);
+    em.enter(container, &config, PAGE_INDEX);
     em.select_widget(widget);
     REQUIRE(em.selected_widget() == widget);
 

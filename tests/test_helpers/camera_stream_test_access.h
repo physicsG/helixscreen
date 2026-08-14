@@ -28,7 +28,7 @@ class CameraStreamTestAccess {
   public:
     /// Consecutive stream failures the worker tolerates before giving up.
     static constexpr int max_stream_failures() {
-        return CameraStream::kMaxStreamFailures;
+        return CameraStream::MAX_STREAM_FAILURES;
     }
 
     /// Spawn the worker on a real std::thread (stored in `stream_thread_`,
@@ -45,7 +45,7 @@ class CameraStreamTestAccess {
         // false, so no request is ever built from this URL.
         s.stream_url_ = "http://127.0.0.1:9/never-contacted";
         s.snapshot_url_.clear();
-        s.stream_fail_count_ = CameraStream::kMaxStreamFailures;
+        s.stream_fail_count_ = CameraStream::MAX_STREAM_FAILURES;
         s.running_.store(true);
         s.stream_thread_ = std::thread(&CameraStream::stream_thread_func, &s);
     }
@@ -64,7 +64,7 @@ class CameraStreamTestAccess {
     static void run_worker_inline_with_snapshot(CameraStream& s, const std::string& snapshot_url) {
         s.stream_url_ = "http://127.0.0.1:9/never-contacted";
         s.snapshot_url_ = snapshot_url;
-        s.stream_fail_count_ = CameraStream::kMaxStreamFailures;
+        s.stream_fail_count_ = CameraStream::MAX_STREAM_FAILURES;
         s.running_.store(true);
         s.stream_thread_func();
     }

@@ -1293,7 +1293,7 @@ void PrintSelectDetailView::run_when_preflight_ready(std::function<void()> cb) {
             self->headless_scan_done_ = true;
             self->fire_on_preflight_ready();
         },
-        kPreflightReadyTimeoutMs, this);
+        PREFLIGHT_READY_TIMEOUT_MS, this);
     lv_timer_set_repeat_count(preflight_ready_timeout_timer_, 1);
 }
 

@@ -19,9 +19,9 @@ namespace helix::printer {
 namespace {
 
 // Search paths for the built-in catalog (mirrors the old CFS loader).
-const char* kBuiltinPaths[] = {"assets/filaments.json", "../assets/filaments.json",
+const char* BUILTIN_PATHS[] = {"assets/filaments.json", "../assets/filaments.json",
                                "/opt/helixscreen/assets/filaments.json"};
-const char* kUserPaths[] = {"config/user_filaments.json", "../config/user_filaments.json"};
+const char* USER_PATHS[] = {"config/user_filaments.json", "../config/user_filaments.json"};
 
 int get_int(const nlohmann::json& j, const char* key, int def) {
     auto it = j.find(key);
@@ -165,13 +165,13 @@ FilamentCatalog FilamentCatalog::load_with_overlay(const std::string& builtin_pa
 
 FilamentCatalog FilamentCatalog::load_codes(const std::string& scheme) {
     FilamentCatalog cat;
-    for (const auto& jp : read_products(kBuiltinPaths, std::size(kBuiltinPaths))) {
+    for (const auto& jp : read_products(BUILTIN_PATHS, std::size(BUILTIN_PATHS))) {
         auto e = to_effective(jp);
         if (e.codes.find(scheme) != e.codes.end())
             cat.products_.push_back(std::move(e));
     }
     // User overlay may add coded products too.
-    for (const auto& jp : read_products(kUserPaths, std::size(kUserPaths))) {
+    for (const auto& jp : read_products(USER_PATHS, std::size(USER_PATHS))) {
         auto e = to_effective(jp);
         if (e.codes.find(scheme) != e.codes.end())
             cat.products_.push_back(std::move(e));
@@ -195,12 +195,12 @@ std::string first_existing(const char* const* paths, size_t n) {
 } // namespace
 
 FilamentCatalog FilamentCatalog::load_full() {
-    return load_with_overlay(first_existing(kBuiltinPaths, std::size(kBuiltinPaths)),
-                             first_existing(kUserPaths, std::size(kUserPaths)));
+    return load_with_overlay(first_existing(BUILTIN_PATHS, std::size(BUILTIN_PATHS)),
+                             first_existing(USER_PATHS, std::size(USER_PATHS)));
 }
 
 std::map<std::string, std::string> FilamentCatalog::load_user_orca_type_map() {
-    return load_user_orca_type_map_from(first_existing(kUserPaths, std::size(kUserPaths)));
+    return load_user_orca_type_map_from(first_existing(USER_PATHS, std::size(USER_PATHS)));
 }
 
 std::map<std::string, std::string>
@@ -244,11 +244,11 @@ std::string FilamentCatalog::choose_overlay_write_path(const char* const* paths,
 
 bool FilamentCatalog::save_user_products(const std::vector<nlohmann::json>& products) {
     return save_user_products_to(products,
-                                 choose_overlay_write_path(kUserPaths, std::size(kUserPaths)));
+                                 choose_overlay_write_path(USER_PATHS, std::size(USER_PATHS)));
 }
 
 std::vector<nlohmann::json> FilamentCatalog::load_user_products() {
-    return read_products(kUserPaths, std::size(kUserPaths));
+    return read_products(USER_PATHS, std::size(USER_PATHS));
 }
 
 std::vector<nlohmann::json> FilamentCatalog::load_user_products_from(const std::string& path) {

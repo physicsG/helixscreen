@@ -6,6 +6,7 @@
 #include "ui_update_queue.h"
 
 #include "moonraker_api_internal.h"
+#include "runtime_config.h"
 #include "spdlog/spdlog.h"
 
 #include <chrono>
@@ -77,6 +78,16 @@ MoonrakerAPI::~MoonrakerAPI() {
 bool MoonrakerAPI::ensure_http_base_url() {
     if (!http_base_url_.empty()) {
         return true;
+    }
+
+    // Never derive a real HTTP endpoint from a simulated connection. The mock
+    // records the URL it was "connected" to so topology consumers can read it,
+    // but deriving an HTTP base from it would point file transfers at the
+    // operator's actual printer from a --test run that is supposed to touch
+    // nothing. An explicitly configured base URL (above) still wins.
+    if (get_runtime_config()->should_mock_moonraker()) {
+        spdlog::debug("[Moonraker API] Mock Moonraker: not deriving HTTP base URL");
+        return false;
     }
 
     // Try to derive from WebSocket URL

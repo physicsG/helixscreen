@@ -258,7 +258,7 @@ namespace {
 /// Smallest PNG the cache and the processor will both accept: a 10x10 solid
 /// square, 75 bytes. Same bytes as tests/unit/test_thumbnail_cache_request.cpp.
 // clang-format off
-const std::vector<uint8_t> kTinyPng = {
+const std::vector<uint8_t> TINY_PNG = {
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
     0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x0A,
     0x08, 0x02, 0x00, 0x00, 0x00, 0x02, 0x50, 0x58, 0xEA, 0x00, 0x00, 0x00,
@@ -277,8 +277,8 @@ void plant_cached_png(const ThumbnailCache& cache, const std::string& key) {
     const std::string path = cache.get_cache_path(key);
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     REQUIRE(out.good());
-    out.write(reinterpret_cast<const char*>(kTinyPng.data()),
-              static_cast<std::streamsize>(kTinyPng.size()));
+    out.write(reinterpret_cast<const char*>(TINY_PNG.data()),
+              static_cast<std::streamsize>(TINY_PNG.size()));
     out.close();
     REQUIRE(std::filesystem::exists(path));
 }
@@ -490,7 +490,7 @@ TEST_CASE_METHOD(PrintStatusIdleThumbHistoryFixture,
     const helix::ThumbnailTarget target_b = size_thumb(container, 900, 900);
     REQUIRE(target_b.width != target_a.width);
     const auto planted_b =
-        helix::ThumbnailProcessor::instance().process_sync(kTinyPng, key, target_b);
+        helix::ThumbnailProcessor::instance().process_sync(TINY_PNG, key, target_b);
     REQUIRE(planted_b.success);
     const std::string path_b = planted_b.output_path;
     REQUIRE(path_b != path_a);
@@ -542,7 +542,7 @@ TEST_CASE_METHOD(PrintStatusIdleThumbHistoryFixture,
     REQUIRE(source_modified > 0.0);
 
     const helix::ThumbnailTarget target = size_thumb(container, 100, 100);
-    const auto planted = helix::ThumbnailProcessor::instance().process_sync(kTinyPng, key, target);
+    const auto planted = helix::ThumbnailProcessor::instance().process_sync(TINY_PNG, key, target);
     REQUIRE(planted.success);
     REQUIRE(ThumbnailCache::is_lvgl_path(planted.output_path));
 

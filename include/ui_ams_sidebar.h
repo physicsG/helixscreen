@@ -214,7 +214,7 @@ class AmsOperationSidebar {
     // itself stalls it won't fire, but the loop keeps rendering (the number is
     // visibly frozen), so it does.
     lv_timer_t* stall_watchdog_timer_ = nullptr;
-    static constexpr uint32_t kStallWatchdogPeriodMs = 1500;
+    static constexpr uint32_t STALL_WATCHDOG_PERIOD_MS = 1500;
     static void stall_watchdog_cb(lv_timer_t* timer);
 
     // Step progress state

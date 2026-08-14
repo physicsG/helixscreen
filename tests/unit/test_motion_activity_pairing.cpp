@@ -61,7 +61,7 @@ class MotionPairingFixture : public LVGLTestFixture {
     }
 
     /**
-     * recently_active(now) is `inflight_ > 0 || (now - last_done_ < kGraceWindow)`.
+     * recently_active(now) is `inflight_ > 0 || (now - last_done_ < GRACE_WINDOW)`.
      * Passing a `now` past the grace window retires the second term, collapsing
      * the call to a pure `inflight_ > 0` read. AppMotionActivity exposes no
      * inflight getter; this is the supported way to isolate the counter (the
@@ -69,7 +69,7 @@ class MotionPairingFixture : public LVGLTestFixture {
      */
     bool motion_inflight() {
         return state.app_motion_activity().recently_active(AppMotionActivity::clock::now() +
-                                                           AppMotionActivity::kGraceWindow +
+                                                           AppMotionActivity::GRACE_WINDOW +
                                                            std::chrono::seconds(1));
     }
 

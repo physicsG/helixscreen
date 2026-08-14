@@ -125,7 +125,7 @@ void PrinterPrintState::init_subjects(bool register_xml) {
     // here eliminates the BG-thread emplace vs UI-thread read rehash race
     // (see header). update_from_status and the accessor both do direct
     // lookups and never mutate the map after this point.
-    for (int idx = 0; idx < kMaxExtruderScan; ++idx) {
+    for (int idx = 0; idx < MAX_EXTRUDER_SCAN; ++idx) {
         create_extruder_filament_entry(idx);
     }
 
@@ -195,8 +195,8 @@ lv_subject_t* PrinterPrintState::get_extruder_filament_used_subject(int extruder
     auto it = extruder_filament_used_.find(extruder_idx);
     if (it == extruder_filament_used_.end()) {
         spdlog::warn("[PrinterPrintState] get_extruder_filament_used_subject({}) out of range or "
-                     "subjects not initialized (kMaxExtruderScan={})",
-                     extruder_idx, kMaxExtruderScan);
+                     "subjects not initialized (MAX_EXTRUDER_SCAN={})",
+                     extruder_idx, MAX_EXTRUDER_SCAN);
         return nullptr;
     }
     lifetime = it->second.lifetime;
@@ -704,14 +704,14 @@ void PrinterPrintState::update_from_status(const nlohmann::json& status) {
 
     // Per-extruder filament_used (from Klipper's extruder/extruder1/... objects).
     // Keys live at the top level of the status payload, NOT under print_stats.
-    // We scan a small fixed range (0..kMaxExtruderScan-1) — Klipper toolchanger
+    // We scan a small fixed range (0..MAX_EXTRUDER_SCAN-1) — Klipper toolchanger
     // setups max out well below that. Missing keys are silently skipped.
     //
     // All map entries are pre-populated by init_subjects(). We do a direct
     // lookup and only mutate the int value inside the subject, so this runs
     // safely on the WebSocket background thread without racing the UI
     // accessor (no rehash, lv_subject_set_int is atomic on the int).
-    for (int idx = 0; idx < kMaxExtruderScan; ++idx) {
+    for (int idx = 0; idx < MAX_EXTRUDER_SCAN; ++idx) {
         std::string key = (idx == 0) ? "extruder" : "extruder" + std::to_string(idx);
         auto json_it = status.find(key);
         if (json_it == status.end() || !json_it->is_object()) {

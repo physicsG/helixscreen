@@ -17676,7 +17676,7 @@ Target reinterpret_bits(const Source source)
 
 struct diyfp // f * 2^e
 {
-    static constexpr int kPrecision = 64; // = q
+    static constexpr int PRECISION = 64; // = q
 
     std::uint64_t f = 0;
     int e = 0;
@@ -17701,7 +17701,7 @@ struct diyfp // f * 2^e
     */
     static diyfp mul(const diyfp& x, const diyfp& y) noexcept
     {
-        static_assert(kPrecision == 64, "internal error");
+        static_assert(PRECISION == 64, "internal error");
 
         // Computes:
         //  f = round((x.f * y.f) / 2^q)
@@ -17821,21 +17821,21 @@ boundaries compute_boundaries(FloatType value)
     static_assert(std::numeric_limits<FloatType>::is_iec559,
                   "internal error: dtoa_short requires an IEEE-754 floating-point implementation");
 
-    constexpr int      kPrecision = std::numeric_limits<FloatType>::digits; // = p (includes the hidden bit)
-    constexpr int      kBias      = std::numeric_limits<FloatType>::max_exponent - 1 + (kPrecision - 1);
-    constexpr int      kMinExp    = 1 - kBias;
-    constexpr std::uint64_t kHiddenBit = std::uint64_t{1} << (kPrecision - 1); // = 2^(p-1)
+    constexpr int      PRECISION = std::numeric_limits<FloatType>::digits; // = p (includes the hidden bit)
+    constexpr int      BIAS      = std::numeric_limits<FloatType>::max_exponent - 1 + (PRECISION - 1);
+    constexpr int      MIN_EXP    = 1 - BIAS;
+    constexpr std::uint64_t HIDDEN_BIT = std::uint64_t{1} << (PRECISION - 1); // = 2^(p-1)
 
-    using bits_type = typename std::conditional<kPrecision == 24, std::uint32_t, std::uint64_t >::type;
+    using bits_type = typename std::conditional<PRECISION == 24, std::uint32_t, std::uint64_t >::type;
 
     const auto bits = static_cast<std::uint64_t>(reinterpret_bits<bits_type>(value));
-    const std::uint64_t E = bits >> (kPrecision - 1);
-    const std::uint64_t F = bits & (kHiddenBit - 1);
+    const std::uint64_t E = bits >> (PRECISION - 1);
+    const std::uint64_t F = bits & (HIDDEN_BIT - 1);
 
     const bool is_denormal = E == 0;
     const diyfp v = is_denormal
-                    ? diyfp(F, kMinExp)
-                    : diyfp(F + kHiddenBit, static_cast<int>(E) - kBias);
+                    ? diyfp(F, MIN_EXP)
+                    : diyfp(F + HIDDEN_BIT, static_cast<int>(E) - BIAS);
 
     // Compute the boundaries m- and m+ of the floating-point value
     // v = f * 2^e.
@@ -17928,8 +17928,8 @@ boundaries compute_boundaries(FloatType value)
 //
 //      -e <= 60   or   e >= -60 := alpha
 
-constexpr int kAlpha = -60;
-constexpr int kGamma = -32;
+constexpr int ALPHA = -60;
+constexpr int GAMMA = -32;
 
 struct cached_power // c = f * 2^e ~= 10^k
 {
@@ -17997,10 +17997,10 @@ inline cached_power get_cached_power_for_binary_exponent(int e)
     // NB:
     // Actually this function returns c, such that -60 <= e_c + e + 64 <= -34.
 
-    constexpr int kCachedPowersMinDecExp = -300;
-    constexpr int kCachedPowersDecStep = 8;
+    constexpr int CACHED_POWERS_MIN_DEC_EXP = -300;
+    constexpr int CACHED_POWERS_DEC_STEP = 8;
 
-    static constexpr std::array<cached_power, 79> kCachedPowers =
+    static constexpr std::array<cached_power, 79> CACHED_POWERS =
     {
         {
             { 0xAB70FE17C79AC6CA, -1060, -300 },
@@ -18086,21 +18086,21 @@ inline cached_power get_cached_power_for_binary_exponent(int e)
     };
 
     // This computation gives exactly the same results for k as
-    //      k = ceil((kAlpha - e - 1) * 0.30102999566398114)
+    //      k = ceil((ALPHA - e - 1) * 0.30102999566398114)
     // for |e| <= 1500, but doesn't require floating-point operations.
     // NB: log_10(2) ~= 78913 / 2^18
     JSON_ASSERT(e >= -1500);
     JSON_ASSERT(e <=  1500);
-    const int f = kAlpha - e - 1;
+    const int f = ALPHA - e - 1;
     const int k = ((f * 78913) / (1 << 18)) + static_cast<int>(f > 0);
 
-    const int index = (-kCachedPowersMinDecExp + k + (kCachedPowersDecStep - 1)) / kCachedPowersDecStep;
+    const int index = (-CACHED_POWERS_MIN_DEC_EXP + k + (CACHED_POWERS_DEC_STEP - 1)) / CACHED_POWERS_DEC_STEP;
     JSON_ASSERT(index >= 0);
-    JSON_ASSERT(static_cast<std::size_t>(index) < kCachedPowers.size());
+    JSON_ASSERT(static_cast<std::size_t>(index) < CACHED_POWERS.size());
 
-    const cached_power cached = kCachedPowers[static_cast<std::size_t>(index)];
-    JSON_ASSERT(kAlpha <= cached.e + e + 64);
-    JSON_ASSERT(kGamma >= cached.e + e + 64);
+    const cached_power cached = CACHED_POWERS[static_cast<std::size_t>(index)];
+    JSON_ASSERT(ALPHA <= cached.e + e + 64);
+    JSON_ASSERT(GAMMA >= cached.e + e + 64);
 
     return cached;
 }
@@ -18207,8 +18207,8 @@ M- and M+ must be normalized and share the same exponent -60 <= e <= -32.
 inline void grisu2_digit_gen(char* buffer, int& length, int& decimal_exponent,
                              diyfp M_minus, diyfp w, diyfp M_plus)
 {
-    static_assert(kAlpha >= -60, "internal error");
-    static_assert(kGamma <= -32, "internal error");
+    static_assert(ALPHA >= -60, "internal error");
+    static_assert(GAMMA <= -32, "internal error");
 
     // Generates the digits (and the exponent) of a decimal floating-point
     // number V = buffer * 10^decimal_exponent in the range [M-, M+]. The diyfp's
@@ -18222,8 +18222,8 @@ inline void grisu2_digit_gen(char* buffer, int& length, int& decimal_exponent,
     // Grisu2 generates the digits of M+ from left to right and stops as soon as
     // V is in [M-,M+].
 
-    JSON_ASSERT(M_plus.e >= kAlpha);
-    JSON_ASSERT(M_plus.e <= kGamma);
+    JSON_ASSERT(M_plus.e >= ALPHA);
+    JSON_ASSERT(M_plus.e <= GAMMA);
 
     std::uint64_t delta = diyfp::sub(M_plus, M_minus).f; // (significand of (M+ - M-), implicit exponent is e)
     std::uint64_t dist  = diyfp::sub(M_plus, w      ).f; // (significand of (M+ - w ), implicit exponent is e)
@@ -18507,7 +18507,7 @@ template<typename FloatType>
 JSON_HEDLEY_NON_NULL(1)
 void grisu2(char* buf, int& len, int& decimal_exponent, FloatType value)
 {
-    static_assert(diyfp::kPrecision >= std::numeric_limits<FloatType>::digits + 3,
+    static_assert(diyfp::PRECISION >= std::numeric_limits<FloatType>::digits + 3,
                   "internal error: not enough precision");
 
     JSON_ASSERT(std::isfinite(value));
@@ -18723,15 +18723,15 @@ char* to_chars(char* first, const char* last, FloatType value)
     JSON_ASSERT(len <= std::numeric_limits<FloatType>::max_digits10);
 
     // Format the buffer like printf("%.*g", prec, value)
-    constexpr int kMinExp = -4;
+    constexpr int MIN_EXP = -4;
     // Use digits10 here to increase compatibility with version 2.
-    constexpr int kMaxExp = std::numeric_limits<FloatType>::digits10;
+    constexpr int MAX_EXP = std::numeric_limits<FloatType>::digits10;
 
-    JSON_ASSERT(last - first >= kMaxExp + 2);
-    JSON_ASSERT(last - first >= 2 + (-kMinExp - 1) + std::numeric_limits<FloatType>::max_digits10);
+    JSON_ASSERT(last - first >= MAX_EXP + 2);
+    JSON_ASSERT(last - first >= 2 + (-MIN_EXP - 1) + std::numeric_limits<FloatType>::max_digits10);
     JSON_ASSERT(last - first >= std::numeric_limits<FloatType>::max_digits10 + 6);
 
-    return dtoa_impl::format_buffer(first, len, decimal_exponent, kMinExp, kMaxExp);
+    return dtoa_impl::format_buffer(first, len, decimal_exponent, MIN_EXP, MAX_EXP);
 }
 
 }  // namespace detail

@@ -47,14 +47,14 @@ void register_fan_stack_widget() {
 namespace {
 
 // Fan-related icons available in the font
-static const char* const kFanIcons[] = {
+static const char* const FAN_ICONS[] = {
     // clang-format off
     "fan",       "fan_off",    "cooldown",   "heat_wave",
     // clang-format on
 };
-static constexpr size_t kFanIconCount = std::size(kFanIcons);
-static constexpr int kIconCellSize = 36;
-static constexpr const char* kDefaultFanIcon = "fan";
+static constexpr size_t FAN_ICON_COUNT = std::size(FAN_ICONS);
+static constexpr int ICON_CELL_SIZE = 36;
+static constexpr const char* DEFAULT_FAN_ICON = "fan";
 
 /// Resolve a responsive spacing token to pixels, with a fallback.
 int resolve_space_token(const char* name, int fallback) {
@@ -597,9 +597,9 @@ void FanStackWidget::bind_carousel_fans() {
 
             // Don't let stale telemetry overwrite the user's optimistic value
             // during the Moonraker round-trip (mirrors FanDial).
-            constexpr uint32_t kPostInputSuppressionMs = 400;
+            constexpr uint32_t POST_INPUT_SUPPRESSION_MS = 400;
             if (cp.last_user_input_ms != 0 &&
-                (lv_tick_get() - cp.last_user_input_ms) < kPostInputSuppressionMs)
+                (lv_tick_get() - cp.last_user_input_ms) < POST_INPUT_SUPPRESSION_MS)
                 return;
 
             if (cp.arc) {
@@ -921,11 +921,11 @@ void FanStackWidget::ConfigurePicker::on_created(lv_obj_t* backdrop) {
         return;
     }
 
-    std::string effective_icon = owner_.icon_name_.empty() ? kDefaultFanIcon : owner_.icon_name_;
+    std::string effective_icon = owner_.icon_name_.empty() ? DEFAULT_FAN_ICON : owner_.icon_name_;
 
-    for (size_t i = 0; i < kFanIconCount; ++i) {
+    for (size_t i = 0; i < FAN_ICON_COUNT; ++i) {
         lv_obj_t* cell = lv_obj_create(icon_grid);
-        lv_obj_set_size(cell, kIconCellSize, kIconCellSize);
+        lv_obj_set_size(cell, ICON_CELL_SIZE, ICON_CELL_SIZE);
         lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_bg_opa(cell, 0, 0);
@@ -937,10 +937,10 @@ void FanStackWidget::ConfigurePicker::on_created(lv_obj_t* backdrop) {
                                   LV_PART_MAIN | LV_STATE_PRESSED);
         lv_obj_set_style_bg_opa(cell, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
 
-        apply_icon_cell_highlight(cell, kFanIcons[i] == effective_icon);
+        apply_icon_cell_highlight(cell, FAN_ICONS[i] == effective_icon);
 
         // Icon glyph
-        const char* cp = ui_icon::lookup_codepoint(kFanIcons[i]);
+        const char* cp = ui_icon::lookup_codepoint(FAN_ICONS[i]);
         if (cp) {
             lv_obj_t* icon = lv_label_create(cell);
             lv_label_set_text(icon, cp);
@@ -951,7 +951,7 @@ void FanStackWidget::ConfigurePicker::on_created(lv_obj_t* backdrop) {
             lv_obj_add_flag(icon, LV_OBJ_FLAG_EVENT_BUBBLE);
         }
 
-        lv_obj_set_user_data(cell, new RowPayload{this, kFanIcons[i]});
+        lv_obj_set_user_data(cell, new RowPayload{this, FAN_ICONS[i]});
 
         lv_obj_add_event_cb(
             cell,
@@ -980,7 +980,7 @@ void FanStackWidget::ConfigurePicker::on_created(lv_obj_t* backdrop) {
             LV_EVENT_DELETE, nullptr);
     }
 
-    spdlog::debug("[FanStackWidget] Picker built with {} icons", kFanIconCount);
+    spdlog::debug("[FanStackWidget] Picker built with {} icons", FAN_ICON_COUNT);
 }
 
 // DECLARATIVE_OK: the grid cells are created in C++, so their selection border has
@@ -995,7 +995,7 @@ void FanStackWidget::ConfigurePicker::refresh_icon_highlights() {
         return;
     }
 
-    std::string effective = owner_.icon_name_.empty() ? kDefaultFanIcon : owner_.icon_name_;
+    std::string effective = owner_.icon_name_.empty() ? DEFAULT_FAN_ICON : owner_.icon_name_;
     uint32_t grid_count = lv_obj_get_child_count(icon_grid);
     for (uint32_t i = 0; i < grid_count; ++i) {
         lv_obj_t* cell = lv_obj_get_child(icon_grid, i);
@@ -1014,7 +1014,7 @@ void FanStackWidget::select_fan(const std::string& object_name) {
 }
 
 void FanStackWidget::select_icon(const std::string& name) {
-    icon_name_ = (name == kDefaultFanIcon) ? "" : name;
+    icon_name_ = (name == DEFAULT_FAN_ICON) ? "" : name;
     save_fan_config();
     picker_.refresh_icon_highlights();
 
@@ -1031,5 +1031,5 @@ void FanStackWidget::save_fan_config() {
     save_widget_config(config);
     spdlog::debug("[FanStackWidget] Saved config: {} fan={} icon={}", instance_id_,
                   selected_fan_.empty() ? "(auto)" : selected_fan_,
-                  icon_name_.empty() ? kDefaultFanIcon : icon_name_);
+                  icon_name_.empty() ? DEFAULT_FAN_ICON : icon_name_);
 }

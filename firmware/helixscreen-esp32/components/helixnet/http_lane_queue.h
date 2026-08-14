@@ -20,15 +20,15 @@ namespace helix::http {
 // during Task 10 (see esp32p4-task-10-report.md) plus margin. Enforced
 // regardless of what a caller asks for — protects the PSRAM accumulation
 // buffer even if a future caller passes an unbounded request.
-inline constexpr size_t kHardCapBytes = 512 * 1024;
+inline constexpr size_t HARD_CAP_BYTES = 512 * 1024;
 
 // Clamps a caller's requested max_bytes to the lane's hard ceiling. A
 // requested size of 0 means "no explicit cap" (the caller wants the whole
 // response, up to whatever the lane allows), which also resolves to the hard
 // ceiling rather than an unbounded fetch.
 inline constexpr size_t clamp_fetch_cap(size_t requested_max_bytes) {
-    if (requested_max_bytes == 0 || requested_max_bytes > kHardCapBytes) {
-        return kHardCapBytes;
+    if (requested_max_bytes == 0 || requested_max_bytes > HARD_CAP_BYTES) {
+        return HARD_CAP_BYTES;
     }
     return requested_max_bytes;
 }

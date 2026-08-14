@@ -54,7 +54,7 @@ static void strip_temperature_suffix(std::string& name) {
 namespace {
 
 // Thermistor-related icons for the picker grid
-static const char* const kThermistorIcons[] = {
+static const char* const THERMISTOR_ICONS[] = {
     // clang-format off
     "thermometer", "thermometer_lines", "thermometer_plus", "thermometer_minus",
     "thermometer_probe", "thermometer_off",
@@ -62,9 +62,9 @@ static const char* const kThermistorIcons[] = {
     "heat_wave", "heater", "radiator", "cooldown",
     // clang-format on
 };
-static constexpr size_t kThermistorIconCount = std::size(kThermistorIcons);
-static constexpr int kIconCellSize = 36;
-static constexpr const char* kDefaultIcon = "thermometer";
+static constexpr size_t THERMISTOR_ICON_COUNT = std::size(THERMISTOR_ICONS);
+static constexpr int ICON_CELL_SIZE = 36;
+static constexpr const char* DEFAULT_ICON = "thermometer";
 
 // Icons with distinct on/off glyphs. Config stores the ON variant;
 // resolve_icon_for_state() derives the OFF variant from this table.
@@ -72,14 +72,14 @@ struct IconPair {
     const char* on_icon;
     const char* off_icon;
 };
-static const IconPair kIconPairs[] = {
+static const IconPair ICON_PAIRS[] = {
     {"thermometer", "thermometer_off"},
 };
 
 /// Map an off-variant icon name to its on-variant (e.g., "thermometer_off" -> "thermometer").
 /// Returns the input unchanged if it's not an off-variant.
 static const char* to_on_variant(const char* icon) {
-    for (const auto& pair : kIconPairs) {
+    for (const auto& pair : ICON_PAIRS) {
         if (std::strcmp(icon, pair.off_icon) == 0)
             return pair.on_icon;
     }
@@ -195,7 +195,7 @@ void ThermistorWidget::attach_single() {
     // Apply custom icon
     lv_obj_t* icon_obj = lv_obj_find_by_name(widget_obj_, "thermistor_icon");
     if (icon_obj) {
-        const char* icon = icon_name_.empty() ? kDefaultIcon : icon_name_.c_str();
+        const char* icon = icon_name_.empty() ? DEFAULT_ICON : icon_name_.c_str();
         ui_icon_set_source(icon_obj, icon);
     }
 
@@ -336,7 +336,7 @@ void ThermistorWidget::bind_carousel_sensors() {
         lv_obj_remove_flag(page, LV_OBJ_FLAG_SCROLLABLE);
 
         // Thermometer icon (use custom icon if configured)
-        const char* icon_src = icon_name_.empty() ? kDefaultIcon : icon_name_.c_str();
+        const char* icon_src = icon_name_.empty() ? DEFAULT_ICON : icon_name_.c_str();
         const char* icon_attrs[] = {"src", icon_src, "size", "sm", "variant", "secondary", nullptr};
         lv_xml_create(page, "icon", icon_attrs);
 
@@ -510,14 +510,14 @@ void ThermistorWidget::select_sensor(const std::string& klipper_name) {
 void ThermistorWidget::select_icon(const std::string& name) {
     // Store the ON variant so display can derive the OFF icon from the pair table
     std::string canonical(to_on_variant(name.c_str()));
-    icon_name_ = (canonical == kDefaultIcon) ? "" : canonical;
+    icon_name_ = (canonical == DEFAULT_ICON) ? "" : canonical;
     save_config();
 
     // Update the widget icon immediately (single mode)
     lv_obj_t* icon_obj =
         widget_obj_ ? lv_obj_find_by_name(widget_obj_, "thermistor_icon") : nullptr;
     if (icon_obj) {
-        const char* effective = icon_name_.empty() ? kDefaultIcon : icon_name_.c_str();
+        const char* effective = icon_name_.empty() ? DEFAULT_ICON : icon_name_.c_str();
         ui_icon_set_source(icon_obj, effective);
     }
 
@@ -597,7 +597,7 @@ void ThermistorWidget::set_config(const nlohmann::json& config) {
         }
         spdlog::debug("[ThermistorWidget] Config: {} sensors, mode={} icon={}", sensors_.size(),
                       is_carousel_mode() ? "carousel" : "single",
-                      icon_name_.empty() ? kDefaultIcon : icon_name_);
+                      icon_name_.empty() ? DEFAULT_ICON : icon_name_);
     }
 }
 
@@ -638,7 +638,7 @@ void ThermistorWidget::save_config() {
     save_widget_config(config);
     spdlog::debug("[ThermistorWidget] Saved config: {} sensors, mode={} icon={}", sensors_.size(),
                   is_carousel_mode() ? "carousel" : "single",
-                  icon_name_.empty() ? kDefaultIcon : icon_name_);
+                  icon_name_.empty() ? DEFAULT_ICON : icon_name_);
 }
 
 void ThermistorWidget::show_sensor_picker() {
@@ -816,11 +816,11 @@ void ThermistorWidget::ConfigurePicker::on_created(lv_obj_t* backdrop) {
         lv_obj_remove_flag(icon_grid, LV_OBJ_FLAG_SCROLLABLE);
 
         std::string effective_icon =
-            owner_.icon_name_.empty() ? std::string(kDefaultIcon) : owner_.icon_name_;
+            owner_.icon_name_.empty() ? std::string(DEFAULT_ICON) : owner_.icon_name_;
 
-        for (size_t i = 0; i < kThermistorIconCount; ++i) {
+        for (size_t i = 0; i < THERMISTOR_ICON_COUNT; ++i) {
             lv_obj_t* cell = lv_obj_create(icon_grid);
-            lv_obj_set_size(cell, kIconCellSize, kIconCellSize);
+            lv_obj_set_size(cell, ICON_CELL_SIZE, ICON_CELL_SIZE);
             lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_set_style_bg_opa(cell, 0, 0);
@@ -832,10 +832,10 @@ void ThermistorWidget::ConfigurePicker::on_created(lv_obj_t* backdrop) {
                                       LV_PART_MAIN | LV_STATE_PRESSED);
             lv_obj_set_style_bg_opa(cell, LV_OPA_20, LV_PART_MAIN | LV_STATE_PRESSED);
 
-            apply_icon_cell_highlight(cell, kThermistorIcons[i] == effective_icon);
+            apply_icon_cell_highlight(cell, THERMISTOR_ICONS[i] == effective_icon);
 
             // Icon glyph
-            const char* cp = ui_icon::lookup_codepoint(kThermistorIcons[i]);
+            const char* cp = ui_icon::lookup_codepoint(THERMISTOR_ICONS[i]);
             if (cp) {
                 lv_obj_t* icon = lv_label_create(cell);
                 lv_label_set_text(icon, cp);
@@ -859,8 +859,8 @@ void ThermistorWidget::ConfigurePicker::on_created(lv_obj_t* backdrop) {
                     auto* target = lv_event_get_current_target_obj(e);
                     auto idx = static_cast<size_t>(
                         reinterpret_cast<intptr_t>(lv_obj_get_user_data(target)));
-                    if (picker && idx < kThermistorIconCount) {
-                        picker->owner_.select_icon(kThermistorIcons[idx]);
+                    if (picker && idx < THERMISTOR_ICON_COUNT) {
+                        picker->owner_.select_icon(THERMISTOR_ICONS[idx]);
                     }
                     LVGL_SAFE_EVENT_CB_END();
                 },
@@ -882,13 +882,13 @@ void ThermistorWidget::ConfigurePicker::refresh_icon_highlights() {
     }
 
     std::string effective_icon =
-        owner_.icon_name_.empty() ? std::string(kDefaultIcon) : owner_.icon_name_;
+        owner_.icon_name_.empty() ? std::string(DEFAULT_ICON) : owner_.icon_name_;
     uint32_t grid_count = lv_obj_get_child_count(icon_grid);
     for (uint32_t i = 0; i < grid_count; ++i) {
         lv_obj_t* cell = lv_obj_get_child(icon_grid, i);
         auto idx = static_cast<size_t>(reinterpret_cast<intptr_t>(lv_obj_get_user_data(cell)));
-        if (idx < kThermistorIconCount) {
-            apply_icon_cell_highlight(cell, kThermistorIcons[idx] == effective_icon);
+        if (idx < THERMISTOR_ICON_COUNT) {
+            apply_icon_cell_highlight(cell, THERMISTOR_ICONS[idx] == effective_icon);
         }
     }
 }

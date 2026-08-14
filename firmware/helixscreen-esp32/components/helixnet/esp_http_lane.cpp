@@ -20,13 +20,13 @@ constexpr char TAG[] = "esp_http_lane";
 // gates are tight (THE PATTERN: no runtime internal-RAM allocation >=32KB
 // after WiFi start); a post-boot 16KB stack claim mirrors app_net_start()'s
 // late pthread spawn in app_boot.cpp.
-constexpr size_t kWorkerStackBytes = 16 * 1024;
-constexpr int kHttpTimeoutMs = 15000;
+constexpr size_t WORKER_STACK_BYTES = 16 * 1024;
+constexpr int HTTP_TIMEOUT_MS = 15000;
 // esp_http_client's own internal read-chunk buffer (config.buffer_size) —
 // small and fine in internal RAM. Only the accumulation buffer built up in
 // run_one() below needs to be PSRAM; that's the buffer the R3 "PSRAM buffer,
 // capped" requirement is about.
-constexpr size_t kClientBufferBytes = 4096;
+constexpr size_t CLIENT_BUFFER_BYTES = 4096;
 } // namespace
 
 EspHttpLane& EspHttpLane::instance() {
@@ -49,7 +49,7 @@ bool EspHttpLane::submit_get(std::string url, size_t range_max_bytes, FetchSucce
 
         // The worker is the only thing that drains the queue and releases
         // slots. Without it the job sits forever and its slot is never
-        // returned, so kQueueDepth failed submissions would wedge the lane for
+        // returned, so QUEUE_DEPTH failed submissions would wedge the lane for
         // the rest of the session. Undo the push and the acquire instead.
         if (!ensure_worker_started_locked()) {
             queue_.pop_back();
@@ -69,7 +69,7 @@ bool EspHttpLane::ensure_worker_started_locked() {
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, kWorkerStackBytes);
+    pthread_attr_setstacksize(&attr, WORKER_STACK_BYTES);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
     pthread_t thread;
@@ -113,8 +113,8 @@ void EspHttpLane::worker_loop() {
 void EspHttpLane::run_one(const Job& job) {
     esp_http_client_config_t config = {};
     config.url = job.url.c_str();
-    config.timeout_ms = kHttpTimeoutMs;
-    config.buffer_size = kClientBufferBytes;
+    config.timeout_ms = HTTP_TIMEOUT_MS;
+    config.buffer_size = CLIENT_BUFFER_BYTES;
     config.method = HTTP_METHOD_GET;
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -158,7 +158,7 @@ void EspHttpLane::run_one(const Job& job) {
 
     // Accumulation buffer in PSRAM — this is the buffer the internal-RAM
     // budget cares about, not esp_http_client's own small read-chunk buffer
-    // (config.buffer_size above, internal RAM, kClientBufferBytes only).
+    // (config.buffer_size above, internal RAM, CLIENT_BUFFER_BYTES only).
     auto* buf = static_cast<uint8_t*>(heap_caps_malloc(job.cap, MALLOC_CAP_SPIRAM));
     if (!buf) {
         if (job.on_error) {

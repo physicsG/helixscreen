@@ -41,7 +41,7 @@ struct PageConfig {
 };
 
 /// Soft cap on maximum number of pages
-static constexpr size_t kMaxPages = 8;
+static constexpr size_t MAX_PAGES = 8;
 
 class PanelWidgetConfig {
   public:

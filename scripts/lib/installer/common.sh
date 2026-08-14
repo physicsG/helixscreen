@@ -285,7 +285,7 @@ _user_dir_name_ok() {
 }
 
 # Accept only scratch directories the installer created, or the staging dir the
-# in-app updater hands over via TMP_DIR (update_checker.cpp kStagingName).
+# in-app updater hands over via TMP_DIR (update_checker.cpp STAGING_NAME).
 validate_tmp_dir() {
     local d="$1"
     if _user_dir_name_ok "$d" '*helixscreen-install*' '.helix-update-staging'; then

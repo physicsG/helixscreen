@@ -41,12 +41,7 @@
   <translation tag="0 = computed" ja="0 = 自動計算"/>
   <translation tag="0 events queued" ja="待機中のイベントなし"/>
   <translation tag="0 slots" ja="{0} スロット"/>
-  <translation tag="0.0000 J/K"/>
-  <translation tag="0.000000 K/s/K"/>
-  <translation tag="0.000000 W/K"/>
   <translation tag="0.4-2mm direct drive, 4-6mm bowden" ja="0.4-2mm ダイレクトドライブ、4-6mm ボーデン"/>
-  <translation tag="0h"/>
-  <translation tag="0m"/>
   <translation tag="0°" ja="0°"/>
   <translation tag="1 day ago" ja="1日前"/>
   <translation tag="1 event queued" ja="1件のイベント待機中"/>
@@ -79,6 +74,7 @@
   <translation tag="30 seconds" ja="30秒"/>
   <translation tag="3D Pipes" ja="3Dパイプ"/>
   <translation tag="3D View" ja="3Dビュー"/>
+  <translation tag="3D printer visualization" ja="3Dプリンター表示"/>
   <translation tag="4. Paper should move but with resistance" ja="4. 紙が抵抗を感じながら動く状態が適切です"/>
   <translation tag="4. Repeat until bed is level" ja="4. ベッドが水平になるまで繰り返してください"/>
   <translation tag="5 min" ja="5分"/>
@@ -124,6 +120,7 @@
   <translation tag="Accelerometer communication failed. Try again." ja="加速度センサーとの通信に失敗しました。再試行してください。"/>
   <translation tag="Accept" ja="承認"/>
   <translation tag="Accepted Z Position: 0.000" ja="確定Z位置: 0.000"/>
+  <translation tag="Accessories" ja="アクセサリー"/>
   <translation tag="Accuracy" ja="精度"/>
   <translation tag="Act:" ja="実測:"/>
   <translation tag="Action Required" ja="対応が必要です"/>
@@ -151,9 +148,10 @@
   <translation tag="All" ja="すべて"/>
   <translation tag="All Devices" ja="すべてのデバイス"/>
   <translation tag="All axes homed" ja="すべての軸がホーミング済み"/>
+  <translation tag="All extruder temperatures with progress bars" ja="全エクストルーダー温度とプログレスバー"/>
   <translation tag="All fields are required" ja="すべての項目が必須です"/>
   <translation tag="All plugins loaded successfully" ja="すべてのプラグインを正常に読み込みました"/>
-  <translation tag="Allow Home Screen Editing"/>
+  <translation tag="Allow Home Screen Editing" ja="ホーム画面の編集を許可"/>
   <translation tag="Allow cold load/unload" ja="コールド時の装填/取り出しを許可"/>
   <translation tag="Allow display to sleep during active prints" ja="印刷中のスリープを許可"/>
   <translation tag="Allwinner" ja="Allwinner"/>
@@ -168,7 +166,7 @@
   <translation tag="An error occurred during measurement." ja="測定中にエラーが発生しました。"/>
   <translation tag="An error occurred during probing." ja="プローブ中にエラーが発生しました。"/>
   <translation tag="An error occurred while loading filament." ja="フィラメントの装填中にエラーが発生しました。"/>
-  <translation tag="An error occurred."/>
+  <translation tag="An error occurred." ja="エラーが発生しました。"/>
   <translation tag="An internal error occurred. The app continues running — please send a debug bundle from Settings &gt; About if it repeats." ja="内部エラーが発生しました。アプリは引き続き動作します。問題が繰り返される場合は、設定 &gt; バージョン情報 からデバッグバンドルを送信してください。"/>
   <translation tag="An unexpected printer error occurred." ja="予期しないプリンターエラーが発生しました。"/>
   <translation tag="An update is available" ja="更新があります"/>
@@ -189,6 +187,7 @@
   <translation tag="Are you sure? This will power off or restart this device." ja="よろしいですか？このデバイスの電源がオフまたは再起動されます。"/>
   <translation tag="Assign Klipper macros to control LEDs via on/off, toggle, or presets" ja="Klipper マクロを割り当ててオン/オフ、トグル、プリセットで LED を制御"/>
   <translation tag="Assign a role to enable sensor monitoring" ja="センサー監視を有効にするには役割を割り当ててください"/>
+  <translation tag="Assisted Retract" ja="アシスト付き引き戻し"/>
   <translation tag="Assisting" ja="アシスト中"/>
   <translation tag="Authentication failed" ja="認証に失敗しました"/>
   <translation tag="Auto" ja="自動"/>
@@ -256,6 +255,7 @@
   <translation tag="Beta features: OFF" ja="ベータ機能: OFF"/>
   <translation tag="Beta features: ON" ja="ベータ機能: ON"/>
   <translation tag="Black" ja="ブラック"/>
+  <translation tag="Blade change and parking" ja="ブレード交換とパーキング"/>
   <translation tag="Blocked" ja="ブロック中"/>
   <translation tag="Bluetooth" ja="Bluetooth"/>
   <translation tag="Bluetooth device not configured" ja="Bluetooth デバイスが設定されていません"/>
@@ -274,6 +274,8 @@
   <translation tag="Both" ja="両方"/>
   <translation tag="Both belts are overtightened." ja="両方のベルトが張りすぎています。"/>
   <translation tag="Both belts need tightening." ja="両方のベルトを張る必要があります。"/>
+  <translation tag="Bowden Length" ja="ボーデン長"/>
+  <translation tag="Bowden tube length from hub to toolhead" ja="ハブからツールヘッドまでのボーデンチューブ長"/>
   <translation tag="Brand" ja="ブランド"/>
   <translation tag="Brightness" ja="明るさ"/>
   <translation tag="Brightness level when LEDs turn on at startup" ja="起動時にLEDが点灯する際の明るさレベル"/>
@@ -281,12 +283,15 @@
   <translation tag="Brother PT (Bluetooth)" ja="Brother PT (Bluetooth)"/>
   <translation tag="Brother QL" ja="Brother QL"/>
   <translation tag="Brother QL (Bluetooth)" ja="Brother QL (Bluetooth)"/>
+  <translation tag="Browse and execute Klipper macros" ja="Klipperマクロを閲覧・実行"/>
   <translation tag="Browse and play recorded timelapses" ja="録画済みタイムラプスを閲覧・再生"/>
   <translation tag="Browse guides, configuration references, and troubleshooting resources for HelixScreen." ja="HelixScreen のガイド、設定リファレンス、トラブルシューティング資料を参照します。"/>
+  <translation tag="Brush nozzle" ja="ノズルをブラシ清掃"/>
   <translation tag="Buffer Status" ja="バッファーステータス"/>
   <translation tag="Build Volume: " ja="造形サイズ: "/>
   <translation tag="Bundle Uploaded" ja="バンドルをアップロードしました"/>
   <translation tag="Button taps and navigation sounds" ja="ボタンタップとナビゲーション音"/>
+  <translation tag="Buzz Servo" ja="サーボを小刻みに動かす"/>
   <translation tag="Bypass" ja="バイパス"/>
   <translation tag="Bypass Mode" ja="バイパスモード"/>
   <translation tag="Bypass controlled by hardware sensor" ja="ハードウェアセンサーによるバイパス制御"/>
@@ -312,6 +317,10 @@
   <translation tag="Cache Dir" ja="キャッシュディレクトリ"/>
   <translation tag="Calibrate" ja="キャリブレート"/>
   <translation tag="Calibrate All" ja="すべてキャリブレート"/>
+  <translation tag="Calibrate Bowden" ja="ボーデンをキャリブレート"/>
+  <translation tag="Calibrate Encoder" ja="エンコーダーをキャリブレート"/>
+  <translation tag="Calibrate Gates" ja="スロットをキャリブレート"/>
+  <translation tag="Calibrate Gear" ja="ギアをキャリブレート"/>
   <translation tag="Calibrate X" ja="X軸をキャリブレート"/>
   <translation tag="Calibrate Y" ja="Y軸をキャリブレート"/>
   <translation tag="Calibrate input shaping to reduce ringing artifacts in prints" ja="入力シェーピングをキャリブレートして印刷のリンギングを軽減します"/>
@@ -322,6 +331,7 @@
   <translation tag="Calibration &amp; Tools" ja="キャリブレーションとツール"/>
   <translation tag="Calibration Complete!" ja="キャリブレーション完了！"/>
   <translation tag="Calibration Failed" ja="キャリブレーション失敗"/>
+  <translation tag="Calibration and system configuration" ja="キャリブレーションとシステム設定"/>
   <translation tag="Calibration cancelled." ja="キャリブレーションをキャンセルしました。"/>
   <translation tag="Calibration complete" ja="キャリブレーション完了"/>
   <translation tag="Calibration complete!" ja="キャリブレーション完了！"/>
@@ -335,6 +345,7 @@
   <translation tag="Calibration succeeded, but the frequency chart data couldn&apos;t be read." ja="キャリブレーションは成功しましたが、周波数グラフのデータを読み取れませんでした。"/>
   <translation tag="Calibration succeeded. The frequency chart is only available when HelixScreen runs on the printer." ja="キャリブレーションは成功しました。周波数グラフは HelixScreen がプリンター上で動作している場合のみ利用できます。"/>
   <translation tag="Calibration timed out. Please try again." ja="タイムアウトしました。もう一度お試しください。"/>
+  <translation tag="Calibration, LED, and system configuration" ja="キャリブレーション、LED、システム設定"/>
   <translation tag="Calibrator not initialized. Try reopening the panel." ja="キャリブレーターが初期化されていません。パネルを開き直してください。"/>
   <translation tag="Camera" ja="カメラ"/>
   <translation tag="Can&apos;t connect — try forgetting and re-pairing the printer" ja="接続できません — プリンターの登録を解除して再ペアリングしてください"/>
@@ -376,6 +387,7 @@
   <translation tag="Chamber target set to {}°C" ja="チャンバー目標温度を{}°C に設定"/>
   <translation tag="Change" ja="変更"/>
   <translation tag="Change Address" ja="アドレスを変更"/>
+  <translation tag="Change Blade" ja="ブレードを交換"/>
   <translation tag="Change Filament" ja="フィラメント交換"/>
   <translation tag="Change LED color based on printer state" ja="プリンターの状態に応じて LED の色を変更"/>
   <translation tag="Change PIN" ja="PIN を変更"/>
@@ -414,6 +426,7 @@
   <translation tag="Choose rendering mode for bed mesh visualization" ja="ベッドメッシュの視覚化レンダリングモードを選択"/>
   <translation tag="Choose sound style" ja="サウンドスタイルを選択"/>
   <translation tag="Choose what to power off or restart." ja="電源オフまたは再起動する対象を選択してください。"/>
+  <translation tag="Clean Brush" ja="ブラシを清掃"/>
   <translation tag="Clean Nozzle" ja="ノズル清掃"/>
   <translation tag="Cleaning Nozzle..." ja="ノズル清掃中..."/>
   <translation tag="Clear" ja="クリア"/>
@@ -421,7 +434,7 @@
   <translation tag="Clear All Events" ja="すべてのイベントをクリア"/>
   <translation tag="Clear Console?" ja="コンソールをクリアしますか？"/>
   <translation tag="Clear Spool" ja="スプールを解除"/>
-  <translation tag="Clear all spool failover assignments"/>
+  <translation tag="Clear all spool failover assignments" ja="すべての予備スプール割り当てを消去"/>
   <translation tag="Clear failed" ja="クリアに失敗しました"/>
   <translation tag="Cleared from settings — system unpair failed, may need OS Bluetooth" ja="設定から削除しました。システムのペアリング解除に失敗、OS の Bluetooth 設定が必要な場合があります"/>
   <translation tag="Clipboard unavailable - use SSH" ja="クリップボード利用不可 - SSHを使用してください"/>
@@ -438,6 +451,7 @@
   <translation tag="Collecting debug info..." ja="デバッグ情報を収集中..."/>
   <translation tag="Color" ja="色"/>
   <translation tag="Color Mismatch" ja="色の不一致"/>
+  <translation tag="Communication Test" ja="通信テスト"/>
   <translation tag="Compact" ja="コンパクト"/>
   <translation tag="Comparison" ja="比較"/>
   <translation tag="Complete" ja="完了"/>
@@ -515,6 +529,8 @@
   <translation tag="Cool Down" ja="冷却"/>
   <translation tag="Cool nozzle after filament ops" ja="フィラメント操作後にノズルを冷却"/>
   <translation tag="Cooling" ja="冷却中"/>
+  <translation tag="Cooling Tube Length" ja="冷却チューブ長"/>
+  <translation tag="Cooling Tube Retraction" ja="冷却チューブの引き戻し"/>
   <translation tag="Copied to clipboard!" ja="クリップボードにコピーしました！"/>
   <translation tag="Copy Command" ja="コマンドをコピー"/>
   <translation tag="Copy failed - use SSH manually" ja="コピー失敗 - SSHを手動で使用してください"/>
@@ -555,6 +571,7 @@
   <translation tag="Current Version" ja="現在のバージョン"/>
   <translation tag="Current Z Position" ja="現在のZ位置"/>
   <translation tag="Current name:" ja="現在の名前:"/>
+  <translation tag="Current time and date" ja="現在の時刻と日付"/>
   <translation tag="Current:" ja="現在:"/>
   <translation tag="Current: %d°C | Target: %d°C" ja="現在: %d°C | 目標: %d°C"/>
   <translation tag="Current: %s · Slot %d" ja="現在: %s · スロット %d"/>
@@ -562,12 +579,16 @@
   <translation tag="Current: Slot %d" ja="現在: スロット %d"/>
   <translation tag="Current: Tool %d" ja="現在: ツール %d"/>
   <translation tag="Currently Loaded" ja="現在ロード中"/>
+  <translation tag="Currently loaded spool info" ja="現在装填中のスプール情報"/>
   <translation tag="Currently printing" ja="印刷中"/>
   <translation tag="Custom" ja="カスタム"/>
   <translation tag="Custom..." ja="カスタム..."/>
   <translation tag="Customize Macro Button" ja="マクロボタンをカスタマイズ"/>
   <translation tag="Customize preset temperatures" ja="プリセット温度をカスタマイズ"/>
+  <translation tag="Cut Distance" ja="カット距離"/>
   <translation tag="Cut filament" ja="フィラメントを切断"/>
+  <translation tag="Cut tip" ja="先端をカット"/>
+  <translation tag="Cutter Enabled" ja="カッター有効"/>
   <translation tag="Cutter jam" ja="カッター詰まり"/>
   <translation tag="Cutting" ja="カット中"/>
   <translation tag="Cutting filament..." ja="フィラメントを切断中..."/>
@@ -611,6 +632,7 @@
   <translation tag="Device name is required" ja="デバイス名は必須です"/>
   <translation tag="Device: " ja="デバイス: "/>
   <translation tag="Different filament?" ja="別のフィラメント？"/>
+  <translation tag="Digital Clock" ja="デジタル時計"/>
   <translation tag="Disable" ja="無効化"/>
   <translation tag="Disable Motors?" ja="モーターを無効にしますか？"/>
   <translation tag="Disable the security PIN" ja="セキュリティ PIN を無効化"/>
@@ -628,6 +650,10 @@
   <translation tag="Display Sleep" ja="ディスプレイスリープ"/>
   <translation tag="Display resolution is very high (%dx%d). Text may appear small. Reduce framebuffer resolution in /boot/firmware/config.txt for best results." ja="ディスプレイ解像度が非常に高くなっています (%dx%d)。テキストが小さく表示される場合があります。最良の結果を得るには、/boot/firmware/config.txt でフレームバッファ解像度を下げてください。"/>
   <translation tag="Display: " ja="ディスプレイ: "/>
+  <translation tag="Distance for hub cutter operation" ja="ハブカッター動作の距離"/>
+  <translation tag="Distance from hub to toolhead" ja="ハブからツールヘッドまでの距離"/>
+  <translation tag="Distance from lane extruder to hub" ja="レーンのエクストルーダーからハブまでの距離"/>
+  <translation tag="Distance from toolhead sensor to nozzle tip" ja="ツールヘッドセンサーからノズル先端までの距離"/>
   <translation tag="Do not power off your printer." ja="プリンターの電源を切らないでください。"/>
   <translation tag="Do not touch the printer during calibration" ja="キャリブレーション中はプリンターに触れないでください"/>
   <translation tag="Dock" ja="ドック"/>
@@ -679,20 +705,30 @@
   <translation tag="Empty" ja="空"/>
   <translation tag="Empty slots disable the associated functionality" ja="空のスロットは関連機能を無効にします"/>
   <translation tag="Enable" ja="有効化"/>
+  <translation tag="Enable Brush Wipe" ja="ブラシワイプを有効化"/>
   <translation tag="Enable Bypass Controls" ja="バイパスコントロールを有効化"/>
   <translation tag="Enable Monitoring" ja="監視を有効化"/>
+  <translation tag="Enable Purge" ja="パージを有効化"/>
   <translation tag="Enable Retraction" ja="リトラクションを有効化"/>
   <translation tag="Enable Timelapse" ja="タイムラプスを有効化"/>
   <translation tag="Enable UI motion effects" ja="UIモーションエフェクトを有効化"/>
   <translation tag="Enable WiFi to scan" ja="WiFi を有効にしてスキャン"/>
   <translation tag="Enable WiFi to scan for networks" ja="WiFi を有効にしてネットワークをスキャン"/>
   <translation tag="Enable anonymous statistics" ja="匿名統計を有効化"/>
+  <translation tag="Enable assisted retraction at hub" ja="ハブでのアシスト付き引き戻しを有効化"/>
   <translation tag="Enable audio feedback" ja="音声フィードバックを有効化"/>
+  <translation tag="Enable brush wipe after purging" ja="パージ後のブラシワイプを有効化"/>
   <translation tag="Enable detailed print preparation tracking (Recommended)" ja="詳細な印刷準備トラッキングを有効化（推奨）"/>
+  <translation tag="Enable feed assist for active slot during printing" ja="印刷中、アクティブなスロットの送りアシストを有効化"/>
+  <translation tag="Enable or disable the hub cutter" ja="ハブカッターの有効／無効"/>
+  <translation tag="Enable purging during tool changes" ja="ツール交換時のパージを有効化"/>
+  <translation tag="Enable/disable automatic backup spool switching" ja="予備スプールへの自動切り替えの有効／無効"/>
+  <translation tag="Enable/disable quiet operation mode" ja="静音動作モードの有効／無効"/>
   <translation tag="Enabled" ja="有効"/>
+  <translation tag="Enclosure humidity sensor readings" ja="エンクロージャー湿度センサーの測定値"/>
   <translation tag="Encoder" ja="エンコーダー"/>
   <translation tag="Ended" ja="終了"/>
-  <translation tag="Endless spool failover cleared for every slot"/>
+  <translation tag="Endless spool failover cleared for every slot" ja="すべてのスロットのエンドレススプール設定を消去しました"/>
   <translation tag="Enhanced {} operation in PRINT_START" ja="PRINT_START 内の {} 操作を強化しました"/>
   <translation tag="Enhanced {} operations in PRINT_START" ja="PRINT_START 内の {} 操作を強化しました"/>
   <translation tag="Enhancement Complete!" ja="改善完了！"/>
@@ -709,6 +745,7 @@
   <translation tag="Enter printer IP address first" ja="先にプリンターのIPアドレスを入力してください"/>
   <translation tag="Enter the IP address and port of your Spoolman server." ja="Spoolman サーバーのIPアドレスとポートを入力してください。"/>
   <translation tag="Entry" ja="入口"/>
+  <translation tag="Entry to Extruder" ja="入口からエクストルーダーまで"/>
   <translation tag="Error" ja="エラー"/>
   <translation tag="Error at chunk {} (code={})" ja="チャンク {} でエラー (code={})"/>
   <translation tag="Error loading file" ja="ファイルの読み込みエラー"/>
@@ -727,7 +764,7 @@
   <translation tag="Error: Verification failed" ja="エラー: 検証に失敗しました"/>
   <translation tag="Error: Wrong architecture" ja="エラー: アーキテクチャが正しくありません"/>
   <translation tag="Error: `unzip` not installed" ja="エラー: `unzip` がインストールされていません"/>
-  <translation tag="Errors only"/>
+  <translation tag="Errors only" ja="エラーのみ"/>
   <translation tag="Escalate to emergency stop if cancel doesn&apos;t respond" ja="キャンセルが応答しない場合は緊急停止にエスカレート"/>
   <translation tag="Escalation Timeout" ja="エスカレーションタイムアウト"/>
   <translation tag="Est. Duration" ja="予想時間"/>
@@ -750,6 +787,7 @@
   <translation tag="External Spool" ja="外部スプール"/>
   <translation tag="External spool cleared" ja="外部スプールをクリアしました"/>
   <translation tag="External spool updated" ja="外部スプールを更新しました"/>
+  <translation tag="Extra distance to move once sensors clear" ja="センサーが解除された後に追加で移動する距離"/>
   <translation tag="Extra prime to compensate ooze" ja="滲み出しを補正するための追加プライム"/>
   <translation tag="Extrude" ja="押し出し"/>
   <translation tag="Extrude Speed" ja="押し出し速度"/>
@@ -757,9 +795,13 @@
   <translation tag="Extrude may still be running — response timed out" ja="押出がまだ実行中の可能性があります — 応答タイムアウト"/>
   <translation tag="Extrude/retract feedrate (Saved)" ja="押し出し/引き戻し速度（保存済み）"/>
   <translation tag="Extruder" ja="エクストルーダー"/>
+  <translation tag="Extruder Load Speed" ja="エクストルーダーのロード速度"/>
   <translation tag="Extruder MPC Calibration" ja="エクストルーダー MPCキャリブレーション"/>
   <translation tag="Extruder PID Tuning" ja="エクストルーダー PID チューニング"/>
+  <translation tag="Extruder Unload Speed" ja="エクストルーダーのアンロード速度"/>
+  <translation tag="Extruder distances and sensor configuration" ja="エクストルーダー距離とセンサー設定"/>
   <translation tag="Extruder heats automatically based on material" ja="素材に基づいてエクストルーダーが自動加熱"/>
+  <translation tag="Extruder to Nozzle" ja="エクストルーダーからノズルまで"/>
   <translation tag="FAILED" ja="失敗"/>
   <translation tag="FILAMENTS" ja="フィラメント"/>
   <translation tag="FILTERS" ja="フィルター"/>
@@ -860,14 +902,17 @@
   <translation tag="Failed to upload remapped G-code: {}" ja="リマップしたG-codeのアップロードに失敗しました: {}"/>
   <translation tag="Fan" ja="ファン"/>
   <translation tag="Fan Calibration" ja="ファンキャリブレーション"/>
+  <translation tag="Fan Speeds" ja="ファン速度"/>
   <translation tag="Fan Transfer" ja="ファン熱伝達"/>
   <translation tag="Fan control failed: {}" ja="ファン制御に失敗しました: {}"/>
   <translation tag="FanSelect" ja="ファンを選択"/>
   <translation tag="Fans" ja="ファン"/>
   <translation tag="Farther" ja="遠く"/>
   <translation tag="Features: " ja="機能: "/>
+  <translation tag="Feed Assist" ja="送りアシスト"/>
   <translation tag="Feed filament" ja="フィラメントを送る"/>
   <translation tag="Feed filament directly to extruder" ja="フィラメントをエクストルーダーに直接供給"/>
+  <translation tag="Feed filament from current slot" ja="現在のスロットからフィラメントを送る"/>
   <translation tag="Feeding filament forward" ja="フィラメントを前方に送り出し中"/>
   <translation tag="Filament" ja="フィラメント"/>
   <translation tag="Filament Detected" ja="フィラメント検出"/>
@@ -879,6 +924,7 @@
   <translation tag="Filament Used" ja="使用済みフィラメント"/>
   <translation tag="Filament already exists" ja="フィラメントはすでに存在します"/>
   <translation tag="Filament by Type" ja="種類別フィラメント"/>
+  <translation tag="Filament clog/flow detection meter" ja="フィラメント詰まり／流量検出メーター"/>
   <translation tag="Filament deleted" ja="フィラメントを削除しました"/>
   <translation tag="Filament diameter sensors for flow compensation" ja="フロー補正用フィラメント直径センサー"/>
   <translation tag="Filament is loose" ja="フィラメントが緩んでいます"/>
@@ -887,18 +933,20 @@
   <translation tag="Filament loaded" ja="フィラメントを装填しました"/>
   <translation tag="Filament operation failed" ja="フィラメント操作に失敗しました"/>
   <translation tag="Filament operation timed out" ja="フィラメント操作がタイムアウトしました"/>
-  <translation tag="Filament ran out - nothing at the toolhead and the print is paused."/>
-  <translation tag="Filament ran out and the CFS found no matching spool to switch to. Load a spool of the same material and color, then resume."/>
-  <translation tag="Filament ran out at the toolhead"/>
-  <translation tag="Filament ran out. Auto-refill is off, so the CFS will not switch spools on its own. Load filament, then resume."/>
+  <translation tag="Filament ran out - nothing at the toolhead and the print is paused." ja="フィラメントが切れました - ツールヘッドには何も残っておらず、印刷は一時停止しています。"/>
+  <translation tag="Filament ran out and the CFS found no matching spool to switch to. Load a spool of the same material and color, then resume." ja="フィラメントが切れましたが、CFSは切り替え可能な一致するスプールを見つけられませんでした。同じ材料と色のスプールを装填してから再開してください。"/>
+  <translation tag="Filament ran out at the toolhead" ja="ツールヘッドでフィラメントが切れました"/>
+  <translation tag="Filament ran out. Auto-refill is off, so the CFS will not switch spools on its own. Load filament, then resume." ja="フィラメントが切れました。自動補充がオフのため、CFSは自動でスプールを切り替えません。フィラメントを装填してから再開してください。"/>
   <translation tag="Filament runout" ja="フィラメント切れ"/>
   <translation tag="Filament runout and motion detection sensors" ja="フィラメント切れとモーション検出センサー"/>
+  <translation tag="Filament runout detection status" ja="フィラメント切れ検出の状態"/>
   <translation tag="Filament saved" ja="フィラメントを保存しました"/>
   <translation tag="Filament sensor available for runout detection" ja="フィラメント切れ検出用のフィラメントセンサーが利用可能です"/>
   <translation tag="Filament tension is balanced" ja="フィラメントの張力が均衡しています"/>
   <translation tag="Filament tracking &amp; label printing" ja="フィラメント追跡とラベル印刷"/>
   <translation tag="Filament tracking and inventory" ja="フィラメント追跡と在庫管理"/>
   <translation tag="Filament unload failed: {}" ja="フィラメントの取出しに失敗しました: {}"/>
+  <translation tag="Filament width sensor readings" ja="フィラメント幅センサーの測定値"/>
   <translation tag="FilamentSensor" ja="フィラメントセンサー"/>
   <translation tag="File" ja="ファイル"/>
   <translation tag="File Size" ja="ファイルサイズ"/>
@@ -925,8 +973,10 @@
   <translation tag="Forget" ja="登録解除"/>
   <translation tag="Forget Network?" ja="ネットワークを登録解除しますか？"/>
   <translation tag="Forget network &apos;{}&apos;? You will need the password to reconnect." ja="ネットワーク &apos;{}&apos; を登録解除しますか？再接続にはパスワードが必要です。"/>
+  <translation tag="Form tip" ja="先端を成形"/>
   <translation tag="Forming Tip" ja="チップ形成中"/>
   <translation tag="Forming tip..." ja="チップを形成中..."/>
+  <translation tag="Forward Multiplier" ja="順方向倍率"/>
   <translation tag="Found %zu printers" ja="%zu台のプリンターを検出"/>
   <translation tag="Found 1 printer" ja="プリンター1台を検出"/>
   <translation tag="Framerate" ja="フレームレート"/>
@@ -938,6 +988,10 @@
   <translation tag="G-code Console" ja="G-code コンソール"/>
   <translation tag="G-code Preview" ja="G-code プレビュー"/>
   <translation tag="G-code commands will appear here" ja="G-code コマンドがここに表示されます"/>
+  <translation tag="GCode Console" ja="Gコードコンソール"/>
+  <translation tag="Gear Buffer Speed" ja="ギアのバッファ速度"/>
+  <translation tag="Gear Spool Speed" ja="ギアのスプール速度"/>
+  <translation tag="Gear Unload Speed" ja="ギアのアンロード速度"/>
   <translation tag="Gear motor synced" ja="ギアモーターを同期しました"/>
   <translation tag="Gear sync" ja="ギア同期"/>
   <translation tag="Generic" ja="汎用"/>
@@ -1027,10 +1081,12 @@
   <translation tag="Hotend Heater" ja="ホットエンドヒーター"/>
   <translation tag="How Z-axis movement is displayed" ja="Z軸の移動表示方法"/>
   <translation tag="How far filament is pushed back into the box on eject (mm)" ja="取り出し時にフィラメントをボックスへ押し戻す距離 (mm)"/>
-  <translation tag="How long to hold before a press counts as a long-press, in ms (raise if edit mode or other long-press actions trigger by accident)"/>
+  <translation tag="How long to hold before a press counts as a long-press, in ms (raise if edit mode or other long-press actions trigger by accident)" ja="長押しと判定されるまでの保持時間（ミリ秒）。編集モードなどが誤動作する場合は大きくしてください"/>
   <translation tag="How many labels to print" ja="印刷するラベル枚数"/>
   <translation tag="How the toolhead icon appears" ja="ツールヘッドアイコンの表示スタイル"/>
   <translation tag="Hub" ja="ハブ"/>
+  <translation tag="Hub &amp; Cutter" ja="ハブとカッター"/>
+  <translation tag="Hub Bowden Length" ja="ハブのボーデン長"/>
   <translation tag="Humidity" ja="湿度"/>
   <translation tag="Hyperlapse" ja="ハイパーラプス"/>
   <translation tag="Hyperlapse captures frames at fixed time intervals. Good for very long prints." ja="ハイパーラプスは一定の時間間隔でフレームを撮影します。非常に長い印刷に適しています。"/>
@@ -1051,10 +1107,12 @@
   <translation tag="Include Klipper/Moonraker logs" ja="Klipper/Moonrakerのログを含める"/>
   <translation tag="Incompatible materials: {} cannot use {} as backup" ja="非対応の素材: {} は {} をバックアップとして使用できません"/>
   <translation tag="Indexing G-code..." ja="G-codeをインデックス中..."/>
-  <translation tag="Infinite Spool Mode"/>
+  <translation tag="Infinite Spool Mode" ja="無限スプールモード"/>
   <translation tag="Info" ja="情報"/>
+  <translation tag="Initial speed for filament unloading" ja="フィラメントアンロードの初速"/>
   <translation tag="Initialized" ja="初期化済み"/>
   <translation tag="Initializing..." ja="初期化中..."/>
+  <translation tag="Initiate blade change procedure" ja="ブレード交換手順を開始"/>
   <translation tag="Input" ja="入力"/>
   <translation tag="Input Shaper" ja="インプットシェーパー"/>
   <translation tag="Input Shaper Help" ja="入力シェーパーヘルプ"/>
@@ -1068,7 +1126,7 @@
   <translation tag="Insert filament before resuming" ja="再開前にフィラメントを挿入してください"/>
   <translation tag="Install" ja="インストール"/>
   <translation tag="Install HelixPrint Plugin" ja="HelixPrint プラグインをインストール"/>
-  <translation tag="Install Older Version?"/>
+  <translation tag="Install Older Version?" ja="以前のバージョンをインストールしますか？"/>
   <translation tag="Install Plugin" ja="プラグインをインストール"/>
   <translation tag="Install Root" ja="インストールルート"/>
   <translation tag="Install Update" ja="更新をインストール"/>
@@ -1087,6 +1145,7 @@
   <translation tag="Installation timed out. The script may be stuck." ja="インストールがタイムアウトしました。スクリプトが停止している可能性があります。"/>
   <translation tag="Installing..." ja="インストール中..."/>
   <translation tag="Intensity" ja="強度"/>
+  <translation tag="Interactive calibration for all lanes" ja="全レーンの対話式キャリブレーション"/>
   <translation tag="Interactive probe calibration" ja="インタラクティブプローブキャリブレーション"/>
   <translation tag="Internal error: API not available" ja="内部エラー: API を利用できません"/>
   <translation tag="Internal error: no scan result" ja="内部エラー: スキャン結果がありません"/>
@@ -1099,6 +1158,7 @@
   <translation tag="Job Queue" ja="ジョブキュー"/>
   <translation tag="Jog failed: {}" ja="ジョグに失敗しました: {}"/>
   <translation tag="Join the HelixScreen community on Discord for discussion, tips, troubleshooting help, and feature requests." ja="Discord で HelixScreen コミュニティに参加して、ディスカッション、ヒント、トラブルシューティング支援、機能リクエストを共有しましょう。"/>
+  <translation tag="Jump directly to motion control / jogging" ja="動作制御／ジョグへ直接移動"/>
   <translation tag="Just now" ja="たった今"/>
   <translation tag="KEYBOARD LAYOUT" ja="キーボードレイアウト"/>
   <translation tag="KLICKY CONTROLS" ja="Klickyコントロール"/>
@@ -1106,6 +1166,7 @@
   <translation tag="Keep Printing" ja="印刷を続行"/>
   <translation tag="Keep Required" ja="必須を維持"/>
   <translation tag="Keep the bypass spool visible when bypass is off" ja="バイパスオフ時もバイパススプールの表示を維持"/>
+  <translation tag="Kick away" ja="かき出し"/>
   <translation tag="Kinematics" ja="キネマティクス"/>
   <translation tag="Klipper" ja="Klipper"/>
   <translation tag="Klipper Error" ja="Klipper エラー"/>
@@ -1118,7 +1179,9 @@
   <translation tag="Klipper: " ja="Klipper: "/>
   <translation tag="Klippy Errors" ja="Klippy エラー"/>
   <translation tag="Klippy Shutdowns" ja="Klippy シャットダウン"/>
-  <translation tag="LED"/>
+  <translation tag="LED Controls" ja="LEDコントロール"/>
+  <translation tag="LED Light" ja="LEDライト"/>
+  <translation tag="LED Mode" ja="LEDモード"/>
   <translation tag="LED SELECTION" ja="LED選択"/>
   <translation tag="LED Settings" ja="LED設定"/>
   <translation tag="LED Strip" ja="LEDストリップ"/>
@@ -1135,16 +1198,16 @@
   <translation tag="Labels" ja="ラベル"/>
   <translation tag="Labels Per Sheet" ja="シートあたりのラベル数"/>
   <translation tag="Lane" ja="レーン"/>
+  <translation tag="Lane tests and motor resets" ja="レーンテストとモーターリセット"/>
   <translation tag="Lane {} is blocked — manual intervention required" ja="レーン {} がブロックされています — 手動での対応が必要です"/>
   <translation tag="Language" ja="言語"/>
   <translation tag="Language, theme, brightness, and sound" ja="言語、テーマ、明るさ、サウンド"/>
   <translation tag="Last" ja="最後"/>
-  <translation tag="Last 7 days"/>
+  <translation tag="Last 7 days" ja="過去7日間"/>
   <translation tag="Last print cancelled" ja="前回の印刷がキャンセルされました"/>
   <translation tag="Last print failed" ja="前回の印刷が失敗しました"/>
   <translation tag="Later" ja="後で"/>
   <translation tag="Layer" ja="レイヤー"/>
-  <translation tag="Layer 0 / 0"/>
   <translation tag="Layer Height" ja="レイヤー高さ"/>
   <translation tag="Layer Macro captures one frame per layer change. Best for most prints." ja="レイヤーマクロはレイヤーが変わるごとに 1 フレームを撮影します。ほとんどの印刷に最適です。"/>
   <translation tag="Layer mode captures one frame per layer change. Best for most prints." ja="レイヤーモードはレイヤー変更ごとに1フレームをキャプチャします。ほとんどの印刷に最適です。"/>
@@ -1152,6 +1215,8 @@
   <translation tag="Layout" ja="レイアウト"/>
   <translation tag="Learn More" ja="詳細を見る"/>
   <translation tag="LedSelect" ja="LEDを選択"/>
+  <translation tag="Length of filament to purge" ja="パージするフィラメントの長さ"/>
+  <translation tag="Length of the cooling tube section" ja="冷却チューブ区間の長さ"/>
   <translation tag="Length:" ja="長さ:"/>
   <translation tag="Leveling Gantry..." ja="ガントリーレベリング中..."/>
   <translation tag="Library" ja="ライブラリ"/>
@@ -1159,8 +1224,12 @@
   <translation tag="Light" ja="ライト"/>
   <translation tag="Light will switch when the current operation finishes" ja="現在の操作が完了したらライトを切り替えます"/>
   <translation tag="Listen to all theme sounds" ja="すべてのテーマサウンドを試聴"/>
+  <translation tag="Live temperature graph with configurable sensors" ja="設定可能なセンサーによるリアルタイム温度グラフ"/>
+  <translation tag="Live webcam feed" ja="ウェブカメラのライブ映像"/>
   <translation tag="Load" ja="装填"/>
   <translation tag="Load Filament" ja="フィラメントを装填"/>
+  <translation tag="Load complete" ja="ロード完了"/>
+  <translation tag="Load filament" ja="フィラメントをロード"/>
   <translation tag="Load may still be running — response timed out" ja="装填がまだ実行中の可能性があります — 応答タイムアウト"/>
   <translation tag="Load the required filaments or start anyway?" ja="必要なフィラメントを装填しますか？それともこのまま開始しますか？"/>
   <translation tag="Loaded" ja="装填済み"/>
@@ -1183,12 +1252,13 @@
   <translation tag="Lock" ja="ロック"/>
   <translation tag="Lock A" ja="ロック A"/>
   <translation tag="Lock B" ja="ロック B"/>
+  <translation tag="Lock Screen" ja="画面ロック"/>
   <translation tag="Lock screen after idle timeout" ja="アイドルタイムアウト後に画面をロック"/>
   <translation tag="Locked during print" ja="印刷中はロックされています"/>
   <translation tag="Log Level" ja="ログレベル"/>
   <translation tag="Logs" ja="ログ"/>
-  <translation tag="Long Press Time"/>
-  <translation tag="Long-press the home grid to rearrange widgets (turn off if it triggers by accident)"/>
+  <translation tag="Long Press Time" ja="長押しの時間"/>
+  <translation tag="Long-press the home grid to rearrange widgets (turn off if it triggers by accident)" ja="ホーム画面のグリッドを長押しするとウィジェットを並べ替えできます（誤動作する場合はオフにしてください）"/>
   <translation tag="Longest Disconnect" ja="最長切断時間"/>
   <translation tag="Loosen Path A belt." ja="パスAのベルトを緩めてください。"/>
   <translation tag="Loosen Path B belt." ja="パスBのベルトを緩めてください。"/>
@@ -1196,7 +1266,7 @@
   <translation tag="Lot # (optional)" ja="ロット番号（オプション）"/>
   <translation tag="Lot/Batch Nr" ja="ロット/バッチ番号"/>
   <translation tag="Low Memory" ja="メモリ不足"/>
-  <translation tag="Lowest notification level that interrupts with a toast"/>
+  <translation tag="Lowest notification level that interrupts with a toast" ja="トースト通知で割り込む最も低い通知レベル"/>
   <translation tag="M to toggle" ja="M で切り替え"/>
   <translation tag="MAC:" ja="MAC:"/>
   <translation tag="MACRO DEVICES" ja="マクロデバイス"/>
@@ -1214,6 +1284,7 @@
   <translation tag="Machine Limits" ja="機械制限"/>
   <translation tag="Macro" ja="マクロ"/>
   <translation tag="Macro Browser" ja="マクロブラウザ"/>
+  <translation tag="Macro Button" ja="マクロボタン"/>
   <translation tag="Macro Buttons" ja="マクロボタン"/>
   <translation tag="Macro analysis not initialized" ja="マクロ解析が初期化されていません"/>
   <translation tag="Macro failed: {}" ja="マクロの実行に失敗しました: {}"/>
@@ -1233,6 +1304,7 @@
   <translation tag="Macros" ja="マクロ"/>
   <translation tag="Main LED Strip" ja="メインLEDストリップ"/>
   <translation tag="Maintaining" ja="維持中"/>
+  <translation tag="Maintenance" ja="メンテナンス"/>
   <translation tag="Make %s Optional?" ja="%sをオプションにしますか？"/>
   <translation tag="Make Optional" ja="オプションにする"/>
   <translation tag="Make bed mesh and QGL skippable" ja="ベッドメッシュと QGL をスキップ可能にする"/>
@@ -1243,6 +1315,8 @@
   <translation tag="Managed by your firmware" ja="ファームウェアによって管理されています"/>
   <translation tag="Manual" ja="手動"/>
   <translation tag="Manual Bed Leveling" ja="手動ベッドレベリング"/>
+  <translation tag="Manual Feed" ja="手動送り"/>
+  <translation tag="Manual Retract" ja="手動引き戻し"/>
   <translation tag="Map to closest colors with matching material" ja="一致する素材で最も近い色に割り当て"/>
   <translation tag="Marginal" ja="やや不良"/>
   <translation tag="Master volume level" ja="マスター音量"/>
@@ -1279,6 +1353,11 @@
   <translation tag="Minutes" ja="分"/>
   <translation tag="Mode" ja="モード"/>
   <translation tag="Modified" ja="変更日時"/>
+  <translation tag="Monitor a single fan speed" ja="単一ファンの速度を監視"/>
+  <translation tag="Monitor and set bed temperature" ja="ベッド温度を監視・設定"/>
+  <translation tag="Monitor and set chamber temperature" ja="チャンバー温度を監視・設定"/>
+  <translation tag="Monitor and set nozzle temperature" ja="ノズル温度を監視・設定"/>
+  <translation tag="Monitor temperature sensors (single or carousel)" ja="温度センサーを監視（単一またはカルーセル）"/>
   <translation tag="Monitoring" ja="モニタリング"/>
   <translation tag="Month" ja="月"/>
   <translation tag="Moonraker" ja="Moonraker"/>
@@ -1288,12 +1367,14 @@
   <translation tag="More points = more accurate, but takes longer." ja="ポイント数が多いほど精度が上がりますが、時間がかかります。"/>
   <translation tag="Motion" ja="動作"/>
   <translation tag="Motion: XYZ" ja="動作: XYZ"/>
+  <translation tag="Motor speeds and acceleration" ja="モーター速度と加速度"/>
   <translation tag="Motors Off" ja="モーターオフ"/>
   <translation tag="Motors disable failed: {}" ja="モーターの無効化に失敗しました: {}"/>
   <translation tag="Motors disabled" ja="モーターを無効化しました"/>
   <translation tag="Move" ja="移動"/>
   <translation tag="Move paper back and forth while adjusting. Stop when paper catches slightly but still slides." ja="調整中は紙を前後に動かしてください。紙がわずかに引っかかりながらも滑る状態で止めてください。"/>
   <translation tag="Move selector" ja="セレクターを移動"/>
+  <translation tag="Move speed multipliers" ja="移動速度の倍率"/>
   <translation tag="Moves the print head to measure vibration frequencies on each axis. Takes 2-3 minutes. The printer will make noise — this is normal." ja="プリントヘッドを移動させて各軸の振動周波数を測定します。2〜3分かかります。プリンターから音がしますが、これは正常です。"/>
   <translation tag="Moving lane" ja="レーンを移動中"/>
   <translation tag="Multi-Filament" ja="マルチフィラメント"/>
@@ -1301,8 +1382,10 @@
   <translation tag="Multi-Filament System" ja="マルチフィラメントシステム"/>
   <translation tag="Multi-Filament System Detected" ja="マルチフィラメントシステムを検出"/>
   <translation tag="Multi-Filament System Management" ja="マルチフィラメントシステム管理"/>
+  <translation tag="Multi-Filament System Status" ja="マルチフィラメントシステムの状態"/>
   <translation tag="Multi-Filament System is busy: {}" ja="マルチフィラメントシステムがビジー状態: {}"/>
   <translation tag="Multi-Filament System not available" ja="マルチフィラメントシステムが利用できません"/>
+  <translation tag="Multi-Filament System spool status and control" ja="マルチフィラメントシステムのスプール状態と操作"/>
   <translation tag="Must home axes first" ja="先にホーミングしてください"/>
   <translation tag="My Custom Theme" ja="マイカスタムテーマ"/>
   <translation tag="My Panel" ja="マイパネル"/>
@@ -1341,6 +1424,7 @@
   <translation tag="No History" ja="履歴なし"/>
   <translation tag="No LED macros detected on your printer." ja="プリンターで LED マクロが検出されませんでした。"/>
   <translation tag="No LED macros detected on your printer. Add Klipper macros for LED control first." ja="プリンターで LED マクロが検出されませんでした。先に LED 制御用の Klipper マクロを追加してください。"/>
+  <translation tag="No LED strips detected" ja="LEDストリップが検出されません"/>
   <translation tag="No Macros Found" ja="マクロが見つかりません"/>
   <translation tag="No Multi-Filament System connected" ja="マルチフィラメントシステムが接続されていません"/>
   <translation tag="No Multi-Filament System connected." ja="マルチフィラメントシステムが接続されていません。"/>
@@ -1351,10 +1435,10 @@
   <translation tag="No Spools" ja="スプールなし"/>
   <translation tag="No USB printer detected" ja="USB プリンターが検出されません"/>
   <translation tag="No USB printers found" ja="USBプリンターが見つかりません"/>
-  <translation tag="No auto-switchover plugin (lessWaste or bambufy) is installed, so this printer will not change to a backup spool on its own."/>
   <translation tag="No automatic backup-spool package is installed" ja="自動バックアップスプール用プラグインが未インストールです"/>
   <translation tag="No buffer data available" ja="バッファーデータがありません"/>
   <translation tag="No camera — use USB barcode scanner" ja="カメラなし — USB バーコードスキャナーを使用してください"/>
+  <translation tag="No chamber temperature sensor detected" ja="チャンバー温度センサーが検出されません"/>
   <translation tag="No changes selected.\n\nClick Cancel to close." ja="変更が選択されていません。\n\n「キャンセル」をクリックして閉じてください。"/>
   <translation tag="No changes to revert" ja="元に戻す変更はありません"/>
   <translation tag="No color" ja="色なし"/>
@@ -1363,10 +1447,12 @@
   <translation tag="No events queued" ja="キューにイベントはありません"/>
   <translation tag="No fans detected" ja="ファンが検出されませんでした"/>
   <translation tag="No filament loaded to unload" ja="取出すフィラメントが装填されていません"/>
+  <translation tag="No filament sensor detected" ja="フィラメントセンサーが検出されません"/>
   <translation tag="No filaments found" ja="フィラメントが見つかりません"/>
   <translation tag="No file loaded" ja="ファイルが読み込まれていません"/>
   <translation tag="No file to reprint" ja="再印刷するファイルがありません"/>
   <translation tag="No files available for printing" ja="印刷可能なファイルがありません"/>
+  <translation tag="No humidity sensor detected" ja="湿度センサーが検出されません"/>
   <translation tag="No images found on USB drive" ja="USBドライブに画像が見つかりません"/>
   <translation tag="No jobs in queue" ja="キューにジョブがありません"/>
   <translation tag="No macro devices configured" ja="マクロデバイスが設定されていません"/>
@@ -1393,14 +1479,16 @@
   <translation tag="No prints yet" ja="印刷履歴なし"/>
   <translation tag="No profiles available" ja="利用可能なプロファイルがありません"/>
   <translation tag="No sensors detected" ja="センサーが検出されませんでした"/>
-  <translation tag="No slot currently matches."/>
+  <translation tag="No slot currently matches." ja="現在、一致するスロットはありません。"/>
   <translation tag="No spool assigned" ja="スプール未割当"/>
   <translation tag="No spools found — tap to retry" ja="スプールが見つかりません — タップして再試行"/>
   <translation tag="No tape detected in printer" ja="プリンターにテープが検出されません"/>
   <translation tag="No target printer configured" ja="対象プリンターが設定されていません"/>
+  <translation tag="No temperature sensors detected" ja="温度センサーが検出されません"/>
   <translation tag="No timelapse videos found" ja="タイムラプス動画が見つかりません"/>
   <translation tag="No vendors found" ja="ベンダーが見つかりません"/>
   <translation tag="No webcam detected.\nA webcam is required for timelapse." ja="ウェブカメラが検出されませんでした。\nタイムラプスにはウェブカメラが必要です。"/>
+  <translation tag="No width sensor detected" ja="幅センサーが検出されません"/>
   <translation tag="None" ja="なし"/>
   <translation tag="None (disable)" ja="なし (無効)"/>
   <translation tag="Not Enough Filament" ja="フィラメントが不足しています"/>
@@ -1415,7 +1503,7 @@
   <translation tag="Not found (use phone app)" ja="見つかりません (スマホアプリを使用)"/>
   <translation tag="Not in your spools? Set it up" ja="スプールにない？登録する"/>
   <translation tag="Not now" ja="後で"/>
-  <translation tag="Not yet available on this display"/>
+  <translation tag="Not yet available on this display" ja="このディスプレイではまだ利用できません"/>
   <translation tag="Not yet calibrated" ja="未キャリブレーション"/>
   <translation tag="Notes" ja="メモ"/>
   <translation tag="Notes (optional)" ja="メモ（オプション）"/>
@@ -1435,11 +1523,13 @@
   <translation tag="Nozzle Priming" ja="ノズルプライミング"/>
   <translation tag="Nozzle Temp" ja="ノズル温度"/>
   <translation tag="Nozzle Temperature" ja="ノズル温度"/>
+  <translation tag="Nozzle Temperatures" ja="ノズル温度"/>
   <translation tag="Nozzle Temps" ja="ノズル温度"/>
   <translation tag="Nozzle did not reach {}°C — {} cancelled" ja="ノズルが{}°Cに達しませんでした — {}を中止しました"/>
   <translation tag="Nozzle min cannot exceed max" ja="ノズル温度の最小値は最大値を超えられません"/>
   <translation tag="Nozzle target set to {}°C" ja="ノズル目標温度を {}°C に設定しました"/>
   <translation tag="Nozzle temp must be 100-500°C" ja="ノズル温度は 100〜500°C にしてください"/>
+  <translation tag="Nozzle, bed, and chamber temps stacked" ja="ノズル・ベッド・チャンバー温度を積み重ね表示"/>
   <translation tag="Nozzle:" ja="ノズル:"/>
   <translation tag="OD" ja="OD"/>
   <translation tag="OFF" ja="OFF"/>
@@ -1454,12 +1544,14 @@
   <translation tag="Off:" ja="オフ:"/>
   <translation tag="On" ja="オン"/>
   <translation tag="On and Off macros must be different" ja="オンとオフのマクロは異なるものにしてください"/>
-  <translation tag="On your phone or computer, join the WiFi network \&quot;{}\&quot;, then open http://{} in a browser to finish setup."/>
-  <translation tag="On-screen Alerts"/>
+  <translation tag="On-screen Alerts" ja="画面上の通知"/>
   <translation tag="On/Off" ja="オン/オフ"/>
   <translation tag="On/Off (state-aware)" ja="オン/オフ（状態追跡）"/>
   <translation tag="On:" ja="オン:"/>
+  <translation tag="Ooze Reduction" ja="にじみ低減"/>
   <translation tag="Open" ja="開く"/>
+  <translation tag="Open G-code command console" ja="Gコードコマンドコンソールを開く"/>
+  <translation tag="Open LED color and brightness controls" ja="LEDの色と明るさの操作を開く"/>
   <translation tag="Open Source Licenses" ja="オープンソースライセンス"/>
   <translation tag="Operation already in progress" ja="操作がすでに進行中です"/>
   <translation tag="Operations" ja="操作"/>
@@ -1485,6 +1577,7 @@
   <translation tag="PIN must be 4-6 digits" ja="PIN は 4〜6 桁にしてください"/>
   <translation tag="PIN removed" ja="PIN を削除しました"/>
   <translation tag="PIN set" ja="PIN を設定しました"/>
+  <translation tag="PIN-protected screen lock" ja="PINで保護された画面ロック"/>
   <translation tag="PINs don&apos;t match" ja="PIN が一致しません"/>
   <translation tag="PLA" ja="PLA"/>
   <translation tag="PLA - Black" ja="PLA - ブラック"/>
@@ -1506,9 +1599,12 @@
   <translation tag="Panel Usage" ja="パネル使用状況"/>
   <translation tag="Paper Test Calibration" ja="紙テストキャリブレーション"/>
   <translation tag="Parameters" ja="パラメータ"/>
+  <translation tag="Park" ja="パーキング"/>
+  <translation tag="Park the AFC system" ja="AFCシステムをパーキング"/>
   <translation tag="Part" ja="パーツ"/>
   <translation tag="Part Cooling Fan" ja="パーツ冷却ファン"/>
   <translation tag="Part Fan" ja="パーツファン"/>
+  <translation tag="Part, hotend, and auxiliary fan speeds" ja="パーツ・ホットエンド・補助ファンの速度"/>
   <translation tag="Password" ja="パスワード"/>
   <translation tag="Password cannot be empty" ja="パスワードを入力してください"/>
   <translation tag="Password is required for secured networks" ja="セキュリティ保護されたネットワークにはパスワードが必要です"/>
@@ -1518,11 +1614,13 @@
   <translation tag="Pause" ja="一時停止"/>
   <translation tag="Pause macro not configured" ja="一時停止マクロが未設定です"/>
   <translation tag="Pause the print first, then load, unload, or change filament" ja="先に印刷を一時停止してから、装填・排出・フィラメント交換を行ってください"/>
+  <translation tag="Pause/resume and stop the active print" ja="実行中の印刷の一時停止／再開と停止"/>
   <translation tag="Paused" ja="一時停止"/>
   <translation tag="Paused (attention needed)" ja="一時停止（対応が必要）"/>
   <translation tag="Pausing..." ja="一時停止中..."/>
   <translation tag="Peak Freq" ja="ピーク周波数"/>
   <translation tag="Peak:" ja="ピーク:"/>
+  <translation tag="Pending alerts and system messages" ja="未読のアラートとシステムメッセージ"/>
   <translation tag="Performance" ja="パフォーマンス"/>
   <translation tag="Phase Tracking" ja="フェーズトラッキング"/>
   <translation tag="Phase tracking disabled" ja="フェーズトラッキング無効"/>
@@ -1562,10 +1660,12 @@
   <translation tag="Poor Accuracy" ja="精度不良"/>
   <translation tag="Port" ja="ポート"/>
   <translation tag="Position" ja="位置"/>
+  <translation tag="Post-Sensor Clear" ja="センサー通過後の追加移動"/>
   <translation tag="Power" ja="電源"/>
   <translation tag="Power Devices" ja="電源デバイス"/>
   <translation tag="Power off the printer or screen" ja="プリンターまたは画面の電源をオフにします"/>
   <translation tag="Pre-print command failed: {}" ja="印刷前コマンドに失敗しました: {}"/>
+  <translation tag="Preheat" ja="予熱"/>
   <translation tag="Preheat Macro" ja="予熱マクロ"/>
   <translation tag="Preheat PLA" ja="PLA 予熱"/>
   <translation tag="Preheat cancelled" ja="予熱がキャンセルされました"/>
@@ -1590,6 +1690,7 @@
   <translation tag="Print Cancelled" ja="印刷キャンセル"/>
   <translation tag="Print Complete!" ja="印刷完了！"/>
   <translation tag="Print Completion Alert" ja="印刷完了通知"/>
+  <translation tag="Print Controls" ja="印刷コントロール"/>
   <translation tag="Print Details" ja="印刷詳細"/>
   <translation tag="Print Failed" ja="印刷失敗"/>
   <translation tag="Print File" ja="印刷ファイル"/>
@@ -1602,6 +1703,7 @@
   <translation tag="Print Paused" ja="印刷一時停止"/>
   <translation tag="Print Speed" ja="印刷速度"/>
   <translation tag="Print Start" ja="印刷開始"/>
+  <translation tag="Print Stats" ja="印刷統計"/>
   <translation tag="Print Status" ja="印刷ステータス"/>
   <translation tag="Print Time" ja="印刷時間"/>
   <translation tag="Print Tuning" ja="印刷チューニング"/>
@@ -1609,8 +1711,10 @@
   <translation tag="Print didn&apos;t start — printer may be busy or offline (B3 polls={}, status=0x{:02X}, error=0x{:02X})" ja="印刷が開始されませんでした — プリンターがビジー状態またはオフラインの可能性があります (B3 polls={}, status=0x{:02X}, error=0x{:02X})"/>
   <translation tag="Print error" ja="印刷エラー"/>
   <translation tag="Print failed" ja="印刷失敗"/>
+  <translation tag="Print history statistics" ja="印刷履歴の統計"/>
   <translation tag="Print issue detected" ja="印刷の問題を検出しました"/>
   <translation tag="Print preparation failed: {}" ja="印刷準備に失敗しました: {}"/>
+  <translation tag="Print progress and file selection" ja="印刷の進捗とファイル選択"/>
   <translation tag="Print server rejected the job — check printer status" ja="印刷サーバーがジョブを拒否しました — プリンターの状態を確認してください"/>
   <translation tag="Print setup failed" ja="印刷のセットアップに失敗しました"/>
   <translation tag="Print setup failed: internal error" ja="印刷のセットアップに失敗しました: 内部エラー"/>
@@ -1668,16 +1772,20 @@
   <translation tag="Probing Bed..." ja="ベッドをプローブ中..."/>
   <translation tag="Probing Failed" ja="プローブ失敗"/>
   <translation tag="Proceed" ja="続行"/>
-  <translation tag="Processing..."/>
+  <translation tag="Processing..." ja="処理中..."/>
   <translation tag="Profile deleted" ja="プロファイルを削除しました"/>
   <translation tag="Profile name (e.g., default)" ja="プロファイル名（例: default）"/>
   <translation tag="Profile renamed" ja="プロファイル名を変更しました"/>
   <translation tag="Profiles" ja="プロファイル"/>
   <translation tag="Pulling filament back" ja="フィラメントを引き戻し中"/>
   <translation tag="Purge" ja="パージ"/>
+  <translation tag="Purge &amp; Wipe" ja="パージとワイプ"/>
+  <translation tag="Purge Length" ja="パージ長"/>
   <translation tag="Purge failed: {}" ja="パージに失敗しました: {}"/>
   <translation tag="Purge macro not configured" ja="パージマクロが未設定です"/>
   <translation tag="Purge may still be running — response timed out" ja="パージがまだ実行中の可能性があります — 応答タイムアウト"/>
+  <translation tag="Purge to bucket" ja="バケツへパージ"/>
+  <translation tag="Purge tower and brush settings" ja="パージタワーとブラシの設定"/>
   <translation tag="Purging" ja="パージ中"/>
   <translation tag="Purging nozzle" ja="ノズルをパージ中"/>
   <translation tag="Purging..." ja="パージ中..."/>
@@ -1692,6 +1800,7 @@
   <translation tag="Quad Gantry Level complete" ja="QGL 完了"/>
   <translation tag="Quad Gantry Level started..." ja="QGL を開始しました..."/>
   <translation tag="Queue: Ready" ja="キュー: 準備完了"/>
+  <translation tag="Queued print jobs" ja="キューに入った印刷ジョブ"/>
   <translation tag="Quick" ja="簡易"/>
   <translation tag="Quick Actions" ja="クイックアクション"/>
   <translation tag="Quick Button 1" ja="クイックボタン1"/>
@@ -1699,13 +1808,18 @@
   <translation tag="Quick Button 3" ja="クイックボタン3"/>
   <translation tag="Quick Button 4" ja="クイックボタン4"/>
   <translation tag="Quick actions, calibration, speed" ja="クイックアクション、キャリブレーション、速度"/>
+  <translation tag="Quick preheat with material selection" ja="材料を選んで素早く予熱"/>
+  <translation tag="Quick toggle, long press for full control" ja="素早く切り替え、長押しで詳細操作"/>
+  <translation tag="Quick tool switching for multi-tool printers" ja="マルチツールプリンター向けの高速ツール切り替え"/>
   <translation tag="RFCOMM connect failed" ja="RFCOMM 接続に失敗しました"/>
   <translation tag="RFCOMM connect failed: " ja="RFCOMM 接続に失敗しました: "/>
   <translation tag="RSS" ja="RSS"/>
   <translation tag="RSS:" ja="RSS:"/>
+  <translation tag="Ramming Volume" ja="ラミング量"/>
   <translation tag="Raspberry Pi" ja="Raspberry Pi"/>
   <translation tag="Raspberry Pi (32-bit)" ja="Raspberry Pi (32-bit)"/>
   <translation tag="Re-probe" ja="再プローブ"/>
+  <translation tag="Re-read spool RFID tags and remaining length" ja="スプールのRFIDタグと残量を再読み込み"/>
   <translation tag="Re-syncs Happy Hare&apos;s tracked state with the hardware." ja="Happy Hare が追跡している状態をハードウェアと再同期します。"/>
   <translation tag="Ready" ja="準備完了"/>
   <translation tag="Ready to Apply" ja="適用の準備完了"/>
@@ -1735,6 +1849,7 @@
   <translation tag="Refill the spool, then Resume." ja="スプールを補充してから再開してください。"/>
   <translation tag="Refresh" ja="更新"/>
   <translation tag="Refresh Interval" ja="更新間隔"/>
+  <translation tag="Refresh RFID" ja="RFIDを再読み込み"/>
   <translation tag="Release all stepper motors. Position will be lost." ja="すべてのステッピングモーターを解放します。位置情報は失われます。"/>
   <translation tag="Remaining (g)" ja="残量 (g)"/>
   <translation tag="Remaining Weight (g)" ja="残量（g）"/>
@@ -1759,17 +1874,24 @@
   <translation tag="Reprint Last" ja="前回を再印刷"/>
   <translation tag="Request Failed" ja="要求に失敗しました"/>
   <translation tag="Require confirmation before emergency stop" ja="緊急停止前に確認を求める"/>
+  <translation tag="Requires Moonraker power device" ja="Moonraker電源デバイスが必要です"/>
   <translation tag="Requires Moonraker-Timelapse plugin" ja="Moonraker-Timelapse プラグインが必要です"/>
+  <translation tag="Requires Multi-Filament System or MMU hardware" ja="マルチフィラメントシステムまたはMMUハードウェアが必要です"/>
+  <translation tag="Requires clog detection hardware" ja="詰まり検出ハードウェアが必要です"/>
   <translation tag="Resend write failed at chunk {}" ja="チャンク {} で再送信の書き込みに失敗しました"/>
   <translation tag="Reset" ja="リセット"/>
+  <translation tag="Reset Blade Counter" ja="ブレードカウンターをリセット"/>
   <translation tag="Reset CFS" ja="CFSをリセット"/>
-  <translation tag="Reset Endless Spool"/>
-  <translation tag="Reset Endless Spool?"/>
+  <translation tag="Reset Endless Spool" ja="エンドレススプールをリセット"/>
+  <translation tag="Reset Endless Spool?" ja="エンドレススプールをリセットしますか？"/>
   <translation tag="Reset Home Screen?" ja="ホーム画面をリセットしますか？"/>
+  <translation tag="Reset Motor Timer" ja="モータータイマーをリセット"/>
+  <translation tag="Reset Servo Counter" ja="サーボカウンターをリセット"/>
   <translation tag="Reset Speed &amp; Flow to 100%" ja="速度とフローを100%にリセット"/>
   <translation tag="Reset all settings and restart wizard" ja="すべての設定をリセットしてウィザードを再開"/>
-  <translation tag="Reset endless spool failed"/>
+  <translation tag="Reset endless spool failed" ja="エンドレススプールのリセットに失敗しました"/>
   <translation tag="Reset failed" ja="リセットに失敗しました"/>
+  <translation tag="Reset motor run-time counter" ja="モーターの稼働時間カウンターをリセット"/>
   <translation tag="Reset to Default" ja="デフォルトにリセット"/>
   <translation tag="Reset to defaults" ja="デフォルトに戻す"/>
   <translation tag="Reset to original values" ja="元の値にリセット"/>
@@ -1780,6 +1902,7 @@
   <translation tag="Restart Firmware?" ja="ファームウェアを再起動しますか？"/>
   <translation tag="Restart HelixScreen" ja="HelixScreen を再起動"/>
   <translation tag="Restart Klipper" ja="Klipper を再起動"/>
+  <translation tag="Restart Klipper firmware" ja="Klipperファームウェアを再起動"/>
   <translation tag="Restart Moonraker" ja="Moonraker を再起動"/>
   <translation tag="Restart Now" ja="今すぐ再起動"/>
   <translation tag="Restart Required" ja="再起動が必要です"/>
@@ -1806,24 +1929,34 @@
   <translation tag="Retract Length" ja="リトラクト長"/>
   <translation tag="Retract Speed" ja="リトラクト速度"/>
   <translation tag="Retract failed: {}" ja="リトラクトに失敗しました: {}"/>
+  <translation tag="Retract filament" ja="フィラメントを引き戻す"/>
+  <translation tag="Retract filament to current slot" ja="現在のスロットへフィラメントを引き戻す"/>
   <translation tag="Retract may still be running — response timed out" ja="リトラクトがまだ実行中の可能性があります — 応答タイムアウト"/>
   <translation tag="Retraction" ja="リトラクション"/>
   <translation tag="Retraction Settings" ja="リトラクション設定"/>
+  <translation tag="Retraction distance in the cooling tube" ja="冷却チューブ内での引き戻し距離"/>
+  <translation tag="Retraction distance to clear extruder gears" ja="エクストルーダーギアから抜くための引き戻し距離"/>
   <translation tag="Retry" ja="再試行"/>
+  <translation tag="Reverse Multiplier" ja="逆方向倍率"/>
   <translation tag="Review detected hardware validation issues" ja="検出されたハードウェア検証の問題を確認"/>
   <translation tag="Review your changes" ja="変更を確認"/>
   <translation tag="Review your configuration below, then click Finish to save" ja="以下の設定を確認し、「完了」をクリックして保存してください"/>
   <translation tag="Rewinding" ja="巻き戻し中"/>
   <translation tag="Role:" ja="役割:"/>
+  <translation tag="Rotating tips and helpful information" ja="入れ替わるヒントと役立つ情報"/>
   <translation tag="Rotation" ja="回転"/>
   <translation tag="Rotation: %d\xc2\xb0 - %ds remaining (or wait to retry)" ja="回転: %d\xc2\xb0 - %ds残り (待つと再試行)"/>
   <translation tag="Rounded" ja="ラウンド"/>
   <translation tag="Run" ja="実行"/>
+  <translation tag="Run Calibration Wizard" ja="キャリブレーションウィザードを実行"/>
   <translation tag="Run Dangerous Macro?" ja="危険なマクロを実行しますか？"/>
   <translation tag="Run Macro" ja="マクロを実行"/>
   <translation tag="Run Macro?" ja="マクロを実行しますか？"/>
   <translation tag="Run a Klipper macro when preheating this material" ja="この素材の予熱時に Klipper マクロを実行"/>
+  <translation tag="Run a configured macro with one tap" ja="設定済みマクロをワンタップで実行"/>
+  <translation tag="Run brush cleaning sequence" ja="ブラシ清掃シーケンスを実行"/>
   <translation tag="Run filament load/unload even when the nozzle is cold (for macros that heat the nozzle themselves)" ja="ノズルがコールドの状態でもフィラメントの装填/取り出しを実行（ノズルを自身で加熱するマクロ向け）"/>
+  <translation tag="Run test sequence on all lanes" ja="全レーンでテストシーケンスを実行"/>
   <translation tag="Run without parameter prompt" ja="パラメータ入力なしで実行"/>
   <translation tag="Run {}?" ja="{} を実行しますか？"/>
   <translation tag="Running {}..." ja="{} を実行中..."/>
@@ -1909,6 +2042,7 @@
   <translation tag="Select Spool" ja="スプールを選択"/>
   <translation tag="Select a filament slot to load" ja="装填するフィラメントスロットを選択"/>
   <translation tag="Select fan" ja="ファンを選択"/>
+  <translation tag="Select gate" ja="スロットを選択"/>
   <translation tag="Select macro for first button" ja="最初のボタンのマクロを選択"/>
   <translation tag="Select macro for fourth button" ja="4番目のボタンのマクロを選択"/>
   <translation tag="Select macro for second button" ja="2番目のボタンのマクロを選択"/>
@@ -1925,6 +2059,7 @@
   <translation tag="Selecting" ja="選択中"/>
   <translation tag="Selecting slot..." ja="スロットを選択中..."/>
   <translation tag="Selector" ja="セレクター"/>
+  <translation tag="Selector Speed" ja="セレクター速度"/>
   <translation tag="Self-Test" ja="セルフテスト"/>
   <translation tag="Send Report" ja="レポートを送信"/>
   <translation tag="Send commands directly to printer" ja="プリンターに直接コマンドを送信"/>
@@ -1933,16 +2068,19 @@
   <translation tag="Sensor" ja="センサー"/>
   <translation tag="Sensor Response" ja="センサー応答"/>
   <translation tag="Sensor Temperature" ja="センサー温度"/>
+  <translation tag="Sensor to Nozzle" ja="センサーからノズルまで"/>
   <translation tag="Sensors" ja="センサー"/>
   <translation tag="Separate on/off macros. HelixScreen tracks the state." ja="個別のオン/オフマクロ。HelixScreenが状態を追跡します。"/>
   <translation tag="Server Setup" ja="サーバー設定"/>
   <translation tag="Servo" ja="サーボ"/>
+  <translation tag="Servo Down" ja="サーボを下げる"/>
+  <translation tag="Servo Move" ja="サーボを移動"/>
+  <translation tag="Servo Up" ja="サーボを上げる"/>
   <translation tag="Session Duration" ja="セッション継続時間"/>
   <translation tag="Session Start" ja="セッション開始"/>
   <translation tag="Set " ja="設定 "/>
   <translation tag="Set Active" ja="アクティブに設定"/>
   <translation tag="Set PIN" ja="PIN を設定"/>
-  <translation tag="Set Up WiFi"/>
   <translation tag="Set a phone strobe app to %.1f Hz and aim at the belt. Adjust until the belt appears stationary.\n\nRecommended apps:\n  Android: Strobily, Strobe Light\n  iOS: Strobe Light Tachometer, myStroboscope" ja="スマホのストロボアプリを %.1f Hz に設定してベルトに向けてください。ベルトが静止して見えるまで調整します。\n\n推奨アプリ:\n  Android: Strobily, Strobe Light\n  iOS: Strobe Light Tachometer, myStroboscope"/>
   <translation tag="Set local timezone for time display" ja="時刻表示用のローカルタイムゾーンを設定"/>
   <translation tag="Set logging verbosity for troubleshooting" ja="トラブルシューティング用のログの詳細レベルを設定"/>
@@ -1951,6 +2089,7 @@
   <translation tag="Settings" ja="設定"/>
   <translation tag="Settings Snapshot" ja="設定スナップショット"/>
   <translation tag="Settings reset to defaults. Restarting..." ja="設定をデフォルトにリセットしました。再起動中..."/>
+  <translation tag="Setup" ja="セットアップ"/>
   <translation tag="Setup Complete!" ja="セットアップ完了！"/>
   <translation tag="Setup Timelapse" ja="タイムラプスを設定"/>
   <translation tag="Shadow Intensity" ja="影の強度"/>
@@ -1971,13 +2110,13 @@
   <translation tag="Show text labels on icon-only home screen widgets" ja="アイコンのみのホーム画面ウィジェットにテキストラベルを表示"/>
   <translation tag="Show up/down buttons on long lists" ja="長いリストに上下ボタンを表示"/>
   <translation tag="Show whatever curves you last had visible on the full graph." ja="フルグラフで最後に表示していた曲線を表示します。"/>
-  <translation tag="Showing loaded colors"/>
-  <translation tag="Showing sliced colors"/>
-  <translation tag="Showing the 50 newest files. See more in the printer&apos;s web UI."/>
+  <translation tag="Showing the 50 newest files. See more in the printer&apos;s web UI." ja="最新の50ファイルを表示しています。それ以外はプリンターのWeb画面で確認してください。"/>
   <translation tag="Shutdown" ja="シャットダウン"/>
   <translation tag="Shutdown / Reboot" ja="シャットダウン / 再起動"/>
   <translation tag="Shutdown failed" ja="シャットダウンに失敗しました"/>
   <translation tag="Shutdown failed — host is still reachable" ja="シャットダウンに失敗しました — ホストに依然として到達可能です"/>
+  <translation tag="Shutdown or reboot the printer host" ja="プリンターホストをシャットダウンまたは再起動"/>
+  <translation tag="Shutdown/Reboot" ja="シャットダウン/再起動"/>
   <translation tag="Shutting down printer..." ja="プリンターをシャットダウン中..."/>
   <translation tag="Shutting down screen..." ja="画面をシャットダウン中..."/>
   <translation tag="Shutting down..." ja="シャットダウン中..."/>
@@ -1995,6 +2134,7 @@
   <translation tag="Slot %d Filament" ja="スロット %d のフィラメント"/>
   <translation tag="Slot 1" ja="スロット1"/>
   <translation tag="Slot {}" ja="スロット {}"/>
+  <translation tag="Slot {} matches." ja="スロット {} が一致します。"/>
   <translation tag="Slot {} spool cleared" ja="スロット {} のスプールをクリアしました"/>
   <translation tag="Slot {} updated" ja="スロット {} を更新しました"/>
   <translation tag="Small labels help keep controls calm and focused." ja="小さなラベルはコントロールを落ち着いた集中した状態に保ちます。"/>
@@ -2011,7 +2151,10 @@
   <translation tag="Spaghetti detected — print paused" ja="スパゲッティを検出しました — 印刷を一時停止しました"/>
   <translation tag="Speaker" ja="スピーカー"/>
   <translation tag="Speed" ja="速度"/>
+  <translation tag="Speed Settings" ja="速度設定"/>
   <translation tag="Speed change failed: {}" ja="速度変更に失敗しました: {}"/>
+  <translation tag="Speed multiplier for forward moves" ja="順方向移動の速度倍率"/>
+  <translation tag="Speed multiplier for reverse moves" ja="逆方向移動の速度倍率"/>
   <translation tag="Speed of prime movement" ja="プライム動作の速度"/>
   <translation tag="Speed of retraction movement" ja="リトラクション動作の速度"/>
   <translation tag="Speed used to push filament out of the box (mm/s)" ja="フィラメントをボックスから押し出す速度 (mm/s)"/>
@@ -2088,7 +2231,7 @@
   <translation tag="Surfaces inherit app background tokens for light and dark modes." ja="サーフェスはライトモードとダークモードのアプリ背景トークンを継承します。"/>
   <translation tag="Switch Printer" ja="プリンターを切り替え"/>
   <translation tag="Switch between light and dark themes" ja="ライトテーマとダークテーマを切り替え"/>
-  <translation tag="Switch to v%s"/>
+  <translation tag="Switch to v%s" ja="v%s に切り替え"/>
   <translation tag="Switched to T{}" ja="T{} に切替えました"/>
   <translation tag="Switches to a backup spool on runout" ja="フィラメント切れ時にバックアップスプールへ切り替えます"/>
   <translation tag="Switching heater control to MPC. Klipper will restart." ja="ヒーター制御をMPCに切り替えます。Klipperが再起動します。"/>
@@ -2103,7 +2246,6 @@
   <translation tag="System detected" ja="システムを検出しました"/>
   <translation tag="T%d has no filament loaded — this print will run out." ja="T%d にフィラメントが装填されていません — この印刷は途中で切れます。"/>
   <translation tag="T%d needs filament in slot %d, which is empty — this print will run out." ja="T%d はスロット %d のフィラメントを必要としますが、空です — この印刷は途中で切れます。"/>
-  <translation tag="T0"/>
   <translation tag="TD-1 filament color detection" ja="TD-1 フィラメント色検出"/>
   <translation tag="TEMPERATURE SENSORS" ja="温度センサー"/>
   <translation tag="THEME COLORS" ja="テーマカラー"/>
@@ -2131,20 +2273,27 @@
   <translation tag="Temp °C" ja="温度 °C"/>
   <translation tag="Temp °C (%d–%d)" ja="温度 °C (%d〜%d)"/>
   <translation tag="Temperature" ja="温度"/>
+  <translation tag="Temperature Graph" ja="温度グラフ"/>
   <translation tag="Temperature Graph Config" ja="温度グラフ設定"/>
-  <translation tag="Temperature control has been optimized."/>
+  <translation tag="Temperature Sensors" ja="温度センサー"/>
   <translation tag="Temperatures" ja="温度"/>
   <translation tag="Temperatures saved" ja="温度を保存しました"/>
   <translation tag="Template" ja="テンプレート"/>
   <translation tag="Temporary adjustment for this print, unless saved on Controls panel" ja="コントロールパネルで保存しない限り、この印刷のみの一時的な調整です"/>
   <translation tag="Tertiary" ja="ターシャリ"/>
+  <translation tag="Test All Lanes" ja="全レーンをテスト"/>
   <translation tag="Test Connection" ja="接続テスト"/>
+  <translation tag="Test Grip" ja="グリップをテスト"/>
+  <translation tag="Test Load" ja="ロードをテスト"/>
+  <translation tag="Test Move" ja="移動をテスト"/>
   <translation tag="Test Network" ja="ネットワークテスト"/>
   <translation tag="Test Print" ja="テスト印刷"/>
+  <translation tag="Test RS-485 link to CFS units" ja="CFSユニットへのRS-485接続をテスト"/>
   <translation tag="Test Screensaver" ja="スクリーンセーバーをテスト"/>
   <translation tag="Test Tracker" ja="テストトラッカー"/>
   <translation tag="Test label printed" ja="テストラベル印刷完了"/>
   <translation tag="Testing rotation: %d\xc2\xb0 (%d/%d) - %ds remaining" ja="回転テスト: %d\xc2\xb0 (%d/%d) - %ds残り"/>
+  <translation tag="Testing, servo, and motor operations" ja="テスト・サーボ・モーター操作"/>
   <translation tag="Thanks! Anonymous usage data helps improve HelixScreen." ja="ご協力ありがとうございます！匿名の使用データが HelixScreen の改善に役立ちます。"/>
   <translation tag="Thanks! TOTALLY anonymous usage data helps improve HelixScreen." ja="ご協力ありがとうございます！完全匿名の使用データが HelixScreen の改善に役立ちます。"/>
   <translation tag="That slot cannot stand in for this one" ja="そのスロットはこのスロットの代わりになりません"/>
@@ -2177,8 +2326,8 @@
   <translation tag="These tools have no matching filament loaded:" ja="これらのツールに一致するフィラメントが装填されていません:"/>
   <translation tag="This calibration uses the paper friction method to set your Z-offset." ja="このキャリブレーションは紙の摩擦方式を使用して Z-offset を設定します。"/>
   <translation tag="This cannot be undone." ja="この操作は元に戻せません。"/>
-  <translation tag="This channel offers v{}, older than the installed v{}. Anything added since then will be removed."/>
-  <translation tag="This clears every spool&apos;s failover assignment. The print will stop on runout until you set up failover again."/>
+  <translation tag="This channel offers v{}, older than the installed v{}. Anything added since then will be removed." ja="このチャンネルが提供するのは v{} で、インストール済みの v{} より古いバージョンです。それ以降に追加されたものは削除されます。"/>
+  <translation tag="This clears every spool&apos;s failover assignment. The print will stop on runout until you set up failover again." ja="すべてのスプールの予備割り当てを消去します。再設定するまで、フィラメント切れで印刷が停止します。"/>
   <translation tag="This device has no wired network connection. If you turn WiFi off, it can only be turned back on from this screen." ja="このデバイスには有線ネットワーク接続がありません。WiFiをオフにすると、この画面からのみオンに戻せます。"/>
   <translation tag="This device has only {} MB of RAM. Resonance calibration is memory-intensive and can make the printer firmware report a \&quot;Timer Too Close\&quot; error or restart mid-test. Continue anyway?" ja="このデバイスの RAM は {} MB しかありません。共振キャリブレーションはメモリを大量に消費し、プリンターのファームウェアが \&quot;Timer Too Close\&quot; エラーを報告したり、テスト中に再起動したりする可能性があります。それでも続行しますか？"/>
   <translation tag="This device has very little RAM. Resonance calibration is memory-intensive and may cause a \&quot;Timer Too Close\&quot; error. Continue anyway?" ja="このデバイスの RAM は非常に少ないです。共振キャリブレーションはメモリを大量に消費し、\&quot;Timer Too Close\&quot; エラーを引き起こす可能性があります。それでも続行しますか？"/>
@@ -2221,20 +2370,30 @@
   <translation tag="Timelapse render failed: {}" ja="タイムラプスのレンダリングに失敗しました: {}"/>
   <translation tag="Timelapse rendered successfully" ja="タイムラプスのレンダリングが完了しました"/>
   <translation tag="Timezone" ja="タイムゾーン"/>
+  <translation tag="Tip Forming" ja="チップ形成"/>
+  <translation tag="Tip shaping configuration" ja="チップ形状の設定"/>
   <translation tag="Tip:" ja="ヒント:"/>
+  <translation tag="Tips" ja="ヒント"/>
   <translation tag="Tips database format error" ja="ヒントデータベースの形式エラー"/>
   <translation tag="Tips database not found" ja="ヒントデータベースが見つかりません"/>
   <translation tag="Toggle" ja="トグル"/>
   <translation tag="Toggle (fire-and-forget)" ja="トグル（状態追跡なし）"/>
+  <translation tag="Toggle AFC LED strip" ja="AFC LEDストリップを切り替え"/>
+  <translation tag="Toggle Auto-Refill" ja="自動補充を切り替え"/>
+  <translation tag="Toggle Moonraker power devices" ja="Moonraker電源デバイスを切り替え"/>
+  <translation tag="Toggle Quiet Mode" ja="静音モードを切り替え"/>
+  <translation tag="Toggle toolhead LED for an extruder" ja="エクストルーダーのツールヘッドLEDを切り替え"/>
   <translation tag="Toggle:" ja="切り替え:"/>
   <translation tag="Too humid" ja="湿度が高すぎます"/>
   <translation tag="Tool" ja="ツール"/>
   <translation tag="Tool Changer" ja="ツールチェンジャー"/>
+  <translation tag="Tool Switcher" ja="ツール切り替え"/>
   <translation tag="Tool change failed: {}" ja="ツール変更に失敗しました: {}"/>
   <translation tag="Tool mapping failed" ja="ツールマッピングに失敗しました"/>
   <translation tag="Tool swap" ja="ツール交換"/>
   <translation tag="Tool {} → Lane {}: no filament loaded." ja="ツール {} → レーン {}: フィラメントが装填されていません。"/>
   <translation tag="Toolhead" ja="ツールヘッド"/>
+  <translation tag="Toolhead LED" ja="ツールヘッドLED"/>
   <translation tag="Toolhead Style" ja="ツールヘッドスタイル"/>
   <translation tag="Toolhead jam" ja="ツールヘッドの詰まり"/>
   <translation tag="Toolhead, G-code, limits, and materials" ja="ツールヘッド、Gコード、制限、材料"/>
@@ -2261,6 +2420,7 @@
   <translation tag="Turn Off" ja="オフにする"/>
   <translation tag="Turn Off WiFi?" ja="WiFiをオフにしますか？"/>
   <translation tag="Turn On" ja="オンにする"/>
+  <translation tag="Turn On LEDs" ja="LEDを点灯"/>
   <translation tag="Turn on LEDs when printer starts" ja="プリンター起動時に LED を点灯"/>
   <translation tag="Turn the extruder heater off after a load or unload finishes" ja="装填または排出の完了後にエクストルーダーヒーターをオフにします"/>
   <translation tag="Type" ja="タイプ"/>
@@ -2289,10 +2449,13 @@
   <translation tag="Unknown Step" ja="不明なステップ"/>
   <translation tag="Unknown error" ja="不明なエラー"/>
   <translation tag="Unload" ja="排出"/>
+  <translation tag="Unload Distance" ja="アンロード距離"/>
   <translation tag="Unload Filament" ja="フィラメントを排出"/>
+  <translation tag="Unload filament" ja="フィラメントをアンロード"/>
   <translation tag="Unload macro not configured" ja="アンロードマクロが未設定です"/>
   <translation tag="Unload may still be running — response timed out" ja="排出がまだ実行中の可能性があります — 応答タイムアウト"/>
   <translation tag="Unloading" ja="アンロード中"/>
+  <translation tag="Unloading Start Speed" ja="アンロード開始速度"/>
   <translation tag="Unloading before bypass..." ja="バイパス前にアンロード中..."/>
   <translation tag="Unloading filament..." ja="フィラメントを排出中..."/>
   <translation tag="Unloads After Print" ja="印刷後にアンロード"/>
@@ -2320,7 +2483,6 @@
   <translation tag="Uptime" ja="稼働時間"/>
   <translation tag="Use Android native keyboard for text input" ja="テキスト入力に Android ネイティブキーボードを使用"/>
   <translation tag="Use G10/G11 firmware retraction" ja="G10/G11 ファームウェアリトラクションを使用"/>
-  <translation tag="Use Settings Instead"/>
   <translation tag="Use printer type to select image" ja="プリンタータイプで画像を選択"/>
   <translation tag="VM Peak" ja="VM ピーク"/>
   <translation tag="VM Size" ja="VM サイズ"/>
@@ -2354,6 +2516,7 @@
   <translation tag="Visits: " ja="表示回数: "/>
   <translation tag="Visual Fine-Tuning" ja="視覚的微調整"/>
   <translation tag="Volume" ja="音量"/>
+  <translation tag="Volume of filament used during ramming" ja="ラミング時に使用するフィラメント量"/>
   <translation tag="WIDTH SENSORS" ja="幅センサー"/>
   <translation tag="WLED" ja="WLED"/>
   <translation tag="WLED Preset" ja="WLED プリセット"/>
@@ -2367,7 +2530,7 @@
   <translation tag="Warming Bed..." ja="ベッド予熱中..."/>
   <translation tag="Warn" ja="警告"/>
   <translation tag="Warning" ja="警告"/>
-  <translation tag="Warnings &amp; errors"/>
+  <translation tag="Warnings &amp; errors" ja="警告とエラー"/>
   <translation tag="Watch the belt under the strobe LED. Adjust frequency until the belt appears stationary — that is the resonant frequency." ja="ストロボ LED の下でベルトを観察してください。ベルトが静止して見えるまで周波数を調整します — それが共振周波数です。"/>
   <translation tag="Weak battery" ja="バッテリー残量低下"/>
   <translation tag="Webcam" ja="ウェブカメラ"/>
@@ -2380,6 +2543,7 @@
   <translation tag="When starting a print, you&apos;ll be able to choose whether to run %s. This saves time when you&apos;ve already done it recently or want more control over your print preparation." ja="印刷開始時に %s を実行するかどうかを選択できるようになります。最近すでに実行した場合や、印刷準備をより細かく制御したい場合に時間を節約できます。"/>
   <translation tag="Where UI sounds play" ja="UIサウンドの再生先"/>
   <translation tag="White" ja="ホワイト"/>
+  <translation tag="Wi-Fi and ethernet connection status" ja="Wi-Fiとイーサネットの接続状態"/>
   <translation tag="WiFi" ja="WiFi"/>
   <translation tag="WiFi Disabled" ja="WiFi 無効"/>
   <translation tag="WiFi Enabled" ja="WiFi 有効"/>
@@ -2393,8 +2557,10 @@
   <translation tag="WiFi was configured but hardware is not available. Check system configuration." ja="WiFi は設定されていますが、ハードウェアが利用できません。システム設定を確認してください。"/>
   <translation tag="Widget Labels" ja="ウィジェットラベル"/>
   <translation tag="Width" ja="幅"/>
+  <translation tag="Width Sensor" ja="幅センサー"/>
   <translation tag="Wifi" ja="Wi-Fi"/>
   <translation tag="Will not switch spools on runout" ja="フィラメント切れ時にスプールを切り替えません"/>
+  <translation tag="Wipe nozzle on silicone cleaning strip" ja="シリコン清掃ストリップでノズルを拭く"/>
   <translation tag="Wizard Error" ja="ウィザードエラー"/>
   <translation tag="Working..." ja="処理中..."/>
   <translation tag="Write failed at chunk {}" ja="チャンク {} で書き込みに失敗しました"/>
@@ -2448,9 +2614,7 @@
   <translation tag="Z:" ja="Z:"/>
   <translation tag="Z: 0.000" ja="Z: 0.000"/>
   <translation tag="\&quot;%s\&quot; failed to load" ja="\&quot;%s\&quot; の読み込みに失敗しました"/>
-  <translation tag="backup-spool switching is on. It only switches to a port whose filament type AND colour both match the active spool and whose own port sensor reads filament present."/>
   <translation tag="bed" ja="ベッド"/>
-  <translation tag="benchy.gcode"/>
   <translation tag="by Preston Brown" ja="by Preston Brown"/>
   <translation tag="chamber heater" ja="チャンバーヒーター"/>
   <translation tag="complete" ja="完了"/>
@@ -2460,6 +2624,8 @@
   <translation tag="e.g. Jet Black" ja="例：ジェットブラック"/>
   <translation tag="e.g. NAME=my_var VALUE=123" ja="例: NAME=my_var VALUE=123"/>
   <translation tag="e.g. Polymaker" ja="例：Polymaker"/>
+  <translation tag="eSpooler Mode" ja="eSpoolerモード"/>
+  <translation tag="eSpooler, clog detection, and sensor settings" ja="eSpooler、詰まり検出、センサーの設定"/>
   <translation tag="elapsed" ja="経過"/>
   <translation tag="enable" ja="有効化"/>
   <translation tag="enabled" ja="有効"/>
@@ -2470,11 +2636,8 @@
   <translation tag="fans" ja="ファン"/>
   <translation tag="heated bed" ja="ヒートベッド"/>
   <translation tag="idle" ja="アイドル"/>
-  <translation tag="is installed but its backup-spool switching is turned off, so no automatic swap will happen."/>
-  <translation tag="is installed, but its backup-spool setting could not be read - do not count on an automatic swap."/>
   <translation tag="layers" ja="レイヤー"/>
   <translation tag="left" ja="残り"/>
-  <translation tag="matches."/>
   <translation tag="mm before clog" ja="詰まりまでの距離 (mm)"/>
   <translation tag="needs" ja="必要"/>
   <translation tag="not detected" ja="未検出"/>
@@ -2514,7 +2677,6 @@
   <translation tag="v%s available" ja="v%s が利用可能です"/>
   <translation tag="v{} installed! Restarting..." ja="v{} をインストールしました！再起動中..."/>
   <translation tag="v{} is available. Tap to update." ja="v{} が利用可能です。タップして更新してください。"/>
-  <translation tag="will switch to a slot whose filament type AND colour both match the active spool and whose own port sensor reads filament present."/>
   <translation tag="you have" ja="現在は"/>
   <translation tag="{} LED strips available" ja="{} 個の LED ストリップが利用可能です"/>
   <translation tag="{} axis homed" ja="{} 軸がホーミング済み"/>
@@ -2525,12 +2687,16 @@
   <translation tag="{} critical hardware issues" ja="{} 個の重要なハードウェアの問題"/>
   <translation tag="{} filament sensors available" ja="{} 個のフィラメントセンサーが利用可能です"/>
   <translation tag="{} heater turned off" ja="{} ヒーターをオフにしました"/>
+  <translation tag="{} is installed but its backup-spool switching is turned off, so no automatic swap will happen." ja="{} はインストールされていますが、予備スプールへの切り替えがオフになっているため、自動切り替えは行われません。"/>
+  <translation tag="{} is installed, but its backup-spool setting could not be read - do not count on an automatic swap." ja="{} はインストールされていますが、予備スプールの設定を読み取れませんでした - 自動切り替えを当てにしないでください。"/>
   <translation tag="{} lanes" ja="{} レーン"/>
   <translation tag="{} macro not configured" ja="{} マクロが未設定です"/>
   <translation tag="{} may cause unintended changes. Are you sure?" ja="{} は意図しない変更を引き起こす可能性があります。よろしいですか？"/>
   <translation tag="{} more taps to {} beta features" ja="あと{}回タップでベータ機能を{}"/>
+  <translation tag="{} needs the HelixPrint plugin. Printing original file." ja="{} には HelixPrint プラグインが必要です。元のファイルを印刷します。"/>
   <translation tag="{} new hardware available" ja="{} 個の新しいハードウェアが利用可能です"/>
   <translation tag="{} preset{}" ja="{} 個のプリセット{}"/>
   <translation tag="{} target set to {}°C" ja="{} 目標温度を {}°C に設定しました"/>
+  <translation tag="{} will switch to a slot whose filament type AND colour both match the active spool and whose own port sensor reads filament present." ja="{} は、フィラメントの種類と色の両方がアクティブなスプールと一致し、かつ自身のポートセンサーがフィラメントを検知しているスロットに切り替えます。"/>
   <translation tag="{} — response timed out" ja="{} — 応答タイムアウト"/>
 </translations>

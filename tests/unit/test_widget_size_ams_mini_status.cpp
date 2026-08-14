@@ -122,7 +122,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini mode dispatch: width_px vs W_NORMA
 // trust for this calculation -- see the avail_w comment in rebuild_spools).
 TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: cell width derives from real width",
                  "[ui][ams_mini][widget_size]") {
-    constexpr int kMinSpoolW = 60; // mirrors MIN_SPOOL_W in ui_ams_mini_status.cpp
+    constexpr int MIN_SPOOL_W = 60; // mirrors MIN_SPOOL_W in ui_ams_mini_status.cpp
 
     ui_ams_mini_status_init();
 
@@ -152,11 +152,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: cell width derives fro
     int gap = theme_manager_get_spacing("space_xxs");
     REQUIRE(avail_w > 0);
 
-    int expected_visible = (avail_w + gap) / (kMinSpoolW + gap);
+    int expected_visible = (avail_w + gap) / (MIN_SPOOL_W + gap);
     expected_visible = std::clamp(expected_visible, 1, 6);
     int expected_cell_px = (avail_w - (expected_visible - 1) * gap - 2) / expected_visible;
-    if (expected_cell_px < kMinSpoolW)
-        expected_cell_px = kMinSpoolW;
+    if (expected_cell_px < MIN_SPOOL_W)
+        expected_cell_px = MIN_SPOOL_W;
 
     REQUIRE(lv_obj_get_width(cell0) == expected_cell_px);
     // With a 300px real container the row fits more than one spool -- this is

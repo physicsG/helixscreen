@@ -403,6 +403,15 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
      */
     [[nodiscard]] std::vector<int> get_tool_mapping() const override;
 
+    /// AFC echoes each lane's `map` field back over the subscription, so a
+    /// restore can be confirmed against firmware truth rather than our own
+    /// optimistic write (#1270).
+    [[nodiscard]] bool reports_firmware_tool_mapping() const override {
+        return true;
+    }
+
+    [[nodiscard]] uint64_t firmware_tool_mapping_generation() const override;
+
     /**
      * @brief Set discovered lane and hub names from PrinterCapabilities
      *
@@ -525,7 +534,7 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     // This is also what restores retention across an eject now that
     // parse_afc_stepper honours AFC's clears: firmware truth clears, and the
     // override re-supplies the identity the user attached.
-    static constexpr const char* kOverrideNamespace = "helix-screen-afc-overrides";
+    static constexpr const char* OVERRIDE_NAMESPACE = "helix-screen-afc-overrides";
     std::unique_ptr<helix::ams::FilamentSlotOverrideStore> override_store_;
     std::unordered_map<int, helix::ams::FilamentSlotOverride> overrides_;
     /// Layer the user override over firmware values. Callers hold mutex_.
@@ -997,9 +1006,10 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     // Per-lane hub routing: lane_name → hub name ("direct" for direct lanes)
     std::unordered_map<std::string, std::string> lane_hub_routing_;
 
-    // Lanes whose "map" field arrived as a non-string (array/object) — dedupes the
-    // multi-tool tripwire warning so it fires once per lane, not per update.
-    std::set<std::string> map_non_string_warned_lanes_;
+    // Lanes whose "map" field listed more than one tool (AFC virtual tools, #605)
+    // — dedupes the "extras are not tracked" warning so it fires once per lane,
+    // not once per status update.
+    std::set<std::string> multi_tool_warned_lanes_;
 
     // AFC state strings outside our known vocabulary — dedupes the schema-drift
     // warning so it fires once per distinct string, not once per status update.
@@ -1037,7 +1047,7 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     /// printer.AFC.message is a FIFO head and each clear pops one entry, so a
     /// single send leaves the next queued error on screen. Armed by clear_fault(),
     /// spent one per status delta that still carries a message. Hitting zero is
-    /// the abnormal exit — see kMessageDrainMaxClears.
+    /// the abnormal exit — see MESSAGE_DRAIN_MAX_CLEARS.
     int message_drain_budget_ = 0;
 
     /// Set by parse_afc_state() while holding mutex_; consumed by
@@ -1075,7 +1085,7 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     /// _get_message(clear=False) — so an error raised by the caller's own
     /// follow-up action (the sidebar sends AFC_RESET right after clear_fault())
     /// can be swallowed unseen anywhere inside the 5 s window.
-    static constexpr int kMessageDrainMaxClears = 10;
+    static constexpr int MESSAGE_DRAIN_MAX_CLEARS = 10;
 
     /// Sends one queued AFC_CLEAR_MESSAGE if the drain is armed and a message is
     /// still present. Must be called WITHOUT mutex_ held.

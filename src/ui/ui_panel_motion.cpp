@@ -107,7 +107,7 @@ MotionPanel::MotionPanel() {
     auto* cfg = Config::get_instance();
     if (cfg) {
         int mode = cfg->get<int>("/motion/jog_mode", -1);
-        if (mode >= 0 && mode < kJogModeCount) {
+        if (mode >= 0 && mode < JOG_MODE_COUNT) {
             current_mode_ = static_cast<JogMode>(mode);
         } else {
             // Migrate legacy bool setting and persist new key
@@ -696,7 +696,7 @@ void MotionPanel::jog(JogDirection direction, float distance_mm) {
         // hair inside the envelope returns a sub-micron residual (199.9999995,
         // +1, max=200 -> ~5e-7). That is a blocked jog, not a real move — an
         // exact compare skipped the warning and dispatched a no-op instead.
-        if (std::abs(ddx) <= helix::AxisMove::kEpsilonMm) {
+        if (std::abs(ddx) <= helix::AxisMove::EPSILON_MM) {
             ddx = 0.0;
             if (!x_edge_warned_) {
                 NOTIFY_WARNING(lv_tr("X jog blocked at bed edge"));
@@ -709,7 +709,7 @@ void MotionPanel::jog(JogDirection direction, float distance_mm) {
     if (ddy != 0.0 && bounds.has_y && y_homed) {
         ddy = helix::clamp_jog_delta(current_y_, jog_coalescer_.uncommitted_y(), ddy, bounds.y_min,
                                      bounds.y_max);
-        if (std::abs(ddy) <= helix::AxisMove::kEpsilonMm) {
+        if (std::abs(ddy) <= helix::AxisMove::EPSILON_MM) {
             ddy = 0.0;
             if (!y_edge_warned_) {
                 NOTIFY_WARNING(lv_tr("Y jog blocked at bed edge"));

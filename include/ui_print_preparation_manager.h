@@ -436,6 +436,35 @@ class PrintPreparationManager {
     [[nodiscard]] bool disabling_option_requires_plugin(const PrePrintOption& opt) const;
 
     /**
+     * @brief Can the adaptive-mesh params actually reach the printer?
+     *
+     * The inverse-facing sibling of disabling_option_requires_plugin(): that one
+     * asks whether DISABLING an option needs the plugin (and hides the toggle if
+     * so), this one asks whether the params an ENABLED adaptive bed_mesh emits
+     * can be delivered at all. True when the plugin can rewrite the PRINT_START
+     * call, or when a pre-start mechanism (printer `setup_gcode` / per-option
+     * PreStartGcode lines) carries the intent instead.
+     *
+     * False means collect_macro_skip_params() must not emit them: start_print()
+     * would collect, fail the capability check, drop them, and warn the user
+     * about a modification they never asked for.
+     */
+    [[nodiscard]] bool adaptive_emit_is_deliverable() const;
+
+    /**
+     * @brief Translated, comma-joined names of the features a dropped
+     *        modification would have carried.
+     *
+     * Feeds the "needs the HelixPrint plugin" warning so it names what it is
+     * dropping. Empty when nothing identifiable contributed, in which case the
+     * caller falls back to the generic message.
+     *
+     * @param ops_to_disable Embedded ops this print was going to strip out
+     */
+    [[nodiscard]] std::string
+    describe_dropped_modifications(const std::vector<gcode::OperationType>& ops_to_disable) const;
+
+    /**
      * @brief Get the pre-print time estimate subject (seconds)
      *
      * Updated by recalculate_estimate() whenever checkbox toggles change.

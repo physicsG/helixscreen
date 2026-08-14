@@ -376,9 +376,18 @@ void MoonrakerRequestTracker::check_timeouts(
     // reach at ~3.5 h of mostly nothing (bundle 3Q2GB74K). So the debug line
     // additionally requires the oldest request to have aged past
     // PENDING_LOG_MIN_AGE_MS — below that the queue is working, not stuck. The
-    // warn path is unaffected: a 30 s request always logs.
+    // warn path is unaffected: a request past its warn age always logs.
+    //
+    // The warn age is per-method, because "old" is not one number. A blocking
+    // G-code script is bounded by the macro it is running, not by the network:
+    // an AFC toolchange over a 2 m bowden takes over a minute of perfectly
+    // healthy waiting, which at 30 s made the tracker the single loudest thing
+    // in an AFC user's log (77 warnings in one bundle, every one of them normal).
     if (pending_count > 0) {
-        const bool warn = oldest_age_ms > 30000;
+        const uint32_t warn_age = oldest_method == "printer.gcode.script"
+                                      ? PENDING_WARN_AGE_GCODE_MS
+                                      : PENDING_WARN_AGE_MS;
+        const bool warn = oldest_age_ms > warn_age;
         const auto now = std::chrono::steady_clock::now();
         const bool signature_changed = pending_count != last_logged_pending_count_ ||
                                        oldest_method != last_logged_oldest_method_ ||

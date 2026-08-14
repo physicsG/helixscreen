@@ -18,7 +18,7 @@ namespace helix::diag {
 namespace {
 
 // TCP_LISTEN in the kernel's st column.
-constexpr const char* kStateListen = "0A";
+constexpr const char* STATE_LISTEN = "0A";
 
 bool parse_hex(const std::string& s, uint32_t& out) {
     if (s.empty() || s.size() > 8)
@@ -109,7 +109,7 @@ std::vector<std::string> parse_listeners_for_port(const std::string& proc_net_tc
         std::string sl, local, remote, state;
         if (!(ls >> sl >> local >> remote >> state))
             continue;
-        if (state != kStateListen)
+        if (state != STATE_LISTEN)
             continue;
 
         const size_t colon = local.rfind(':');
@@ -307,7 +307,7 @@ std::vector<std::string> listeners_on_port(uint16_t port) {
 std::vector<ProcMatch> find_moonraker_processes() {
     // "klippy" rather than "klipper": the process is klippy.py, and matching
     // "klipper" alone would also hit every path containing the klipper dir.
-    static const std::vector<std::string> kNeedles = {"moonraker", "klippy"};
+    static const std::vector<std::string> NEEDLES = {"moonraker", "klippy"};
 
     std::vector<ProcMatch> out;
     std::error_code ec;
@@ -327,7 +327,7 @@ std::vector<ProcMatch> find_moonraker_processes() {
             continue;
         std::string raw((std::istreambuf_iterator<char>(cmd)), std::istreambuf_iterator<char>());
         const std::string cmdline = decode_proc_cmdline(raw);
-        if (cmdline.empty() || !cmdline_matches_any(cmdline, kNeedles))
+        if (cmdline.empty() || !cmdline_matches_any(cmdline, NEEDLES))
             continue;
 
         // Skip ourselves: helix-screen's own argv can name a moonraker URL.

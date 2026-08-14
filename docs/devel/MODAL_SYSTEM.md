@@ -476,7 +476,7 @@ class SpoolEditModal : public Modal {
 > a NavigationManager overlay hosting four internal views selected by the
 > `ams_edit_view` subject: overview (spool card + "Change filament" row),
 > Spoolman spool picker, a unified spool-edit view (identity + color +
-> logistics, `kViewSpoolEdit`), and the color view. `SpoolEditModal`,
+> logistics, `VIEW_SPOOL_EDIT`), and the color view. `SpoolEditModal`,
 > `ColorPicker`, and `FilamentCatalogPickerModal` remain standalone modals for
 > their other consumers (SpoolmanPanel, LED/theme pickers, FilamentPanel
 > presets).

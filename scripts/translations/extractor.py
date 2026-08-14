@@ -26,12 +26,18 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Set, Dict, List, Tuple, Optional
 
+from .cpp_tables import extract_table_strings
+
 # Attributes that contain translatable text.
 # placeholder_tag is the explicit translation key for text-input placeholders
 # (mirrors how label/label_tag and text/translation_tag pair up); the textarea
 # parser resolves it via lv_tr() at runtime. Non-translatable example/format
 # placeholders (IPs, numerics, URLs) are dropped later by the skip patterns.
 TEXT_ATTRIBUTES = {"text", "label", "description", "title", "subtitle", "placeholder_tag"}
+
+# Attributes that ARE the translation key rather than a rendered default. They
+# are extracted unconditionally -- see the note at the extraction site.
+EXPLICIT_TAG_ATTRIBUTES = ("translation_tag", "label_tag")
 
 # Inline element text: <text_muted>Foo</text_muted>. The C parser
 # (lib/helix-xml/src/xml/lv_xml.c) applies this as text= + translation_tag=,
@@ -450,6 +456,21 @@ def extract_strings_from_cpp(cpp_path: Path) -> Set[str]:
             if not should_skip_cpp_text(text):
                 result.add(text)
 
+    # Static tables whose entries the UI translates through a variable
+    # (lv_tr(def.display_name) and friends), which the call-site patterns above
+    # cannot see. Suppression markers still apply, so a table row can opt out
+    # with a trailing `// i18n: do not translate`.
+    for text in extract_table_strings(content):
+        for match in _STRING_LITERAL_RE.finditer(content):
+            if match.group(1) != text:
+                continue
+            if _marker_applies(content, match.start(1), I18N_DO_NOT_TRANSLATE_RE) or _marker_applies(
+                content, match.start(1), I18N_UNIVERSAL_RE
+            ):
+                break
+        else:
+            result.add(text)
+
     return result
 
 
@@ -546,6 +567,24 @@ def extract_strings_from_xml(xml_path: Path) -> Set[str]:
             # Decode XML entities (named + numeric character references)
             text = _decode_xml_entities(text)
 
+            if not should_skip_text(text):
+                result.add(text)
+
+    # Explicit translate-me markers. Unlike `text=`, these are NOT suppressed by
+    # a sibling `bind_text=`: the tag is precisely what the widget re-resolves
+    # through lv_label_set_translation_tag() when the language changes, so an
+    # element that binds its live value and names its tag is asking for the tag
+    # to be translated. The `text=` beside it is only a design-time placeholder.
+    #
+    # Without this, `<x bind_text="s" text="Processing..." translation_tag="Processing..."/>`
+    # lost both halves to the bind_text skip below, and the string stayed
+    # untranslated in all nine locales while looking marked-up in the XML.
+    for attr in EXPLICIT_TAG_ATTRIBUTES:
+        for match in re.finditer(rf'(?<![\w]){attr}="([^"]*)"', content):
+            text = match.group(1)
+            if not text or text.startswith(("$", "#")):
+                continue
+            text = _decode_xml_entities(text)
             if not should_skip_text(text):
                 result.add(text)
 

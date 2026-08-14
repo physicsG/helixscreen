@@ -106,28 +106,38 @@ void SpoolmanManager::init_subjects() {
         },
         get_printer_state().get_subjects_lifetime());
 
-    // Observe Spoolman availability — force-stop polling when Spoolman disappears
-    auto* spoolman_subj = lv_xml_get_subject(nullptr, "printer_has_spoolman");
-    if (spoolman_subj) {
-        spoolman_availability_observer_ = observe_int_sync<SpoolmanManager>(
-            spoolman_subj, this, [](SpoolmanManager* self, int value) {
-                if (value == 0) {
-                    std::lock_guard<std::recursive_mutex> lock(self->mutex_);
-                    spdlog::info("[SpoolmanManager] Spoolman became unavailable, stopping polling");
-                    self->poll_refcount_ = 0;
-                    if (self->poll_timer_ && lv_is_initialized()) {
-                        lv_timer_delete(self->poll_timer_);
-                        self->poll_timer_ = nullptr;
-                    }
-                    self->reset_circuit_breaker();
-                    // Nothing will refresh these while Spoolman is gone, and the
-                    // next Spoolman may not be the same one (printer switch).
-                    // Drop them so the resolver falls back to firmware data.
-                    self->identity_cache_.clear();
-                    self->identity_unresolvable_.clear();
+    // Observe Spoolman availability — stop polling when Spoolman disappears, and
+    // arm it when Spoolman shows up. Reached through the capabilities accessor
+    // rather than lv_xml_get_subject("printer_has_spoolman"): that lookup misses
+    // whenever subjects were initialised without XML registration, and the miss
+    // is silent, which left the manager with no availability observer at all.
+    spoolman_availability_observer_ = observe_int_sync<SpoolmanManager>(
+        get_printer_state().get_printer_has_spoolman_subject(), this,
+        [](SpoolmanManager* self, int value) {
+            if (value == 0) {
+                std::lock_guard<std::recursive_mutex> lock(self->mutex_);
+                spdlog::info("[SpoolmanManager] Spoolman became unavailable, stopping polling");
+                // poll_refcount_ is deliberately kept: it counts panels that
+                // still want polling, and they get no second chance to ask.
+                // Zeroing it is what made a Spoolman that came back never
+                // resume for an already-active panel.
+                if (self->poll_timer_ && lv_is_initialized()) {
+                    lv_timer_delete(self->poll_timer_);
+                    self->poll_timer_ = nullptr;
                 }
-            });
-    }
+                self->reset_circuit_breaker();
+                // Nothing will refresh these while Spoolman is gone, and the
+                // next Spoolman may not be the same one (printer switch).
+                // Drop them so the resolver falls back to firmware data.
+                self->identity_cache_.clear();
+                self->identity_unresolvable_.clear();
+            } else {
+                // Spoolman appeared. Honour any request that arrived while
+                // it could not be served -- at boot, that is all of them.
+                self->ensure_poll_timer();
+            }
+        },
+        get_printer_state().get_subjects_lifetime());
 
     initialized_ = true;
 
@@ -307,9 +317,17 @@ void SpoolmanManager::refresh_spoolman_weights() {
                             // slot-reassignment and weights-unchanged early
                             // returns below — a slot whose weight never moves
                             // would otherwise never get a name.
-                            cache_identity(d->spool);
+                            const bool identity_is_new = cache_identity(d->spool);
 
                             AmsState& ams = AmsState::instance();
+                            if (identity_is_new) {
+                                // A name the label consumers could not resolve a
+                                // moment ago just became resolvable. The weight
+                                // early-returns below would otherwise swallow it
+                                // whenever the weight happens not to move, which
+                                // is every poll once a spool settles (#1264).
+                                ams.bump_slots_version();
+                            }
                             auto* primary = ams.get_backend(0);
                             if (!primary) {
                                 return;
@@ -438,9 +456,12 @@ void SpoolmanManager::refresh_spoolman_weights() {
 
                     // Before the unchanged-weights early return below, same as
                     // the AMS slot path.
-                    cache_identity(spool);
+                    const bool identity_is_new = cache_identity(spool);
 
                     AmsState& state = AmsState::instance();
+                    if (identity_is_new) {
+                        state.bump_slots_version();
+                    }
                     auto ext = state.get_external_spool_info();
                     if (!ext.has_value() || ext->spoolman_id != ext_spoolman_id) {
                         spdlog::debug(
@@ -500,9 +521,9 @@ std::optional<helix::SpoolIdentity> SpoolmanManager::find_identity(int spool_id)
     return it->second; // by value — the map can rehash under a later poll
 }
 
-void SpoolmanManager::cache_identity(const SpoolInfo& spool) {
+bool SpoolmanManager::cache_identity(const SpoolInfo& spool) {
     if (spool.id <= 0 || s_shutdown_flag.load(std::memory_order_acquire)) {
-        return;
+        return false;
     }
 
     SpoolmanManager& mgr = instance();
@@ -517,7 +538,7 @@ void SpoolmanManager::cache_identity(const SpoolInfo& spool) {
     if (mgr.identity_cache_.count(spool.id) > 0) {
         spdlog::trace("[SpoolmanManager] Identity for spool {} already cached, not re-extracting",
                       spool.id);
-        return;
+        return false;
     }
 
     helix::SpoolIdentity identity = identity_from_spool(spool);
@@ -527,13 +548,14 @@ void SpoolmanManager::cache_identity(const SpoolInfo& spool) {
         // later, better record from being taken.
         spdlog::trace("[SpoolmanManager] Spool {} carries no usable identity, not caching",
                       spool.id);
-        return;
+        return false;
     }
 
     spdlog::debug("[SpoolmanManager] Cached identity for spool {}: vendor='{}' name='{}' "
                   "material='{}'",
                   spool.id, identity.vendor, identity.filament_name, identity.material);
     mgr.identity_cache_.emplace(spool.id, std::move(identity));
+    return true;
 }
 
 void SpoolmanManager::note_identity_unresolvable(int spool_id) {
@@ -604,26 +626,37 @@ void SpoolmanManager::reset_circuit_breaker() {
 void SpoolmanManager::start_spoolman_polling() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-    if (!get_printer_state().is_spoolman_available()) {
-        spdlog::trace("[SpoolmanManager] Spoolman not available, skipping poll start");
-        return;
-    }
-
+    // Record the wish unconditionally. Returning early here instead used to
+    // discard it outright: at boot every caller arrives before Spoolman is
+    // marked available, so the Home panel polled nothing for the whole session.
     ++poll_refcount_;
     spdlog::debug("[SpoolmanManager] Starting Spoolman polling (refcount: {})", poll_refcount_);
 
-    // Only create timer on first reference
-    if (poll_refcount_ == 1 && !poll_timer_) {
-        poll_timer_ = lv_timer_create(
-            [](lv_timer_t* timer) {
-                auto* self = static_cast<SpoolmanManager*>(lv_timer_get_user_data(timer));
-                self->refresh_spoolman_weights();
-            },
-            POLL_INTERVAL_MS, this);
+    ensure_poll_timer();
+}
 
-        // Also do an immediate refresh
-        refresh_spoolman_weights();
+void SpoolmanManager::ensure_poll_timer() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+    if (poll_refcount_ == 0 || poll_timer_ != nullptr) {
+        return;
     }
+
+    if (!get_printer_state().is_spoolman_available()) {
+        spdlog::debug("[SpoolmanManager] Spoolman not available yet, poll deferred (refcount: {})",
+                      poll_refcount_);
+        return;
+    }
+
+    poll_timer_ = lv_timer_create(
+        [](lv_timer_t* timer) {
+            auto* self = static_cast<SpoolmanManager*>(lv_timer_get_user_data(timer));
+            self->refresh_spoolman_weights();
+        },
+        POLL_INTERVAL_MS, this);
+
+    // Also do an immediate refresh
+    refresh_spoolman_weights();
 }
 
 void SpoolmanManager::stop_spoolman_polling() {

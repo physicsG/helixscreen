@@ -30,7 +30,7 @@ typedef void (*toast_action_callback_t)(void* user_data);
  *
  * Stacks multiple simultaneous toasts in the top-right of the screen. Each
  * toast owns its own dismiss timer and action callback so the stack can
- * dismiss in any order. The stack height is capped at kMaxVisible to protect
+ * dismiss in any order. The stack height is capped at MAX_VISIBLE to protect
  * small screens — overflow silently drops the oldest toast (no queueing).
  */
 class ToastManager {
@@ -160,11 +160,11 @@ class ToastManager {
     static void action_btn_clicked(lv_event_t* e);
 
     // Hard cap — further bounded at first show_by screen height.
-    static constexpr size_t kMaxVisible = 5;
+    static constexpr size_t MAX_VISIBLE = 5;
 
     lv_obj_t* toast_stack_ = nullptr;
     ToastList active_;
-    size_t max_visible_ = kMaxVisible;
+    size_t max_visible_ = MAX_VISIBLE;
     std::atomic<bool> initialized_{false};
 
     friend class ToastManagerTestAccess;

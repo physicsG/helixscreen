@@ -574,7 +574,7 @@ int extract_tar_member(const std::string& tarball_path, const std::string& extra
 /// python3 snippet: extract argv[2] from zip argv[1] into argv[3], restoring the
 /// member's unix mode bits (zipfile.extract() drops them) and forcing the exec
 /// bit on bin/* and *.sh so an extracted installer or binary is runnable.
-constexpr const char* kPyExtractScript =
+constexpr const char* PY_EXTRACT_SCRIPT =
     "import os, stat, sys, zipfile\n"
     "zip_path, member, destdir = sys.argv[1], sys.argv[2], sys.argv[3]\n"
     "try:\n"
@@ -924,11 +924,11 @@ std::string UpdateChecker::compute_update_staging_dir(const std::string& tarball
     // ALWAYS a dot-prefixed subdir — never the bare dir. TMP_DIR is rm -rf'd on
     // installer cleanup; handing it a bare mount/install dir would wipe live
     // data (past incident wiped a device partition passed as TMP_DIR).
-    static constexpr const char* kStagingName = ".helix-update-staging";
+    static constexpr const char* STAGING_NAME = ".helix-update-staging";
     if (base == "/") {
-        return std::string("/") + kStagingName;
+        return std::string("/") + STAGING_NAME;
     }
-    return base + "/" + kStagingName;
+    return base + "/" + STAGING_NAME;
 }
 
 std::string UpdateChecker::get_download_path(DownloadPathDiag* diag,
@@ -1555,7 +1555,7 @@ int UpdateChecker::extract_zip_member(const std::string& zip_path, const std::st
 
     const std::string py_bin = find_tool_path("python3");
     if (!py_bin.empty()) {
-        return safe_exec({py_bin, "-c", kPyExtractScript, zip_path, member, extract_dir});
+        return safe_exec({py_bin, "-c", PY_EXTRACT_SCRIPT, zip_path, member, extract_dir});
     }
 
     spdlog::error("[UpdateChecker] No unzip binary and no python3 — cannot extract '{}'", member);
@@ -1572,7 +1572,7 @@ UpdateChecker::ZipIntegrity UpdateChecker::verify_zip_integrity(const std::strin
         // Code 2 matters on the AD5M, whose python3.7 is built without zlib:
         // ZipFile() raises "Compression requires the (missing) zlib module" for
         // a deflated release zip, which must NOT be read as corruption.
-        static constexpr const char* kTestScript =
+        static constexpr const char* TEST_SCRIPT =
             "import sys\n"
             "try:\n"
             "    import zipfile, zlib\n"
@@ -1585,7 +1585,7 @@ UpdateChecker::ZipIntegrity UpdateChecker::verify_zip_integrity(const std::strin
             "    sys.exit(2)\n"
             "except Exception:\n"
             "    sys.exit(1)\n";
-        int ret = safe_exec({py_bin, "-c", kTestScript, zip_path});
+        int ret = safe_exec({py_bin, "-c", TEST_SCRIPT, zip_path});
         if (ret == 0) {
             return ZipIntegrity::Ok;
         }
@@ -1841,17 +1841,18 @@ void UpdateChecker::do_install(const std::string& tarball_path) {
     // own child processes, all writing during the install window.  5 MB is
     // ~10× the log's worst case and leaves enough room that "passed the
     // probe" means the FS is genuinely healthy, not marginal.
-    constexpr uint64_t kMinInstallLogFreeBytes = 5 * 1024 * 1024; // 5 MB
+    constexpr uint64_t MIN_INSTALL_LOG_FREE_BYTES = 5 * 1024 * 1024; // 5 MB
 
     std::string install_log = "/var/log/helixscreen-install.log";
     {
-        auto probe = helix::system::probe_log_path_writable(install_log, kMinInstallLogFreeBytes);
+        auto probe =
+            helix::system::probe_log_path_writable(install_log, MIN_INSTALL_LOG_FREE_BYTES);
         if (!probe.ok) {
             const std::string fallback = tarball_path + ".install.log";
             flog_warn("[UpdateChecker] {} not writable ({}), falling back to {}", install_log,
                       probe.error, fallback);
             install_log = fallback;
-            probe = helix::system::probe_log_path_writable(install_log, kMinInstallLogFreeBytes);
+            probe = helix::system::probe_log_path_writable(install_log, MIN_INSTALL_LOG_FREE_BYTES);
             if (!probe.ok) {
                 flog_error("[UpdateChecker] fallback log {} also not writable ({}); "
                            "install.sh stdout/stderr will be lost",

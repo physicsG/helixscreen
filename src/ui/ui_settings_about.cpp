@@ -24,11 +24,11 @@
 #else
 // Fallback when contributors.h is not generated (e.g., Android CMake builds
 // without git available). Keep in sync with actual contributors from git log.
-inline constexpr const char* kContributors[] = {
+inline constexpr const char* CONTRIBUTORS[] = {
     "Andrew Basson",  "Justin Hayes", "Pierre Poissinger", "Preston Brown", "RNGIllSkillz",
     "Sergei Rozhkov", "Timo V",
 };
-inline constexpr int kContributorCount = sizeof(kContributors) / sizeof(kContributors[0]);
+inline constexpr int CONTRIBUTOR_COUNT = sizeof(CONTRIBUTORS) / sizeof(CONTRIBUTORS[0]);
 #endif
 #include "format_utils.h"
 #include "helix_version.h"
@@ -269,11 +269,11 @@ void AboutSettingsOverlay::setup_contributor_marquee() {
     // Build a single concatenated string: "Name1  •  Name2  •  Name3  •  "
     // Trailing separator ensures continuity when LVGL wraps circular scroll
     std::string text;
-    for (int i = 0; i < kContributorCount; i++) {
+    for (int i = 0; i < CONTRIBUTOR_COUNT; i++) {
         if (i > 0) {
             text += "  \xe2\x80\xa2  ";
         }
-        text += kContributors[i];
+        text += CONTRIBUTORS[i];
     }
     text += "  \xe2\x80\xa2  ";
 
@@ -286,7 +286,7 @@ void AboutSettingsOverlay::setup_contributor_marquee() {
     lv_obj_set_style_anim_duration(marquee_content_, text.size() * 100, 0);
 
     spdlog::debug("[{}] Contributor marquee set up with {} contributors", get_name(),
-                  kContributorCount);
+                  CONTRIBUTOR_COUNT);
 }
 
 // ============================================================================
@@ -415,8 +415,8 @@ void AboutSettingsOverlay::hide_update_download_modal() {
 // ============================================================================
 
 // 7-tap easter egg constants (shared by version and printer name callbacks)
-static constexpr int kSecretTapCount = 7;
-static constexpr uint32_t kSecretTapTimeoutMs = 2000;
+static constexpr int SECRET_TAP_COUNT = 7;
+static constexpr uint32_t SECRET_TAP_TIMEOUT_MS = 2000;
 
 void AboutSettingsOverlay::on_about_printer_name_clicked(lv_event_t*) {
     static int tap_count = 0;
@@ -424,13 +424,13 @@ void AboutSettingsOverlay::on_about_printer_name_clicked(lv_event_t*) {
 
     uint32_t now = lv_tick_get();
 
-    if (now - last_tap_time > kSecretTapTimeoutMs) {
+    if (now - last_tap_time > SECRET_TAP_TIMEOUT_MS) {
         tap_count = 0;
     }
     last_tap_time = now;
     tap_count++;
 
-    int remaining = kSecretTapCount - tap_count;
+    int remaining = SECRET_TAP_COUNT - tap_count;
 
     if (remaining > 0 && remaining <= 3) {
         char buf[32];
@@ -449,13 +449,13 @@ void AboutSettingsOverlay::on_about_version_clicked(lv_event_t*) {
 
     uint32_t now = lv_tick_get();
 
-    if (now - last_tap_time > kSecretTapTimeoutMs) {
+    if (now - last_tap_time > SECRET_TAP_TIMEOUT_MS) {
         tap_count = 0;
     }
     last_tap_time = now;
     tap_count++;
 
-    int remaining = kSecretTapCount - tap_count;
+    int remaining = SECRET_TAP_COUNT - tap_count;
 
     if (remaining > 0 && remaining <= 3) {
         Config* config = Config::get_instance();

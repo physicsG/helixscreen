@@ -206,11 +206,11 @@ void FilamentMappingCard::rebuild_compact_view() {
     // column. Beyond the cap, the remaining tools are summarized in a single
     // "+N" overflow pill that fills the final grid cell (tap the card to see
     // and edit the full mapping).
-    constexpr size_t kMaxVisiblePills = 6;
+    constexpr size_t MAX_VISIBLE_PILLS = 6;
     size_t visible = count;
-    bool overflow = count > kMaxVisiblePills;
+    bool overflow = count > MAX_VISIBLE_PILLS;
     if (overflow) {
-        visible = kMaxVisiblePills - 1; // leave space for the overflow pill
+        visible = MAX_VISIBLE_PILLS - 1; // leave space for the overflow pill
     }
     for (size_t i = 0; i < visible; ++i) {
         const auto& mapping = mappings_[i];

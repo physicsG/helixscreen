@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.99.113] - 2026-08-13
+
+A fix release for two problems that showed up in the field on the Adventurer 5X. Uploading a
+debug bundle crashed the app outright on nearly every printer, and because the crash happened
+inside the reporting path itself, the bundles that would have reported it never arrived.
+Separately, Wi-Fi setup in the first-run wizard could sit on "Connecting" forever after a
+password was entered, with no timeout and no way back to the form. Nine languages also pick up
+a large batch of text that had been silently falling back to English.
+
+### Fixed
+
+- Uploading a debug bundle no longer crashes on any printer whose `printer.cfg` has more than
+  one `[include]` line, which is very nearly all of them. Introduced in 0.99.112.
+- Wi-Fi setup in the first-run wizard now reports a timeout after 45 seconds instead of showing
+  "Connecting" indefinitely. Cancelling an attempt no longer leaves every later password prompt
+  stuck on a spinner with no fields to fill in.
+- Debug bundles no longer download and process each log file twice. On a 473 MB printer that was
+  an extra multi-megabyte fetch and parse on every single upload.
+- Printer details in a debug bundle are now captured before the upload starts rather than read
+  from the upload thread, closing a rare crash.
+- Text that the interface translates indirectly - filament type names and several status
+  messages - now appears in all nine languages instead of falling back to English.
+- Filament runout guidance on the Adventurer 5X is now written as whole sentences, so it can be
+  translated properly instead of being stitched together from untranslatable fragments.
+- The Active Spool widget shows the filament brand from Spoolman
+  ([#1264](https://github.com/prestonbrown/helixscreen/issues/1264)).
+- Spoolman weight polling now starts at boot, and spool labels refresh when identity details
+  arrive rather than staying blank.
+- AFC lane maps that arrive as a list are parsed correctly, and the AFC mock no longer reports a
+  vendor that real AFC hardware never sends.
+- Four chatty log sources no longer crowd out useful history in the debug-bundle ring buffer.
+
+### Changed
+
+- Constants throughout the codebase were renamed from `kCamelCase` to `UPPER_SNAKE_CASE`, the
+  convention the contributor docs always specified. No behaviour change.
+
+## [0.99.112] - 2026-08-13
+
+The temperature graph becomes interactive: tap a plotted line and it captions the sample
+under your finger, including what the heater was aiming for at that moment. The Klipper
+plugin gets an important fix - enabling phase tracking could silently leave PRINT_START
+holding two copies of its own body, so every print homed, levelled and heat-soaked twice.
+AMS tool-mapping restore now waits for the firmware to confirm the change rather than
+trusting its own echo. The ESP32-S3 firmware moved from "first boots" to "survives".
+Downloads are 8.1 MB smaller.
+
+### Added
+
+- **Tap the temperature graph to read a sample** - tapping a plotted line pins the nearest sample and captions it with the temperature, the target in effect at that moment, and the time. The caption follows the sample as the graph scrolls, and the hit test covers the drawn line itself, not just the sample dots - so a steep heater ramp, where consecutive samples sit hundreds of pixels apart, is tappable where you can see it.
+- **Home temperature tiles show the target while heating (#1267)** - a nozzle, bed or chamber tile climbing to a setpoint now says what it is climbing toward. An idle tile stays a bare reading rather than gaining a permanent "/ -", and the smallest panels are left alone where there is no room.
+- **AMS mapping restore is confirmed against the firmware (#1270)** - after a print that remapped lanes, the restore waits for the backend to echo the change back before clearing its recovery record. Backends update their own registry optimistically, so comparing against ourselves confirmed exactly the failure it was meant to catch. Covers AFC, Happy Hare and CFS (not on K1, where the command is a confirmed no-op); backends that publish no status keep the previous behaviour instead of waiting for proof that cannot arrive.
+- **Printer artwork for the Artillery Genius Pro, Kingroon KLP1 and Sovol SV07**, cut to match the shipped set. Every database entry now either has artwork or is explicitly listed as missing, so a new printer cannot silently fall through to a generic frame.
+- **Debug bundles capture printer.cfg and the macro list** - the config and its include tree ride in their own field rather than competing with the incident window in the Klipper log.
+- **An update-channel switch can move backward** - someone who tried the devel track and switched back to stable is ahead of the channel they now want, and used to be told "up to date" forever with no way back. Moving backward is offered with a confirmation, never auto-notified.
+
+### Fixed
+
+- **Enabling phase tracking could duplicate your PRINT_START (#1268)** - the config rewrite ended its capture at the first genuinely empty line, so the original tail survived and PRINT_START came out holding the instrumented body followed by an un-instrumented copy: double home, double QGL, double heat-soak on every print, with no config error to indicate anything was wrong. Enabling now also fails closed if the macros it injects are not defined anywhere in the config - which they never were, because the installer had been pointing at a file merged away some releases ago.
+- **Printer-fault alerts stayed up after Klipper recovered (#1266)** - an MCU disconnect raised an alert that survived a FIRMWARE_RESTART from Mainsail, and a cascade of them had to be acknowledged one by one on an already-healthy printer. Alerts raised for a printer-side fault are now swept when Klipper returns to ready.
+- **Mapping restore could be spent on a halted Klipper (#1270)** - every backend's send reports success unconditionally, so commands Klipper refused counted as restores; the snapshot was then cleared and the recovery record deleted, stranding the printer on the print's mapping. A halted Klipper at print end is exactly what a cancelled or errored print looks like. Restore now waits for Klipper to come back.
+- **Eject and three other AMS actions did nothing on multi-unit setups (#1258)** - the Overview panel and the AMS panel each had their own copy of the context-menu switch and the two had drifted, so Eject, Select Gate, Check Gate and Clear Spool were discarded with no toast and no log line. Single-unit installs were unaffected, which is why a BoxTurtle+NightOwl user had a dead Eject button.
+- **AFC lane eject mirrored refusals that were not ours to make (#1258)** - our copy of AFC's own rules had forked into two version eras selected by sniffing the status payload, and there is no reliable AFC version to read. We now send the command and let AFC decide.
+- **Touch calibration was unreachable on a rotated panel (#1259)** - the Settings entry point was gated on the same heuristic that decides whether to auto-fire the wizard, and that heuristic cannot see a touch panel mounted 90 degrees from the display. Reported on an FLSUN T1 Pro. Any real touch panel can now reach the wizard manually; the first-run auto-fire keeps its narrower test.
+- **A pre-print warning about an option you never chose (#1269)** - adaptive bed mesh emitted its parameters on printers with no way to deliver them, so start-print dropped them and warned on every print. The emit is now gated on deliverability, and the warning names what was actually dropped.
+- **Icons kept the size they were built at (#1210)** - the first icon ever created pinned the font face for every icon after it, so a runtime resize re-pointed everything except the icons.
+- **The camera feed went blank after closing an overlay** - tapping the navbar button for the panel you are already on restored it visible but deactivated, so the stream never restarted until you bounced to another panel and back.
+- **Eight printers rendered as the wrong machine** - 20 database entries named an image that has never existed in the tree, and the failure was silent: an Ender-3 S1, a Neptune 4 Pro and a FLSUN delta all quietly drew a generic CoreXY frame. Eight now resolve to a real image; the remaining eight are listed in a gate that can only shrink.
+- **The printer image was soft on large displays** - the widget always enlarged a 300px prerendered tier, up to about 2.2x on a 1024x600 panel, while the full-size source sat unused beside it. It now renders from the source when the request exceeds the tier.
+- **Gaps between icons and labels collapsed to zero** on the controls panel and the unified temperature card - two shared styles referenced spacing constants that are not defined yet at the point the file is parsed, so they registered empty.
+- **The Snapmaker U1 package shipped no prerendered images** - it was the only one of the ten release targets missing the copy step, so the device decoded 23.5 MB of PNG at runtime for images it had prerendered copies of.
+- **The no-thumbnail placeholder failed to load on firmware**, leaving an empty widget.
+
+### Changed
+
+- **Downloads are 8.1 MB (21%) smaller** - every PNG losslessly recompressed and verified pixel-identical against the original. Over half the saving is two files that had been written with compression effectively off.
+- **A newer config is left alone** - running an older build after a newer one no longer stamps the config version down and makes the newer build re-run migrations it has already applied.
+- **INSTALL.md and TROUBLESHOOTING.md state the glibc floor for the pi and pi32 packages (#1259)** and point at the statically linked cc1 package as the fallback, after a reporter on Debian Buster hit a bare "GLIBC_2.29 not found" with no documented minimum to check against.
+- **Documented the AMS bypass-controls override and CFS external spool.**
+
+### Internal
+
+- The ESP32-S3 firmware compiles without RTTI. `dynamic_cast`, `typeid` and `std::type_index` were replaced throughout the tree with process-local type tags and virtual capability queries, dropping 2,076 typeinfo-name symbols and 308 KB from the app image (97.4% -> 92.8% of the OTA slot). A lint gate now forbids the RTTI shapes on the desktop side, where they would still build and silently block the next file pulled into the firmware slice.
+- The ESP32 CI build had been red since the port got real, and none of it was the firmware: ESP-IDF v5.5.4 emits exception unwind tables about five times larger than neighbouring releases, and that +1.66 MB was the whole overflow. Pinned to v5.5.5.
+- ESP32 robustness: no longer bootloops on a degraded touch ribbon, guards the websocket handle against the timer-task reconnect race, bounds every wait that could outlive the task watchdog, marshals provisioning WiFi calls onto the LVGL thread, and wires up notifications, toasts, emergency stop and the real Moonraker control surface, which had all been abort-if-called stubs. A committed Kconfig default pointing at a real machine on a private LAN was scrubbed.
+- The release pipeline: the Pi dual-link ran two whole-program `ld` processes at once with nothing ordering them, which is what the runner OOM-killed on v0.99.110; per-SHA CI ccaches had pushed the repo past GitHub's 10 GB budget and evicted seven of the nine release caches, which is why the v0.99.111 Pi build ran cold; and every toolchain download was a bare `wget` with no retry, which is how a valid zlib URL failed a build 52 ms in. All three fixed. Release channels are now declared per-branch in a file rather than derived from the tag, so devel builds can use plain monotonic versions the updater can actually compare.
+- Telemetry records whether Moonraker is local (the verdict only, never the host) and finally surfaces `helix_macros` adoption, which has been collected since schema v2 and was never projected out of storage.
+- `helix-screen ctl` gained `long_press`, so gesture-entered screens - edit mode, and the widget catalog behind it - are reachable from automation for the first time. The documented press/sleep/release recipe never worked.
+- The temperature graph's tooltip indexed its metadata by slot while resolving by handle, so a remove-then-add cycle would caption the wrong series and eventually read out of bounds.
+- The mock client never recorded its connection URL, so everything asking which host we are talking to read it as no connection - the plugin install modal offered the remote path against a local Moonraker.
+
 ## [0.99.111] - 2026-08-12
 
 **Upgrading from 0.99.108?** This is your next release. Neither 0.99.109 nor 0.99.110
@@ -5002,6 +5093,8 @@ Initial tagged release. Foundation for all subsequent development.
 - Automated GitHub Actions release pipeline
 - One-liner installation script with platform auto-detection
 
+[0.99.113]: https://github.com/prestonbrown/helixscreen/compare/v0.99.112...v0.99.113
+[0.99.112]: https://github.com/prestonbrown/helixscreen/compare/v0.99.111...v0.99.112
 [0.99.111]: https://github.com/prestonbrown/helixscreen/compare/v0.99.108...v0.99.111
 [0.99.110]: https://github.com/prestonbrown/helixscreen/compare/v0.99.109...v0.99.110
 [0.99.109]: https://github.com/prestonbrown/helixscreen/compare/v0.99.108...v0.99.109

@@ -201,6 +201,11 @@ MoonrakerClient::~MoonrakerClient() {
     }
 }
 
+void MoonrakerClient::set_last_url(const std::string& url) {
+    std::lock_guard<std::mutex> lock(reconnect_mutex_);
+    last_url_ = url;
+}
+
 void MoonrakerClient::set_connection_state(ConnectionState new_state) {
     ConnectionState old_state = connection_state_.exchange(new_state);
 

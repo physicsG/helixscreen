@@ -376,6 +376,39 @@ On Klipper-based platforms (Pi, AD5M, K1, K2, Snapmaker U1, etc.), `setup_config
 - systemd journal entries when available (`journalctl -u helixscreen`)
 - Crash report (if recent)
 - `settings.json` (sanitized)
+- `printer_config` — Klipper's `printer.cfg` and every config it `[include]`s, fetched from
+  `/server/files/config/<path>` and sanitized per line (see below)
+- `filament_system.gcode_macros` — bare `gcode_macro` names from `/printer/objects/list`
+
+### Why `printer_config` is its own field
+
+Klipper re-dumps `printer.cfg` into `klippy.log` on every start, so the log tail used to carry it
+for free. It no longer does: every line of a config is a unique shape, so it survived
+`condense_klipper_log()`'s shape-collapse intact and spent the whole line budget on config —
+84/63/58% of `klipper_log` on AD5X bundles `4QA7SZAM` / `LYGVE39Y` / `XSNN7PX5`. `ce4f21914` added
+`strip_klipper_config_dumps()` to elide it so the incident window survives.
+
+Fetching the files into a separate field gives the content back without putting it back in
+competition with the incident, and beats the log copy anyway — that one arrives head-truncated
+whenever the byte window slices through the dump.
+
+Budget: `MAX_CONFIG_BYTES` (512 KB) and `MAX_CONFIG_FILES` (40). A full ZMOD AD5X config is ~250 KB
+across its includes, so it fits whole. Hitting either cap records `printer_config.truncated` with
+the reason rather than silently shortening.
+
+### Sanitizing config bodies
+
+Config bodies go through `sanitize_text_block()`, which applies `sanitize_value()` **per line**.
+This is not interchangeable with calling `sanitize_value()` on the file: that function replaces any
+single string over 4 KB with `[REDACTED_LONG_VALUE]`, so a whole-file call would redact every
+config in the bundle. Line granularity still catches what actually turns up in a `printer.cfg` —
+notification macros carrying Pushover/Telegram tokens, camera and Spoolman URLs with embedded
+credentials, emails, MACs.
+
+What it does **not** redact: filesystem paths, so an `[include /home/<user>/printer_data/…]` ships
+the username. That is the same exposure `update.install_root` has always had, not a new class, but
+it is worth knowing before pasting a config excerpt into a public issue. The existing rule applies
+unchanged — scrub bundle excerpts before they go anywhere public.
 
 Bundles are uploaded to `crash.helixscreen.org` with an 8-char uppercase alphanumeric share code
 (e.g. `UK9QCFY3`, `CGR6C7PA`). The code is minted server-side; nothing in this repo validates its

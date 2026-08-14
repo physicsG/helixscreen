@@ -22,6 +22,7 @@
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
+#include "fault_modal_registry.h"
 #include "pending_startup_warnings.h"
 
 #include <spdlog/spdlog.h>
@@ -109,6 +110,7 @@ struct AsyncErrorData {
     char message[256];
     bool modal;
     bool has_title;
+    bool fault; ///< Raised by ui_notification_printer_fault() — track for sweeping
 };
 
 // Format "title: message" (or just message when no title) into caller-provided
@@ -193,7 +195,11 @@ static void async_error_callback(void* user_data) {
             }
 
             // Show modal dialog for critical errors
-            helix::ui::modal_show_alert(data->title, data->message, ModalSeverity::Error, "OK");
+            lv_obj_t* dialog =
+                helix::ui::modal_show_alert(data->title, data->message, ModalSeverity::Error, "OK");
+            if (data->fault) {
+                helix::ui::track_fault_modal(dialog);
+            }
 
             helix::ui::notification_update(NotificationStatus::ERROR);
         } else {
@@ -462,7 +468,11 @@ void ui_notification_warning_with_detail(const char* message, const char* detail
     show_detail_notification(ToastSeverity::WARNING, message, detail, 8000);
 }
 
-void ui_notification_error(const char* title, const char* message, bool modal) {
+// Shared body for ui_notification_error() and ui_notification_printer_fault().
+// @p fault only decides whether the resulting dialog joins the sweep registry;
+// presentation is identical either way.
+static void show_error_notification(const char* title, const char* message, bool modal,
+                                    bool fault) {
     if (!message) {
         spdlog::warn("[Notification] Attempted to show error notification with null message");
         return;
@@ -498,7 +508,11 @@ void ui_notification_error(const char* title, const char* message, bool modal) {
             }
 
             // Show modal dialog for critical errors
-            helix::ui::modal_show_alert(title, message, ModalSeverity::Error, "OK");
+            lv_obj_t* dialog =
+                helix::ui::modal_show_alert(title, message, ModalSeverity::Error, "OK");
+            if (fault) {
+                helix::ui::track_fault_modal(dialog);
+            }
 
             helix::ui::notification_update(NotificationStatus::ERROR);
         } else {
@@ -551,9 +565,18 @@ void ui_notification_error(const char* title, const char* message, bool modal) {
         data->message[sizeof(data->message) - 1] = '\0';
 
         data->modal = modal;
+        data->fault = fault;
 
         helix::ui::async_call(async_error_callback, data);
     }
+}
+
+void ui_notification_error(const char* title, const char* message, bool modal) {
+    show_error_notification(title, message, modal, /*fault=*/false);
+}
+
+void ui_notification_printer_fault(const char* title, const char* message) {
+    show_error_notification(title, message, /*modal=*/true, /*fault=*/true);
 }
 
 // ============================================================================

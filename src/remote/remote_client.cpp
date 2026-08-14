@@ -65,7 +65,7 @@ struct HelpEntry {
     const char* detail;  ///< extra CLI-only lines ("\n"-separated), or nullptr
 };
 
-static const HelpEntry kHelp[] = {
+static const HelpEntry HELP[] = {
     {"Navigation (fs metaphor)", "help, ?", "Show this help", nullptr},
     {nullptr, "ping", "Health check", nullptr},
     {nullptr, "navigate <panel>", "Go to a base panel", nullptr},
@@ -144,27 +144,27 @@ static const HelpEntry kHelp[] = {
     {"Interactive", "repl", "Interactive REPL with line editing and history", nullptr},
 };
 
-static constexpr int kHelpUsageWidth = 26;
+static constexpr int HELP_USAGE_WIDTH = 26;
 
 /// Render the shared table. `verbose` adds each entry's `detail` lines, which
 /// the REPL omits so its in-session listing stays scannable.
 static void print_help_table(bool verbose) {
-    for (const HelpEntry& e : kHelp) {
+    for (const HelpEntry& e : HELP) {
         if (e.section) {
             printf("\n%s:\n", e.section);
         }
-        int pad = kHelpUsageWidth - 2 - static_cast<int>(strlen(e.usage));
+        int pad = HELP_USAGE_WIDTH - 2 - static_cast<int>(strlen(e.usage));
         if (pad > 0) {
             printf("  %s%*s%s\n", e.usage, pad, "", e.summary);
         } else {
             // Usage too long to share a line — summary goes underneath.
-            printf("  %s\n%*s%s\n", e.usage, kHelpUsageWidth, "", e.summary);
+            printf("  %s\n%*s%s\n", e.usage, HELP_USAGE_WIDTH, "", e.summary);
         }
         if (verbose && e.detail) {
             for (const char* p = e.detail; p;) {
                 const char* nl = strchr(p, '\n');
                 int len = nl ? static_cast<int>(nl - p) : static_cast<int>(strlen(p));
-                printf("%*s%.*s\n", kHelpUsageWidth, "", len, p);
+                printf("%*s%.*s\n", HELP_USAGE_WIDTH, "", len, p);
                 p = nl ? nl + 1 : nullptr;
             }
         }

@@ -131,8 +131,8 @@ bool heap_snapshot_age_is_plausible(long age_ms, int uptime_sec) {
     }
     // uptime is truncated to whole seconds, so allow a couple of seconds of
     // slack before calling an age impossible.
-    constexpr long kSlackMs = 2000;
-    return age_ms <= static_cast<long>(uptime_sec) * 1000 + kSlackMs;
+    constexpr long SLACK_MS = 2000;
+    return age_ms <= static_cast<long>(uptime_sec) * 1000 + SLACK_MS;
 }
 
 CrashReporter& CrashReporter::instance() {

@@ -1223,6 +1223,16 @@ void AmsBackendCfs::handle_status_update(const nlohmann::json& notification) {
         if (is_full_update) {
             auto new_info = parse_box_status(box);
 
+            // Firmware-sourced mapping tick. box.map is what the CFS itself
+            // reports — verified on a live K2: BOX_MODIFY_TN T1A=T1B echoed back
+            // as a single-key delta in ~0.7s. This is what lets a remap restore
+            // be confirmed against the box rather than against the optimistic
+            // write set_tool_mapping() makes before sending (#1270). Bumped here
+            // rather than inside parse_box_status because that parser is static.
+            if (box.contains("map") && box["map"].is_object()) {
+                ++firmware_map_generation_;
+            }
+
             // Build observed per-slot RFID fingerprints for every unit present
             // in this notification. Slots that weren't included stay empty
             // (observed_uids stays at default ""), and empty-UID observations
@@ -1773,8 +1783,8 @@ void AmsBackendCfs::push_slot_color_to_firmware(int global_index, uint32_t color
     // legitimate user choice and we don't want to silently drop it. The
     // caller (set_slot_info, which sets color_set=true on the override) is
     // responsible for only invoking this when a real color was chosen.
-    constexpr int kCfsMaxSlots = 16; // 4 units × 4 slots
-    if (global_index < 0 || global_index >= kCfsMaxSlots) {
+    constexpr int CFS_MAX_SLOTS = 16; // 4 units × 4 slots
+    if (global_index < 0 || global_index >= CFS_MAX_SLOTS) {
         spdlog::debug("{} push_slot_color_to_firmware: skipping invalid slot {}", backend_log_tag(),
                       global_index);
         return;
@@ -1884,14 +1894,14 @@ AmsError AmsBackendCfs::set_tool_mapping(int tool_number, int slot_index) {
     //
     // Example: set_tool_mapping(0, 5) sends "BOX_MODIFY_TN T1A=T2B" — when the
     // slicer emits T0/T1A, the CFS routes from physical slot T2B (index 5).
-    constexpr int kCfsMaxSlots = 16; // 4 units × 4 slots
-    if (tool_number < 0 || tool_number >= kCfsMaxSlots) {
+    constexpr int CFS_MAX_SLOTS = 16; // 4 units × 4 slots
+    if (tool_number < 0 || tool_number >= CFS_MAX_SLOTS) {
         return AmsError(AmsResult::INVALID_TOOL,
                         "Tool " + std::to_string(tool_number) + " out of range",
                         "Invalid tool number", "");
     }
-    if (slot_index < 0 || slot_index >= kCfsMaxSlots) {
-        return AmsErrorHelper::invalid_slot(slot_index, kCfsMaxSlots - 1);
+    if (slot_index < 0 || slot_index >= CFS_MAX_SLOTS) {
+        return AmsErrorHelper::invalid_slot(slot_index, CFS_MAX_SLOTS - 1);
     }
 
     std::string tool_tnn = CfsMaterialDb::slot_to_tnn(tool_number);
@@ -2058,8 +2068,8 @@ bool AmsBackendCfs::detect_fork_dialect(const nlohmann::json& box_json) {
 std::string AmsBackendCfs::slot_set_gcode(int global_slot_index, const std::string& material,
                                           uint32_t color_rgb, const std::string& brand,
                                           const std::string& name, int spoolman_id) {
-    constexpr int kCfsMaxSlots = 16; // 4 units × 4 slots
-    if (global_slot_index < 0 || global_slot_index >= kCfsMaxSlots) {
+    constexpr int CFS_MAX_SLOTS = 16; // 4 units × 4 slots
+    if (global_slot_index < 0 || global_slot_index >= CFS_MAX_SLOTS) {
         spdlog::error("[AMS CFS] Invalid slot index for slot-set: {}", global_slot_index);
         return "";
     }
@@ -2085,8 +2095,8 @@ std::string AmsBackendCfs::slot_set_gcode(int global_slot_index, const std::stri
 std::string AmsBackendCfs::load_gcode(int idx, CfsMacroVariant variant) {
     if (variant == CfsMacroVariant::Fork) {
         // The Box T command owns the complete load or change operation.
-        constexpr int kCfsMaxSlots = 16;
-        if (idx < 0 || idx >= kCfsMaxSlots) {
+        constexpr int CFS_MAX_SLOTS = 16;
+        if (idx < 0 || idx >= CFS_MAX_SLOTS) {
             spdlog::error("[AMS CFS] Invalid slot index for load: {}", idx);
             return "";
         }
@@ -2164,8 +2174,8 @@ std::string AmsBackendCfs::swap_gcode(int idx, CfsMacroVariant variant) {
         // BOX_CHANGE; that name appears only in a user-written alias macro that
         // this firmware does not define.
         //
-        constexpr int kCfsMaxSlots = 16;
-        if (idx < 0 || idx >= kCfsMaxSlots) {
+        constexpr int CFS_MAX_SLOTS = 16;
+        if (idx < 0 || idx >= CFS_MAX_SLOTS) {
             spdlog::error("[AMS CFS] Invalid slot index for swap: {}", idx);
             return "";
         }
@@ -2532,6 +2542,20 @@ helix::printer::ToolMappingCapabilities AmsBackendCfs::get_tool_mapping_capabili
 std::vector<int> AmsBackendCfs::get_tool_mapping() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return system_info_.tool_to_slot_map;
+}
+
+bool AmsBackendCfs::reports_firmware_tool_mapping() const {
+    // Everywhere except the K1 official CFS upgrade firmware, where
+    // BOX_MODIFY_TN is a confirmed no-op (#968 Phase 5): the command is
+    // accepted and nothing changes, so no box frame with a new map ever
+    // arrives. Claiming confirmation support there would leave a restore
+    // waiting forever and strand pending_remap.json (#1270).
+    return macro_variant_ != CfsMacroVariant::K1;
+}
+
+uint64_t AmsBackendCfs::firmware_tool_mapping_generation() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return firmware_map_generation_;
 }
 
 std::vector<helix::printer::DeviceAction> AmsBackendCfs::get_device_actions() const {

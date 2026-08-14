@@ -67,7 +67,7 @@ static constexpr int32_t DEFAULT_SLOT_WIDTH = 80;
 // scope to or -1 for "every unit". This panel is always the whole-system view:
 // the AMS Overview panel owns the per-unit presentation, via its own inline
 // detail view rather than through here.
-static constexpr int kAllUnits = -1;
+static constexpr int ALL_UNITS = -1;
 
 // Logo path mapping moved to AmsState::get_logo_path()
 
@@ -694,11 +694,11 @@ void AmsPanel::create_slots(int count) {
 
     // Pre-show environment indicator so flex layout accounts for its width
     // when calculating slot sizes. Must happen BEFORE slot creation.
-    ams_detail_pre_show_env_indicator(detail_widgets_, kAllUnits);
+    ams_detail_pre_show_env_indicator(detail_widgets_, ALL_UNITS);
 
     // Create new slots
     auto result = ams_detail_create_slots(detail_widgets_, slot_widgets_, MAX_VISIBLE_SLOTS,
-                                          kAllUnits, on_slot_clicked, this);
+                                          ALL_UNITS, on_slot_clicked, this);
 
     current_slot_count_ = result.slot_count;
 
@@ -793,13 +793,13 @@ void AmsPanel::setup_path_canvas() {
     ui_filament_path_canvas_set_buffer_callback(path_canvas_, on_buffer_clicked, this);
 
     // Configure from backend using shared helper
-    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, kAllUnits, false);
+    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, ALL_UNITS, false);
 
     spdlog::debug("[{}] Path canvas setup complete", get_name());
 }
 
 void AmsPanel::update_path_canvas_from_backend() {
-    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, kAllUnits, false);
+    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, ALL_UNITS, false);
 }
 
 void AmsPanel::setup_bypass_spool() {

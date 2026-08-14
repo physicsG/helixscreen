@@ -484,8 +484,8 @@ void PanelWidgetConfig::set_widget_config(const std::string& id, const nlohmann:
 }
 
 int PanelWidgetConfig::add_page(const std::string& name) {
-    if (pages_.size() >= kMaxPages) {
-        spdlog::warn("[PanelWidgetConfig] Cannot add page: at maximum ({} pages)", kMaxPages);
+    if (pages_.size() >= MAX_PAGES) {
+        spdlog::warn("[PanelWidgetConfig] Cannot add page: at maximum ({} pages)", MAX_PAGES);
         return -1;
     }
 

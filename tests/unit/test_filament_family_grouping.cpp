@@ -156,7 +156,7 @@ TEST_CASE("numbered nylon grades collapse into the PA family",
 TEST_CASE("PAHT files under PA", "[filament][family][derivation][polyamide]") {
     // Every PAHT product currently in the catalog is PA12/PA612-class and
     // prints in the ordinary PA envelope. Documented as a deliberate mapping,
-    // not an accident of string parsing — see kPahtFamily.
+    // not an accident of string parsing — see PAHT_FAMILY.
     CHECK(filament::display_family("PAHT") == "PA");
     CHECK(filament::display_family("PAHT-CF") == "PA");
 }
@@ -616,8 +616,8 @@ TEST_CASE_METHOD(XMLTestFixture, "AD5X whitelist filters entries, not just headi
     FilamentCatalogSelector sel;
     sel.attach(root);
     // Stock AD5X firmware whitelist, derived from the backend rather than re-typed.
-    sel.configure(std::nullopt, std::vector<std::string>(AmsBackendAd5xIfs::kStockWhitelist.begin(),
-                                                         AmsBackendAd5xIfs::kStockWhitelist.end()));
+    sel.configure(std::nullopt, std::vector<std::string>(AmsBackendAd5xIfs::STOCK_WHITELIST.begin(),
+                                                         AmsBackendAd5xIfs::STOCK_WHITELIST.end()));
     sel.populate();
 
     // Headings collapse to the four allowed families.

@@ -19,7 +19,7 @@ namespace helix {
 namespace perf {
 
 /// Size of the per-metric ring buffer (60 samples × ~1 Hz = ~60 s of history).
-constexpr std::size_t kHistorySamples = 60;
+constexpr std::size_t HISTORY_SAMPLES = 60;
 
 /// Singleton — sibling to PrinterState/AmsState/ToolState.
 class PerformanceState {
@@ -114,9 +114,9 @@ class PerformanceState {
 
     // ---- Ring buffers ----
     struct Ring {
-        std::array<float, kHistorySamples> data{};
+        std::array<float, HISTORY_SAMPLES> data{};
         std::size_t head = 0; ///< index of NEXT write (rolls)
-        std::size_t fill = 0; ///< samples written (clamped to kHistorySamples)
+        std::size_t fill = 0; ///< samples written (clamped to HISTORY_SAMPLES)
     };
     mutable std::mutex history_mu_;
     std::unordered_map<std::string, Ring> history_;

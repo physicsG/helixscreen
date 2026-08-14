@@ -445,7 +445,7 @@ TEST_CASE("async_lifetime nullptr tag normalised to (null)", "[lifetime_guard][t
 TEST_CASE("async_lifetime overflow rolls into (other)", "[lifetime_guard][telemetry]") {
     drain_skip_counters();
 
-    // kMaxTrackedTags is 64. Generate 128 distinct stable tag pointers so the
+    // MAX_TRACKED_TAGS is 64. Generate 128 distinct stable tag pointers so the
     // first 64 claim tracked slots and the next 64 roll into "(other)". The
     // counter interns by pointer equality, so each call hits the cold path
     // and claims (or overflows) a slot.
@@ -475,15 +475,15 @@ TEST_CASE("async_lifetime quiet tags release their slots", "[lifetime_guard][tel
 
     // Saturate every tracked slot, then drain. All of them go quiet, so the
     // drain must hand their slots back.
-    const size_t kSlots = helix::async_lifetime::kMaxTrackedTags;
-    std::vector<std::string> owners(kSlots);
-    for (size_t i = 0; i < kSlots; ++i) {
+    const size_t SLOTS = helix::async_lifetime::MAX_TRACKED_TAGS;
+    std::vector<std::string> owners(SLOTS);
+    for (size_t i = 0; i < SLOTS; ++i) {
         owners[i] = "saturating_tag_" + std::to_string(i);
         helix::async_lifetime::note_skipped(owners[i].c_str());
     }
 
     auto first = helix::async_lifetime::take_snapshot();
-    REQUIRE(first.total == kSlots);
+    REQUIRE(first.total == SLOTS);
     REQUIRE(first.other_count == 0);
 
     // A producer that only turns hot in a later window must still be named.
@@ -505,16 +505,16 @@ TEST_CASE("async_lifetime a producer hot in consecutive windows stays named",
     // Fill every slot but keep ONE producer hot across both windows. Slots are
     // released on every drain, so the hot tag re-claims one — what matters is
     // that it is still reported by name, never rolled into "(other)".
-    const size_t kSlots = helix::async_lifetime::kMaxTrackedTags;
-    std::vector<std::string> owners(kSlots - 1);
-    for (size_t i = 0; i < kSlots - 1; ++i) {
+    const size_t SLOTS = helix::async_lifetime::MAX_TRACKED_TAGS;
+    std::vector<std::string> owners(SLOTS - 1);
+    for (size_t i = 0; i < SLOTS - 1; ++i) {
         owners[i] = "filler_tag_" + std::to_string(i);
         helix::async_lifetime::note_skipped(owners[i].c_str());
     }
     helix::async_lifetime::note_skipped("persistent_producer");
 
     auto first = helix::async_lifetime::take_snapshot();
-    REQUIRE(first.total == kSlots);
+    REQUIRE(first.total == SLOTS);
     REQUIRE(first.other_count == 0);
 
     helix::async_lifetime::note_skipped("persistent_producer");

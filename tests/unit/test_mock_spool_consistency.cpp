@@ -7,6 +7,7 @@
 
 #include "ams_backend_mock.h"
 #include "color_utils.h"
+#include "filament_display_name.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
@@ -32,7 +33,16 @@ std::map<int, SpoolInfo> fetch_mock_spools() {
     return by_id;
 }
 
-void check_backend_against_spoolman(AmsBackendMock& mock, int slot_count) {
+/// Does the mocked firmware report a vendor of its own?
+///
+/// AFC does not: read_vendor() in ams_backend_afc.cpp has nothing to read until
+/// upstream AFC #808 ships, so a real lane's brand is empty and the vendor can
+/// only come from the Spoolman identity cache. Mocking a brand onto the slot
+/// there hides exactly the bug #1264 was.
+enum class FirmwareVendor { Reported, Absent };
+
+void check_backend_against_spoolman(AmsBackendMock& mock, int slot_count,
+                                    FirmwareVendor vendor = FirmwareVendor::Reported) {
     auto spools = fetch_mock_spools();
     REQUIRE(!spools.empty());
 
@@ -47,7 +57,13 @@ void check_backend_against_spoolman(AmsBackendMock& mock, int slot_count) {
         const SpoolInfo& spool = it->second;
 
         CHECK(slot.material == spool.material);
-        CHECK(slot.brand == spool.vendor);
+        if (vendor == FirmwareVendor::Reported) {
+            CHECK(slot.brand == spool.vendor);
+        } else {
+            // The Spoolman record still knows the vendor; the slot must not.
+            CHECK(slot.brand.empty());
+            CHECK(!spool.vendor.empty());
+        }
         // Spoolman's filament.name is a filament name, not a colour word, so it
         // lands on spool_name. SlotInfo::color_name stays a colour label and is
         // left unset by apply_spool_to_slot — the label resolver derives one
@@ -69,7 +85,7 @@ TEST_CASE("AFC mock slots match mock Spoolman spools (spec §9 drift)",
           "[mock][spoolman][ams_edit_overlay]") {
     AmsBackendMock mock(8);
     mock.set_afc_mode(true);
-    check_backend_against_spoolman(mock, 8);
+    check_backend_against_spoolman(mock, 8, FirmwareVendor::Absent);
 }
 
 TEST_CASE("Happy Hare mock slots match mock Spoolman spools (spec §9 drift)",
@@ -84,6 +100,45 @@ TEST_CASE("AFC mock keeps one unlinked lane for the untracked path",
     mock.set_afc_mode(true);
     SlotInfo lane3 = mock.get_slot_info(3);
     CHECK(lane3.spoolman_id == 0);
-    CHECK(lane3.brand == "Generic");
+    // Unlinked AND unbranded: no Spoolman record to name it, and AFC reports no
+    // vendor, so this lane is the one that must fall back to its color name.
+    CHECK(lane3.brand.empty());
     CHECK(lane3.material == "PETG");
+}
+
+TEST_CASE("AFC mock lane resolves its brand through the Spoolman identity, not the slot",
+          "[mock][spoolman][ams][1264]") {
+    // The realism contract this file guards, stated end to end: AFC reports no
+    // vendor, so the loaded lane carries none, and the only thing that can name
+    // the brand is the Spoolman identity cache. If a future change reseeds a
+    // brand onto the AFC slots, the first CHECK here fails and #1264 is silently
+    // untestable again.
+    AmsBackendMock mock(8);
+    mock.set_afc_mode(true);
+
+    const SlotInfo lane0 = mock.get_slot_info(0);
+    REQUIRE(lane0.status == SlotStatus::LOADED);
+    REQUIRE(lane0.spoolman_id > 0);
+    CHECK(lane0.brand.empty());
+
+    auto spools = fetch_mock_spools();
+    auto it = spools.find(lane0.spoolman_id);
+    REQUIRE(it != spools.end());
+    const SpoolInfo& spool = it->second;
+
+    // Cache miss: nothing but the color is left to name the lane.
+    const std::string without_identity = helix::resolve_filament_label(lane0, nullptr, "Jet Black");
+    CHECK(without_identity.find(spool.vendor) == std::string::npos);
+
+    // Cache hit: the vendor arrives, exactly as SpoolmanManager caches it.
+    helix::SpoolIdentity identity;
+    identity.vendor = spool.vendor;
+    identity.filament_name = spool.filament_name;
+    identity.material = spool.material;
+    identity.color_hex = spool.color_hex;
+    REQUIRE(identity.valid());
+
+    const std::string with_identity = helix::resolve_filament_label(lane0, &identity, "Jet Black");
+    CHECK(with_identity.find(spool.vendor) != std::string::npos);
+    CHECK(with_identity != without_identity);
 }

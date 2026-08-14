@@ -62,11 +62,11 @@ class WiFiManagerTestAccess {
             wm.backend_->stop();
         }
     }
-    // Backdate the association stamp past kAssociationGrace so the expiry side
+    // Backdate the association stamp past ASSOCIATION_GRACE so the expiry side
     // of the suppression is testable without a 5-second sleep.
     static void expire_association_grace(WiFiManager& wm) {
         wm.last_association_change_ = std::chrono::steady_clock::now() -
-                                      WiFiManager::kAssociationGrace - std::chrono::seconds(1);
+                                      WiFiManager::ASSOCIATION_GRACE - std::chrono::seconds(1);
     }
     static bool in_association_grace(const WiFiManager& wm) {
         return wm.in_association_grace();

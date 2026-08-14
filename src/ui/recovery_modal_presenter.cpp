@@ -232,7 +232,7 @@ void RecoveryModalPresenter::present(const helix::ErrorEvent& e) {
     if (!shown) {
         spdlog::warn("[RecoveryModal] show_prompt failed; falling back to alert");
         shown_detail_.clear();
-        ui_notification_error(modal_title_for(e), e.detail.c_str(), /*modal=*/true);
+        ui_notification_printer_fault(modal_title_for(e), e.detail.c_str());
     }
 }
 

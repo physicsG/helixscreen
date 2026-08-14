@@ -376,7 +376,7 @@ class AsyncLifetimeGuard {
 //
 // Tags are string-literal pointers (per `UpdateQueue::TaggedCallback`'s
 // contract), so the counter interns by pointer equality — no hashing, no
-// allocation, no string-lifetime concerns. Bounded at `kMaxTrackedTags` slots;
+// allocation, no string-lifetime concerns. Bounded at `MAX_TRACKED_TAGS` slots;
 // overflow rolls into an "(other)" bucket. Slots are released again whenever a
 // window drains them to zero, so the bound is on tags active *per window*, not
 // on tags seen over the life of the process.
@@ -389,7 +389,7 @@ namespace helix::async_lifetime {
 /// 1 KB and the linear-scan hot path cache-friendly. Slot count is the only
 /// knob — tune if a real device shows >64 distinct producers skipping inside a
 /// single window (which would itself be a signal).
-constexpr size_t kMaxTrackedTags = 64;
+constexpr size_t MAX_TRACKED_TAGS = 64;
 
 /// Increment the skip counter for `tag`. Lock-free on the repeating-tag hot
 /// path (linear scan over cache-friendly slots); the first sighting of a tag

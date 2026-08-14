@@ -144,7 +144,7 @@ helix::PromptData make_prompt(const std::string& title, int n_buttons) {
 //    lv_mem_core_clib.c) that leaves lv_mem_monitor_t zeroed — free_size would
 //    read 0 on both samples and the check would pass against any leak
 //    whatsoever. The number comes from the C allocator instead. Treat it as a
-//    coarse backstop: see kHeapGrowthLimitBytes for the measured noise.
+//    coarse backstop: see HEAP_GROWTH_LIMIT_BYTES for the measured noise.
 size_t heap_bytes() {
 #if defined(__APPLE__)
     return static_cast<size_t>(mstats().bytes_used);
@@ -182,7 +182,7 @@ size_t heap_bytes() {
 // The exact detector is the widget census below; this is only the backstop for
 // a leak that is not an lv_obj. If you are hunting a byte-level regression, run
 // the file under ASan (see the header comment) rather than tightening this.
-constexpr long kHeapGrowthLimitBytes = 8L * 1024L * 1024L;
+constexpr long HEAP_GROWTH_LIMIT_BYTES = 8L * 1024L * 1024L;
 
 void require_no_heap_growth(size_t before, size_t after, const char* what) {
     if (before == 0 || after == 0) {
@@ -191,10 +191,10 @@ void require_no_heap_growth(size_t before, size_t after, const char* what) {
     }
     const long delta = static_cast<long>(after) - static_cast<long>(before);
     spdlog::info("[action_prompt-stress/{}] heap delta {} bytes (limit {})", what, delta,
-                 kHeapGrowthLimitBytes);
+                 HEAP_GROWTH_LIMIT_BYTES);
     INFO("heap grew " << delta << " bytes across the " << what << " burst (limit "
-                      << kHeapGrowthLimitBytes << ")");
-    REQUIRE(delta < kHeapGrowthLimitBytes);
+                      << HEAP_GROWTH_LIMIT_BYTES << ")");
+    REQUIRE(delta < HEAP_GROWTH_LIMIT_BYTES);
 }
 
 uint32_t count_descendants(lv_obj_t* obj) {

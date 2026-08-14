@@ -14,8 +14,8 @@ namespace helix {
 
 namespace {
 
-constexpr const char* kIntensityPtr = "/upgrade_nudge/intensity";
-constexpr const char* kDismissedVersionPtr = "/upgrade_nudge/dismissed_version";
+constexpr const char* INTENSITY_PTR = "/upgrade_nudge/intensity";
+constexpr const char* DISMISSED_VERSION_PTR = "/upgrade_nudge/dismissed_version";
 
 UpgradeNudge::Intensity parse_intensity(const std::string& s) {
     if (s == "aggressive")
@@ -55,9 +55,9 @@ void UpgradeNudge::reload() {
         return;
     }
     std::lock_guard<std::mutex> lock(mu_);
-    std::string raw = cfg->get<std::string>(kIntensityPtr, std::string("off"));
+    std::string raw = cfg->get<std::string>(INTENSITY_PTR, std::string("off"));
     intensity_ = parse_intensity(raw);
-    dismissed_version_ = cfg->get<std::string>(kDismissedVersionPtr, std::string(""));
+    dismissed_version_ = cfg->get<std::string>(DISMISSED_VERSION_PTR, std::string(""));
     spdlog::debug("[UpgradeNudge] Loaded intensity={} dismissed_version='{}'",
                   intensity_to_string(intensity_), dismissed_version_);
 }
@@ -132,7 +132,7 @@ void UpgradeNudge::dismiss_current_version() {
     if (!cfg) {
         return;
     }
-    cfg->set<std::string>(kDismissedVersionPtr, available);
+    cfg->set<std::string>(DISMISSED_VERSION_PTR, available);
     cfg->save();
 
     std::lock_guard<std::mutex> lock(mu_);

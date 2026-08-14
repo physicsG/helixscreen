@@ -360,7 +360,7 @@ class AmsBackendAfcTestHelper : public AmsBackendAfc {
             std::count(captured_gcodes.begin(), captured_gcodes.end(), expected));
     }
 
-    static constexpr int kMessageDrainMaxClears = AmsBackendAfc::kMessageDrainMaxClears;
+    static constexpr int MESSAGE_DRAIN_MAX_CLEARS = AmsBackendAfc::MESSAGE_DRAIN_MAX_CLEARS;
 
     void test_maybe_drain_message_queue() {
         maybe_drain_message_queue();
@@ -1712,10 +1712,78 @@ TEST_CASE("AFC tool mapping valid string still maps", "[ams][afc][tool_mapping]"
     REQUIRE(helper.get_slot_mapped_tool(0) == 3);
 }
 
-TEST_CASE("AFC tool mapping array-shaped map resets and does not crash",
+TEST_CASE("AFC tool mapping single-element list maps like a string", "[ams][afc][tool_mapping]") {
+    // AFC virtual tools (#605) change `map` to a list UNCONDITIONALLY — a plain
+    // 4-lane BoxTurtle with virtual tools disabled sends ["T0"], not "T0". Treating
+    // the list as unsupported would unmap every lane on every AFC install the day
+    // that version ships, so the one-tool list must behave exactly like the string.
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::array({"T0"})}});
+    helper.feed_afc_stepper("lane2", {{"map", nlohmann::json::array({"T3"})}});
+
+    REQUIRE(helper.get_slot_mapped_tool(0) == 0);
+    REQUIRE(helper.get_slot_mapped_tool(1) == 3);
+    // Forward map too — this is what change_tool() resolves through
+    REQUIRE(helper.get_tool_mapping()[0] == 0);
+    REQUIRE(helper.get_tool_mapping()[3] == 1);
+}
+
+TEST_CASE("AFC tool mapping multi-tool list keeps the lowest tool", "[ams][afc][tool_mapping]") {
+    // Virtual tools: a lane carries several tools at once. SlotRegistry holds one
+    // tool per lane, so the lowest wins — stable as virtual tools are added and
+    // removed above it. AFC's own order is NOT sorted (its UI showed "T14, T13, T1"),
+    // so feed it unsorted to prove we do not just take the first element.
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    REQUIRE_NOTHROW(
+        helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::array({"T14", "T13", "T1"})}}));
+    REQUIRE(helper.get_slot_mapped_tool(0) == 1);
+    REQUIRE(helper.get_tool_mapping()[1] == 0);
+
+    // Removing the virtual tools leaves the lane on the same tool it already had —
+    // the whole point of picking the lowest rather than the first.
+    helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::array({"T1"})}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 1);
+}
+
+TEST_CASE("AFC tool mapping empty list unmaps the lane", "[ams][afc][tool_mapping]") {
+    // AFC_REMOVE_MAPPING can strip a lane back to no tools. An empty PRESENT list is
+    // authoritative and must unmap, exactly like a present null.
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::array({"T2"})}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 2);
+
+    helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::array()}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == -1);
+    REQUIRE(helper.get_tool_mapping()[2] == -1);
+}
+
+TEST_CASE("AFC tool mapping list skips junk entries without losing good ones",
           "[ams][afc][tool_mapping]") {
-    // Speculative future AFC shape (enhancement #605): map as an array. We do NOT
-    // support multi-tool maps — treat as unmapped, warn once (tripwire), no crash.
+    // One unparseable element must not discard the lane's real tools. In particular
+    // "T14,T13" must NOT parse as 14 — std::stoi stops at the comma and returns a
+    // confident wrong answer, which is exactly the silent failure to avoid.
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    REQUIRE_NOTHROW(helper.feed_afc_stepper(
+        "lane1", {{"map", nlohmann::json::array({"T14,T13", "garbage", "T7", 5, nullptr})}}));
+    REQUIRE(helper.get_slot_mapped_tool(0) == 7);
+
+    // A list with nothing salvageable unmaps rather than guessing.
+    helper.feed_afc_stepper("lane2", {{"map", nlohmann::json::array({"T1"})}});
+    REQUIRE(helper.get_slot_mapped_tool(1) == 1);
+    helper.feed_afc_stepper("lane2", {{"map", nlohmann::json::array({"T14,T13", "nope"})}});
+    REQUIRE(helper.get_slot_mapped_tool(1) == -1);
+}
+
+TEST_CASE("AFC tool mapping object-shaped map does not crash", "[ams][afc][tool_mapping]") {
+    // Not a shape AFC is known to send; assert it degrades to unmapped, not a crash.
     AmsBackendAfcTestHelper helper;
     helper.initialize_test_lanes_with_slots(4);
 
@@ -1723,7 +1791,7 @@ TEST_CASE("AFC tool mapping array-shaped map resets and does not crash",
     REQUIRE(helper.get_slot_mapped_tool(0) == 2);
 
     REQUIRE_NOTHROW(
-        helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::array({"T0", "T4"})}}));
+        helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::object({{"T0", "lane1"}})}}));
     REQUIRE(helper.get_slot_mapped_tool(0) == -1);
 }
 
@@ -2777,7 +2845,7 @@ TEST_CASE("AFC drains a session's worth of accumulated messages", "[ams][afc][re
 
 TEST_CASE("AFC message drain is bounded", "[ams][afc][recovery]") {
     // A fault that re-enqueues as fast as we pop must not spin forever.
-    // kMessageDrainMaxClears is the runaway guard, not the expected exit — the
+    // MESSAGE_DRAIN_MAX_CLEARS is the runaway guard, not the expected exit — the
     // preceding test covers the normal drain-until-empty path.
     AmsBackendAfcTestHelper helper;
     helper.initialize_test_lanes_with_slots(4);
@@ -2791,7 +2859,7 @@ TEST_CASE("AFC message drain is bounded", "[ams][afc][recovery]") {
     }
 
     REQUIRE(helper.gcode_count("AFC_CLEAR_MESSAGE") ==
-            AmsBackendAfcTestHelper::kMessageDrainMaxClears);
+            AmsBackendAfcTestHelper::MESSAGE_DRAIN_MAX_CLEARS);
 }
 
 TEST_CASE("AFC clear_fault discards queued lane ejects", "[ams][afc][recovery]") {
@@ -5538,7 +5606,7 @@ TEST_CASE("AFC tool changer reconciliation derives current_slot from active tool
 }
 
 // ---- L1: classify_error ----
-static const char* kJamLine =
+static const char* JAM_LINE =
     "!! Toolhead runout detected by tool_end sensor, but upstream sensors still "
     "detect filament. Possible filament break or jam at the toolhead. Please clear "
     "the jam and reload filament manually, then resume the print.";
@@ -5550,7 +5618,7 @@ TEST_CASE("AFC jam with toolhead loaded offers Unload not Eject", "[ams][afc][cl
 
     helix::ClassifyContext ctx;
     ctx.is_paused = true;
-    auto e = helper.classify_error(kJamLine, ctx);
+    auto e = helper.classify_error(JAM_LINE, ctx);
 
     REQUIRE(e.has_value());
     REQUIRE(e->severity == helix::ErrorSeverity::CRITICAL);
@@ -5574,7 +5642,7 @@ TEST_CASE("AFC jam with empty toolhead offers Eject not Unload", "[ams][afc][cla
 
     helix::ClassifyContext ctx;
     ctx.is_paused = true;
-    auto e = helper.classify_error(kJamLine, ctx);
+    auto e = helper.classify_error(JAM_LINE, ctx);
 
     REQUIRE(e.has_value());
     auto has = [&](const std::string& label) {
@@ -5609,7 +5677,7 @@ TEST_CASE("AFC recovery actions flag only the ones that move filament through th
                                  {{"tool_start_status", true}, {"lane_loaded", "lane2"}});
         helix::ClassifyContext ctx;
         ctx.is_paused = true;
-        auto e = helper.classify_error(kJamLine, ctx);
+        auto e = helper.classify_error(JAM_LINE, ctx);
         REQUIRE(e.has_value());
 
         CHECK(flag_of(e, "Resume") == 1);  // resuming the print extrudes
@@ -5624,7 +5692,7 @@ TEST_CASE("AFC recovery actions flag only the ones that move filament through th
                                  {{"tool_start_status", false}, {"lane_loaded", "lane2"}});
         helix::ClassifyContext ctx;
         ctx.is_paused = true;
-        auto e = helper.classify_error(kJamLine, ctx);
+        auto e = helper.classify_error(JAM_LINE, ctx);
         REQUIRE(e.has_value());
 
         CHECK(flag_of(e, "Eject") == 0);

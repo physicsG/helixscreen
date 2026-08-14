@@ -539,7 +539,7 @@ void WizardPrinterIdentifyStep::cleanup() {
                     // user quits) previously came back with all of them gone and no
                     // in-app way to revisit a mis-detected pick. Mark it provisional;
                     // it becomes authoritative only when wizard_completed flips.
-                    config->set<bool>(config->df() + helix::kWizardPresetProvisional, true);
+                    config->set<bool>(config->df() + helix::WIZARD_PRESET_PROVISIONAL, true);
                     // Keep the current run collapsing the now-redundant steps.
                     helix::wizard_mark_preset_applied_this_session();
                 }

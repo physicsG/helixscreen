@@ -18,7 +18,7 @@ namespace {
 /// Anything at or below 0 is Klipper's "no data" / disconnect / inactive-tool
 /// placeholder. Shared by the live recorder and the store seed so a sample can
 /// never enter the history through one door that the other would have rejected.
-constexpr int kMaxValidTempDeci = 4000;
+constexpr int MAX_VALID_TEMP_DECI = 4000;
 } // namespace
 
 // ============================================================================
@@ -211,7 +211,7 @@ bool TemperatureHistoryManager::add_sample_internal(const std::string& heater_na
     // recorder, and is replayed later, so it must be rejected at this boundary —
     // the single source feeding every consumer (overlay, mini graph, panel).
     // Upper bound rejects obviously-bogus spikes (deci-degrees; 4000 = 400°C).
-    if (temp_deci <= 0 || temp_deci > kMaxValidTempDeci) {
+    if (temp_deci <= 0 || temp_deci > MAX_VALID_TEMP_DECI) {
         spdlog::debug("[TempHistory] dropping invalid sample for '{}': {} deci-°C", heater_name,
                       temp_deci);
         return false;
@@ -305,7 +305,7 @@ void TemperatureHistoryManager::seed_from_store(const TemperatureStore& store, i
             // reporting, and a seeded 0 draws a solid vertical drop to the
             // chart's 0°C floor exactly like a live one would.
             const int temp_deci = static_cast<int>(std::lround(series.temperatures[i] * 10.0f));
-            if (temp_deci <= 0 || temp_deci > kMaxValidTempDeci) {
+            if (temp_deci <= 0 || temp_deci > MAX_VALID_TEMP_DECI) {
                 continue;
             }
             TempSample s;

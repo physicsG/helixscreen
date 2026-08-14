@@ -380,17 +380,17 @@ void NavigationManager::overlay_animate_slide_in(lv_obj_t* panel) {
     // also lv_anim_exec_xcb_t — so one variable serves both the immediate
     // "animations disabled" write and the animation's exec callback.
     using TranslateFn = void (*)(void*, int32_t);
-    static const TranslateFn kTranslateY = [](void* obj, int32_t v) {
+    static const TranslateFn TRANSLATE_Y = [](void* obj, int32_t v) {
         if (!lv_obj_is_valid(static_cast<lv_obj_t*>(obj)))
             return;
         lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(obj), v, LV_PART_MAIN);
     };
-    static const TranslateFn kTranslateX = [](void* obj, int32_t v) {
+    static const TranslateFn TRANSLATE_X = [](void* obj, int32_t v) {
         if (!lv_obj_is_valid(static_cast<lv_obj_t*>(obj)))
             return;
         lv_obj_set_style_translate_x(static_cast<lv_obj_t*>(obj), v, LV_PART_MAIN);
     };
-    const TranslateFn set_translate = portrait ? kTranslateY : kTranslateX;
+    const TranslateFn set_translate = portrait ? TRANSLATE_Y : TRANSLATE_X;
 
     // Skip animation if disabled - show panel in final state
     if (!DisplaySettingsManager::instance().get_animations_enabled()) {
@@ -479,17 +479,17 @@ void NavigationManager::overlay_animate_slide_out(lv_obj_t* panel) {
     }
 
     using TranslateFn = void (*)(void*, int32_t);
-    static const TranslateFn kTranslateY = [](void* obj, int32_t v) {
+    static const TranslateFn TRANSLATE_Y = [](void* obj, int32_t v) {
         if (!lv_obj_is_valid(static_cast<lv_obj_t*>(obj)))
             return;
         lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(obj), v, LV_PART_MAIN);
     };
-    static const TranslateFn kTranslateX = [](void* obj, int32_t v) {
+    static const TranslateFn TRANSLATE_X = [](void* obj, int32_t v) {
         if (!lv_obj_is_valid(static_cast<lv_obj_t*>(obj)))
             return;
         lv_obj_set_style_translate_x(static_cast<lv_obj_t*>(obj), v, LV_PART_MAIN);
     };
-    const TranslateFn set_translate = portrait ? kTranslateY : kTranslateX;
+    const TranslateFn set_translate = portrait ? TRANSLATE_Y : TRANSLATE_X;
 
     lv_anim_t slide_anim;
     lv_anim_init(&slide_anim);

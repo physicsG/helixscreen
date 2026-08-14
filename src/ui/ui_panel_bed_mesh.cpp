@@ -574,7 +574,7 @@ void BedMeshPanel::apply_portrait_canvas_height() {
     // height, and the two are deliberately kept distinct:
     // bed_mesh_portrait_canvas_height's floor is a share of column_h, and
     // passing avail_h for both silently zeroes that floor out (see the
-    // kBedMeshPortraitCanvasMinPct comment in bed_mesh_portrait_layout.h).
+    // BED_MESH_PORTRAIT_CANVAS_MIN_PCT comment in bed_mesh_portrait_layout.h).
     //
     // Only current_mesh_card is subtracted, not a separate profiles_card
     // minimum: profiles_card shares this ROW's height (height="100%" at the

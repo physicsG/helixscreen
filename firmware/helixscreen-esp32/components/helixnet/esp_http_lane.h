@@ -42,13 +42,13 @@ class EspHttpLane {
     // Submits a capped, in-memory GET (HTTP Range: bytes=0-{cap-1}, cap =
     // clamp_fetch_cap(range_max_bytes)). Returns false immediately — queuing
     // nothing, calling neither callback — if the queue is already at
-    // kQueueDepth or the worker pthread failed to start. Callers MUST NOT
+    // QUEUE_DEPTH or the worker pthread failed to start. Callers MUST NOT
     // block or retry-loop on a false return; a full queue means "try again
     // later" (e.g. next scroll tick), never a caller-side spin.
     bool submit_get(std::string url, size_t range_max_bytes, FetchSuccessCb on_success,
                     FetchErrorCb on_error);
 
-    static constexpr size_t kQueueDepth = 8;
+    static constexpr size_t QUEUE_DEPTH = 8;
 
     EspHttpLane(const EspHttpLane&) = delete;
     EspHttpLane& operator=(const EspHttpLane&) = delete;
@@ -73,7 +73,7 @@ class EspHttpLane {
     std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<Job> queue_;                 // guarded by mutex_
-    BoundedSlotCounter slots_{kQueueDepth}; // guarded by mutex_
+    BoundedSlotCounter slots_{QUEUE_DEPTH}; // guarded by mutex_
     bool worker_started_ = false;           // guarded by mutex_
 };
 

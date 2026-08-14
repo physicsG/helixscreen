@@ -44,8 +44,9 @@ namespace {
 /// UpdateQueue tags for the guarded home-confirm callbacks in
 /// handle_load_with_preheat(). String literals: the skip counter interns by
 /// pointer identity.
-constexpr const char* kHomeConfirmLoadTag = "AmsOperationSidebar::home_confirm_load";
-constexpr const char* kHomeConfirmLoadDeclineTag = "AmsOperationSidebar::home_confirm_load_decline";
+constexpr const char* HOME_CONFIRM_LOAD_TAG = "AmsOperationSidebar::home_confirm_load";
+constexpr const char* HOME_CONFIRM_LOAD_DECLINE_TAG =
+    "AmsOperationSidebar::home_confirm_load_decline";
 
 /**
  * @brief Drives the sidebar Unload button's disabled state (1 = disabled).
@@ -221,7 +222,7 @@ bool AmsOperationSidebar::setup(lv_obj_t* panel) {
     // Independent stall watchdog for the indeterminate "Working…" state (#1065
     // row 14). Runs on the main loop; the callback no-ops unless an op is active.
     if (!stall_watchdog_timer_) {
-        stall_watchdog_timer_ = lv_timer_create(stall_watchdog_cb, kStallWatchdogPeriodMs, this);
+        stall_watchdog_timer_ = lv_timer_create(stall_watchdog_cb, STALL_WATCHDOG_PERIOD_MS, this);
     }
 
     sync_reset_button_label();
@@ -1428,7 +1429,7 @@ void AmsOperationSidebar::handle_load_with_preheat(int slot_index) {
         auto token = lifetime_.token();
         helix::ui::request_home_confirmation(
             [this, token, start_preheat]() {
-                token.defer(kHomeConfirmLoadTag, [this, start_preheat]() {
+                token.defer(HOME_CONFIRM_LOAD_TAG, [this, start_preheat]() {
                     if (AmsBackend* backend = AmsState::instance().get_backend()) {
                         backend->arm_home_preconfirmed();
                     }
@@ -1436,7 +1437,7 @@ void AmsOperationSidebar::handle_load_with_preheat(int slot_index) {
                 });
             },
             [this, token]() {
-                token.defer(kHomeConfirmLoadDeclineTag, [this]() {
+                token.defer(HOME_CONFIRM_LOAD_DECLINE_TAG, [this]() {
                     spdlog::info("[AmsSidebar] User declined pre-load home; no heat commanded");
                 });
             });
@@ -1544,8 +1545,8 @@ void AmsOperationSidebar::dispatch_backend_load(const helix::ui::FilamentOpPlan&
 namespace {
 /// UpdateQueue tags for the guarded param-modal callbacks. String literals: the
 /// skip counter interns by pointer identity.
-constexpr const char* kLoadMacroTag = "AmsOperationSidebar::load_macro";
-constexpr const char* kUnloadMacroTag = "AmsOperationSidebar::unload_macro";
+constexpr const char* LOAD_MACRO_TAG = "AmsOperationSidebar::load_macro";
+constexpr const char* UNLOAD_MACRO_TAG = "AmsOperationSidebar::unload_macro";
 } // namespace
 
 void AmsOperationSidebar::dispatch_load_outside_backend(const helix::ui::FilamentOpPlan& plan) {
@@ -1565,7 +1566,7 @@ void AmsOperationSidebar::dispatch_load_outside_backend(const helix::ui::Filamen
     helix::ui::dispatch_filament_macro(
         macro_name, helix::ui::ParamPolicy::Prompt,
         [this, token](const helix::MacroParamResult& result) {
-            token.defer(kLoadMacroTag, [this, params = result.params]() {
+            token.defer(LOAD_MACRO_TAG, [this, params = result.params]() {
                 send_standard_filament_macro(/*is_load=*/true, params);
             });
         });
@@ -1584,7 +1585,7 @@ void AmsOperationSidebar::dispatch_unload_outside_backend(const helix::ui::Filam
     helix::ui::dispatch_filament_macro(
         macro_name, helix::ui::ParamPolicy::Prompt,
         [this, token](const helix::MacroParamResult& result) {
-            token.defer(kUnloadMacroTag, [this, params = result.params]() {
+            token.defer(UNLOAD_MACRO_TAG, [this, params = result.params]() {
                 send_standard_filament_macro(/*is_load=*/false, params);
             });
         });

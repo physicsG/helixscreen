@@ -426,7 +426,12 @@ void ui_panel_motion_init(lv_obj_t* parent);
 **Naming conventions:**
 - Functions/variables: `snake_case` (`ui_panel_home_init`, `temp_target`)
 - XML files: `kebab-case` (`nozzle-temp-panel.xml`)
-- Constants: `UPPER_SNAKE_CASE` (`MAX_TEMP`)
+- Constants: `UPPER_SNAKE_CASE` (`MAX_TEMP`) — including `constexpr`, file-scope
+  `static const`, and enum enumerators. **Not** Google's `kCamelCase`: the tree
+  drifted into it for a while and was swept back, so a `kFoo` you find in a diff
+  is a mistake to fix, not a precedent to follow. The exceptions are names that
+  mirror a third-party API verbatim (Apple's `kCWSecurityWPA2Personal`) — match
+  the foreign spelling there rather than inventing a local one.
 
 **Critical patterns:**
 ```cpp

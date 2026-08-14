@@ -1678,12 +1678,12 @@ void PrintStatusWidget::print_card_clicked_cb(lv_event_t* e) {
     // originated inside the named nozzle click target; the chevron cb
     // handles it. Name must match the lv_obj name in
     // ui_xml/components/print_status_detailed_active.xml.
-    constexpr std::string_view kNozzleClickTargetName = "detailed_nozzle_click_target";
+    constexpr std::string_view NOZZLE_CLICK_TARGET_NAME = "detailed_nozzle_click_target";
     bool from_nozzle_group = false;
     if (auto* target = lv_event_get_target_obj(e)) {
         for (lv_obj_t* o = target; o; o = lv_obj_get_parent(o)) {
             const char* name = lv_obj_get_name(o);
-            if (name && std::string_view(name) == kNozzleClickTargetName) {
+            if (name && std::string_view(name) == NOZZLE_CLICK_TARGET_NAME) {
                 from_nozzle_group = true;
                 break;
             }

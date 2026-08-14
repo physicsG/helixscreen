@@ -19,19 +19,19 @@ ControlButtonView compute_control_button_view(helix::PrintJobState state, Pendin
 
     switch (pending) {
     case PendingAction::Pausing:
-        v.primary_icon = kControlIconHourglass;
+        v.primary_icon = CONTROL_ICON_HOURGLASS;
         v.primary_label = "Pausing...";
         break;
     case PendingAction::Resuming:
-        v.primary_icon = kControlIconHourglass;
+        v.primary_icon = CONTROL_ICON_HOURGLASS;
         v.primary_label = "Resuming...";
         break;
     case PendingAction::None:
         if (state == helix::PrintJobState::PAUSED) {
-            v.primary_icon = kControlIconPlay;
+            v.primary_icon = CONTROL_ICON_PLAY;
             v.primary_label = "Resume";
         } else {
-            v.primary_icon = kControlIconPause;
+            v.primary_icon = CONTROL_ICON_PAUSE;
             v.primary_label = "Pause";
         }
         break;

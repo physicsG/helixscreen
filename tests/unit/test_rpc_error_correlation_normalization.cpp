@@ -197,9 +197,9 @@ TEST_CASE_METHOD(CorrelationFixture,
     // wording, sent identically on both channels) becomes "Must home axes
     // first" on the router side only. The RPC side records Klipper's wording,
     // so the exact-string dedup misses and BOTH toasts fire.
-    const std::string kRewritten = "Must home axis first";
+    const std::string REWRITTEN = "Must home axis first";
 
-    auto r = run_both_channels(kRewritten);
+    auto r = run_both_channels(REWRITTEN);
 
     INFO("router toasts: " << r.router_toasts << " suppressions: " << r.suppressions);
     CHECK(r.caller_cb_fired);
@@ -227,11 +227,11 @@ TEST_CASE_METHOD(CorrelationFixture, "cross-channel dedup is unaffected by toast
     // on a copy -- the compared text (ErrorEvent::detail / DeferredCtx::clean)
     // is never truncated. This >80-char message must therefore dedup on the
     // untruncated text. Pins that truncation stays out of the compared path.
-    const std::string kLong = "Move out of range: X=400.000000 Y=400.000000 Z=400.000000 exceeds "
-                              "the configured axis maximum for this printer";
-    REQUIRE(kLong.size() > 80);
+    const std::string LONG = "Move out of range: X=400.000000 Y=400.000000 Z=400.000000 exceeds "
+                             "the configured axis maximum for this printer";
+    REQUIRE(LONG.size() > 80);
 
-    auto r = run_both_channels(kLong);
+    auto r = run_both_channels(LONG);
 
     INFO("router toasts: " << r.router_toasts << " suppressions: " << r.suppressions);
     CHECK(r.caller_cb_fired);

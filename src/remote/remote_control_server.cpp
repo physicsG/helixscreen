@@ -52,10 +52,10 @@ namespace helix {
 // names ("home", "print-select") — strip a trailing "_panel" and map '_' -> '-'.
 static std::string panel_short_name(int idx) {
     std::string n = PanelFactory::PANEL_NAMES[idx];
-    static const std::string kSuffix = "_panel";
-    if (n.size() > kSuffix.size() &&
-        n.compare(n.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0) {
-        n.erase(n.size() - kSuffix.size());
+    static const std::string SUFFIX = "_panel";
+    if (n.size() > SUFFIX.size() &&
+        n.compare(n.size() - SUFFIX.size(), SUFFIX.size(), SUFFIX) == 0) {
+        n.erase(n.size() - SUFFIX.size());
     }
     std::replace(n.begin(), n.end(), '_', '-');
     return n;
@@ -420,8 +420,8 @@ nlohmann::json RemoteControlServer::handle_reset(const nlohmann::json& /*params*
         // non-exiting entries, so it flips to true as soon as every modal has
         // been marked -- no need to wait out the exit animation here.
         int modals_cleared = 0;
-        constexpr int kMaxModalDepth = 16; // matching kMaxDepth's reasoning below
-        while (!ModalStack::instance().empty() && modals_cleared < kMaxModalDepth) {
+        constexpr int MAX_MODAL_DEPTH = 16; // matching MAX_DEPTH's reasoning below
+        while (!ModalStack::instance().empty() && modals_cleared < MAX_MODAL_DEPTH) {
             lv_obj_t* top = Modal::get_top();
             if (!top) {
                 break;
@@ -429,10 +429,10 @@ nlohmann::json RemoteControlServer::handle_reset(const nlohmann::json& /*params*
             Modal::hide(top);
             modals_cleared++;
         }
-        if (modals_cleared == kMaxModalDepth && !ModalStack::instance().empty()) {
+        if (modals_cleared == MAX_MODAL_DEPTH && !ModalStack::instance().empty()) {
             spdlog::warn("[RemoteControlServer] reset: modal stack still non-empty after "
                          "{} dismissals -- hit the safety cap, something isn't draining",
-                         kMaxModalDepth);
+                         MAX_MODAL_DEPTH);
         }
 
         // Toasts: ToastManager::hide() dismisses every visible toast (also via
@@ -450,18 +450,18 @@ nlohmann::json RemoteControlServer::handle_reset(const nlohmann::json& /*params*
         // UpdateQueue::process_pending() tick. So overlay_stack_names() must be
         // read exactly once, before any go_back() call, to get the true depth --
         // rereading it in a loop condition would never observe a decrease within
-        // this same callback and would just spin to kMaxDepth every time.
+        // this same callback and would just spin to MAX_DEPTH every time.
         // Bounded rather than unbounded: a nav stack that will not drain is a
         // bug, and spinning forever here would hang the UI thread.
         auto& nav = NavigationManager::instance();
-        constexpr int kMaxDepth = 32;
+        constexpr int MAX_DEPTH = 32;
         int actual_depth = static_cast<int>(nav.overlay_stack_names().size());
-        int overlays_popped = std::min(actual_depth, kMaxDepth);
-        if (actual_depth > kMaxDepth) {
+        int overlays_popped = std::min(actual_depth, MAX_DEPTH);
+        if (actual_depth > MAX_DEPTH) {
             spdlog::warn("[RemoteControlServer] reset: overlay stack depth {} exceeds the "
                          "safety cap of {} -- popping {} and leaving the rest, something "
                          "isn't draining",
-                         actual_depth, kMaxDepth, kMaxDepth);
+                         actual_depth, MAX_DEPTH, MAX_DEPTH);
         }
         for (int i = 0; i < overlays_popped; ++i) {
             nav.go_back();
@@ -639,11 +639,11 @@ nlohmann::json RemoteControlServer::handle_screenshot(const nlohmann::json& para
     // UI thread would block the very redraws it is waiting to observe.
     int stable_frames = 0;
     if (stable) {
-        constexpr int kRequired = 3;
-        constexpr int kMaxSamples = 180; // ~3s at 16ms
+        constexpr int REQUIRED = 3;
+        constexpr int MAX_SAMPLES = 180; // ~3s at 16ms
         uint64_t last = 0;
         int run = 0;
-        for (int i = 0; i < kMaxSamples; i++) {
+        for (int i = 0; i < MAX_SAMPLES; i++) {
             uint64_t h = execute_on_ui_thread([resolve_crop]() -> nlohmann::json {
                              lv_obj_t* crop = resolve_crop();
                              helix::CapturedFrame f;
@@ -655,15 +655,15 @@ nlohmann::json RemoteControlServer::handle_screenshot(const nlohmann::json& para
 
             run = (i > 0 && h == last) ? run + 1 : 1;
             last = h;
-            if (run >= kRequired) {
+            if (run >= REQUIRED) {
                 stable_frames = run;
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }
-        if (stable_frames < kRequired) {
+        if (stable_frames < REQUIRED) {
             throw std::runtime_error(
-                "Screen never stabilized: no " + std::to_string(kRequired) +
+                "Screen never stabilized: no " + std::to_string(REQUIRED) +
                 " identical consecutive frames within 3s. Try `freeze` first.");
         }
     }

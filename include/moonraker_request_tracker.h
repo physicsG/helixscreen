@@ -143,6 +143,16 @@ class MoonrakerRequestTracker {
     /// drain is worth a line. See the throttle note in check_timeouts().
     static constexpr uint32_t PENDING_LOG_MIN_AGE_MS = 1000; // 1s
 
+    /// Age at which the periodic pending-count line escalates from debug to warn.
+    static constexpr uint32_t PENDING_WARN_AGE_MS = 30000; // 30s
+
+    /// Same, for a long-running G-code script. `printer.gcode.script` does not
+    /// return until Klipper finishes the macro, and an AFC toolchange over a 2 m
+    /// bowden is legitimately a minute or more, so the 30 s threshold flagged
+    /// healthy work: 77 warnings in one AFC bundle, all of them normal lane
+    /// loads. Past five minutes a script really has stopped.
+    static constexpr uint32_t PENDING_WARN_AGE_GCODE_MS = 300000; // 5min
+
   private:
     std::map<uint64_t, PendingRequest> pending_requests_;
     std::mutex requests_mutex_;

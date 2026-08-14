@@ -233,6 +233,12 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
     [[nodiscard]] helix::printer::ToolMappingCapabilities
     get_tool_mapping_capabilities() const override;
     [[nodiscard]] std::vector<int> get_tool_mapping() const override;
+
+    /// True except on K1, where BOX_MODIFY_TN no-ops (#968) so no confirming
+    /// box frame ever arrives. See the definition for the full rationale.
+    [[nodiscard]] bool reports_firmware_tool_mapping() const override;
+
+    [[nodiscard]] uint64_t firmware_tool_mapping_generation() const override;
     [[nodiscard]] bool supports_auto_heat_on_load() const override {
         return true;
     }
@@ -367,6 +373,11 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
     // from the static helpers (load_gcode/unload_gcode/swap_gcode), so this
     // is read on the script-build side, not in hot paths.
     CfsMacroVariant macro_variant_ = CfsMacroVariant::K2;
+
+    /// Monotonic count of box.map parses — firmware-sourced by construction,
+    /// since the optimistic path writes system_info_ via assign_tool_slot()
+    /// and never touches this (#1270).
+    uint64_t firmware_map_generation_ = 0;
 
     /// Box schema last seen on the wire, latched by handle_status_update.
     ///

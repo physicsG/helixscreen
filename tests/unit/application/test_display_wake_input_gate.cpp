@@ -48,17 +48,17 @@ namespace {
 
 // Where the synthetic finger lands, and the target it lands on. Well inside the
 // 800x480 fixture display.
-constexpr int kTouchX = 120;
-constexpr int kTouchY = 120;
-constexpr int kTargetPos = 60;
-constexpr int kTargetSize = 160;
+constexpr int TOUCH_X = 120;
+constexpr int TOUCH_Y = 120;
+constexpr int TARGET_POS = 60;
+constexpr int TARGET_SIZE = 160;
 
 // Virtual-clock step between synthetic reads. Finer than the 33ms production
 // read period so the long-press threshold is crossed with little overshoot.
-constexpr int kReadStepMs = 10;
+constexpr int READ_STEP_MS = 10;
 
 // The blackout disable_input_briefly() schedules.
-constexpr int kBlackoutMs = 200;
+constexpr int BLACKOUT_MS = 200;
 
 /// State the synthetic indev's read callback reports. File-scope because LVGL
 /// retains the callback for as long as the indev lives; ScopedWakeIndev bounds
@@ -109,8 +109,8 @@ class ScopedWakeIndev {
     /// Hold the current touch state for @p ms of virtual time, reading the
     /// device the way LVGL's own read timer would.
     void hold(int ms) const {
-        for (int elapsed = 0; elapsed < ms; elapsed += kReadStepMs) {
-            lv_tick_inc(kReadStepMs);
+        for (int elapsed = 0; elapsed < ms; elapsed += READ_STEP_MS) {
+            lv_tick_inc(READ_STEP_MS);
             lv_indev_read(indev_);
         }
     }
@@ -128,8 +128,8 @@ lv_obj_t* make_press_target(lv_obj_t* parent) {
     lv_obj_t* target = lv_obj_create(parent);
     lv_obj_remove_flag(target, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(target, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_pos(target, kTargetPos, kTargetPos);
-    lv_obj_set_size(target, kTargetSize, kTargetSize);
+    lv_obj_set_pos(target, TARGET_POS, TARGET_POS);
+    lv_obj_set_size(target, TARGET_SIZE, TARGET_SIZE);
     lv_obj_add_event_cb(target, count_pressed_cb, LV_EVENT_PRESSED, nullptr);
     lv_obj_add_event_cb(target, count_long_pressed_cb, LV_EVENT_LONG_PRESSED, nullptr);
     lv_obj_update_layout(target);
@@ -175,7 +175,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "held press fires LONG_PRESSED once with no wa
     ScopedWakeIndev indev;
     make_press_target(test_screen());
 
-    g_wake_indev_state.point = {kTouchX, kTouchY};
+    g_wake_indev_state.point = {TOUCH_X, TOUCH_Y};
     g_wake_indev_state.state = LV_INDEV_STATE_PRESSED;
 
     // Press registers on the target.
@@ -201,7 +201,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     ScopedWakeIndev indev;
     make_press_target(test_screen());
 
-    g_wake_indev_state.point = {kTouchX, kTouchY};
+    g_wake_indev_state.point = {TOUCH_X, TOUCH_Y};
     g_wake_indev_state.state = LV_INDEV_STATE_PRESSED;
 
     // The wake touch lands and LVGL starts counting toward the long press.
@@ -216,11 +216,11 @@ TEST_CASE_METHOD(LVGLTestFixture,
 
     lv_timer_t* gate_timer = timer_added_since(before);
     REQUIRE(gate_timer != nullptr);
-    REQUIRE(gate_timer->period == kBlackoutMs);
+    REQUIRE(gate_timer->period == BLACKOUT_MS);
 
     // Blackout: input is off, but reads still run — that is what carries the
     // reset through (the handler precedes the enabled check).
-    indev.hold(kBlackoutMs);
+    indev.hold(BLACKOUT_MS);
 
     // Production's re-enable. Fired directly because the fixture's timer pump
     // never runs periodic timers (see the file header).

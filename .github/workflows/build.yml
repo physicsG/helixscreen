@@ -245,6 +245,16 @@ jobs:
     # them inside a fixed container with pinned fonts — don't "fix" this by
     # dropping the --ignore; that trades a green build for flaky pixel diffs
     # unrelated to whatever change actually broke it.
+    # The Moonraker plugin runs on the printer inside Moonraker, so no C++ test
+    # reaches it and these are its only coverage. They need no binary and no
+    # printer -- the Moonraker component surface is mocked -- which is why they
+    # can run here rather than in a hardware job. Previously nothing ran them at
+    # all, and moonraker-plugin/install.sh sat pointing at a config file that had
+    # been deleted for months (prestonbrown/helixscreen#1268).
+    - name: Run Moonraker plugin tests (pytest)
+      timeout-minutes: 2
+      run: pytest moonraker-plugin/tests/ -v
+
     - name: Run out-of-process UI tests (pytest, excluding goldens)
       timeout-minutes: 5
       run: pytest tests/ui/ -v --ignore=tests/ui/test_screens.py

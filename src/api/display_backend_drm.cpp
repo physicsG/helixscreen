@@ -344,17 +344,17 @@ lv_display_t* DisplayBackendDRM::create_display(int width, int height) {
     // panels (e.g. 5.5" QHD 1440x2560) that would otherwise render with
     // unreadably small text. Skip if the user explicitly requested a resolution
     // via -s. See prestonbrown/helixscreen#773, #774.
-    static constexpr uint32_t kHighDpiThreshold = 1920;
+    static constexpr uint32_t HIGH_DPI_THRESHOLD = 1920;
     int downscale_idx = size_was_explicit_
-                            ? helix::DrmModeMatch::kNoMatch
-                            : helix::find_best_downscale_mode(modes, kHighDpiThreshold);
-    if (downscale_idx != helix::DrmModeMatch::kNoMatch) {
+                            ? helix::DrmModeMatch::NO_MATCH
+                            : helix::find_best_downscale_mode(modes, HIGH_DPI_THRESHOLD);
+    if (downscale_idx != helix::DrmModeMatch::NO_MATCH) {
         int pref_idx = helix::find_preferred_mode_index(modes);
         const auto& native = modes[pref_idx];
         const auto& target = modes[downscale_idx];
         spdlog::info("[DRM Backend] Native resolution {}x{} exceeds {}px threshold, "
                      "selecting {}x{}@{} mode",
-                     native.hdisplay, native.vdisplay, kHighDpiThreshold, target.hdisplay,
+                     native.hdisplay, native.vdisplay, HIGH_DPI_THRESHOLD, target.hdisplay,
                      target.vdisplay, target.vrefresh);
         width = static_cast<int>(target.hdisplay);
         height = static_cast<int>(target.vdisplay);
@@ -366,13 +366,13 @@ lv_display_t* DisplayBackendDRM::create_display(int width, int height) {
     if (width > 0 && height > 0) {
         int match_idx = helix::find_matching_mode(modes, static_cast<uint32_t>(width),
                                                   static_cast<uint32_t>(height));
-        if (match_idx != helix::DrmModeMatch::kNoMatch) {
+        if (match_idx != helix::DrmModeMatch::NO_MATCH) {
             chosen_w = modes[match_idx].hdisplay;
             chosen_h = modes[match_idx].vdisplay;
             spdlog::info("[DRM Backend] Using requested mode {}x{}", chosen_w, chosen_h);
         } else if (size_was_explicit_ && !modes.empty()) {
             int pref = helix::find_preferred_mode_index(modes);
-            if (pref != helix::DrmModeMatch::kNoMatch) {
+            if (pref != helix::DrmModeMatch::NO_MATCH) {
                 chosen_w = modes[pref].hdisplay;
                 chosen_h = modes[pref].vdisplay;
             }

@@ -90,12 +90,12 @@ class GCodeViewerState {
         // HELIX_GCODE_MODE handling lives in decide_render_mode() (pure, unit
         // tested); this only applies the result and logs why.
 #ifdef ENABLE_3D_RENDERER
-        constexpr bool kHave3DRenderer = true;
+        constexpr bool HAVE_3D_RENDERER = true;
 #else
-        constexpr bool kHave3DRenderer = false;
+        constexpr bool HAVE_3D_RENDERER = false;
 #endif
         const char* mode_env = std::getenv("HELIX_GCODE_MODE");
-        const auto rm = helix::gcode_viewer::decide_render_mode(mode_env, kHave3DRenderer);
+        const auto rm = helix::gcode_viewer::decide_render_mode(mode_env, HAVE_3D_RENDERER);
         render_mode_ = rm.mode;
         switch (rm.reason) {
         case helix::gcode_viewer::RenderModeReason::EnvForced3D:
@@ -1258,9 +1258,9 @@ static void gcode_viewer_watchdog_cb(lv_timer_t* timer) {
         // Rate-limit the warn so we don't fill the bundle on a wedged renderer.
         // First kick logs immediately; subsequent kicks log at most every 30s.
         uint32_t now_ms = lv_tick_get();
-        constexpr uint32_t kKickLogIntervalMs = 30000;
+        constexpr uint32_t KICK_LOG_INTERVAL_MS = 30000;
         bool should_log = (st->watchdog_last_kick_log_ms_ == 0) ||
-                          (now_ms - st->watchdog_last_kick_log_ms_ >= kKickLogIntervalMs);
+                          (now_ms - st->watchdog_last_kick_log_ms_ >= KICK_LOG_INTERVAL_MS);
         if (should_log) {
             uint32_t age_ms = st->print_progress_last_change_ms_ == 0
                                   ? 0

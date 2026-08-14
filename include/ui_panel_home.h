@@ -112,7 +112,7 @@ class HomePanel : public PanelBase {
     lv_subject_t page_subject_{};
     ObserverGuard page_observer_;
 
-    static constexpr int kMaxPages = 8;
+    static constexpr int MAX_PAGES = 8;
 
     void build_carousel();
     void rebuild_carousel();

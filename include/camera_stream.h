@@ -260,10 +260,10 @@ class CameraStream {
     bool thread_detached_ = false; // Set by stop() if thread join times out
     std::thread stream_thread_;
 
-    static constexpr int kMaxStreamFailures = 3;
-    static constexpr int kSnapshotIntervalMs = 2000;
-    static constexpr int kStreamConnectTimeoutSec = 5; // Initial connection attempt
-    static constexpr int kStreamTimeoutSec = 300;      // Active stream — reconnects on timeout
+    static constexpr int MAX_STREAM_FAILURES = 3;
+    static constexpr int SNAPSHOT_INTERVAL_MS = 2000;
+    static constexpr int STREAM_CONNECT_TIMEOUT_SEC = 5; // Initial connection attempt
+    static constexpr int STREAM_TIMEOUT_SEC = 300;       // Active stream — reconnects on timeout
 
     // libturbojpeg runtime loading (dlopen) — nullptr if unavailable
     void* tj_lib_ = nullptr; // dlopen handle

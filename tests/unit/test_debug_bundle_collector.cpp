@@ -13,6 +13,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <zlib.h>
@@ -183,8 +184,141 @@ TEST_CASE("DebugBundleCollector: BundleResult defaults are reasonable", "[debug-
 
 TEST_CASE("DebugBundleCollector: collect_printer_info() returns valid JSON", "[debug-bundle]") {
     // Printer may not be connected, but should not crash
-    json printer = helix::DebugBundleCollector::collect_printer_info();
+    json printer = helix::DebugBundleCollector::collect_printer_info(
+        helix::DebugBundleCollector::snapshot_printer_state());
     REQUIRE(printer.is_object());
+}
+
+TEST_CASE("DebugBundleCollector: collect_printer_info() renders a snapshot without PrinterState",
+          "[debug-bundle]") {
+    // The section is pure assembly now, so the whole state table is reachable
+    // without a live printer — and without the LVGL subject reads that used to
+    // happen on the upload worker.
+    helix::PrinterSnapshot snap;
+    snap.captured = true;
+    snap.model = "Adventurer 5X";
+    snap.klipper_version = "v0.13.0-746-ZMOD";
+    snap.connection_state = 2; // connected
+    snap.klippy_state = 2;     // shutdown
+
+    const json printer = helix::DebugBundleCollector::collect_printer_info(snap);
+    CHECK(printer["model"] == "Adventurer 5X");
+    CHECK(printer["klipper_version"] == "v0.13.0-746-ZMOD");
+    CHECK(printer["connection_state"] == "connected");
+    CHECK(printer["klippy_state"] == "shutdown");
+
+    SECTION("out-of-range enums are dropped rather than indexing off the table") {
+        helix::PrinterSnapshot bad;
+        bad.captured = true;
+        bad.connection_state = 99;
+        bad.klippy_state = -1;
+        const json out = helix::DebugBundleCollector::collect_printer_info(bad);
+        CHECK_FALSE(out.contains("connection_state"));
+        CHECK_FALSE(out.contains("klippy_state"));
+    }
+
+    SECTION("an uncaptured snapshot still yields a well-formed object") {
+        const json out = helix::DebugBundleCollector::collect_printer_info({});
+        REQUIRE(out.is_object());
+        CHECK_FALSE(out.contains("klipper_version"));
+    }
+}
+
+// ============================================================================
+// walk_include_tree() — the traversal that shipped a UAF in v0.99.112
+// ============================================================================
+
+namespace {
+/// Fetcher backed by a table; anything not in the table is a 404.
+helix::ConfigFetcher table_fetcher(const std::map<std::string, std::string>& files) {
+    return [files](const std::string& path) {
+        auto it = files.find(path);
+        if (it == files.end())
+            return helix::ConfigFetchResult{404, ""};
+        return helix::ConfigFetchResult{200, it->second};
+    };
+}
+} // namespace
+
+TEST_CASE("DebugBundleCollector: walk_include_tree follows a multi-include root",
+          "[debug-bundle]") {
+    // THE REGRESSION CASE. The walk binds a name to queue[i] and pushes onto
+    // `queue` while still iterating the remaining [include] patterns of the same
+    // file. With `const std::string&` the first push reallocated (an
+    // initializer-list vector has capacity exactly 1) and every later pattern
+    // read freed memory — SIGBUS on the AD5X's mips build. Two includes in the
+    // root is the minimum that reproduces it, so this must stay >= 2.
+    const std::vector<std::string> available = {"printer.cfg", "a.cfg", "b.cfg", "c.cfg"};
+    auto fetch = table_fetcher({
+        {"printer.cfg", "[include a.cfg]\n[include b.cfg]\n[include c.cfg]\n"},
+        {"a.cfg", "[stepper_x]\nstep_pin: PA1\n"},
+        {"b.cfg", "[stepper_y]\nstep_pin: PA2\n"},
+        {"c.cfg", "[stepper_z]\nstep_pin: PA3\n"},
+    });
+
+    std::string truncated = "sentinel";
+    size_t bytes = 0;
+    const json files = helix::DebugBundleCollector::walk_include_tree("printer.cfg", available,
+                                                                      fetch, &truncated, &bytes);
+
+    REQUIRE(files.is_object());
+    CHECK(files.size() == 4);
+    CHECK(files.contains("printer.cfg"));
+    CHECK(files.contains("a.cfg"));
+    CHECK(files.contains("b.cfg"));
+    CHECK(files.contains("c.cfg"));
+    CHECK(truncated.empty());
+    CHECK(bytes > 0);
+}
+
+TEST_CASE("DebugBundleCollector: walk_include_tree terminates on an include cycle",
+          "[debug-bundle]") {
+    const std::vector<std::string> available = {"printer.cfg", "loop.cfg"};
+    auto fetch = table_fetcher({
+        {"printer.cfg", "[include loop.cfg]\n"},
+        {"loop.cfg", "[include printer.cfg]\n[include loop.cfg]\n"},
+    });
+
+    const json files =
+        helix::DebugBundleCollector::walk_include_tree("printer.cfg", available, fetch);
+    CHECK(files.size() == 2); // seen-set stops the cycle
+}
+
+TEST_CASE("DebugBundleCollector: walk_include_tree resolves nested relative includes",
+          "[debug-bundle]") {
+    // An include inside mod/base.cfg is relative to mod/, and a glob must not
+    // cross a '/'.
+    const std::vector<std::string> available = {"printer.cfg", "mod/base.cfg", "mod/ifs.cfg",
+                                                "mod/sub/deep.cfg"};
+    auto fetch = table_fetcher({
+        {"printer.cfg", "[include mod/base.cfg]\n"},
+        {"mod/base.cfg", "[include ifs.cfg]\n[include *.cfg]\n"},
+        {"mod/ifs.cfg", "[ifs]\n"},
+        {"mod/sub/deep.cfg", "[deep]\n"},
+    });
+
+    const json files =
+        helix::DebugBundleCollector::walk_include_tree("printer.cfg", available, fetch);
+    CHECK(files.contains("mod/ifs.cfg"));
+    CHECK_FALSE(files.contains("mod/sub/deep.cfg")); // '*' does not cross '/'
+}
+
+TEST_CASE("DebugBundleCollector: walk_include_tree reports HTTP errors but skips 404s",
+          "[debug-bundle]") {
+    const std::vector<std::string> available = {"printer.cfg", "gone.cfg", "broken.cfg"};
+    auto fetch = [](const std::string& path) {
+        if (path == "printer.cfg")
+            return helix::ConfigFetchResult{200, "[include gone.cfg]\n[include broken.cfg]\n"};
+        if (path == "broken.cfg")
+            return helix::ConfigFetchResult{500, ""};
+        return helix::ConfigFetchResult{404, ""};
+    };
+
+    const json files =
+        helix::DebugBundleCollector::walk_include_tree("printer.cfg", available, fetch);
+    CHECK_FALSE(files.contains("gone.cfg")); // a stale include is Klipper's problem, not ours
+    REQUIRE(files.contains("broken.cfg"));
+    CHECK(files["broken.cfg"]["error"] == "HTTP 500");
 }
 
 // ============================================================================
@@ -369,6 +503,181 @@ TEST_CASE("DebugBundleCollector: filter_filament_objects handles empty and non-a
     REQUIRE(helix::DebugBundleCollector::filter_filament_objects(json::array()).empty());
     REQUIRE(helix::DebugBundleCollector::filter_filament_objects(json::object()).empty());
     REQUIRE(helix::DebugBundleCollector::filter_filament_objects(json(42)).empty());
+}
+
+TEST_CASE("DebugBundleCollector: extract_gcode_macro_names captures bare macro names",
+          "[debug-bundle][filament][macro-names]") {
+    // The question this exists to answer: does macro X exist on this printer?
+    // printer.cfg is stripped from the bundle before shape-collapse, so on an
+    // AD5X the whole ZMOD config is gone and nothing else can say.
+    json objects = json::array({
+        "gcode_macro A_CHANGE_FILAMENT", "gcode_macro INSERT_PRUTOK_IFS",
+        "gcode_macro _IFS_REMOVE_CURRENT_PRUTOK", "gcode_macro _G28", "extruder", "toolhead",
+        "filament_switch_sensor runout",
+        "gcode_button estop", // not a macro despite the prefix overlap
+        "gcode_macro",        // bare section name, no macro name follows
+        "gcode_macro ",       // prefix with an empty name
+    });
+
+    auto macros = helix::DebugBundleCollector::extract_gcode_macro_names(objects);
+
+    REQUIRE(macros.size() == 4);
+    // Stored bare, with the "gcode_macro " prefix stripped.
+    CHECK(macros[0].get<std::string>() == "A_CHANGE_FILAMENT");
+    CHECK(macros[1].get<std::string>() == "INSERT_PRUTOK_IFS");
+    CHECK(macros[2].get<std::string>() == "_IFS_REMOVE_CURRENT_PRUTOK");
+    CHECK(macros[3].get<std::string>() == "_G28");
+
+    // No non-macro object, and no empty entry from the degenerate prefixes -
+    // an empty string would read as a real macro whose name we lost.
+    for (const auto& m : macros) {
+        const std::string name = m.get<std::string>();
+        CHECK_FALSE(name.empty());
+        CHECK(name.find("gcode_macro") == std::string::npos);
+        CHECK(name != "estop");
+    }
+}
+
+TEST_CASE("DebugBundleCollector: extract_gcode_macro_names caps runaway configs",
+          "[debug-bundle][filament][macro-names]") {
+    json objects = json::array();
+    for (size_t i = 0; i < helix::DebugBundleCollector::MAX_GCODE_MACRO_NAMES + 50; ++i) {
+        objects.push_back("gcode_macro M" + std::to_string(i));
+    }
+
+    auto macros = helix::DebugBundleCollector::extract_gcode_macro_names(objects);
+    REQUIRE(macros.size() == helix::DebugBundleCollector::MAX_GCODE_MACRO_NAMES);
+    CHECK(macros[0].get<std::string>() == "M0");
+}
+
+TEST_CASE("DebugBundleCollector: extract_gcode_macro_names handles empty and non-array input",
+          "[debug-bundle][filament][macro-names]") {
+    REQUIRE(helix::DebugBundleCollector::extract_gcode_macro_names(json::array()).empty());
+    REQUIRE(helix::DebugBundleCollector::extract_gcode_macro_names(json::object()).empty());
+    REQUIRE(helix::DebugBundleCollector::extract_gcode_macro_names(json(42)).empty());
+    // A non-string element must not abort the scan of the rest.
+    json mixed = json::array({42, "gcode_macro KEPT", json::object()});
+    auto macros = helix::DebugBundleCollector::extract_gcode_macro_names(mixed);
+    REQUIRE(macros.size() == 1);
+    CHECK(macros[0].get<std::string>() == "KEPT");
+}
+
+// ============================================================================
+// printer.cfg + [include] tree [debug-bundle][printer-config]
+// ============================================================================
+
+TEST_CASE("DebugBundleCollector: parse_include_patterns finds Klipper includes",
+          "[debug-bundle][printer-config]") {
+    const std::string body = "[include mod/base.cfg]\r\n"
+                             "[include  spaced.cfg ]\n"
+                             "[include mod/*.cfg]\n"
+                             "[printer]\n"
+                             "kinematics: corexy\n"
+                             "# [include commented.cfg]\n"
+                             "  [include indented.cfg]\n"
+                             "gcode: [include inline.cfg]\n"
+                             "[include unterminated.cfg\n";
+
+    auto pats = helix::DebugBundleCollector::parse_include_patterns(body);
+
+    REQUIRE(pats.size() == 3);
+    CHECK(pats[0] == "mod/base.cfg"); // trailing CR stripped
+    CHECK(pats[1] == "spaced.cfg");   // surrounding whitespace trimmed
+    CHECK(pats[2] == "mod/*.cfg");
+
+    // A Klipper section header must start at column 0, so an indented or
+    // commented "[include ...]" is an option continuation, not a section - and
+    // treating one as an include would fetch files the printer never loads.
+    for (const auto& p : pats) {
+        CHECK(p != "commented.cfg");
+        CHECK(p != "indented.cfg");
+        CHECK(p != "inline.cfg");
+        CHECK(p != "unterminated.cfg");
+    }
+}
+
+TEST_CASE("DebugBundleCollector: glob_match does not let wildcards cross a slash",
+          "[debug-bundle][printer-config]") {
+    CHECK(helix::DebugBundleCollector::glob_match("printer.cfg", "printer.cfg"));
+    CHECK(helix::DebugBundleCollector::glob_match("mod/*.cfg", "mod/base.cfg"));
+    CHECK(helix::DebugBundleCollector::glob_match("*.cfg", "printer.cfg"));
+    CHECK(helix::DebugBundleCollector::glob_match("mod/?.cfg", "mod/a.cfg"));
+
+    // The load-bearing case: Python glob (which Klipper uses) stops '*' at a
+    // separator, so a top-level "*.cfg" must not vacuum up the whole tree.
+    CHECK_FALSE(helix::DebugBundleCollector::glob_match("*.cfg", "mod/base.cfg"));
+    CHECK_FALSE(helix::DebugBundleCollector::glob_match("mod/*.cfg", "mod/sub/base.cfg"));
+    CHECK_FALSE(helix::DebugBundleCollector::glob_match("mod/?.cfg", "mod/ab.cfg"));
+
+    CHECK_FALSE(helix::DebugBundleCollector::glob_match("printer.cfg", "printer.cfg.bak"));
+    CHECK_FALSE(helix::DebugBundleCollector::glob_match("other.cfg", "printer.cfg"));
+}
+
+TEST_CASE("DebugBundleCollector: resolve_include_pattern is relative to the including file",
+          "[debug-bundle][printer-config]") {
+    const std::vector<std::string> available = {
+        "printer.cfg",      "mod/base.cfg", "mod/ifs.cfg",
+        "mod/sub/deep.cfg", "top.cfg",      "mod/notcfg.txt",
+    };
+
+    // From printer.cfg (config root), a bare name stays at the root.
+    auto from_root =
+        helix::DebugBundleCollector::resolve_include_pattern("top.cfg", "printer.cfg", available);
+    REQUIRE(from_root.size() == 1);
+    CHECK(from_root[0] == "top.cfg");
+
+    // From mod/base.cfg, a bare name resolves INTO mod/ - resolving it at the
+    // root instead would fetch the wrong file or silently nothing.
+    auto sibling =
+        helix::DebugBundleCollector::resolve_include_pattern("ifs.cfg", "mod/base.cfg", available);
+    REQUIRE(sibling.size() == 1);
+    CHECK(sibling[0] == "mod/ifs.cfg");
+
+    // A glob expands to every match at that level and no deeper.
+    auto globbed =
+        helix::DebugBundleCollector::resolve_include_pattern("mod/*.cfg", "printer.cfg", available);
+    REQUIRE(globbed.size() == 2);
+    CHECK(globbed[0] == "mod/base.cfg");
+    CHECK(globbed[1] == "mod/ifs.cfg");
+
+    // "./" prefix normalizes to the listing's form.
+    auto dotted =
+        helix::DebugBundleCollector::resolve_include_pattern("./top.cfg", "printer.cfg", available);
+    REQUIRE(dotted.size() == 1);
+    CHECK(dotted[0] == "top.cfg");
+
+    // No match is empty, not a fabricated path.
+    CHECK(helix::DebugBundleCollector::resolve_include_pattern("missing.cfg", "printer.cfg",
+                                                               available)
+              .empty());
+}
+
+TEST_CASE("DebugBundleCollector: config bodies sanitize per line, not whole-file",
+          "[debug-bundle][printer-config][sanitize]") {
+    // A whole printer.cfg exceeds sanitize_value()'s 4 KB guard, which would
+    // return [REDACTED_LONG_VALUE] for the entire file. sanitize_text_block()
+    // is what keeps the config readable while still redacting the secrets that
+    // actually turn up in one.
+    std::string body = "[printer]\nkinematics: corexy\n"
+                       "[gcode_macro NOTIFY]\n"
+                       "gcode: RUN_SHELL_COMMAND CMD=curl https://api.telegram.org/bot123/send\n"
+                       "[spoolman]\nserver: http://user:hunter2@spool.local:7912\n"
+                       "# owner: someone@example.com\n";
+    body += std::string(5000, 'x'); // push the file past the 4 KB guard
+    body += "\n";
+
+    const std::string clean = helix::DebugBundleCollector::sanitize_text_block(body);
+
+    // Structure survives - the whole file was NOT collapsed to one marker.
+    CHECK(clean.find("kinematics: corexy") != std::string::npos);
+    CHECK(clean.find("[gcode_macro NOTIFY]") != std::string::npos);
+
+    // Secrets do not.
+    CHECK(clean.find("api.telegram.org/bot123") == std::string::npos);
+    CHECK(clean.find("hunter2") == std::string::npos);
+    CHECK(clean.find("someone@example.com") == std::string::npos);
+    CHECK(clean.find("[REDACTED_CREDENTIALS]") != std::string::npos);
+    CHECK(clean.find("[REDACTED_EMAIL]") != std::string::npos);
 }
 
 // ============================================================================
@@ -1187,8 +1496,8 @@ std::vector<LFE> ad5m_logs_root() {
     };
 }
 
-const std::vector<std::string> kKlippyStems = {"klippy.log", "printer.log"};
-const std::vector<std::string> kMoonrakerStems = {"moonraker.log"};
+const std::vector<std::string> KLIPPY_STEMS = {"klippy.log", "printer.log"};
+const std::vector<std::string> MOONRAKER_STEMS = {"moonraker.log"};
 
 } // namespace
 
@@ -1198,48 +1507,48 @@ TEST_CASE("DebugBundleCollector: pick_rotated_sibling finds the crash's real log
         // The trap. crowsnest.log.2026-08-11 is 940 KB and ~5 days newer than the
         // newest klippy rotation, so any "newest rotated file" rule ships a
         // webcam log in place of the crash.
-        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(pi_logs_root(), kKlippyStems) ==
+        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(pi_logs_root(), KLIPPY_STEMS) ==
                 "klippy.log.2026-06-08");
     }
 
     SECTION("Pi layout: moonraker rotation") {
         REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(
-                    pi_logs_root(), kMoonrakerStems) == "moonraker.log.2026-08-09");
+                    pi_logs_root(), MOONRAKER_STEMS) == "moonraker.log.2026-08-09");
     }
 
     SECTION("AD5M/AD5X layout: klippy's log is printer.log, with an hour suffix") {
-        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(ad5m_logs_root(), kKlippyStems) ==
+        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(ad5m_logs_root(), KLIPPY_STEMS) ==
                 "printer.log.2026-06-13_15");
     }
 
     SECTION("AD5M layout: the moonraker rotation that held the LYGVE39Y incident") {
         REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(
-                    ad5m_logs_root(), kMoonrakerStems) == "moonraker.log.2026-08-11");
+                    ad5m_logs_root(), MOONRAKER_STEMS) == "moonraker.log.2026-08-11");
     }
 
     SECTION("never the active file, however it sorts") {
         std::vector<LFE> only_active = {{"moonraker.log", 999999, 9999999999.0}};
-        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(only_active, kMoonrakerStems)
+        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(only_active, MOONRAKER_STEMS)
                     .empty());
     }
 
     SECTION("never a nested path — mod/init.log.1 is not klippy's") {
         std::vector<LFE> nested = {{"mod/printer.log.1", 9999, 9999999999.0}};
-        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(nested, kKlippyStems).empty());
+        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(nested, KLIPPY_STEMS).empty());
     }
 
     SECTION("never a different daemon that merely shares the suffix shape") {
         std::vector<LFE> other = {{"crowsnest.log.2026-08-11", 940700, 9999999999.0},
                                   {"mainsail-error.log.1", 10, 9999999999.0}};
-        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(other, kKlippyStems).empty());
-        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(other, kMoonrakerStems).empty());
+        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(other, KLIPPY_STEMS).empty());
+        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(other, MOONRAKER_STEMS).empty());
     }
 
     SECTION("numeric rotation suffixes count too") {
         std::vector<LFE> numeric = {{"moonraker.log", 100, 500.0},
                                     {"moonraker.log.1", 100, 400.0},
                                     {"moonraker.log.2", 100, 300.0}};
-        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(numeric, kMoonrakerStems) ==
+        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(numeric, MOONRAKER_STEMS) ==
                 "moonraker.log.1"); // newest of the rotations
     }
 
@@ -1248,12 +1557,12 @@ TEST_CASE("DebugBundleCollector: pick_rotated_sibling finds the crash's real log
         std::vector<LFE> tricky = {{"printer.log_backup.1", 500, 9999999999.0},
                                    {"printer.logger.2", 500, 9999999999.0},
                                    {"printer.log.2026-01-01", 500, 100.0}};
-        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(tricky, kKlippyStems) ==
+        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling(tricky, KLIPPY_STEMS) ==
                 "printer.log.2026-01-01");
     }
 
     SECTION("empty listing is not a crash") {
-        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling({}, kKlippyStems).empty());
+        REQUIRE(helix::DebugBundleCollector::pick_rotated_sibling({}, KLIPPY_STEMS).empty());
     }
 }
 
@@ -1292,16 +1601,16 @@ TEST_CASE("DebugBundleCollector: condense threshold preserves EVERY proc_stats s
         // Not a defect in the Klipper path — klippy.log has no equivalent block,
         // and this is exactly why moonraker.log cannot inherit the same number.
         auto out = helix::DebugBundleCollector::condense_klipper_log(
-            raw, helix::DebugBundleCollector::kKlipperCondenseMaxRepeats, /*tail_lines=*/0);
+            raw, helix::DebugBundleCollector::KLIPPER_CONDENSE_MAX_REPEATS, /*tail_lines=*/0);
         REQUIRE(count_block(out, "17864624") < 30); // incident sacrificed
         REQUIRE(count_block(out, "17864626") == 30);
     }
 
     SECTION("the moonraker threshold keeps both blocks whole") {
         // Reads the shipping constant, not a copy of it: dropping
-        // kMoonrakerCondenseMaxRepeats back toward Klipper's value fails here.
+        // MOONRAKER_CONDENSE_MAX_REPEATS back toward Klipper's value fails here.
         auto out = helix::DebugBundleCollector::condense_klipper_log(
-            raw, helix::DebugBundleCollector::kMoonrakerCondenseMaxRepeats, /*tail_lines=*/0);
+            raw, helix::DebugBundleCollector::MOONRAKER_CONDENSE_MAX_REPEATS, /*tail_lines=*/0);
         REQUIRE(count_block(out, "17864624") == 30);
         REQUIRE(count_block(out, "17864626") == 30);
     }

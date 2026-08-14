@@ -323,7 +323,7 @@ static void draw_line(lv_layer_t* layer, int32_t x1, int32_t y1, int32_t x2, int
 static void draw_routed_tube_parallel(lv_layer_t* layer, int32_t sx, int32_t sy, int32_t ex,
                                       int32_t ey, int32_t horiz_y, lv_color_t color, int32_t width,
                                       bool active) {
-    constexpr float kFilletR = 9.0f;
+    constexpr float FILLET_R = 9.0f;
 
     // Clamp the bend so it leaves room for both fillets.
     int32_t lo = sy + 4;
@@ -347,7 +347,7 @@ static void draw_routed_tube_parallel(lv_layer_t* layer, int32_t sx, int32_t sy,
                             {(float)ex, (float)y_approach},
                             {(float)ex, (float)ey}};
     pg::FilamentPath path;
-    pg::route_polyline_filleted(path, pts, 4, kFilletR);
+    pg::route_polyline_filleted(path, pts, 4, FILLET_R);
     helix::ui::draw_lane(layer, path, sp_lane_style(color, width, active));
 }
 

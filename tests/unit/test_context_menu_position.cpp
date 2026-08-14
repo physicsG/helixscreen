@@ -27,17 +27,17 @@ using AnchorAlign = ContextMenu::AnchorAlign;
 
 namespace {
 
-constexpr int32_t kMargin = 10;
-constexpr int32_t kGap = 4;
+constexpr int32_t MARGIN = 10;
+constexpr int32_t GAP = 4;
 
 lv_point_t below(lv_point_t card, lv_area_t anchor, lv_point_t bounds,
                  AnchorAlign align = AnchorAlign::Center) {
-    return ContextMenu::compute_card_pos(card, anchor, bounds, kMargin, kGap,
-                                         AnchorMode::BelowAnchor, align);
+    return ContextMenu::compute_card_pos(card, anchor, bounds, MARGIN, GAP, AnchorMode::BelowAnchor,
+                                         align);
 }
 
 lv_point_t at_click(lv_point_t card, int32_t x, int32_t y, lv_point_t bounds) {
-    return ContextMenu::compute_card_pos(card, {x, y, x, y}, bounds, kMargin, kGap,
+    return ContextMenu::compute_card_pos(card, {x, y, x, y}, bounds, MARGIN, GAP,
                                          AnchorMode::ClickPoint, AnchorAlign::Center);
 }
 
@@ -80,13 +80,13 @@ TEST_CASE("compute_card_pos: centring off the left edge clamps to the margin",
           "[context-menu][position]") {
     // Anchor hugs the left edge, so a centred card would start at -30.
     const lv_point_t pos = below({80, 60}, {0, 100, 20, 140}, {800, 480});
-    CHECK(pos.x == kMargin);
+    CHECK(pos.x == MARGIN);
 }
 
 TEST_CASE("compute_card_pos: centring off the right edge clamps to the margin",
           "[context-menu][position]") {
     const lv_point_t pos = below({80, 60}, {760, 100, 800, 140}, {800, 480});
-    CHECK(pos.x == 800 - 80 - kMargin);
+    CHECK(pos.x == 800 - 80 - MARGIN);
 }
 
 // ============================================================================
@@ -113,7 +113,7 @@ TEST_CASE("compute_card_pos: click-anchored card slides up rather than flipping"
     // Vertically it never flips - the pointer is on a row, and jumping the card to
     // the far side of it would leave the row it describes uncovered but far away.
     const lv_point_t pos = at_click({80, 60}, 100, 460, {800, 480});
-    CHECK(pos.y == 480 - 60 - kMargin);
+    CHECK(pos.y == 480 - 60 - MARGIN);
 }
 
 // ============================================================================
@@ -125,18 +125,18 @@ TEST_CASE("compute_card_pos: a card taller than the screen keeps its top on scre
     // The high-edge clamp alone yields 480-500-10 = -30, which would put the card's
     // header and first row above the top of the screen where they cannot be reached.
     const lv_point_t pos = below({80, 500}, {100, 100, 200, 140}, {800, 480});
-    CHECK(pos.y == kMargin);
+    CHECK(pos.y == MARGIN);
 }
 
 TEST_CASE("compute_card_pos: a card wider than the screen keeps its left edge on screen",
           "[context-menu][position]") {
     const lv_point_t pos = below({900, 60}, {100, 100, 200, 140}, {800, 480});
-    CHECK(pos.x == kMargin);
+    CHECK(pos.x == MARGIN);
 }
 
 TEST_CASE("compute_card_pos: an oversized click-anchored card clamps the same way",
           "[context-menu][position]") {
     const lv_point_t pos = at_click({900, 500}, 400, 240, {800, 480});
-    CHECK(pos.x == kMargin);
-    CHECK(pos.y == kMargin);
+    CHECK(pos.x == MARGIN);
+    CHECK(pos.y == MARGIN);
 }

@@ -32,18 +32,9 @@
 using namespace helix;
 using namespace helix::ui;
 
-// Friend shim (declared friend in ui_print_start_controller.h) to reach the
-// private pre-print gate + remap-warning decision helper.
-class PrintStartControllerTestAccess {
-  public:
-    static bool check(PrintStartController& c) {
-        return c.check_required_filament_present();
-    }
-    static bool should_warn_remap_unsupported(const helix::printer::ToolMappingCapabilities& caps,
-                                              bool applies_via_preprint) {
-        return PrintStartController::should_warn_remap_unsupported(caps, applies_via_preprint);
-    }
-};
+// Friend shim lives in test_helpers/ — it must be defined exactly once across
+// the test binary (see the header's note on ODR).
+#include "../test_helpers/print_start_controller_test_access.h"
 
 namespace {
 

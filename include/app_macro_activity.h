@@ -36,7 +36,7 @@ namespace helix {
 class AppMacroActivity {
   public:
     using clock = std::chrono::steady_clock;
-    static constexpr std::chrono::seconds kGraceWindow{2};
+    static constexpr std::chrono::seconds GRACE_WINDOW{2};
 
     /**
      * Ceiling on how long a single in-flight send may keep the tracker active.
@@ -55,7 +55,7 @@ class AppMacroActivity {
      * 10-minute ceiling sits safely above any legitimate in-flight macro and
      * converts a permanent wedge into a bounded, self-healing one.
      */
-    static constexpr std::chrono::minutes kMaxInflightAge{10};
+    static constexpr std::chrono::minutes MAX_INFLIGHT_AGE{10};
 
     void note_sent(clock::time_point now = clock::now()) {
         last_sent_ns_.store(now.time_since_epoch().count(), std::memory_order_relaxed);
@@ -74,13 +74,13 @@ class AppMacroActivity {
     bool recently_active(clock::time_point now = clock::now()) const {
         if (inflight_.load(std::memory_order_relaxed) > 0) {
             // Self-healing ceiling: if even the NEWEST send is older than
-            // kMaxInflightAge, the counter is stuck, not busy. Treat it as
+            // MAX_INFLIGHT_AGE, the counter is stuck, not busy. Treat it as
             // inactive so the toast comes back rather than staying suppressed
             // for the rest of the session.
             const auto sent_ns = last_sent_ns_.load(std::memory_order_relaxed);
             if (sent_ns != 0) {
                 const clock::time_point sent{clock::duration{sent_ns}};
-                if ((now - sent) < kMaxInflightAge) {
+                if ((now - sent) < MAX_INFLIGHT_AGE) {
                     return true;
                 }
             }
@@ -90,7 +90,7 @@ class AppMacroActivity {
             return false;
         }
         const clock::time_point last{clock::duration{last_ns}};
-        return (now - last) < kGraceWindow;
+        return (now - last) < GRACE_WINDOW;
     }
 
   private:

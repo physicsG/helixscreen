@@ -76,8 +76,8 @@ class PrinterDiscovery {
         int best_chamber_sensor_conf = 0;
         int best_chamber_cooling_fan_conf = 0;
 
-        constexpr int kChamberHeaterGenericWeight = 2;  // settable heater — preferred
-        constexpr int kChamberTemperatureFanWeight = 1; // fan — only wins if no heater_generic
+        constexpr int CHAMBER_HEATER_GENERIC_WEIGHT = 2;  // settable heater — preferred
+        constexpr int CHAMBER_TEMPERATURE_FAN_WEIGHT = 1; // fan — only wins if no heater_generic
 
         // Promote the current object to the best chamber heater if its keyword
         // confidence (plus object-type tiebreak) exceeds the running best.
@@ -154,7 +154,7 @@ class PrinterDiscovery {
             else if (name.rfind("heater_generic ", 0) == 0) {
                 heaters_.push_back(name);
                 std::string heater_name = name.substr(15); // Remove "heater_generic " prefix
-                try_set_chamber_heater(name, heater_name, kChamberHeaterGenericWeight);
+                try_set_chamber_heater(name, heater_name, CHAMBER_HEATER_GENERIC_WEIGHT);
             }
             // ================================================================
             // Sensors: temperature_sensor, temperature_fan (dual-purpose)
@@ -171,7 +171,7 @@ class PrinterDiscovery {
                 sensors_.push_back(name);
                 fans_.push_back(name);                  // Also add to fans for control
                 std::string fan_name = name.substr(16); // Remove "temperature_fan " prefix
-                try_set_chamber_heater(name, fan_name, kChamberTemperatureFanWeight);
+                try_set_chamber_heater(name, fan_name, CHAMBER_TEMPERATURE_FAN_WEIGHT);
                 try_set_chamber_cooling_fan(name, fan_name);
             }
             // TMC stepper drivers with built-in temperature (tmc2240, tmc5160)
@@ -1350,10 +1350,10 @@ class PrinterDiscovery {
 
         // Air-quality penalty: names carrying a gas/particulate/humidity token
         // describe air quality, not chamber temperature.
-        static const char* const kAirQualityTokens[] = {
+        static const char* const AIR_QUALITY_TOKENS[] = {
             "TVOC", "VOC",  "CO2",  "GAS",         "HUMIDITY", "IAQ",
             "AQI",  "PM25", "PM10", "PARTICULATE", "PRESSURE"};
-        for (const char* tok : kAirQualityTokens) {
+        for (const char* tok : AIR_QUALITY_TOKENS) {
             if (has_standalone_token(upper, tok)) {
                 score -= 40;
                 break;

@@ -1081,6 +1081,11 @@ void WizardWifiStep::show_password_modal(const char* ssid) {
     spdlog::debug("[{}] Showing password modal for SSID: {}", get_name(),
                   helix::redact::ssid(ssid));
 
+    // Reset connecting state — the shared modal hides the password form and the Connect
+    // button while wifi_connecting is 1, so a previous attempt left latched would open
+    // this modal straight into the spinner with nothing to type into.
+    lv_subject_set_int(&wifi_connecting_, 0);
+
     const char* attrs[] = {"ssid", ssid, NULL};
     password_modal_ = helix::ui::modal_show("wifi_password_modal", attrs);
 
@@ -1117,13 +1122,16 @@ void WizardWifiStep::show_password_modal(const char* ssid) {
 }
 
 void WizardWifiStep::hide_password_modal() {
-    if (!password_modal_)
-        return;
+    if (password_modal_) {
+        spdlog::debug("[{}] Hiding password modal", get_name());
 
-    spdlog::debug("[{}] Hiding password modal", get_name());
+        helix::ui::modal_hide(password_modal_);
+        password_modal_ = nullptr;
+    }
 
-    helix::ui::modal_hide(password_modal_);
-    password_modal_ = nullptr;
+    // Reset connecting state unconditionally: the modal is gone either way, and leaving
+    // the subject at 1 would open the next one in the spinner state.
+    lv_subject_set_int(&wifi_connecting_, 0);
 }
 
 // ============================================================================

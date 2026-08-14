@@ -89,6 +89,17 @@ class Ad5xIfsTestAccess {
         std::lock_guard<std::mutex> lock(b.mutex_);
         return b.build_color_list_value();
     }
+    static std::string runout_detail(const AmsBackendAd5xIfs& b) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        return b.build_runout_detail_locked();
+    }
+    static void set_runout_state(AmsBackendAd5xIfs& b, int slot, bool has_ifs_vars,
+                                 std::optional<bool> backup_variable) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        b.runout_slot_ = slot;
+        b.has_ifs_vars_ = has_ifs_vars;
+        b.ifs_backup_variable_ = backup_variable;
+    }
     static std::string build_types(const AmsBackendAd5xIfs& b) {
         std::lock_guard<std::mutex> lock(b.mutex_);
         return b.build_type_list_value();
@@ -6381,14 +6392,14 @@ TEST_CASE("AD5X IFS coalesces a burst of color-change triggers into one debounce
     const uint32_t submit_before = Ad5xIfsTestAccess::zcolor_worker_submit_count(backend);
     REQUIRE_FALSE(Ad5xIfsTestAccess::zcolor_schedule_armed(backend));
 
-    constexpr int kBurst = 20;
-    for (int i = 0; i < kBurst; ++i) {
+    constexpr int BURST = 20;
+    for (int i = 0; i < BURST; ++i) {
         Ad5xIfsTestAccess::on_gcode_response_line(backend,
                                                   "// CHANGE_ZCOLOR SLOT=2 HEX=F72224 TYPE=PLA");
     }
 
     // Every trigger is seen (diagnostic counter rises by the full burst)...
-    CHECK(Ad5xIfsTestAccess::zcolor_schedule_count(backend) == sched_before + kBurst);
+    CHECK(Ad5xIfsTestAccess::zcolor_schedule_count(backend) == sched_before + BURST);
     // ...but only ONE debounce worker was submitted; the rest hit the armed gate.
     CHECK(Ad5xIfsTestAccess::zcolor_worker_submit_count(backend) == submit_before + 1);
     CHECK(Ad5xIfsTestAccess::zcolor_schedule_armed(backend));
@@ -8444,14 +8455,14 @@ namespace {
 // The exact swatch grid zmod renders for "Select color" (bundle 482NB943,
 // 17:34:19.0-19.2 and 17:35:29.6-29.9). Order matters: the bug landed the slot
 // on whichever entry came LAST, so #161616 is the value that showed on screen.
-const std::vector<std::string> kZmodPalette = {
+const std::vector<std::string> ZMOD_PALETTE = {
     "ffffff", "fef043", "dcf478", "0acc38", "067749", "0c6283", "0de2a0", "75d9f3",
     "45a8f9", "2750e0", "46328e", "a03cf7", "f330f9", "d4b0dc", "f95d73", "f72224",
     "7c4b00", "f98d33", "fdebd5", "d3c4a3", "af7836", "898989", "bcbcbc", "161616"};
 
 // zmod's stock material whitelist, in render order (17:34:35.849-35.886).
 // PETG-CF is last, so that is the type the slot ended up displaying.
-const std::vector<std::string> kZmodMaterials = {"PLA", "PLA-CF", "SILK",   "TPU",
+const std::vector<std::string> ZMOD_MATERIALS = {"PLA", "PLA-CF", "SILK",   "TPU",
                                                  "ABS", "PETG",   "PETG-CF"};
 
 std::string palette_button(int slot1, const std::string& type, const std::string& hex) {
@@ -8487,7 +8498,7 @@ TEST_CASE("AD5X IFS regression: COLOR palette render never moves the slot (#1065
     Ad5xIfsTestAccess::set_material(backend, 0, "PETG");
     const size_t syncs_before = Ad5xIfsTestAccess::external_sync_count(backend);
 
-    for (const auto& hex : kZmodPalette) {
+    for (const auto& hex : ZMOD_PALETTE) {
         REQUIRE_FALSE(
             Ad5xIfsTestAccess::on_gcode_response_line(backend, palette_button(1, "PETG", hex)));
         // Not just "ends correct" — never moves at all.
@@ -8495,7 +8506,7 @@ TEST_CASE("AD5X IFS regression: COLOR palette render never moves the slot (#1065
         REQUIRE(backend.get_slot_info(0).material == "PETG");
     }
 
-    for (const auto& type : kZmodMaterials) {
+    for (const auto& type : ZMOD_MATERIALS) {
         REQUIRE_FALSE(
             Ad5xIfsTestAccess::on_gcode_response_line(backend, material_button(1, type, "898989")));
         REQUIRE(backend.get_slot_info(0).material == "PETG");
@@ -8533,7 +8544,7 @@ TEST_CASE("AD5X IFS regression: type change surfaces on the menu re-render, not 
     Ad5xIfsTestAccess::set_material(backend, 1, "PETG");
 
     // "Select material type" renders; every entry is a candidate, PETG-CF last.
-    for (const auto& type : kZmodMaterials) {
+    for (const auto& type : ZMOD_MATERIALS) {
         REQUIRE_FALSE(
             Ad5xIfsTestAccess::on_gcode_response_line(backend, material_button(1, type, "F330F9")));
     }
@@ -10306,18 +10317,18 @@ TEST_CASE_METHOD(Ad5xRunoutFixture,
     // number: a predicate hardcoding the short constant fires early on a
     // long-dwell config, and one hardcoding the long constant never fires on a
     // short-dwell config. Either way a REQUIRE below goes red.
-    constexpr auto kSlack = std::chrono::seconds(5);
-    auto dwell_is_load_bearing = [this, kSlack](AmsBackendAd5xIfs& b) {
+    constexpr auto SLACK = std::chrono::seconds(5);
+    auto dwell_is_load_bearing = [this, SLACK](AmsBackendAd5xIfs& b) {
         set_print_state(helix::PrintJobState::PAUSED);
         seat_then_drop_head(b);
         REQUIRE(Ad5xIfsTestAccess::head_empty_armed(b));
 
         const auto dwell = Ad5xIfsTestAccess::runout_confirm_delay(b);
-        REQUIRE(dwell > kSlack); // the two probes have to straddle it
+        REQUIRE(dwell > SLACK); // the two probes have to straddle it
 
         // Just short of the dwell: armed, paused, idle — everything else holds.
         // A too-short threshold raises here.
-        Ad5xIfsTestAccess::age_head_empty(b, dwell - kSlack);
+        Ad5xIfsTestAccess::age_head_empty(b, dwell - SLACK);
         REQUIRE_FALSE(Ad5xIfsTestAccess::evaluate_runout(b));
         REQUIRE_FALSE(Ad5xIfsTestAccess::runout_active(b));
         REQUIRE(Ad5xIfsTestAccess::action(b) == AmsAction::IDLE);
@@ -10326,7 +10337,7 @@ TEST_CASE_METHOD(Ad5xRunoutFixture,
         REQUIRE(Ad5xIfsTestAccess::head_empty_armed(b));
 
         // Just past it. A too-long threshold fails to raise here.
-        Ad5xIfsTestAccess::age_head_empty(b, dwell + kSlack);
+        Ad5xIfsTestAccess::age_head_empty(b, dwell + SLACK);
         REQUIRE(Ad5xIfsTestAccess::evaluate_runout(b));
         REQUIRE(Ad5xIfsTestAccess::runout_active(b));
         REQUIRE(Ad5xIfsTestAccess::action(b) == AmsAction::ERROR);
@@ -10483,6 +10494,67 @@ TEST_CASE("AD5X IFS runout: backup-slot match needs type AND colour AND presence
 
     SECTION("the ran-out lane never matches itself") {
         REQUIRE(Ad5xIfsTestAccess::find_backup_slot(backend, 0) != 0);
+    }
+}
+
+// The runout detail is assembled from several translatable pieces. It used to
+// be built by concatenation -- the subject glued on in C++ and the rest left as
+// a fragment starting mid-clause ("is installed but ...", "matches.") -- which
+// no translator can reorder, so those fragments sat untranslated in all eight
+// non-English locales. Each piece is now a whole sentence with the variable
+// part as `{}`.
+//
+// These assertions pin the assembled ENGLISH only. They deliberately do not
+// claim to catch a relapse into concatenation: `who + " " + lv_tr("will switch
+// ...")` produces a byte-identical English string, so no assertion on the
+// output can tell the two apart (verified by mutating it back -- this test
+// still passed). What differs is the CATALOG, and that is guarded elsewhere:
+// re-splitting the sentence makes the whole-sentence key obsolete and the
+// fragments new, which the "no user-facing strings are missing from the
+// translation catalogs" gate in tests/shell/test_code_lint.bats fails on.
+TEST_CASE("AD5X IFS runout detail reads as whole sentences", "[ams][ad5x_ifs][runout][i18n]") {
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_port_presence(backend, 0, true);
+    Ad5xIfsTestAccess::set_material(backend, 0, "PLA");
+    Ad5xIfsTestAccess::set_color(backend, 0, "FF0000");
+
+    const auto contains = [](const std::string& haystack, const char* needle) {
+        return haystack.find(needle) != std::string::npos;
+    };
+
+    SECTION("stock zMod names Infinite Spool Mode as the subject") {
+        Ad5xIfsTestAccess::set_runout_state(backend, 0, /*has_ifs_vars=*/false, std::nullopt);
+        const std::string detail = Ad5xIfsTestAccess::runout_detail(backend);
+
+        // Subject adjacent to its verb is exactly what concatenation could not
+        // guarantee once a translator moved either one.
+        REQUIRE(contains(detail, "Infinite Spool Mode will switch to a slot"));
+        REQUIRE(contains(detail, "No slot currently matches."));
+    }
+
+    SECTION("a matching backup slot is named in one sentence, not three pieces") {
+        Ad5xIfsTestAccess::set_port_presence(backend, 2, true);
+        Ad5xIfsTestAccess::set_material(backend, 2, "PLA");
+        Ad5xIfsTestAccess::set_color(backend, 2, "FF0000");
+        Ad5xIfsTestAccess::set_runout_state(backend, 0, /*has_ifs_vars=*/false, std::nullopt);
+
+        REQUIRE(contains(Ad5xIfsTestAccess::runout_detail(backend), "Slot 3 matches."));
+    }
+
+    SECTION("an unreadable plugin setting names the plugin as the subject") {
+        Ad5xIfsTestAccess::set_var_prefix(backend, "bambufy");
+        Ad5xIfsTestAccess::set_runout_state(backend, 0, /*has_ifs_vars=*/true, std::nullopt);
+
+        REQUIRE(contains(Ad5xIfsTestAccess::runout_detail(backend),
+                         "bambufy is installed, but its backup-spool setting could not be read"));
+    }
+
+    SECTION("backup switching turned off names the plugin as the subject") {
+        Ad5xIfsTestAccess::set_var_prefix(backend, "lessWaste");
+        Ad5xIfsTestAccess::set_runout_state(backend, 0, /*has_ifs_vars=*/true, false);
+
+        REQUIRE(contains(Ad5xIfsTestAccess::runout_detail(backend),
+                         "lessWaste is installed but its backup-spool switching is turned off"));
     }
 }
 

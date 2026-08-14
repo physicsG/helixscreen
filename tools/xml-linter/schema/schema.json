@@ -1707,6 +1707,9 @@
         "show_target": {
           "type": "bool"
         },
+        "hide_target_when_off": {
+          "type": "bool"
+        },
         "hide_target_below_bp": {
           "type": "string"
         },

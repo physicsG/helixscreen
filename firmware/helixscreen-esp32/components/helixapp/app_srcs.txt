@@ -227,6 +227,7 @@ src/ui/ams_drawing_utils.cpp
 src/ui/backdrop_blur.cpp
 src/ui/console_filter_engine.cpp
 src/ui/fan_spin_animation.cpp
+src/ui/fault_modal_registry.cpp
 src/ui/filament_op_router.cpp
 src/ui/filament_path_geometry.cpp
 src/ui/filament_tube_stroker.cpp

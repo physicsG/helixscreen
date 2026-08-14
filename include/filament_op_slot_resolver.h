@@ -193,7 +193,7 @@ struct OpButtonState {
 
 /// Slot sentinel meaning "the external / bypass spool", not an AMS lane. The
 /// value AmsOperationSidebar's callers have always passed for the bypass row.
-inline constexpr int kExternalSpoolSlot = -2;
+inline constexpr int EXTERNAL_SPOOL_SLOT = -2;
 
 /// A resolved preheat target. @c material_name is empty when no source named the
 /// material, which is the caller's cue to say "Heating to N°C" without a "for X".
@@ -235,7 +235,7 @@ struct PreheatTarget {
  *   1. The slot the load actually targets. An AMS lane the user picked is the
  *      filament about to pass through the melt zone; nothing outranks it.
  *   2. The external / bypass spool, but ONLY when the load has no AMS lane of
- *      its own (@p target_slot == kExternalSpoolSlot, or nothing resolved, or
+ *      its own (@p target_slot == EXTERNAL_SPOOL_SLOT, or nothing resolved, or
  *      the lane names no material). On an external-spool-only printer this is
  *      the one filament there is.
  *
@@ -252,7 +252,7 @@ struct PreheatTarget {
  * now" and is correct for its callers. This answers "what is about to go in",
  * where the target slot — not the active one — is the authority.
  *
- * @param target_slot       Slot the load targets; kExternalSpoolSlot for bypass,
+ * @param target_slot       Slot the load targets; EXTERNAL_SPOOL_SLOT for bypass,
  *                          < 0 for "none resolved".
  * @param target_slot_info  SlotInfo for @p target_slot, or nullptr when there is
  *                          no backend / no such slot.
@@ -282,7 +282,7 @@ resolve_load_preheat_material(int target_slot, const SlotInfo* target_slot_info,
     };
 
     // The bypass row IS the external spool — never look at an AMS lane for it.
-    if (target_slot == kExternalSpoolSlot) {
+    if (target_slot == EXTERNAL_SPOOL_SLOT) {
         return external_spool ? from(*external_spool) : std::nullopt;
     }
 

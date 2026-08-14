@@ -711,12 +711,22 @@ export default {
         // GET /v1/dashboard/hardware
         if (url.pathname === "/v1/dashboard/hardware") {
           const queries = hardwareQueries(days, filters);
-          const [modelsRes, kinematicsRes, mcuRes, capsRes, volRes, countsRes, ramRes, amsRes] =
+          const [modelsRes, kinematicsRes, mcuRes, capsRes, volRes, countsRes, ramRes, amsRes, helixMacrosRes, moonrakerLocalityRes] =
             await Promise.all(queries.map((q) => executeQuery(queryConfig, q)));
 
           const toList = (res: unknown) => {
             const d = res as { data: Array<{ name: string; count: number }> };
             return (d.data ?? []).map((r) => ({ name: r.name, count: r.count }));
+          };
+
+          // Collapse a "1"/"0" tri-state column into a labelled yes/no split.
+          // Rows with an empty name never reach here (the query filters them),
+          // so `reported` counts only devices that actually answered.
+          const toYesNo = (res: unknown, yesKey: string, noKey: string) => {
+            const rows = toList(res);
+            const yes = rows.find((r) => r.name === "1")?.count ?? 0;
+            const no = rows.find((r) => r.name === "0")?.count ?? 0;
+            return { [yesKey]: yes, [noKey]: no, reported: yes + no };
           };
 
           const capsData = capsRes as { data: Array<Record<string, number>> };
@@ -790,6 +800,12 @@ export default {
               };
               return { name: AMS_NAMES[r.name] ?? r.name, count: r.count };
             }),
+            // Both are yes/no splits over the devices that reported the field.
+            // `reported` is the denominator: it excludes clients too old to
+            // send it, so a small number here means "not enough data yet"
+            // rather than "nobody has it".
+            helix_macros: toYesNo(helixMacrosRes, "installed", "not_installed"),
+            moonraker_locality: toYesNo(moonrakerLocalityRes, "local", "remote"),
           });
         }
 

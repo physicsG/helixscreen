@@ -1261,7 +1261,7 @@ TEST_CASE("Crash: breadcrumb ring keeps the newest 256 entries on wraparound",
           "[telemetry][crash]") {
     // Drain the ring first — static state leaks across test cases. Writing
     // ring-size drain entries pushes any residual application breadcrumbs out.
-    // Ring size: src/system/crash_handler.cpp kBreadcrumbRingSize = 256.
+    // Ring size: src/system/crash_handler.cpp BREADCRUMB_RING_SIZE = 256.
     for (int i = 0; i < 256; ++i) {
         crash_handler::breadcrumb::note("drain", "drain");
     }
@@ -1295,7 +1295,7 @@ TEST_CASE("Crash: breadcrumb ring keeps the newest 256 entries on wraparound",
 
 TEST_CASE("Crash: breadcrumb category/subject are truncated with null terminator",
           "[telemetry][crash]") {
-    // Ring size: src/system/crash_handler.cpp kBreadcrumbRingSize = 256.
+    // Ring size: src/system/crash_handler.cpp BREADCRUMB_RING_SIZE = 256.
     for (int i = 0; i < 256; ++i) {
         crash_handler::breadcrumb::note("drain", "drain");
     }

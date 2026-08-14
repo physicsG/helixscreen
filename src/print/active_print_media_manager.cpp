@@ -383,7 +383,7 @@ void ActivePrintMediaManager::load_thumbnail_for_file(const std::string& filenam
                     // Metadata record exists but has no thumbnails. Briefly this
                     // can mean Moonraker is still mid-scan, but the common cause
                     // is a file sliced WITHOUT thumbnails — a permanent
-                    // condition. Retry only kMaxEmptyThumbnailRetries times and
+                    // condition. Retry only MAX_EMPTY_THUMBNAIL_RETRIES times and
                     // warn once; filelist_changed/klippy_ready re-triggers cover
                     // the late-scan case beyond that.
                     spdlog::log(thumbnail_retry_count_ == 0 ? spdlog::level::warn
@@ -392,8 +392,8 @@ void ActivePrintMediaManager::load_thumbnail_for_file(const std::string& filenam
                                 "(attempt {}/{}) - file may lack thumbnails or scan is "
                                 "incomplete",
                                 metadata_filename, thumbnail_retry_count_ + 1,
-                                kMaxEmptyThumbnailRetries + 1);
-                    schedule_thumbnail_retry(filename, kMaxEmptyThumbnailRetries);
+                                MAX_EMPTY_THUMBNAIL_RETRIES + 1);
+                    schedule_thumbnail_retry(filename, MAX_EMPTY_THUMBNAIL_RETRIES);
                     return;
                 }
 
@@ -420,7 +420,7 @@ void ActivePrintMediaManager::load_thumbnail_for_file(const std::string& filenam
                 }
                 const std::string resolved_thumb_path =
                     resolve_thumbnail_path(thumbnail_rel_path, gcode_dir);
-                constexpr size_t kEsp32ThumbnailMaxBytes = 512 * 1024;
+                constexpr size_t ESP32_THUMBNAIL_MAX_BYTES = 512 * 1024;
 
                 // MANDATORY threading: EspHttpLane invokes on_success/on_error
                 // directly on its own worker thread with no marshaling. Both
@@ -429,7 +429,7 @@ void ActivePrintMediaManager::load_thumbnail_for_file(const std::string& filenam
                 // captured only to pass into the deferred body, never
                 // dereferenced on the worker.
                 api_->transfers().download_file_partial(
-                    "gcodes", resolved_thumb_path, kEsp32ThumbnailMaxBytes,
+                    "gcodes", resolved_thumb_path, ESP32_THUMBNAIL_MAX_BYTES,
                     [this, tok = lifetime_.token(), ctx,
                      resolved_thumb_path](const std::string& png_bytes) {
                         // lane worker: PSRAM copy only, no LVGL, no members.
@@ -482,7 +482,7 @@ void ActivePrintMediaManager::load_thumbnail_for_file(const std::string& filenam
                                       spdlog::warn("[ActivePrintMediaManager] PSRAM thumbnail "
                                                    "download failed for '{}' (attempt {}/{}): {}",
                                                    filename, thumbnail_retry_count_ + 1,
-                                                   kMaxThumbnailAttempts, message);
+                                                   MAX_THUMBNAIL_ATTEMPTS, message);
                                       schedule_thumbnail_retry(filename);
                                   });
                     });
@@ -544,7 +544,7 @@ void ActivePrintMediaManager::load_thumbnail_for_file(const std::string& filenam
                                       spdlog::warn("[ActivePrintMediaManager] Thumbnail download "
                                                    "failed for '{}' (attempt {}/{}): {}",
                                                    filename, thumbnail_retry_count_ + 1,
-                                                   kMaxThumbnailAttempts, message);
+                                                   MAX_THUMBNAIL_ATTEMPTS, message);
                                       schedule_thumbnail_retry(filename);
                                   });
                     });
@@ -566,7 +566,7 @@ void ActivePrintMediaManager::load_thumbnail_for_file(const std::string& filenam
                           spdlog::warn("[ActivePrintMediaManager] Thumbnail metadata fetch failed "
                                        "for '{}' (attempt {}/{}): {}",
                                        metadata_filename, thumbnail_retry_count_ + 1,
-                                       kMaxThumbnailAttempts, message);
+                                       MAX_THUMBNAIL_ATTEMPTS, message);
                           schedule_thumbnail_retry(filename);
                       });
         },
@@ -652,7 +652,7 @@ void ActivePrintMediaManager::on_retry_timer_fired() {
         return; // a fetch completed in the meantime
     }
     spdlog::info("[ActivePrintMediaManager] Retrying thumbnail load for '{}' (attempt {}/{})",
-                 retry_filename_, thumbnail_retry_count_ + 1, kMaxThumbnailAttempts);
+                 retry_filename_, thumbnail_retry_count_ + 1, MAX_THUMBNAIL_ATTEMPTS);
     load_thumbnail_for_file(retry_filename_);
 }
 

@@ -566,8 +566,8 @@ bool TempGraphController::attach_series_observers(size_t i) {
                     // a spurious 0 never consumes the per-series sample slot and block
                     // the next real reading. Upper bound rejects obviously-bogus spikes
                     // (deci-degrees: 4000 = 400°C covers any nozzle).
-                    constexpr int kMaxValidTempDeci = 4000;
-                    if (temp_deci <= 0 || temp_deci > kMaxValidTempDeci)
+                    constexpr int MAX_VALID_TEMP_DECI = 4000;
+                    if (temp_deci <= 0 || temp_deci > MAX_VALID_TEMP_DECI)
                         return;
 
                     // Throttle chart updates to one sample per SAMPLE_INTERVAL_SEC

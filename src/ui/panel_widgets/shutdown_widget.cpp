@@ -28,15 +28,15 @@ namespace {
 
 // Split-button dropdown indices (must match XML option order:
 // "Both\nPrinter\nScreen" in shutdown_modal.xml).
-constexpr uint32_t kScopeBoth = 0;
-constexpr uint32_t kScopePrinter = 1;
-constexpr uint32_t kScopeScreen = 2;
+constexpr uint32_t SCOPE_BOTH = 0;
+constexpr uint32_t SCOPE_PRINTER = 1;
+constexpr uint32_t SCOPE_SCREEN = 2;
 
 // After a successful machine.shutdown/reboot, Moonraker replies OK but the
 // OS-level shutdown can silently no-op on some firmwares (observed on SonicPad
 // Jpe230 — logind.PowerOff returns without initiating the shutdown). If the
 // WebSocket has reconnected within this window, the host is clearly still up.
-constexpr uint32_t kVerificationWindowMs = 20000;
+constexpr uint32_t VERIFICATION_WINDOW_MS = 20000;
 
 struct VerifyCtx {
     IMoonrakerAPI* api;
@@ -53,7 +53,7 @@ void verify_host_down_timer_cb(lv_timer_t* timer) {
 
     const char* action = ctx->is_reboot ? "reboot" : "shutdown";
     spdlog::warn("[ShutdownDialog] Host still reachable {}s after {} — {} silently failed",
-                 kVerificationWindowMs / 1000, action, action);
+                 VERIFICATION_WINDOW_MS / 1000, action, action);
 
     const char* msg = ctx->is_reboot ? lv_tr("Reboot failed — host is still reachable")
                                      : lv_tr("Shutdown failed — host is still reachable");
@@ -68,7 +68,7 @@ void schedule_host_down_verification(IMoonrakerAPI* api, bool is_reboot) {
     }
     helix::ui::queue_update("ShutdownDialog::verify", [api, is_reboot]() {
         auto* ctx = new VerifyCtx{api, is_reboot};
-        lv_timer_create(verify_host_down_timer_cb, kVerificationWindowMs, ctx);
+        lv_timer_create(verify_host_down_timer_cb, VERIFICATION_WINDOW_MS, ctx);
     });
 }
 
@@ -82,13 +82,13 @@ void schedule_host_down_verification(IMoonrakerAPI* api, bool is_reboot) {
 // button itself. We don't depend on which descendant emitted the event; the
 // walk-up only needs to reach the named view-root ancestor (per L069).
 ShutdownModal* find_shutdown_modal(lv_event_t* e) {
-    constexpr const char* kViewName = "shutdown_modal";
-    constexpr size_t kViewNameLen = 14;
+    constexpr const char* VIEW_NAME = "shutdown_modal";
+    constexpr size_t VIEW_NAME_LEN = 14;
     lv_obj_t* obj = lv_event_get_current_target_obj(e);
     while (obj) {
         const char* name = lv_obj_get_name(obj);
-        if (name && std::strncmp(name, kViewName, kViewNameLen) == 0 &&
-            (name[kViewNameLen] == '\0' || name[kViewNameLen] == '_')) {
+        if (name && std::strncmp(name, VIEW_NAME, VIEW_NAME_LEN) == 0 &&
+            (name[VIEW_NAME_LEN] == '\0' || name[VIEW_NAME_LEN] == '_')) {
             return static_cast<ShutdownModal*>(lv_obj_get_user_data(obj));
         }
         obj = lv_obj_get_parent(obj);
@@ -246,7 +246,7 @@ void on_reboot_printer_clicked(lv_event_t* e) {
 }
 
 // Split-button dispatchers (dual-scope mode). The split button's selected
-// dropdown index encodes the scope (kScopeBoth/kScopePrinter/kScopeScreen).
+// dropdown index encodes the scope (SCOPE_BOTH/SCOPE_PRINTER/SCOPE_SCREEN).
 void on_restart_split_clicked(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[ShutdownModal] restart_split");
     auto* m = find_shutdown_modal(e);
@@ -254,13 +254,13 @@ void on_restart_split_clicked(lv_event_t* e) {
     if (!m || !sb)
         return;
     switch (ui_split_button_get_selected(sb)) {
-    case kScopeBoth:
+    case SCOPE_BOTH:
         m->fire_both_reboot();
         break;
-    case kScopePrinter:
+    case SCOPE_PRINTER:
         m->fire_printer_reboot();
         break;
-    case kScopeScreen:
+    case SCOPE_SCREEN:
         m->fire_screen_reboot();
         break;
     }
@@ -273,13 +273,13 @@ void on_shutdown_split_clicked(lv_event_t* e) {
     if (!m || !sb)
         return;
     switch (ui_split_button_get_selected(sb)) {
-    case kScopeBoth:
+    case SCOPE_BOTH:
         m->fire_both_shutdown();
         break;
-    case kScopePrinter:
+    case SCOPE_PRINTER:
         m->fire_printer_shutdown();
         break;
-    case kScopeScreen:
+    case SCOPE_SCREEN:
         m->fire_screen_shutdown();
         break;
     }

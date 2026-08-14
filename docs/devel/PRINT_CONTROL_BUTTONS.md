@@ -80,7 +80,7 @@ function with **no LVGL dependency** — which makes it trivially unit-testable
 enum class PendingAction : int { None = 0, Pausing = 1, Resuming = 2 };
 
 struct ControlButtonView {
-    const char* primary_icon  = kControlIconPause;  // MDI glyph pointer
+    const char* primary_icon  = CONTROL_ICON_PAUSE;  // MDI glyph pointer
     const char* primary_label = "Pause";            // English; caller runs lv_tr()
     bool        primary_enabled = false;
     bool        stop_enabled    = false;
@@ -103,11 +103,11 @@ v.primary_enabled = active && pending == PendingAction::None && slot_ok;
 v.stop_enabled    = active && cancel_available;
 
 switch (pending) {
-case PendingAction::Pausing:  v.primary_icon = kControlIconHourglass; v.primary_label = "Pausing...";  break;
-case PendingAction::Resuming: v.primary_icon = kControlIconHourglass; v.primary_label = "Resuming..."; break;
+case PendingAction::Pausing:  v.primary_icon = CONTROL_ICON_HOURGLASS; v.primary_label = "Pausing...";  break;
+case PendingAction::Resuming: v.primary_icon = CONTROL_ICON_HOURGLASS; v.primary_label = "Resuming..."; break;
 case PendingAction::None:
-    if (state == PrintJobState::PAUSED) { v.primary_icon = kControlIconPlay;  v.primary_label = "Resume"; }
-    else                                { v.primary_icon = kControlIconPause; v.primary_label = "Pause";  }
+    if (state == PrintJobState::PAUSED) { v.primary_icon = CONTROL_ICON_PLAY;  v.primary_label = "Resume"; }
+    else                                { v.primary_icon = CONTROL_ICON_PAUSE; v.primary_label = "Pause";  }
     break;
 }
 ```
@@ -121,7 +121,7 @@ Inputs → outputs at a glance:
   available — this prevents re-triggering while an RPC is in flight, and shows
   the hourglass + transitional label.
 
-Icon constants: `kControlIconPause`, `kControlIconPlay`, `kControlIconHourglass`
+Icon constants: `CONTROL_ICON_PAUSE`, `CONTROL_ICON_PLAY`, `CONTROL_ICON_HOURGLASS`
 (MDI glyphs, defined in `print_control_view.h`).
 
 ---

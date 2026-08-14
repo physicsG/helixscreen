@@ -28,25 +28,25 @@ namespace gcode {
 namespace {
 
 /// Orange-red color for excluded objects (strikethrough style)
-constexpr uint32_t kExcludedObjectColor = 0xFF6B35;
-constexpr uint8_t kExcludedR = (kExcludedObjectColor >> 16) & 0xFF;
-constexpr uint8_t kExcludedG = (kExcludedObjectColor >> 8) & 0xFF;
-constexpr uint8_t kExcludedB = kExcludedObjectColor & 0xFF;
+constexpr uint32_t EXCLUDED_OBJECT_COLOR = 0xFF6B35;
+constexpr uint8_t EXCLUDED_R = (EXCLUDED_OBJECT_COLOR >> 16) & 0xFF;
+constexpr uint8_t EXCLUDED_G = (EXCLUDED_OBJECT_COLOR >> 8) & 0xFF;
+constexpr uint8_t EXCLUDED_B = EXCLUDED_OBJECT_COLOR & 0xFF;
 
 /// Selection blue for highlighted objects
-constexpr uint32_t kHighlightedObjectColor = 0x42A5F5;
-constexpr uint8_t kHighlightedR = (kHighlightedObjectColor >> 16) & 0xFF;
-constexpr uint8_t kHighlightedG = (kHighlightedObjectColor >> 8) & 0xFF;
-constexpr uint8_t kHighlightedB = kHighlightedObjectColor & 0xFF;
+constexpr uint32_t HIGHLIGHTED_OBJECT_COLOR = 0x42A5F5;
+constexpr uint8_t HIGHLIGHTED_R = (HIGHLIGHTED_OBJECT_COLOR >> 16) & 0xFF;
+constexpr uint8_t HIGHLIGHTED_G = (HIGHLIGHTED_OBJECT_COLOR >> 8) & 0xFF;
+constexpr uint8_t HIGHLIGHTED_B = HIGHLIGHTED_OBJECT_COLOR & 0xFF;
 
 /// Light grey for selection bracket wireframes
-constexpr uint32_t kBracketColor = 0xC0C0C0;
+constexpr uint32_t BRACKET_COLOR = 0xC0C0C0;
 
 /// Object pick distance threshold (pixels)
-constexpr float kPickThresholdPx = 15.0f;
+constexpr float PICK_THRESHOLD_PX = 15.0f;
 
 /// Alpha value for excluded objects (60%)
-constexpr uint8_t kExcludedAlpha = 153;
+constexpr uint8_t EXCLUDED_ALPHA = 153;
 
 /// Ghost-look tuning. The goal is a faint, translucent, see-through apparition — NOT a
 /// dimmer solid copy and NOT a washed-out gray. The transparency cue comes from letting
@@ -56,12 +56,12 @@ constexpr uint8_t kExcludedAlpha = 153;
 /// reads clearly. Hue is kept (low wash) so it still reads as the object's color.
 /// Combined with the reduced blit opacity in blit_ghost_cache(), this gives the ghostly
 /// look. Dial these to taste: lower infill/opacity = fainter, higher wash = paler.
-constexpr int kGhostInfillBrightPercent = 12; // sparse infill nearly vanishes → see-through
-constexpr int kGhostWallBrightPercent = 100;  // solid surfaces = visible washed shell
+constexpr int GHOST_INFILL_BRIGHT_PERCENT = 12; // sparse infill nearly vanishes → see-through
+constexpr int GHOST_WALL_BRIGHT_PERCENT = 100;  // solid surfaces = visible washed shell
 
 /// Ghost wash factor: % blend of the base/tool color toward white. Kept low so the ghost
 /// keeps its hue (teal stays teal) rather than graying out — just a touch of lift.
-constexpr int kGhostWashPercent = 15;
+constexpr int GHOST_WASH_PERCENT = 15;
 
 /// Lerp a single 8-bit channel toward white (255) by pct%.
 inline uint8_t wash_to_white(uint8_t c, int pct) {
@@ -91,14 +91,14 @@ inline bool is_ghost_solid_surface(FeatureType t) {
 }
 
 /// Default extrusion width when metadata is unavailable (mm)
-constexpr float kDefaultExtrusionWidthMm = 0.4f;
+constexpr float DEFAULT_EXTRUSION_WIDTH_MM = 0.4f;
 
 /// Extrusion pixel width clamp range
-constexpr int kMinExtrusionPixelWidth = 1;
-constexpr int kMaxExtrusionPixelWidth = 8;
+constexpr int MIN_EXTRUSION_PIXEL_WIDTH = 1;
+constexpr int MAX_EXTRUSION_PIXEL_WIDTH = 8;
 
 /// Minimum line length for thick line perpendicular computation
-constexpr float kMinLineLength = 0.001f;
+constexpr float MIN_LINE_LENGTH = 0.001f;
 
 } // namespace
 
@@ -628,7 +628,7 @@ void GCodeLayerRenderer::apply_ssao() {
     // For each empty pixel adjacent to a filled pixel, draw a dark outline.
     // Makes the model pop from the background.
     // =========================================================================
-    constexpr float kOutlineDarken = 0.3f; // Outline brightness (0=black, 1=original)
+    constexpr float OUTLINE_DARKEN = 0.3f; // Outline brightness (0=black, 1=original)
 
     for (int y = 1; y < h - 1; y++) {
         for (int x = 1; x < w - 1; x++) {
@@ -644,9 +644,9 @@ void GCodeLayerRenderer::apply_ssao() {
                                ((src[y * stride_px + (x + 1)] >> 24) == 0);
 
                 if (on_edge) {
-                    uint8_t r = static_cast<uint8_t>(((pixel >> 16) & 0xFF) * kOutlineDarken);
-                    uint8_t g = static_cast<uint8_t>(((pixel >> 8) & 0xFF) * kOutlineDarken);
-                    uint8_t b = static_cast<uint8_t>((pixel & 0xFF) * kOutlineDarken);
+                    uint8_t r = static_cast<uint8_t>(((pixel >> 16) & 0xFF) * OUTLINE_DARKEN);
+                    uint8_t g = static_cast<uint8_t>(((pixel >> 8) & 0xFF) * OUTLINE_DARKEN);
+                    uint8_t b = static_cast<uint8_t>((pixel & 0xFF) * OUTLINE_DARKEN);
                     dst[y * stride_px + x] =
                         (static_cast<uint32_t>(alpha) << 24) | (r << 16) | (g << 8) | b;
                 }
@@ -815,12 +815,12 @@ int GCodeLayerRenderer::render_layers_to_cache(int from_layer, int to_layer) {
                         float nx = -dy / len;
                         float ny = dx / len;
                         // Dot product with light direction (-0.707, -0.707)
-                        constexpr float kLightX = -0.707f;
-                        constexpr float kLightY = -0.707f;
-                        float ndotl = nx * kLightX + ny * kLightY;
+                        constexpr float LIGHT_X = -0.707f;
+                        constexpr float LIGHT_Y = -0.707f;
+                        float ndotl = nx * LIGHT_X + ny * LIGHT_Y;
                         // Map [-1, 1] → brightness modifier
-                        constexpr float kNormalStrength = 0.12f;
-                        float normal_mod = 1.0f + ndotl * kNormalStrength;
+                        constexpr float NORMAL_STRENGTH = 0.12f;
+                        float normal_mod = 1.0f + ndotl * NORMAL_STRENGTH;
                         brightness *= normal_mod;
                         if (brightness > 1.0f)
                             brightness = 1.0f;
@@ -840,10 +840,10 @@ int GCodeLayerRenderer::render_layers_to_cache(int from_layer, int to_layer) {
                 if (!obj_name.empty()) {
                     if (excluded_objects_.count(obj_name) > 0) {
                         // Excluded: orange-red with reduced alpha
-                        r = kExcludedR;
-                        g = kExcludedG;
-                        b = kExcludedB;
-                        uint32_t color = (static_cast<uint32_t>(kExcludedAlpha) << 24) | (r << 16) |
+                        r = EXCLUDED_R;
+                        g = EXCLUDED_G;
+                        b = EXCLUDED_B;
+                        uint32_t color = (static_cast<uint32_t>(EXCLUDED_ALPHA) << 24) | (r << 16) |
                                          (g << 8) | b;
                         draw_thick_line_bresenham_solid(p1.x, p1.y, p2.x, p2.y, color, line_width);
                         ++segments_rendered;
@@ -851,9 +851,9 @@ int GCodeLayerRenderer::render_layers_to_cache(int from_layer, int to_layer) {
                     }
                     if (highlighted_objects_.count(obj_name) > 0) {
                         // Highlighted: selection blue, full alpha
-                        r = kHighlightedR;
-                        g = kHighlightedG;
-                        b = kHighlightedB;
+                        r = HIGHLIGHTED_R;
+                        g = HIGHLIGHTED_G;
+                        b = HIGHLIGHTED_B;
                     }
                 }
             }
@@ -1254,12 +1254,12 @@ void GCodeLayerRenderer::render_segment(lv_layer_t* layer, const ToolpathSegment
         // infill is dimmed so it sits faintly behind the walls. The translucency comes
         // from the 40% ghost-cache blit, not from darkening the color toward black.
         lv_color_t model_color = color_extrusion_;
-        const int bright_pct = is_ghost_solid_surface(seg.feature_type) ? kGhostWallBrightPercent
-                                                                        : kGhostInfillBrightPercent;
+        const int bright_pct = is_ghost_solid_surface(seg.feature_type) ? GHOST_WALL_BRIGHT_PERCENT
+                                                                        : GHOST_INFILL_BRIGHT_PERCENT;
         base_color =
-            lv_color_make(wash_to_white(model_color.red, kGhostWashPercent) * bright_pct / 100,
-                          wash_to_white(model_color.green, kGhostWashPercent) * bright_pct / 100,
-                          wash_to_white(model_color.blue, kGhostWashPercent) * bright_pct / 100);
+            lv_color_make(wash_to_white(model_color.red, GHOST_WASH_PERCENT) * bright_pct / 100,
+                          wash_to_white(model_color.green, GHOST_WASH_PERCENT) * bright_pct / 100,
+                          wash_to_white(model_color.blue, GHOST_WASH_PERCENT) * bright_pct / 100);
     } else {
         base_color = get_segment_color(seg);
     }
@@ -1348,16 +1348,16 @@ std::string GCodeLayerRenderer::resolve_object_name(int16_t index) const {
 /// Case-insensitive check for "support" substring in an object name.
 /// Used by both the main-thread member function and the background ghost thread.
 static bool name_looks_like_support(const std::string& name) {
-    static constexpr const char kSupport[] = "support";
-    static constexpr size_t kSupportLen = 7;
+    static constexpr const char SUPPORT[] = "support";
+    static constexpr size_t SUPPORT_LEN = 7;
 
-    if (name.size() < kSupportLen)
+    if (name.size() < SUPPORT_LEN)
         return false;
 
-    for (size_t i = 0; i <= name.size() - kSupportLen; ++i) {
+    for (size_t i = 0; i <= name.size() - SUPPORT_LEN; ++i) {
         bool match = true;
-        for (size_t j = 0; j < kSupportLen; ++j) {
-            if (std::tolower(static_cast<unsigned char>(name[i + j])) != kSupport[j]) {
+        for (size_t j = 0; j < SUPPORT_LEN; ++j) {
+            if (std::tolower(static_cast<unsigned char>(name[i + j])) != SUPPORT[j]) {
                 match = false;
                 break;
             }
@@ -1386,7 +1386,7 @@ std::optional<std::string> GCodeLayerRenderer::pick_object_at(int screen_x, int 
     // Capture transform params (no widget offset for cache coords)
     TransformParams transform = capture_transform_params();
 
-    const float PICK_THRESHOLD = kPickThresholdPx;
+    const float PICK_THRESHOLD = PICK_THRESHOLD_PX;
     float closest_distance = std::numeric_limits<float>::max();
     std::optional<std::string> picked_object;
 
@@ -1450,10 +1450,10 @@ lv_color_t GCodeLayerRenderer::get_segment_color(const ToolpathSegment& seg) con
         const std::string& obj_name = resolve_object_name(seg.object_name_index);
         if (!obj_name.empty()) {
             if (excluded_objects_.count(obj_name) > 0) {
-                return lv_color_hex(kExcludedObjectColor);
+                return lv_color_hex(EXCLUDED_OBJECT_COLOR);
             }
             if (highlighted_objects_.count(obj_name) > 0) {
-                return lv_color_hex(kHighlightedObjectColor);
+                return lv_color_hex(HIGHLIGHTED_OBJECT_COLOR);
             }
         }
     }
@@ -1502,7 +1502,7 @@ void GCodeLayerRenderer::render_selection_brackets(lv_layer_t* layer) {
         // Set up line drawing style
         lv_draw_line_dsc_t dsc;
         lv_draw_line_dsc_init(&dsc);
-        dsc.color = lv_color_hex(kBracketColor);
+        dsc.color = lv_color_hex(BRACKET_COLOR);
         dsc.width = 2;
         dsc.opa = LV_OPA_COVER;
 
@@ -1677,19 +1677,19 @@ void GCodeLayerRenderer::background_ghost_render_thread() {
     // then apply per-feature brightness. ARGB8888: A in high byte, RGB lower. Full
     // alpha here — the translucency is applied at blit time. Infill is dimmed;
     // walls keep full washed brightness (silhouette).
-    const uint8_t wash_r = wash_to_white(local_color_extrusion.red, kGhostWashPercent);
-    const uint8_t wash_g = wash_to_white(local_color_extrusion.green, kGhostWashPercent);
-    const uint8_t wash_b = wash_to_white(local_color_extrusion.blue, kGhostWashPercent);
+    const uint8_t wash_r = wash_to_white(local_color_extrusion.red, GHOST_WASH_PERCENT);
+    const uint8_t wash_g = wash_to_white(local_color_extrusion.green, GHOST_WASH_PERCENT);
+    const uint8_t wash_b = wash_to_white(local_color_extrusion.blue, GHOST_WASH_PERCENT);
 
-    uint8_t ghost_r = wash_r * kGhostInfillBrightPercent / 100;
-    uint8_t ghost_g = wash_g * kGhostInfillBrightPercent / 100;
-    uint8_t ghost_b = wash_b * kGhostInfillBrightPercent / 100;
+    uint8_t ghost_r = wash_r * GHOST_INFILL_BRIGHT_PERCENT / 100;
+    uint8_t ghost_g = wash_g * GHOST_INFILL_BRIGHT_PERCENT / 100;
+    uint8_t ghost_b = wash_b * GHOST_INFILL_BRIGHT_PERCENT / 100;
     uint8_t ghost_a = 255; // Full alpha, we'll apply 40% when blitting
     uint32_t ghost_color = (ghost_a << 24) | (ghost_r << 16) | (ghost_g << 8) | ghost_b;
 
-    uint8_t wall_r = wash_r * kGhostWallBrightPercent / 100;
-    uint8_t wall_g = wash_g * kGhostWallBrightPercent / 100;
-    uint8_t wall_b = wash_b * kGhostWallBrightPercent / 100;
+    uint8_t wall_r = wash_r * GHOST_WALL_BRIGHT_PERCENT / 100;
+    uint8_t wall_g = wash_g * GHOST_WALL_BRIGHT_PERCENT / 100;
+    uint8_t wall_b = wash_b * GHOST_WALL_BRIGHT_PERCENT / 100;
     uint32_t ghost_wall_color = (255u << 24) | (wall_r << 16) | (wall_g << 8) | wall_b;
 
     // Render all layers to raw buffer
@@ -1738,22 +1738,22 @@ void GCodeLayerRenderer::background_ghost_render_thread() {
             // Solid/visible surfaces stay at full washed brightness; only sparse infill
             // is dimmed to near-invisible so the shell reads as see-through.
             const bool is_solid = is_ghost_solid_surface(seg.feature_type);
-            const int bright_pct = is_solid ? kGhostWallBrightPercent : kGhostInfillBrightPercent;
+            const int bright_pct = is_solid ? GHOST_WALL_BRIGHT_PERCENT : GHOST_INFILL_BRIGHT_PERCENT;
 
             // Per-segment ghost color (tool palette or single color)
             uint32_t seg_color = is_solid ? ghost_wall_color : ghost_color;
             if (local_tool_palette.has_tool_colors()) {
                 lv_color_t tc = local_tool_palette.resolve(seg.tool_index, local_color_extrusion);
-                uint8_t tr = wash_to_white(tc.red, kGhostWashPercent) * bright_pct / 100;
-                uint8_t tg = wash_to_white(tc.green, kGhostWashPercent) * bright_pct / 100;
-                uint8_t tb = wash_to_white(tc.blue, kGhostWashPercent) * bright_pct / 100;
+                uint8_t tr = wash_to_white(tc.red, GHOST_WASH_PERCENT) * bright_pct / 100;
+                uint8_t tg = wash_to_white(tc.green, GHOST_WASH_PERCENT) * bright_pct / 100;
+                uint8_t tb = wash_to_white(tc.blue, GHOST_WASH_PERCENT) * bright_pct / 100;
                 seg_color = (255u << 24) | (tr << 16) | (tg << 8) | tb;
             }
             if (!obj_name.empty() && local_excluded.count(obj_name) > 0) {
                 // Excluded: dim orange-red
-                uint8_t ex_r = kExcludedR * kGhostInfillBrightPercent / 100;
-                uint8_t ex_g = kExcludedG * kGhostInfillBrightPercent / 100;
-                uint8_t ex_b = kExcludedB * kGhostInfillBrightPercent / 100;
+                uint8_t ex_r = EXCLUDED_R * GHOST_INFILL_BRIGHT_PERCENT / 100;
+                uint8_t ex_g = EXCLUDED_G * GHOST_INFILL_BRIGHT_PERCENT / 100;
+                uint8_t ex_b = EXCLUDED_B * GHOST_INFILL_BRIGHT_PERCENT / 100;
                 seg_color = (255u << 24) | (ex_r << 16) | (ex_g << 8) | ex_b;
             }
 
@@ -1949,10 +1949,10 @@ void GCodeLayerRenderer::draw_thick_line_aa_solid(int x0, int y0, int x1, int y1
 
     float dx = static_cast<float>(x1 - x0);
     float dy = static_cast<float>(y1 - y0);
-    constexpr float kMinLineLength = 0.5f;
+    constexpr float MIN_LINE_LENGTH = 0.5f;
     float len = std::sqrt(dx * dx + dy * dy);
 
-    if (len < kMinLineLength) {
+    if (len < MIN_LINE_LENGTH) {
         draw_line_aa_solid(x0, y0, x1, y1, color);
         return;
     }
@@ -1972,7 +1972,7 @@ void GCodeLayerRenderer::draw_thick_line_aa_solid(int x0, int y0, int x1, int y1
 }
 
 int GCodeLayerRenderer::get_extrusion_pixel_width() const {
-    float width_mm = kDefaultExtrusionWidthMm;
+    float width_mm = DEFAULT_EXTRUSION_WIDTH_MM;
 
     if (gcode_) {
         // Full-file mode: prefer extrusion_width_mm, then nozzle_diameter_mm
@@ -1985,7 +1985,7 @@ int GCodeLayerRenderer::get_extrusion_pixel_width() const {
     // Streaming mode: no metadata available, use default 0.4mm
 
     int pixel_width = static_cast<int>(std::round(width_mm * scale_));
-    return std::clamp(pixel_width, kMinExtrusionPixelWidth, kMaxExtrusionPixelWidth);
+    return std::clamp(pixel_width, MIN_EXTRUSION_PIXEL_WIDTH, MAX_EXTRUSION_PIXEL_WIDTH);
 }
 
 void GCodeLayerRenderer::draw_thick_line_bresenham(int x0, int y0, int x1, int y1, uint32_t color,
@@ -2000,7 +2000,7 @@ void GCodeLayerRenderer::draw_thick_line_bresenham(int x0, int y0, int x1, int y
     float dy = static_cast<float>(y1 - y0);
     float len = std::sqrt(dx * dx + dy * dy);
 
-    if (len < kMinLineLength) {
+    if (len < MIN_LINE_LENGTH) {
         draw_line_bresenham(x0, y0, x1, y1, color);
         return;
     }
@@ -2031,7 +2031,7 @@ void GCodeLayerRenderer::draw_thick_line_bresenham_solid(int x0, int y0, int x1,
     float dy = static_cast<float>(y1 - y0);
     float len = std::sqrt(dx * dx + dy * dy);
 
-    if (len < kMinLineLength) {
+    if (len < MIN_LINE_LENGTH) {
         draw_line_bresenham_solid(x0, y0, x1, y1, color);
         return;
     }

@@ -133,7 +133,7 @@ class ActivePrintMediaManager {
     // print starts (OrcaSlicer upload-and-print), so the first metadata query
     // can fail or return no thumbnails. Each failure schedules a one-shot
     // lv_timer retry with backoff (2s, 5s, 10s, 20s, then 30s) up to
-    // kMaxThumbnailAttempts total attempts per filename. If the print ends
+    // MAX_THUMBNAIL_ATTEMPTS total attempts per filename. If the print ends
     // (empty filename) while a retry is pending, last_effective_filename_ is
     // intentionally preserved (see process_filename), so the retry may still
     // late-fill the preserved display info — intended, and bounded by the cap.
@@ -144,7 +144,7 @@ class ActivePrintMediaManager {
     /// filename is no longer current, a retry is already pending, or
     /// @p max_retries retries have already been scheduled.
     void schedule_thumbnail_retry(const std::string& filename,
-                                  int max_retries = kMaxThumbnailAttempts - 1);
+                                  int max_retries = MAX_THUMBNAIL_ATTEMPTS - 1);
     /// Cancel any pending retry timer and clear retry bookkeeping filename.
     void cancel_thumbnail_retry();
     /// Body of the retry timer: re-validates filename + generation, then reloads.
@@ -177,14 +177,14 @@ class ActivePrintMediaManager {
     bool last_was_empty_ = false; ///< Prevents repeated "empty filename" log spam
 
     /// Max total metadata/thumbnail load attempts per filename (1 initial + 9 retries).
-    static constexpr int kMaxThumbnailAttempts = 10;
+    static constexpr int MAX_THUMBNAIL_ATTEMPTS = 10;
 
     /// Lower retry cap for the success-with-empty-thumbnails leg: a metadata
     /// record can briefly lack thumbnails mid-scan, but the common cause is a
     /// file sliced WITHOUT thumbnails — a permanent condition where the full
     /// ladder would just burn RPCs. Late-scan cases beyond this are covered by
     /// the notify_filelist_changed / notify_klippy_ready re-triggers.
-    static constexpr int kMaxEmptyThumbnailRetries = 2;
+    static constexpr int MAX_EMPTY_THUMBNAIL_RETRIES = 2;
 
     helix::ui::LvglTimerGuard retry_timer_; ///< Pending one-shot retry (empty when none)
     int thumbnail_retry_count_ = 0;         ///< Retries scheduled for the current filename

@@ -11,15 +11,15 @@
 namespace {
 // Every directory name under ui_xml/ that can hold a layout override. Content
 // subdirectories (components/, translations/) are deliberately absent.
-constexpr const char* kVariantDirs[] = {"micro_portrait", "tiny_portrait", "portrait",
+constexpr const char* VARIANT_DIRS[] = {"micro_portrait", "tiny_portrait", "portrait",
                                         "ultrawide",      "micro",         "tiny"};
 } // namespace
 
 namespace helix {
 
 bool LayoutManager::is_variant_dir(const std::string& dir) {
-    return std::find(std::begin(kVariantDirs), std::end(kVariantDirs), dir) !=
-           std::end(kVariantDirs);
+    return std::find(std::begin(VARIANT_DIRS), std::end(VARIANT_DIRS), dir) !=
+           std::end(VARIANT_DIRS);
 }
 
 LayoutManager& LayoutManager::instance() {

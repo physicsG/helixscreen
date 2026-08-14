@@ -6,6 +6,7 @@
 #include "ui_busy_overlay.h"
 #include "ui_error_reporting.h"
 #include "ui_panel_print_status.h"
+#include "ui_pre_print_options_renderer.h"
 #include "ui_temperature_utils.h"
 #include "ui_update_queue.h"
 
@@ -24,6 +25,7 @@
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -769,12 +771,22 @@ void PrintPreparationManager::start_print(const std::string& filename,
                          capability.reason);
             spdlog::warn(
                 "[PrintPreparationManager] Skipping modification - printing original file");
+            // Name the features being dropped. "Cannot modify G-code" alone left
+            // the user guessing which of the print dialog's controls it referred
+            // to — #1269 was filed against filament remapping, which does not
+            // touch G-code at all, because the toast fires at the same moment.
+            const std::string dropped = describe_dropped_modifications(ops_to_disable);
             // Clear modifications so we fall through to normal print path
             ops_to_disable.clear();
             macro_skip_params.clear();
             // Show user notification about skipped modification
-            NOTIFY_WARNING(lv_tr("Cannot modify G-code: {}. Printing original file."),
-                           capability.reason);
+            if (dropped.empty()) {
+                NOTIFY_WARNING(lv_tr("Cannot modify G-code: {}. Printing original file."),
+                               capability.reason);
+            } else {
+                NOTIFY_WARNING(lv_tr("{} needs the HelixPrint plugin. Printing original file."),
+                               dropped);
+            }
         } else {
             spdlog::info("[PrintPreparationManager] Modifying G-code: {} file ops, {} macro params "
                          "(method: {})",
@@ -885,6 +897,100 @@ bool PrintPreparationManager::disabling_option_requires_plugin(const PrePrintOpt
     return true;
 }
 
+// Translated, comma-joined names of the features a dropped modification would
+// have carried, for the "needs the HelixPrint plugin" warning. Uses the same
+// label the toggle row shows, so the message points at something the user can
+// recognize in the dialog they just came from.
+std::string PrintPreparationManager::describe_dropped_modifications(
+    const std::vector<gcode::OperationType>& ops_to_disable) const {
+    std::vector<std::string> names;
+    std::set<std::string> covered;
+
+    for (const auto& opt : get_cached_options().options) {
+        const PrePrintOptionState state = get_option_state(opt.id);
+
+        // (a) a file-embeddable op this print was going to strip out
+        const std::optional<gcode::OperationType> embedded_op = file_embeddable_op_for_id(opt.id);
+        const bool strips_embedded_op =
+            embedded_op.has_value() && std::find(ops_to_disable.begin(), ops_to_disable.end(),
+                                                 *embedded_op) != ops_to_disable.end();
+
+        // (b) a MacroParam skip rewritten into the START_PRINT call
+        const bool rewrites_macro_param =
+            opt.strategy_kind == PrePrintStrategyKind::MacroParam &&
+            (state == PrePrintOptionState::DISABLED ||
+             (opt.adaptive_active && state == PrePrintOptionState::ENABLED));
+
+        if (strips_embedded_op || rewrites_macro_param) {
+            names.push_back(PrePrintOptionsRenderer::label_for(opt));
+            covered.insert(opt.id);
+        }
+    }
+
+    // LAYER 2 mirror: collect_macro_skip_params() also emits for ops the DB
+    // never declared, picked up from PRINT_START analysis. Those have no
+    // PrePrintOption to read a label from, so synthesize one — label_key_for()
+    // carries hardcoded names for exactly these four legacy ids.
+    if (macro_analysis_.has_value() && macro_analysis_->found) {
+        const std::pair<helix::PrintStartOpCategory, const char*> categories[] = {
+            {helix::PrintStartOpCategory::BED_MESH, "bed_mesh"},
+            {helix::PrintStartOpCategory::QGL, "qgl"},
+            {helix::PrintStartOpCategory::Z_TILT, "z_tilt"},
+            {helix::PrintStartOpCategory::NOZZLE_CLEAN, "nozzle_clean"},
+        };
+        for (const auto& [cat, id] : categories) {
+            if (covered.count(id) || !is_macro_op_controllable(cat) ||
+                get_option_state(id) != PrePrintOptionState::DISABLED ||
+                get_macro_skip_param(cat).empty()) {
+                continue;
+            }
+            PrePrintOption synthetic;
+            synthetic.id = id;
+            names.push_back(PrePrintOptionsRenderer::label_for(synthetic));
+        }
+    }
+
+    std::string joined;
+    for (const auto& name : names) {
+        if (!joined.empty()) {
+            joined += ", ";
+        }
+        joined += name;
+    }
+    return joined;
+}
+
+// Adaptive meshing is the one case where an ENABLED option emits skip params.
+// Every other emitter fires on DISABLED, and those options are hidden up front
+// when the plugin is missing (disabling_option_requires_plugin() ->
+// PrintSelectDetailView's visibility_lookup). The adaptive pair has no such
+// gate: bed_mesh ENABLED is the default, so on a plugin-less printer with no
+// pre-start mechanism start_print() collected the params, found it could not
+// rewrite the file, dropped them, and warned - on every print, for a state the
+// user never chose and no visible toggle could change (#1269).
+//
+// So emit only when the params can actually be delivered. The three arms mirror
+// disabling_option_requires_plugin() exactly:
+//   - plugin present    -> modify_and_print() rewrites the PRINT_START call
+//   - setup_gcode set   -> non-empty skip params trigger the printer-level
+//                          pre-start block (emit_printer_setup in start_print),
+//                          which is how K1/K1C PRINT_PREPARED fires. Suppressing
+//                          here would silently disarm that trigger.
+//   - pre-start lines   -> the same pre-start path fires for per-option
+//                          PreStartGcode strategies.
+// Otherwise the emit is pure noise: the unmodified file still prints and the
+// macro runs its own default mesh, which is exactly what happens today after
+// the drop - minus the warning.
+bool PrintPreparationManager::adaptive_emit_is_deliverable() const {
+    if (check_modification_capability().can_modify) {
+        return true;
+    }
+    if (!get_cached_options().setup_gcode.empty()) {
+        return true;
+    }
+    return !collect_pre_start_gcode_lines().empty();
+}
+
 std::vector<std::pair<std::string, std::string>>
 PrintPreparationManager::collect_macro_skip_params() const {
     // THREADING: This method reads macro_analysis_ and checkbox states.
@@ -915,16 +1021,25 @@ PrintPreparationManager::collect_macro_skip_params() const {
                     get_option_state(opt.id) == PrePrintOptionState::ENABLED) {
                     const auto* macro = std::get_if<PrePrintStrategyMacroParam>(&opt.strategy);
                     if (macro && !macro->adaptive_param.empty()) {
-                        // Emit BOTH the enable param and the adaptive token, e.g.
-                        // SKIP_LEVELING=0 ADAPTIVE=1. The enable param is normally
-                        // omitted on ENABLED (macro default), but adaptive meshing
-                        // must explicitly run the mesh, so make it unambiguous.
-                        skip_params.emplace_back(macro->param_name, macro->enable_value);
-                        skip_params.emplace_back(macro->adaptive_param, macro->adaptive_value);
-                        spdlog::debug("[PrintPreparationManager] Adaptive bed mesh: {}={} {}={} "
-                                      "(id={})",
-                                      macro->param_name, macro->enable_value, macro->adaptive_param,
-                                      macro->adaptive_value, opt.id);
+                        if (adaptive_emit_is_deliverable()) {
+                            // Emit BOTH the enable param and the adaptive token, e.g.
+                            // SKIP_LEVELING=0 ADAPTIVE=1. The enable param is normally
+                            // omitted on ENABLED (macro default), but adaptive meshing
+                            // must explicitly run the mesh, so make it unambiguous.
+                            skip_params.emplace_back(macro->param_name, macro->enable_value);
+                            skip_params.emplace_back(macro->adaptive_param, macro->adaptive_value);
+                            spdlog::debug(
+                                "[PrintPreparationManager] Adaptive bed mesh: {}={} {}={} "
+                                "(id={})",
+                                macro->param_name, macro->enable_value, macro->adaptive_param,
+                                macro->adaptive_value, opt.id);
+                        } else {
+                            spdlog::debug("[PrintPreparationManager] Adaptive bed mesh params "
+                                          "suppressed (id={}): the PRINT_START rewrite that would "
+                                          "carry them is unreachable, so start_print() would drop "
+                                          "them and warn about a state the user never chose",
+                                          opt.id);
+                        }
                     }
                 }
                 // Even when ENABLED/NOT_APPLICABLE, the DB has spoken for this

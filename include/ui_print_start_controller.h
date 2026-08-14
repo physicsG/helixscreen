@@ -324,6 +324,15 @@ class PrintStartController {
     // Observer for print state changes (to restore mapping on print end)
     ObserverGuard print_state_observer_;
 
+    // Observer for klippy state, armed only while a restore is deferred waiting
+    // for Klipper to come back (see observe_klippy_state_for_restore).
+    ObserverGuard klippy_state_observer_;
+
+    // Armed only between sending a restore and the firmware confirming it.
+    ObserverGuard ams_data_observer_;
+    bool awaiting_restore_confirmation_ = false;
+    uint64_t restore_generation_at_send_ = 0;
+
     // === Filament Remap Methods ===
     /// Snapshot current firmware mapping, send remap commands, return true if remaps were sent
     bool apply_filament_remaps();
@@ -352,6 +361,37 @@ class PrintStartController {
 
     /// Set up observer for print state to auto-restore mapping
     void observe_print_state_for_restore();
+
+    /**
+     * @brief Wait for Klipper to become READY, then retry a deferred restore.
+     *
+     * restore_filament_mapping() refuses to spend the snapshot on a halted
+     * Klipper because the backends cannot report the refusal (#1270). This is
+     * what makes that deferral resolve on its own — without it the snapshot
+     * would sit until the next app start, the only other thing that replays
+     * pending_remap.json. Idempotent: a second deferral does not stack observers.
+     */
+    void observe_klippy_state_for_restore();
+
+    /**
+     * @brief Clear the restore snapshot and the on-disk recovery record.
+     *
+     * The single place both the confirmed path and the can't-confirm fallback
+     * converge on, so the snapshot and pending_remap.json can never be cleared
+     * by one and not the other.
+     */
+    void finish_restore();
+
+    /// Observe AmsState's data-revision tick while awaiting firmware confirmation.
+    void observe_ams_data_for_confirmation();
+
+    /**
+     * @brief Re-check whether the firmware has confirmed the restore.
+     *
+     * Cheap and idempotent — the revision tick it hangs off is deliberately
+     * coarse and fires for our own optimistic writes too.
+     */
+    void check_restore_confirmed();
 
     // === Crash Recovery Persistence ===
     /// Save remap state to disk so it survives app restart
