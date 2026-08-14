@@ -67,6 +67,13 @@ class AmsSubscriptionBackend : public AmsBackend {
     AmsError unload_filament(int slot_index) final;
     AmsError select_slot(int slot_index) final;
     AmsError change_tool(int tool_number) final;
+    /// Parking moves the CARRIAGE, so it belongs in the same gate as the rest.
+    /// It was a plain virtual whose only enforcement was a @warning telling each
+    /// implementer to hand-write check_preconditions(true) — the exact opt-in
+    /// shape this NVI set exists to abolish, and which had already shipped one
+    /// backend with no gate at all. It also skipped the in-flight claim, so a
+    /// park could dispatch while a load was mid-flight.
+    AmsError park_toolhead() final;
 
     // --- Shared utilities (public for AmsState and tests) ---
     void emit_event(const std::string& event, const std::string& data = "");
@@ -196,6 +203,11 @@ class AmsSubscriptionBackend : public AmsBackend {
     virtual AmsError do_unload_filament(int slot_index) = 0;
     virtual AmsError do_select_slot(int slot_index) = 0;
     virtual AmsError do_change_tool(int tool_number) = 0;
+    /// Only reached when supports_toolhead_park() is true; the default refuses
+    /// so a backend that does not park needs no override.
+    virtual AmsError do_park_toolhead() {
+        return AmsErrorHelper::not_supported("Toolhead park");
+    }
 
     /// Does a slot SELECT move the toolhead on this backend?
     ///
@@ -258,7 +270,7 @@ class AmsSubscriptionBackend : public AmsBackend {
   private:
     /// The four gated operations, so motion can be classified per METHOD in one
     /// place instead of per backend at every call site.
-    enum class FilamentOp { Load, Unload, SelectSlot, ChangeTool };
+    enum class FilamentOp { Load, Unload, SelectSlot, ChangeTool, Park };
 
     /// Motion classification, stated ONCE for every backend.
     [[nodiscard]] bool op_moves_toolhead(FilamentOp op) const;

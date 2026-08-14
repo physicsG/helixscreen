@@ -1404,10 +1404,11 @@ class AmsBackend {
      * Only meaningful while a head is actually mounted; with an empty carriage
      * there is nothing to dock. Callers gate on MountState/mounted_tool.
      *
-     * @warning This is a plain virtual — it does NOT pass through the
-     * run_filament_op() gate that load/unload/select get for free. Parking
-     * moves the carriage, so an implementation MUST apply its own print refusal
-     * (check_preconditions(true)) or it will dock the head mid-print.
+     * Gated like every other toolhead-motion op: AmsSubscriptionBackend makes
+     * this `final` and routes it through run_filament_op(), so an implementer
+     * writes only the protected do_park_toolhead() hook and cannot forget the
+     * print refusal or the single-op-in-flight claim. It used to be a plain
+     * virtual carrying a warning to hand-write check_preconditions(true).
      *
      * @return AmsError indicating success or failure.
      */

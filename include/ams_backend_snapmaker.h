@@ -188,7 +188,7 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     [[nodiscard]] bool supports_toolhead_park() const override {
         return true;
     }
-    AmsError park_toolhead() override;
+    AmsError do_park_toolhead() override;
 
     // Recovery (not supported)
     AmsError recover() override;

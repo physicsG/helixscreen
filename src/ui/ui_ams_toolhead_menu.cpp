@@ -21,6 +21,40 @@
 
 namespace helix::ui {
 
+namespace {
+
+/// The slot that feeds virtual tool @p tool_index, or @p tool_index unchanged
+/// when nothing maps to it.
+///
+/// The path canvas hands its click back as the VIRTUAL tool number shown on the
+/// badge (ui_system_path_canvas.h says so explicitly), but every backend call
+/// this menu makes is SLOT-indexed — including can_unload_from_toolhead(),
+/// whose name says toolhead while its parameter is documented as a slot. The
+/// two coincide on the U1, where slot N feeds tool N, and diverge on a
+/// toolchanger under ASSIGN_TOOL remapping (see AmsBackend's note on tool
+/// numbers vs slots), which is when a menu keyed on the wrong one acts on the
+/// wrong head.
+///
+/// Falling back to the raw index preserves the identity behaviour for any
+/// backend that publishes no mapped_tool at all.
+int slot_for_tool(const AmsSystemInfo& info, int tool_index) {
+    for (const auto& unit : info.units) {
+        for (const auto& slot : unit.slots) {
+            if (slot.mapped_tool == tool_index) {
+                return slot.global_index;
+            }
+        }
+    }
+    return tool_index;
+}
+
+} // namespace
+
+/// Test seam for slot_for_tool() — see the anonymous-namespace definition.
+int slot_for_tool_for_test(const AmsSystemInfo& info, int tool_index) {
+    return slot_for_tool(info, tool_index);
+}
+
 // Static member initialization
 bool AmsToolheadMenu::callbacks_registered_ = false;
 AmsToolheadMenu* AmsToolheadMenu::s_active_instance_ = nullptr;
@@ -145,12 +179,17 @@ bool AmsToolheadMenu::show_at(lv_obj_t* parent, lv_obj_t* anchor, lv_point_t cli
     bool supports_park = false;
     bool present = false;
     bool can_unload = false;
+    int slot_index = tool_index;
     if (backend) {
-        mounted = backend->get_system_info().mounted_tool;
+        // One fetch: get_system_info() returns by value under the backend mutex.
+        const AmsSystemInfo info = backend->get_system_info();
+        mounted = info.mounted_tool; // tool-space, compared against tool_index
+        slot_index = slot_for_tool(info, tool_index);
         supports_park = backend->supports_toolhead_park();
-        present = backend->get_slot_info(tool_index).is_present();
-        can_unload = backend->can_unload_from_toolhead(tool_index);
+        present = backend->get_slot_info(slot_index).is_present();
+        can_unload = backend->can_unload_from_toolhead(slot_index);
     }
+    slot_index_ = slot_index;
 
     // Same predicate the per-slot menu greys its buttons with, and the mirror of
     // the backend's own refusal: PRINTING always blocks, PAUSED only on a
@@ -167,7 +206,7 @@ bool AmsToolheadMenu::show_at(lv_obj_t* parent, lv_obj_t* anchor, lv_point_t cli
     // described by another unit? On multiACE an ACE-fed head answers with the
     // ACE's unit index.
     const bool source_is_external =
-        backend && backend->slot_identity_owner_unit(tool_index).has_value();
+        backend && backend->slot_identity_owner_unit(slot_index).has_value();
 
     model_ = toolhead_menu_model(tool_index, mounted, supports_park, present, can_unload,
                                  print_blocks_ops, source_is_external);
@@ -344,21 +383,26 @@ void dispatch_toolhead_menu_action(AmsToolheadMenu::ToolheadAction action, int t
         return;
     }
 
+    // Same conversion as show_at(): the caller passes the VIRTUAL tool number,
+    // and select_slot/load_filament/unload_filament are all slot-indexed.
+    const int slot_index = slot_for_tool(backend->get_system_info(), tool_index);
+
     AmsError err{};
     switch (action) {
     case TA::SELECT:
         // select_slot() on a toolchanger IS the tool change (`T{n}`) -- see
         // AmsBackendSnapmaker::select_slot_moves_toolhead().
-        err = backend->select_slot(tool_index);
+        err = backend->select_slot(slot_index);
         break;
     case TA::PARK:
+        // Takes no index at all: the firmware parks whatever is on the carriage.
         err = backend->park_toolhead();
         break;
     case TA::LOAD:
-        err = backend->load_filament(tool_index);
+        err = backend->load_filament(slot_index);
         break;
     case TA::UNLOAD:
-        err = backend->unload_filament(tool_index);
+        err = backend->unload_filament(slot_index);
         break;
     case TA::CANCELLED:
         return;
