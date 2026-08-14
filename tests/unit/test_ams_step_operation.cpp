@@ -255,3 +255,75 @@ TEST_CASE("An in-progress explicit unload is not reinterpreted as a swap",
         CHECK(r.op_type == StepOperationType::LOAD_SWAP);
     }
 }
+
+// =============================================================================
+// Operation ownership survives the pre-start lag
+//
+// start_operation() optimistically sets HEATING and the backend's still-IDLE
+// truth lands on top before the firmware picks the op up. The old signal
+// (target_load_slot_ < 0, cleared on any non-running action) could not tell
+// that from completion, so a UI-initiated unload was declared foreign
+// mid-flight and re-read as the unload half of a swap.
+// =============================================================================
+
+TEST_CASE("Ownership tells pre-start lag apart from completion",
+          "[ams][step_operation][ownership]") {
+    SECTION("an idle BEFORE the op is seen running keeps ownership") {
+        OperationOwnership own;
+        own.on_start();
+        own.on_action(false); // backend has not caught up yet
+        CHECK_FALSE(own.is_external());
+        own.on_action(false); // still not; ownership must not erode
+        CHECK_FALSE(own.is_external());
+    }
+
+    SECTION("an idle AFTER it ran releases ownership") {
+        OperationOwnership own;
+        own.on_start();
+        own.on_action(true); // firmware picked it up
+        CHECK_FALSE(own.is_external());
+        own.on_action(false); // finished
+        CHECK(own.is_external());
+    }
+
+    SECTION("the full hardware sequence") {
+        // start -> transient idle -> running -> ... -> idle
+        OperationOwnership own;
+        own.on_start();
+        own.on_action(false); // 11:00:02.393-.844, the window that broke it
+        CHECK_FALSE(own.is_external());
+        for (int i = 0; i < 5; ++i) {
+            own.on_action(true);
+            CHECK_FALSE(own.is_external());
+        }
+        own.on_action(false);
+        CHECK(own.is_external());
+    }
+
+    SECTION("nothing started is external, and stays so") {
+        OperationOwnership own;
+        CHECK(own.is_external());
+        own.on_action(true); // someone else's operation
+        CHECK(own.is_external());
+        own.on_action(false);
+        CHECK(own.is_external());
+    }
+
+    SECTION("a refused dispatch releases immediately") {
+        // No running action will ever arrive to end it, so on_action() alone
+        // would leave ownership stuck on forever.
+        OperationOwnership own;
+        own.on_start();
+        own.on_abandon();
+        CHECK(own.is_external());
+    }
+
+    SECTION("a second start re-arms the latch") {
+        OperationOwnership own;
+        own.on_start();
+        own.on_action(true);
+        own.on_start(); // new op before the old one's idle arrived
+        own.on_action(false);
+        CHECK_FALSE(own.is_external()); // pre-start lag again, not completion
+    }
+}

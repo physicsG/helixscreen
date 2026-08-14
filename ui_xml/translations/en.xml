@@ -1931,7 +1931,6 @@
   <translation tag="Resume preparation failed" en="Resume preparation failed"/>
   <translation tag="Resuming..." en="Resuming..."/>
   <translation tag="Retract" en="Retract"/>
-  <translation tag="Retract to ACE" en="Retract to ACE"/>
   <translation tag="Retract Distance" en="Retract Distance"/>
   <translation tag="Retract Length" en="Retract Length"/>
   <translation tag="Retract Speed" en="Retract Speed"/>
@@ -1939,6 +1938,7 @@
   <translation tag="Retract filament" en="Retract filament"/>
   <translation tag="Retract filament to current slot" en="Retract filament to current slot"/>
   <translation tag="Retract may still be running — response timed out" en="Retract may still be running — response timed out"/>
+  <translation tag="Retract to ACE" en="Retract to ACE"/>
   <translation tag="Retraction" en="Retraction"/>
   <translation tag="Retraction Settings" en="Retraction Settings"/>
   <translation tag="Retraction distance in the cooling tube" en="Retraction distance in the cooling tube"/>

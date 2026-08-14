@@ -220,7 +220,11 @@ class AmsOperationSidebar {
     // Step progress state
     StepOperationType current_operation_type_ = StepOperationType::LOAD_FRESH;
     int current_step_count_ = 4;
-    int target_load_slot_ = -1;
+    /// Whether the operation on screen is one we started — see
+    /// OperationOwnership. Replaces target_load_slot_, which carried this
+    /// answer as a side effect of holding a slot number nothing ever read (the
+    /// slot itself goes to AmsState::set_pending_target_slot for the pulse).
+    OperationOwnership ownership_;
     bool heat_label_showing_temp_ = false;
     // Index of the step whose label shows a live "<label> cur/target°C" readout
     // (OperationStep::live_temp), or -1 if the active model has none. Set when a
