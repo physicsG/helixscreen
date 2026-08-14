@@ -101,7 +101,12 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// arrives. A feeder or manual head still runs the native sequence and
     /// keeps the stock answer.
     [[nodiscard]] bool preload_finish_ends_unload(int head) const override {
-        return head_source_kind(head) == HeadSource::ACE;
+        // Reads head_kind_ DIRECTLY. The caller is the channel_state parse,
+        // which already holds mutex_, and head_source_kind() takes it again --
+        // a non-recursive std::mutex, so that self-deadlocked the main thread
+        // the first time an ACE-fed head reached preload_finish, i.e. on the
+        // first real unload. The whole UI froze.
+        return head >= 0 && head < NUM_TOOLS && head_kind_[head] == HeadSource::ACE;
     }
 
     /// See AmsBackend::change_tool_completes_load(). True for the U1's own four
@@ -125,6 +130,18 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     };
     /// nullopt when @p slot_index is a head rather than a bay, or out of range.
     [[nodiscard]] std::optional<BaySource> bay_source(int slot_index) const;
+
+    /// The U1's own step model, with the unload's last step naming its
+    /// destination when the head being unloaded is ACE-fed.
+    ///
+    /// The filament does not just leave the nozzle, it travels back into the
+    /// ACE, and "Retract" alone gave no sign of that -- the step sits there for
+    /// the length of the whole retract, which is most of the operation.
+    ///
+    /// A RENAME, not an added step: the firmware drives the step index (phase 3
+    /// for unload_doing), so a fifth step would have nothing to advance it and
+    /// would sit Pending forever.
+    [[nodiscard]] OperationStepModel get_operation_step_model(StepOperationType op) const override;
 
     /// A BAY is actively loaded when it is the one currently feeding a head.
     ///
@@ -186,6 +203,16 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     AmsError do_unload_filament(int slot_index) override;
 
   private:
+    /// Which head ACE @p ace_index actually FEEDS, or -1. Caller must hold mutex_.
+    ///
+    /// multiACE's own `aceHeadForAce()` reverse lookup, and it MUST test the
+    /// head's source kind as well as the index: `head_ace` names an ACE for
+    /// every head, not just the ones it feeds — a live U1 reports
+    /// `{0:0, 1:1, 2:2, 3:0}` — so matching on the index alone picks head 0, a
+    /// stock feeder head, for ACE 0's bays. That is exactly how a bay load was
+    /// dispatched to the wrong toolhead, and the rule was written out twice.
+    [[nodiscard]] int head_fed_by_ace_locked(int ace_index) const;
+
     /// Parse the `ace` object. Caller must hold mutex_.
     void parse_ace_object_locked(const nlohmann::json& ace, bool& changed);
     /// Resolve each bay's spool through `spool_binding` -> `spools`. Caller must
@@ -275,7 +302,6 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
             // multiACE's `weight_g` is only a copy of it. See where this is applied.
         };
         std::array<BaySpool, ACE_SLOTS_PER_UNIT> spool{};
-        using SpoolEntry = BaySpool;
         /// nullopt = the ACE reported no colour, so keep SlotInfo's default
         /// rather than painting the slot black.
         std::array<std::optional<uint32_t>, ACE_SLOTS_PER_UNIT> color_rgb{};

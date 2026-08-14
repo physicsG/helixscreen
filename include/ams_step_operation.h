@@ -36,6 +36,63 @@ struct StepOperationResult {
 };
 
 /**
+ * @brief Whether the operation on screen is one this UI started.
+ *
+ * Was inferred from `target_load_slot_ < 0`, which conflated "no slot" with
+ * "not ours" and got the answer wrong in the one case that matters. The
+ * sidebar cleared that field whenever the action was not a running one — but
+ * start_operation() optimistically sets HEATING and the backend's still-IDLE
+ * truth lands on top of it before the firmware picks the op up. That pre-start
+ * lag looks identical to completion, so a UI-initiated unload was declared
+ * foreign mid-flight and detect_step_operation() re-read it as the unload half
+ * of a swap, replacing the 4-step bar with the 5-step load one.
+ *
+ * The fix is to tell those two apart, which needs one extra bit: has the
+ * backend confirmed the operation actually started? A non-running action only
+ * means "finished" AFTER a running one has been seen. Before that it means
+ * "not started yet", and ownership must survive it.
+ *
+ * Deterministic — no timers, no debounce on a transient whose length is a
+ * property of the printer.
+ */
+struct OperationOwnership {
+    bool ui_initiated = false;  ///< start_operation() was called for this op
+    bool progress_seen = false; ///< ...and the backend has since reported it running
+
+    /// This UI just dispatched an operation.
+    void on_start() {
+        ui_initiated = true;
+        progress_seen = false;
+    }
+
+    /// @param action_is_progress the AMS action names a running operation.
+    void on_action(bool action_is_progress) {
+        if (action_is_progress) {
+            progress_seen = true;
+            return;
+        }
+        // Idle AFTER running = finished, so release ownership and let the next
+        // externally-started operation be detected as one. Idle BEFORE running
+        // is the pre-start lag above — keep it.
+        if (progress_seen) {
+            ui_initiated = false;
+            progress_seen = false;
+        }
+    }
+
+    /// The dispatch never reached the printer (refused, or it threw): there is
+    /// no operation to own, and no running action will ever arrive to end it.
+    void on_abandon() {
+        ui_initiated = false;
+        progress_seen = false;
+    }
+
+    [[nodiscard]] bool is_external() const {
+        return !ui_initiated;
+    }
+};
+
+/**
  * @brief Detect which step operation type to show based on action transitions
  *
  * Handles both the initial detection (when an external operation starts) and
@@ -57,6 +114,28 @@ inline StepOperationResult detect_step_operation(AmsAction action, AmsAction pre
     bool is_active_action = (action == AmsAction::HEATING || action == AmsAction::CUTTING ||
                              action == AmsAction::FORMING_TIP || action == AmsAction::UNLOADING ||
                              action == AmsAction::LOADING);
+
+    // An explicit UNLOAD that is currently unloading is never reinterpreted.
+    //
+    // Everything below guesses at an operation nobody told us about, and the
+    // guess is only safe while there is nothing better to go on. Here there is:
+    // the caller already built an UNLOAD bar. Without this, an ordinary Unload
+    // press landed in the swap arm below — UNLOADING with filament loaded reads
+    // as "the unload half of a swap" — and the 4-step unload bar was rebuilt as
+    // the 5-step load one, parked on "Feed filament" for the rest of the
+    // operation.
+    //
+    // `is_external` cannot be trusted to exclude it: it means "target_load_slot_
+    // < 0", and the caller clears that on any non-progress action, so a single
+    // transient IDLE mid-unload makes the UI's own operation look foreign. That
+    // same transient is what puts prev_action at IDLE, so both conditions of the
+    // arm below are met by a UI-initiated unload.
+    //
+    // A real swap still arrives: LOADING while current_op is UNLOAD hits the
+    // upgrade arm at the bottom, which is the designed route for exactly that.
+    if (current_op == StepOperationType::UNLOAD && action == AmsAction::UNLOADING) {
+        return result; // no change — keep the unload bar
+    }
 
     // External operation just started (transitioned from IDLE to any active action)
     if (is_external && is_active_action && prev_action == AmsAction::IDLE) {

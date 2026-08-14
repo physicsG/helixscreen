@@ -2913,7 +2913,10 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
                 // ...and the number the badges show, not slot + 1: an ACE-fed
                 // head and the bay behind it share ONE spool number, so the two
                 // are computed differently and would drift apart.
-                const int display_slot = loaded_backend->spool_display_number(slot_index);
+                // `sys` is already in hand — pass it, or the helper re-fetches a
+                // full deep copy of AmsSystemInfo under the backend mutex, on
+                // every frame, to produce one integer.
+                const int display_slot = loaded_backend->spool_display_number(slot_index, sys);
                 for (const auto& unit : sys.units) {
                     const bool is_source =
                         owner ? unit.unit_index == *owner

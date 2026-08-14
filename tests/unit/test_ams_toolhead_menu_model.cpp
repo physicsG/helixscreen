@@ -7,6 +7,8 @@
 
 #include "ui_ams_toolhead_menu.h"
 
+#include "ams_types.h"
+
 #include "../catch_amalgamated.hpp"
 
 using helix::ui::toolhead_menu_is_empty;
@@ -145,4 +147,54 @@ TEST_CASE("An externally-fed toolhead offers Unload but not Load",
             }
         }
     }
+}
+
+// =============================================================================
+// The canvas reports a VIRTUAL tool number; the backend calls take a SLOT
+//
+// ui_system_path_canvas.h documents the click argument as "the VIRTUAL tool
+// number shown on the badge, not the physical column", and every backend call
+// the menu makes is slot-indexed -- including can_unload_from_toolhead(), whose
+// name says toolhead while its parameter is documented as a slot. They coincide
+// on the U1 (slot N feeds tool N) and diverge on a toolchanger under ASSIGN_TOOL
+// remapping, where a menu keyed on the wrong one acts on the wrong head.
+// =============================================================================
+
+TEST_CASE("slot_for_tool resolves through mapped_tool", "[ams][toolhead_menu][tool_index]") {
+    AmsSystemInfo info;
+    info.units.emplace_back();
+    auto& unit = info.units.back();
+    unit.slot_count = 3;
+    unit.first_slot_global_index = 0;
+    unit.slots.resize(3);
+    // A remapped machine: the badge numbers do NOT match the slot indices.
+    unit.slots[0].global_index = 0;
+    unit.slots[0].mapped_tool = 2;
+    unit.slots[1].global_index = 1;
+    unit.slots[1].mapped_tool = 0;
+    unit.slots[2].global_index = 2;
+    unit.slots[2].mapped_tool = 1;
+
+    CHECK(helix::ui::slot_for_tool_for_test(info, 2) == 0);
+    CHECK(helix::ui::slot_for_tool_for_test(info, 0) == 1);
+    CHECK(helix::ui::slot_for_tool_for_test(info, 1) == 2);
+
+    // Identity machine (the U1): the two are the same number, which is why the
+    // bug was invisible there.
+    AmsSystemInfo u1;
+    u1.units.emplace_back();
+    auto& heads = u1.units.back();
+    heads.slot_count = 4;
+    heads.slots.resize(4);
+    for (int i = 0; i < 4; ++i) {
+        heads.slots[static_cast<size_t>(i)].global_index = i;
+        heads.slots[static_cast<size_t>(i)].mapped_tool = i;
+    }
+    for (int i = 0; i < 4; ++i) {
+        CHECK(helix::ui::slot_for_tool_for_test(u1, i) == i);
+    }
+
+    // Nothing maps to it: fall back to the raw index rather than -1, preserving
+    // behaviour for a backend that publishes no mapped_tool at all.
+    CHECK(helix::ui::slot_for_tool_for_test(info, 9) == 9);
 }

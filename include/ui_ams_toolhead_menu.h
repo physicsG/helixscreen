@@ -5,6 +5,8 @@
 
 #include "ui_context_menu.h"
 
+#include "ams_types.h"
+
 #include <functional>
 #include <lvgl.h>
 
@@ -88,6 +90,10 @@ struct ToolheadMenuModel {
                                                     bool can_unload, bool print_blocks_ops = false,
                                                     bool source_is_external = false);
 
+/// Test seam for the file-local slot_for_tool(); see its definition for why the
+/// virtual tool number and the slot index are not interchangeable.
+[[nodiscard]] int slot_for_tool_for_test(const AmsSystemInfo& info, int tool_index);
+
 /// True when the model has no entries — nothing to show, so show nothing.
 [[nodiscard]] inline bool toolhead_menu_is_empty(const ToolheadMenuModel& m) {
     return !m.show_select && !m.show_park && !m.show_load && !m.show_unload;
@@ -114,9 +120,11 @@ class AmsToolheadMenu : public ContextMenu {
     AmsToolheadMenu(const AmsToolheadMenu&) = delete;
     AmsToolheadMenu& operator=(const AmsToolheadMenu&) = delete;
 
-    // Movable
-    AmsToolheadMenu(AmsToolheadMenu&& other) noexcept;
-    AmsToolheadMenu& operator=(AmsToolheadMenu&& other) noexcept;
+    // Non-movable. Both panels hold this in a unique_ptr and nothing moves it;
+    // the move bodies existed only to re-init subjects and fix up the static
+    // active-instance pointer, which is 40 lines of unreachable subtlety.
+    AmsToolheadMenu(AmsToolheadMenu&&) = delete;
+    AmsToolheadMenu& operator=(AmsToolheadMenu&&) = delete;
 
     /**
      * @brief Show the toolhead context menu near the tapped nozzle
@@ -147,7 +155,8 @@ class AmsToolheadMenu : public ContextMenu {
   private:
     ActionCallback action_callback_;
     AmsBackend* backend_ = nullptr;
-    int tool_index_ = -1;
+    int tool_index_ = -1; ///< VIRTUAL tool number, as the canvas reports it
+    int slot_index_ = -1; ///< ...and the slot that feeds it — see slot_for_tool()
     ToolheadMenuModel model_;
 
     // Entry visibility is published as subjects and bound with <bind_flag_if_eq>

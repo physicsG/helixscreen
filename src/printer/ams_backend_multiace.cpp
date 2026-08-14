@@ -3,6 +3,7 @@
 
 #include "ams_backend_multiace.h"
 
+#include "color_utils.h"
 #include "json_utils.h"
 
 #include <spdlog/fmt/fmt.h>
@@ -42,6 +43,32 @@ std::optional<uint32_t> color_array_to_rgb(const nlohmann::json& c) {
                                         : 0u;
     };
     return (ch(0) << 16) | (ch(1) << 8) | ch(2);
+}
+
+/// Split multiACE's `"<ace>_<slot>"` bay key, bounds-checked.
+///
+/// Used by BOTH `slot_overrides.json` and the `spool_binding` map — they share
+/// the key shape, and the two hand-written copies of this had already drifted
+/// apart in their comments. Returns nullopt for a malformed key or one naming
+/// hardware outside MAX_ACE_UNITS / ACE_SLOTS_PER_UNIT, so callers `continue`.
+std::optional<std::pair<int, int>> parse_bay_key(const std::string& key, int max_aces,
+                                                 int slots_per_unit) {
+    const auto sep = key.find('_');
+    if (sep == std::string::npos) {
+        return std::nullopt;
+    }
+    int a = -1;
+    int s = -1;
+    try {
+        a = std::stoi(key.substr(0, sep));
+        s = std::stoi(key.substr(sep + 1));
+    } catch (...) {
+        return std::nullopt;
+    }
+    if (a < 0 || a >= max_aces || s < 0 || s >= slots_per_unit) {
+        return std::nullopt;
+    }
+    return std::pair<int, int>{a, s};
 }
 
 /// Model name for an ACE unit, from the only field that distinguishes them.
@@ -127,6 +154,15 @@ std::optional<int> AmsBackendMultiAce::slot_identity_owner_slot(int slot_index) 
     }
     return system_info_.units[static_cast<size_t>(seated.unit_index)].first_slot_global_index +
            seated.slot;
+}
+
+int AmsBackendMultiAce::head_fed_by_ace_locked(int ace_index) const {
+    for (int h = 0; h < NUM_TOOLS; ++h) {
+        if (head_kind_[h] == HeadSource::ACE && head_ace_index_[h] == ace_index) {
+            return h;
+        }
+    }
+    return -1;
 }
 
 AmsBackendMultiAce::HeadSource AmsBackendMultiAce::head_source_kind(int head) const {
@@ -291,7 +327,7 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
                 continue;
             }
             auto& st = ace_units_[idx];
-            st.connected = unit.value("connected", st.connected);
+            st.connected = helix::json_util::safe_bool(unit, "connected", st.connected);
             st.protocol = helix::json_util::safe_string(unit, "protocol", st.protocol);
             st.temp = helix::json_util::safe_int(unit, "temp", st.temp);
             st.humidity = helix::json_util::safe_int(unit, "humidity", st.humidity);
@@ -313,7 +349,8 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
             if (unit.contains("auto_dry") && unit["auto_dry"].is_object()) {
                 const auto& ad = unit["auto_dry"];
                 st.has_auto_dry = true;
-                st.auto_dry_enabled = ad.value("enabled", st.auto_dry_enabled);
+                st.auto_dry_enabled =
+                    helix::json_util::safe_bool(ad, "enabled", st.auto_dry_enabled);
                 st.auto_dry_rh_start =
                     helix::json_util::safe_float(ad, "rh_start", st.auto_dry_rh_start);
                 st.auto_dry_rh_end = helix::json_util::safe_float(ad, "rh_end", st.auto_dry_rh_end);
@@ -323,7 +360,8 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
                     helix::json_util::safe_int(ad, "add_time", st.auto_dry_add_time_min);
             }
             if (unit.contains("auto_dry_running")) {
-                st.auto_dry_running = unit.value("auto_dry_running", st.auto_dry_running);
+                st.auto_dry_running =
+                    helix::json_util::safe_bool(unit, "auto_dry_running", st.auto_dry_running);
             }
 
             if (unit.contains("gate_status") && unit["gate_status"].is_array()) {
@@ -384,39 +422,25 @@ AmsBackendMultiAce::parse_slot_overrides(const std::string& content) {
         if (!v.is_object()) {
             continue;
         }
-        // Keyed "<ace>_<slot>", the same shape as spool_binding. The entries also
-        // repeat the pair as `ace`/`slot` fields; the key is authoritative.
-        const auto sep = key.find('_');
-        if (sep == std::string::npos) {
+        // Keyed "<ace>_<slot>". The entries also repeat the pair as `ace`/`slot`
+        // fields; the key is authoritative.
+        const auto bay = parse_bay_key(key, MAX_ACE_UNITS, ACE_SLOTS_PER_UNIT);
+        if (!bay) {
             continue;
         }
-        int a = -1;
-        int s = -1;
-        try {
-            a = std::stoi(key.substr(0, sep));
-            s = std::stoi(key.substr(sep + 1));
-        } catch (...) {
-            continue;
-        }
-        if (a < 0 || a >= MAX_ACE_UNITS || s < 0 || s >= ACE_SLOTS_PER_UNIT) {
-            continue;
-        }
+        const int a = bay->first;
+        const int s = bay->second;
         auto& o = out[static_cast<size_t>(a)][static_cast<size_t>(s)];
         o.set = true;
         o.material = helix::json_util::safe_string(v, "material", "");
         o.brand = helix::json_util::safe_string(v, "brand", "");
         // "#RRGGBB" here — leading '#', unlike the spool table's bare hex and
         // unlike slots[].color's [r,g,b] array. Three encodings, one concept.
-        std::string col = helix::json_util::safe_string(v, "color", "");
-        if (!col.empty() && col.front() == '#') {
-            col.erase(0, 1);
-        }
-        if (col.size() >= 6) {
-            try {
-                o.color_rgb =
-                    static_cast<uint32_t>(std::stoul(col.substr(col.size() - 6), nullptr, 16));
-            } catch (...) {
-            }
+        // parse_hex_color tolerates the optional leading '#' and validates the
+        // WHOLE string — std::stoul would accept a valid prefix and silently
+        // turn "12G456" into near-black.
+        if (auto rgb = helix::parse_hex_color(helix::json_util::safe_string(v, "color", ""))) {
+            o.color_rgb = *rgb;
         }
     }
     return out;
@@ -502,13 +526,8 @@ void AmsBackendMultiAce::parse_spool_table_locked(const nlohmann::json& ace, boo
             // `weight_g` is deliberately not read: it is multiACE's local copy of
             // Spoolman's remaining weight, and Spoolman owns both weights here.
             // Bare hex, no leading '#', unlike slots[].color which is [r,g,b].
-            const std::string col = helix::json_util::safe_string(sp, "color", "");
-            if (col.size() >= 6) {
-                try {
-                    e.color_rgb =
-                        static_cast<uint32_t>(std::stoul(col.substr(col.size() - 6), nullptr, 16));
-                } catch (...) {
-                }
+            if (auto rgb = helix::parse_hex_color(helix::json_util::safe_string(sp, "color", ""))) {
+                e.color_rgb = *rgb;
             }
             spool_table_[id] = std::move(e);
         }
@@ -522,22 +541,12 @@ void AmsBackendMultiAce::parse_spool_table_locked(const nlohmann::json& ace, boo
             row.fill(std::string{});
         }
         for (const auto& [key, value] : ace["spool_binding"].items()) {
-            // "<ace>_<slot>"
-            const auto sep = key.find('_');
-            if (sep == std::string::npos) {
+            const auto bay = parse_bay_key(key, MAX_ACE_UNITS, ACE_SLOTS_PER_UNIT);
+            if (!bay) {
                 continue;
             }
-            int a = -1;
-            int s = -1;
-            try {
-                a = std::stoi(key.substr(0, sep));
-                s = std::stoi(key.substr(sep + 1));
-            } catch (...) {
-                continue;
-            }
-            if (a < 0 || a >= MAX_ACE_UNITS || s < 0 || s >= ACE_SLOTS_PER_UNIT) {
-                continue;
-            }
+            const int a = bay->first;
+            const int s = bay->second;
             // The id is a string in both the binding and the table's keys.
             bay_spool_id_[static_cast<size_t>(a)][static_cast<size_t>(s)] =
                 value.is_string()
@@ -663,15 +672,9 @@ void AmsBackendMultiAce::rebuild_ace_units_locked() {
             // head. -1 when nothing is bound, so the canvas draws no lane.
             slot.mapped_tool = -1;
             if (head_mode_) {
-                // Which head this ACE is wired to, from head_ace — NOT from
-                // head_seated_, which empties on every unload and took the bays'
-                // tool badges and the unit's path with it.
-                for (int h = 0; h < NUM_TOOLS; ++h) {
-                    if (head_kind_[h] == HeadSource::ACE && head_ace_index_[h] == a) {
-                        slot.mapped_tool = h;
-                        break;
-                    }
-                }
+                // From head_ace — NOT from head_seated_, which empties on every
+                // unload and took the bays' tool badges and the unit's path with it.
+                slot.mapped_tool = head_fed_by_ace_locked(a);
                 if (slot.mapped_tool < 0) {
                     for (int h = 0; h < NUM_TOOLS; ++h) {
                         if (head_seated_[h] && head_seated_[h]->ace_index == a) {
@@ -895,6 +898,35 @@ AmsError AmsBackendMultiAce::set_auto_dry_enabled(bool enabled, int unit) {
 // Filament ops — ACE-fed heads take the ACE path
 // ============================================================================
 
+AmsBackend::OperationStepModel
+AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
+    AmsBackend::OperationStepModel model = AmsBackendSnapmaker::get_operation_step_model(op);
+    if (op != StepOperationType::UNLOAD || model.steps.empty()) {
+        return model;
+    }
+    // Which head this unload is about. current_slot is the head for a U1-side
+    // op; a bay index resolves to the head its ACE feeds, so both entry points
+    // (the sidebar's Unload and a bay's context menu) get the same answer.
+    int head = -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        head = system_info_.current_slot;
+    }
+    if (head >= NUM_TOOLS) {
+        if (auto bay = bay_source(head)) { // takes mutex_ itself — not nested
+            head = bay->head;
+        }
+    }
+    if (head < 0 || head >= NUM_TOOLS) {
+        return model;
+    }
+    if (head_source_kind(head) != HeadSource::ACE) {
+        return model; // a stock feeder head retracts to its own buffer
+    }
+    model.steps.back().label = lv_tr("Retract to ACE");
+    return model;
+}
+
 std::optional<AmsBackendMultiAce::BaySource> AmsBackendMultiAce::bay_source(int slot_index) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (slot_index < NUM_TOOLS) {
@@ -913,29 +945,27 @@ std::optional<AmsBackendMultiAce::BaySource> AmsBackendMultiAce::bay_source(int 
         BaySource src;
         src.ace_index = static_cast<int>(u) - 1; // unit 0 is the U1 itself
         src.bay = slot_index - first;
-        // Which head this ACE actually FEEDS -- multiACE's own aceHeadForAce()
-        // reverse lookup, and note it tests the head's source KIND as well.
-        // head_ace_index_ is a binding for every head, not a statement that the
-        // ACE feeds it: a live U1 reports head_ace {0:0, 1:1, 2:2, 3:0}, so
-        // matching on the index alone picks head 0 -- a stock feeder head -- for
-        // ACE 0's bays, and the load would go to the wrong toolhead.
-        for (int h = 0; h < NUM_TOOLS; ++h) {
-            if (head_kind_[h] == HeadSource::ACE && head_ace_index_[h] == src.ace_index) {
-                src.head = h;
-                break;
-            }
-        }
+        src.head = head_fed_by_ace_locked(src.ace_index);
         return src;
     }
     return std::nullopt;
 }
 
 bool AmsBackendMultiAce::slot_is_actively_loaded(int slot_index) const {
-    if (auto bay = bay_source(slot_index)) {
-        // Its own status already carries the answer -- parse_ace_object_locked()
-        // marks exactly the seated bay LOADED -- so this stays a single source
-        // of truth rather than a second reverse lookup that could disagree.
-        return get_slot_info(slot_index).status == SlotStatus::LOADED;
+    {
+        // One lock, no SlotInfo copy. This runs for EVERY slot on every frame
+        // (AmsState::sync_from_backend), and it used to take mutex_ twice --
+        // once in bay_source(), once in get_slot_info() -- and deep-copy a
+        // SlotInfo with its ~8 std::strings to read a single enum.
+        //
+        // rebuild_ace_units_locked() marks exactly the seated bay LOADED, so the
+        // status IS the answer; this stays one source of truth rather than a
+        // second reverse lookup that could disagree.
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (slot_index >= NUM_TOOLS) {
+            const SlotInfo* slot = system_info_.get_slot_global(slot_index);
+            return slot != nullptr && slot->status == SlotStatus::LOADED;
+        }
     }
     return AmsBackendSnapmaker::slot_is_actively_loaded(slot_index);
 }

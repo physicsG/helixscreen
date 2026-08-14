@@ -8,6 +8,7 @@
 // one ACE Pro 2 in head mode feeding T3 while T0-T2 sit on stock feeders.
 
 #include "../helix_test_fixture.h"
+#include "../lvgl_test_fixture.h"
 #include "ams_backend_multiace.h"
 #include "ams_backend_snapmaker.h"
 #include "ams_types.h"
@@ -1056,4 +1057,105 @@ TEST_CASE_METHOD(HelixTestFixture, "an ACE-fed head and its bay report one spool
     // A feeder head still describes itself, so the caption keeps naming the U1.
     CHECK_FALSE(backend.slot_identity_owner_unit(0).has_value());
     CHECK(backend.spool_display_number(0) == 1);
+}
+
+// =============================================================================
+// The channel_state parse must survive an ACE-fed head reaching preload_finish
+//
+// This test was written once, saw it "stall under the harness", and was cut as
+// a harness artifact. It was not: it had found a real self-deadlock. The parse
+// holds mutex_ and calls preload_finish_ends_unload(), whose first
+// implementation answered via head_source_kind() -- which takes the same
+// non-recursive mutex. On hardware that froze the main thread (the parse runs
+// from UpdateQueue::process_pending) on the first real ACE unload, with the UI
+// stuck on a stale step bar. Confirmed by attaching to the hung process.
+//
+// If this ever hangs again rather than failing, that IS the regression: some
+// override called back into a locking accessor.
+// =============================================================================
+
+namespace {
+
+/// A `filament_feed left` frame putting one head in one channel_state.
+json feed_frame(int head, const char* state) {
+    return json{
+        {"filament_feed left", {{"extruder" + std::to_string(head), {{"channel_state", state}}}}}};
+}
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLTestFixture, "an ACE-fed head's unload resolves at preload_finish",
+                 "[ams][multiace][bay_load][1229]") {
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object())); // T3 is ACE-fed
+    REQUIRE(backend.head_source_kind(3) == HeadSource::ACE);
+
+    backend.handle_status_update(feed_frame(3, "unload_doing"));
+    REQUIRE(backend.get_current_action() == AmsAction::UNLOADING);
+
+    // The last state this head will ever report for the unload -- and the call
+    // that used to deadlock.
+    backend.handle_status_update(feed_frame(3, "preload_finish"));
+    CHECK(backend.get_current_action() == AmsAction::IDLE);
+    helix::ui::UpdateQueue::instance().drain(); // the parse queues AmsState work
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "a feeder head still waits for unload_finish",
+                 "[ams][multiace][bay_load][1229]") {
+    // The other half: on a stock feeder head preload_finish lands mid-sequence
+    // with the nozzle still heating, so it must NOT resolve (#u1-unload-steps).
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    REQUIRE(backend.head_source_kind(0) == HeadSource::FEEDER);
+
+    backend.handle_status_update(feed_frame(0, "unload_doing"));
+    REQUIRE(backend.get_current_action() == AmsAction::UNLOADING);
+
+    backend.handle_status_update(feed_frame(0, "preload_finish"));
+    CHECK(backend.get_current_action() == AmsAction::UNLOADING); // still going
+
+    backend.handle_status_update(feed_frame(0, "unload_finish"));
+    CHECK(backend.get_current_action() == AmsAction::IDLE);
+    helix::ui::UpdateQueue::instance().drain();
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "the unload step names the ACE as the destination",
+                 "[ams][multiace][bay_load]") {
+    // "Retract" alone said nothing about where the filament goes, and on an
+    // ACE-fed head it travels all the way back into the ACE -- which is most of
+    // the operation's duration, spent on that one step.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    // Head 3 is the ACE-fed one in the captured frame; make it the current slot
+    // so the model knows which head the unload is about.
+    backend.handle_status_update(json{{"toolhead", {{"extruder", "extruder3"}}}});
+    REQUIRE(backend.get_system_info().current_slot == 3);
+
+    const auto unload = backend.get_operation_step_model(StepOperationType::UNLOAD);
+    REQUIRE_FALSE(unload.steps.empty());
+    CHECK(unload.steps.back().label == std::string("Retract to ACE"));
+    // A rename, not an extra step: the firmware drives the index (phase 3), so a
+    // fifth step would sit Pending forever.
+    CHECK(unload.steps.size() == 4);
+    CHECK(unload.steps.back().phase_id == 3);
+
+    // The load direction is untouched.
+    const auto load = backend.get_operation_step_model(StepOperationType::LOAD_FRESH);
+    CHECK(load.steps.size() == 5);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "a feeder head's unload keeps the plain Retract label",
+                 "[ams][multiace][bay_load]") {
+    // T0 is on its stock feeder: the filament goes back to the U1's own buffer,
+    // so naming the ACE there would be a lie.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    backend.handle_status_update(json{{"toolhead", {{"extruder", "extruder"}}}});
+    REQUIRE(backend.get_system_info().current_slot == 0);
+    REQUIRE(backend.head_source_kind(0) == HeadSource::FEEDER);
+
+    const auto unload = backend.get_operation_step_model(StepOperationType::UNLOAD);
+    REQUIRE_FALSE(unload.steps.empty());
+    CHECK(unload.steps.back().label == std::string("Retract"));
 }

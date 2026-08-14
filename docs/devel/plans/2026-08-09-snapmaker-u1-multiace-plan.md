@@ -767,6 +767,79 @@ buffer — that term is borrowed from AFC's TurtleNeck. The U1's own vocabulary 
 (`preloading` / `preload_finish`). Worth a comment-only pass so the next reader is not sent
 looking for hardware that does not exist.
 
+### 10.5 From the code review (2026-08-14) — A/B done, C/D/E open
+
+A four-angle review (reuse / simplification / efficiency / altitude) of the whole branch. The
+mechanical findings are fixed in `e0f22f471`; the items below were held back because they change
+architecture rather than tidy it. **The two latent bugs (A, B) are fixed in `23a0cc95c`
+(2026-08-15). C, D and E remain open** — they alter behaviour rather than close a hole, so they
+want doing deliberately rather than folded into a cleanup.
+
+**A. `park_toolhead()` was outside the NVI gate — ✅ fixed 2026-08-15 (`23a0cc95c`).**
+`Park` joined `FilamentOp`; `park_toolhead()` is `final` on `AmsSubscriptionBackend` and routes
+through `run_filament_op()`; backends implement only the protected `do_park_toolhead()` hook,
+whose default refuses. Snapmaker's hand-written gate is deleted. Mutating the gate away
+reproduces the original bug and `[park]` catches it, asserting no gcode leaks on refusal.
+Original diagnosis retained below.
+
+**A (original).** `park_toolhead()` is outside the NVI gate — latent, ordered first.
+`load_filament` / `unload_filament` / `select_slot` / `change_tool` are `final` on
+`AmsSubscriptionBackend` precisely so a backend *cannot* forget the print-active gate; that
+class's own comment records that opt-in gating already shipped one backend with no gate at all
+(`329e731e9` added it to seven and missed the eighth). `park_toolhead()` (`ams_backend.h`) is a
+plain virtual whose only enforcement is a `@warning` telling each implementer to hand-write
+`check_preconditions(true)`, and it skips the `FilamentOpClaim` test-and-set, so a park can
+dispatch while a load is in flight. Latent only because `supports_toolhead_park()` is true on
+exactly one backend today — the second one to implement it docks the head mid-print.
+*Fix:* add `Park` to `FilamentOp`, make `park_toolhead()` `final` on `AmsSubscriptionBackend`
+dispatching to a protected `do_park_toolhead()`. Snapmaker then drops its hand-written gate.
+
+**B. The toolhead menu keyed slot-indexed APIs with a VIRTUAL tool number — ✅ fixed 2026-08-15
+(`23a0cc95c`).** Resolved once via `mapped_tool` in both `show_at()` and the shared dispatch,
+falling back to the raw index for a backend publishing no mapping. Worse than first described:
+`can_unload_from_toolhead(int slot_index)` is slot-indexed *despite its name*, and the dispatch
+was passing the tool number to three further slot-indexed calls — so every backend call in the
+menu took a slot while receiving a tool. `[tool_index]` pins it with a deliberately remapped
+machine alongside the U1's identity case. Original diagnosis retained below.
+
+**B (original).** The toolhead menu keys slot-indexed APIs with a VIRTUAL tool number — latent.
+`ui_system_path_canvas.h` documents the callback argument as "the VIRTUAL tool number shown on
+the badge, not the physical column". `AmsToolheadMenu::show_at()` passes it unconverted to
+`get_slot_info()`, `can_unload_from_toolhead()`, `select_slot()`, `load_filament()` and
+`unload_filament()` — all slot-indexed. It works only because tool == slot on the U1;
+`ams_backend.h` records that toolchanger tool numbers diverge from slots under `ASSIGN_TOOL`
+remapping, and the overview registers this callback for every backend. (The missing bounds
+check is already restored in `e0f22f471`; the index is still the wrong *kind* of index.)
+*Fix:* resolve tool → slot once via `tool_layout.virtual_to_physical` + `mapped_tool` at the
+top of `show_at()`.
+
+**C. OPEN — the toolhead menu bypasses `plan_load()`.**
+The sidebar, filament panel, runout handler and print-status widget all funnel through
+`plan_load()` / `BackendCaps`. This menu calls `load_filament()` / `unload_filament()` /
+`select_slot()` directly, so it gets none of `requires_slot_selection_for_load`,
+`needs_unload_before_load`, the already-mounted refusal, the preheat flow, the step bar — or
+`change_tool_completes_load`, the capability this very branch added to that planner. Related:
+its print-blocks gate is a fifth copy of the same preamble and omits the `is_busy()` term the
+per-slot menu carries.
+
+**D. OPEN — `change_tool_completes_load()` should be derived, not declared.**
+The planner arm it guards substitutes `change_tool(mapped_tool)` for "load slot N", which is
+valid exactly when the tool number *identifies* the slot. On an ACE in head mode four bays share
+one `mapped_tool`, so it is ambiguous — and that is visible in the `AmsSystemInfo` `plan_load()`
+already holds. Deriving it ("take this arm only when `target_slot` is the only slot with that
+`mapped_tool`") deletes the virtual, the `BackendCaps` field and its three call sites, keeps
+AFC/HH/CFS behaviour (they map lanes 1:1), and protects the next many-to-one backend for free.
+
+**E. OPEN — also flagged, smaller.** `detect_step_operation()`'s guard fixes the UNLOAD direction only —
+the same mid-operation transient resets the bar during a LOAD. `slot_identity_owner_unit()` and
+`slot_identity_owner_slot()` are one concept split in two with an unenforced invariant. Bars and
+badge text in `ui_ams_slot.cpp` are read once at widget construction, so they go stale on any
+inventory change that does not alter the slot count. `override_refetch_wanted_` is armed on every
+`event_seq` bump — confirm multiACE does not bump it for telemetry, or that is a continuous HTTP
+loop.
+
+---
+
 ---
 
 ## 11. Session log — 2026-08-10/11

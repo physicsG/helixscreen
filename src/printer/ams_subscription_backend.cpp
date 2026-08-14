@@ -152,6 +152,10 @@ bool AmsSubscriptionBackend::op_moves_toolhead(FilamentOp op) const {
         // on the carriage, are toolhead motion on every backend there is. No
         // override path exists for these on purpose.
         return true;
+    case FilamentOp::Park:
+        // Docking the head IS carriage motion, by definition — there is no
+        // backend on which parking leaves the carriage where it was.
+        return true;
     case FilamentOp::SelectSlot:
         // The one genuinely per-backend answer. See select_slot_moves_toolhead().
         return select_slot_moves_toolhead();
@@ -240,6 +244,8 @@ AmsError AmsSubscriptionBackend::run_filament_op(FilamentOp op, int arg) {
         return do_select_slot(arg);
     case FilamentOp::ChangeTool:
         return do_change_tool(arg);
+    case FilamentOp::Park:
+        return do_park_toolhead();
     }
     return AmsErrorHelper::success(); // Unreachable; the enum is exhaustive.
 }
@@ -258,6 +264,11 @@ AmsError AmsSubscriptionBackend::select_slot(int slot_index) {
 
 AmsError AmsSubscriptionBackend::change_tool(int tool_number) {
     return run_filament_op(FilamentOp::ChangeTool, tool_number);
+}
+
+AmsError AmsSubscriptionBackend::park_toolhead() {
+    // The arg is unused — the firmware parks whichever head is on the carriage.
+    return run_filament_op(FilamentOp::Park, -1);
 }
 
 AmsError AmsSubscriptionBackend::state_preconditions_unlocked() const {

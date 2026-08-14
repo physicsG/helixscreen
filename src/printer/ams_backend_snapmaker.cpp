@@ -572,16 +572,9 @@ AmsError AmsBackendSnapmaker::do_change_tool(int tool_number) {
     return execute_gcode(fmt::format("T{}", tool_number));
 }
 
-AmsError AmsBackendSnapmaker::park_toolhead() {
-    // Park moves the carriage, so it MUST take the same print gate the filament
-    // ops get from run_filament_op(). Those route through the NVI wrapper and
-    // are refused mid-print; park_toolhead() is a plain virtual and would
-    // otherwise dock the head in the middle of a running job and ruin it.
-    // PAUSED still passes — parking is a legitimate manual intervention there,
-    // and Snapmaker's filament_ops_self_home() is false.
-    if (auto err = check_preconditions(/*requires_toolhead_motion=*/true); !err.success()) {
-        return err;
-    }
+AmsError AmsBackendSnapmaker::do_park_toolhead() {
+    // No gate here: run_filament_op() has already refused a printing job and
+    // claimed the single in-flight slot, the same way it does for load/unload.
     // Bare and parameterless — the firmware parks whichever head is on the
     // carriage. Nothing to unload: a docked head keeps its filament.
     return execute_gcode("PARK_EXTRUDER");

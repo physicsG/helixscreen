@@ -437,6 +437,11 @@ void AmsOperationSidebar::cleanup() {
     // Clear active flag FIRST to prevent observer callbacks from using freed widgets
     active_ = false;
 
+    // Whatever we were showing is gone with the widgets. Keeping ownership over
+    // a teardown would make the next externally-started operation look like
+    // ours and go without a step bar.
+    ownership_.on_abandon();
+
     // Delete the stall watchdog before anything else so its main-thread callback
     // can't fire mid-teardown (it never outlives the sidebar this way).
     if (stall_watchdog_timer_) {
@@ -901,7 +906,7 @@ void AmsOperationSidebar::start_operation(StepOperationType op_type, int target_
     spdlog::info("[AmsSidebar] Starting operation: type={}, target_slot={}",
                  static_cast<int>(op_type), target_slot);
 
-    target_load_slot_ = target_slot;
+    ownership_.on_start();
 
     // Set pending target slot early for pulse animation
     AmsState::instance().set_pending_target_slot(target_slot);
@@ -925,7 +930,7 @@ void AmsOperationSidebar::fail_started_operation(const AmsError& error) {
     spdlog::warn("[AmsSidebar] Operation dispatch failed: {} ({})", error.user_msg,
                  error.technical_msg);
     helix::ui::notify_ams_error(error, lv_tr("Filament operation failed"));
-    target_load_slot_ = -1;
+    ownership_.on_abandon();
     AmsState::instance().set_pending_target_slot(-1);
     // Backend never left IDLE; pull its truth back into the UI so the action
     // buttons reappear and the step bar hides.
@@ -937,8 +942,17 @@ void AmsOperationSidebar::update_step_progress(AmsAction action) {
         return;
     }
 
+    // One notion of "this operation is visibly running", used for BOTH the
+    // ownership latch and the container visibility below — they were separate
+    // expressions of the same idea, and only one of them updated ownership.
+    const bool action_is_progress =
+        (action == AmsAction::HEATING || action == AmsAction::LOADING ||
+         action == AmsAction::PURGING || action == AmsAction::CUTTING ||
+         action == AmsAction::FORMING_TIP || action == AmsAction::UNLOADING);
+    ownership_.on_action(action_is_progress);
+
     // Heuristic detection for externally-started operations
-    bool is_external = (target_load_slot_ < 0);
+    const bool is_external = ownership_.is_external();
     bool filament_loaded = false;
     if (is_external) {
         AmsBackend* backend = AmsState::instance().get_backend();
@@ -969,16 +983,13 @@ void AmsOperationSidebar::update_step_progress(AmsAction action) {
         return;
     }
 
-    // Show/hide container based on action
-    bool show_progress = (action == AmsAction::HEATING || action == AmsAction::LOADING ||
-                          action == AmsAction::PURGING || action == AmsAction::CUTTING ||
-                          action == AmsAction::FORMING_TIP || action == AmsAction::UNLOADING);
-
-    if (show_progress) {
+    // Show/hide container based on action. Ownership is NOT cleared here any
+    // more: on_action() above already released it, but only once the operation
+    // had actually been seen running.
+    if (action_is_progress) {
         lv_obj_remove_flag(step_progress_container_, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(step_progress_container_, LV_OBJ_FLAG_HIDDEN);
-        target_load_slot_ = -1;
         if (heat_label_showing_temp_) {
             int reset_idx = (live_temp_step_index_ >= 0) ? live_temp_step_index_ : 0;
             ui_step_progress_set_label(step_progress_, reset_idx, lv_tr("Heat nozzle"));
