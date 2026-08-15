@@ -91,9 +91,12 @@ class AmsContextMenu : public ContextMenu {
     AmsContextMenu(const AmsContextMenu&) = delete;
     AmsContextMenu& operator=(const AmsContextMenu&) = delete;
 
-    // Movable
-    AmsContextMenu(AmsContextMenu&& other) noexcept;
-    AmsContextMenu& operator=(AmsContextMenu&& other) noexcept;
+    // Non-movable. Every owner (AmsPanel, AmsOverviewPanel, the external-spool
+    // menu) holds this in a unique_ptr and nothing moves it; the move bodies
+    // existed only to hand per-instance subjects from one object to another,
+    // and the subjects are the class's now.
+    AmsContextMenu(AmsContextMenu&&) = delete;
+    AmsContextMenu& operator=(AmsContextMenu&&) = delete;
 
     /**
      * @brief Show context menu near a slot widget
@@ -150,16 +153,29 @@ class AmsContextMenu : public ContextMenu {
     void dispatch_ams_action(MenuAction action);
 
     // === Subjects for button enable/disable states ===
-    lv_subject_t slot_is_loaded_subject_; ///< 1 = loaded (Unload enabled), 0 = not loaded
-    lv_subject_t slot_can_load_subject_;  ///< 1 = has filament (Load enabled), 0 = empty
+    //
+    // ONE set for the class, not one per instance. The XML binds these by fixed
+    // name, and three owners each construct their own menu (AmsPanel, the
+    // overview, the external-spool menu): with per-instance subjects registered
+    // under the same names, whichever instance registered LAST owned the names,
+    // and every other instance's writes landed on subjects no card was bound to
+    // any more -- Load/Unload greyed by another menu's stale answer, and, once
+    // an owner was destroyed, the registry pointing at reclaimed storage. One
+    // menu is on screen at a time, so one set is exactly what the XML needs.
+    // Initialised on first construction and torn down through
+    // StaticSubjectRegistry like every other static subject.
+    static lv_subject_t s_slot_is_loaded_subject_; ///< 1 = loaded (Unload enabled), 0 = not loaded
+    static lv_subject_t s_slot_can_load_subject_;  ///< 1 = has filament (Load enabled), 0 = empty
     /// 1 = another unit owns this slot's filament identity (multiACE: an
     /// ACE-fed U1 head). Bound in XML so the edit actions hide and the
     /// "open the owner" action appears, without adding imperative visibility.
-    lv_subject_t slot_source_external_subject_;
+    static lv_subject_t s_slot_source_external_subject_;
+    static bool s_subjects_initialized_;
+    static void init_subjects();
+    static void deinit_subjects();
     /// Unit that owns this slot's identity, or -1. Held so OPEN_SOURCE_UNIT can
     /// name it without re-querying a backend that may have changed.
     int source_owner_unit_ = -1;
-    bool subject_initialized_ = false;
 
     // === Backend reference for dropdown operations ===
     AmsBackend* backend_ = nullptr;
