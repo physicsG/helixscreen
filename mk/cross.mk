@@ -2937,6 +2937,10 @@ release-snapmaker-u1: | build/snapmaker-u1/bin/helix-screen
 	@echo "  $(DIM)Included pre-configured config/settings.json for Snapmaker U1$(RESET)"
 	@cp scripts/$(INSTALLER_FILENAME) $(RELEASE_DIR)/helixscreen/ 2>/dev/null || true
 	@chmod +x $(RELEASE_DIR)/helixscreen/$(INSTALLER_FILENAME) 2>/dev/null || true
+	@# Beside install.sh on purpose: install-fork.sh prefers an installer sitting
+	@# next to it, so an unpacked archive installs from the fork with no network.
+	@cp scripts/install-fork.sh $(RELEASE_DIR)/helixscreen/ 2>/dev/null || true
+	@chmod +x $(RELEASE_DIR)/helixscreen/install-fork.sh 2>/dev/null || true
 	@mkdir -p $(RELEASE_DIR)/helixscreen/scripts
 	@cp scripts/uninstall.sh $(RELEASE_DIR)/helixscreen/scripts/ 2>/dev/null || true
 	@cp -r scripts/kiauh $(RELEASE_DIR)/helixscreen/scripts/ 2>/dev/null || true
