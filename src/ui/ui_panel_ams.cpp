@@ -1202,51 +1202,14 @@ void AmsPanel::on_path_slot_clicked(int slot_index, void* user_data) {
 
 void AmsPanel::on_path_toolhead_clicked(int tool_index, void* user_data) {
     auto* self = static_cast<AmsPanel*>(user_data);
-    if (!self || !self->path_canvas_) {
+    if (!self) {
         return;
     }
-
-    int slot_count = lv_subject_get_int(AmsState::instance().get_slot_count_subject());
-    if (tool_index < 0 || tool_index >= slot_count) {
-        spdlog::warn("[AmsPanel] Ignoring toolhead click - invalid tool {} (slot_count={})",
-                     tool_index, slot_count);
-        return;
-    }
-
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (!backend) {
-        return;
-    }
-
-    // Same as the slot path: read the live touch point synchronously, while the
-    // active indev still reports the press coordinates.
-    lv_point_t click_pt = {0, 0};
-    if (lv_indev_t* indev = lv_indev_active()) {
-        lv_indev_get_point(indev, &click_pt);
-    }
-
-    // Created once and reused, like the per-slot menu: the instance owns
-    // lv_subjects registered under fixed names, so building a fresh one per tap
-    // would re-register those names and destroy the previous owner's storage on
-    // every nozzle press.
-    if (!self->toolhead_menu_) {
-        self->toolhead_menu_ = std::make_unique<helix::ui::AmsToolheadMenu>();
-        self->toolhead_menu_->set_action_callback(
-            [self](helix::ui::AmsToolheadMenu::ToolheadAction a, int tool) {
-                self->dispatch_toolhead_action(a, tool);
-            });
-    }
-    // show_at() returns false when the head has no applicable action; that is a
-    // deliberate no-op, not an error worth reporting.
-    self->toolhead_menu_->show_at(self->parent_screen_, self->path_canvas_, click_pt, tool_index,
-                                  backend);
-}
-
-void AmsPanel::dispatch_toolhead_action(helix::ui::AmsToolheadMenu::ToolheadAction a,
-                                        int tool_index) {
-    // Pure backend work, shared with the overview panel — see
-    // helix::ui::dispatch_toolhead_menu_action().
-    helix::ui::dispatch_toolhead_menu_action(a, tool_index);
+    // Range check, touch point, lazy menu, shared dispatch -- all in the helper,
+    // which the overview calls too. The two panels each had a copy of it once,
+    // and the range check went missing from one of them.
+    helix::ui::show_toolhead_menu_at_touch(self->toolhead_menu_, self->parent_screen_,
+                                           self->path_canvas_, tool_index);
 }
 
 void AmsPanel::on_path_hub_clicked_thunk(lv_point_t click_pt, void* user_data) {

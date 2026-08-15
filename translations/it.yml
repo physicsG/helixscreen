@@ -4,6 +4,7 @@ translations:
   ' elapsed · ': ' trascorso · '
   ' frames': ' fotogrammi'
   ' left': ' rimanente'
+  '"%s" failed to load': Caricamento di "%s" non riuscito
   '%.1f Hz difference': '%.1f Hz di differenza'
   '%d additional fan%s': '%d ventola%s aggiuntiva'
   '%d disabled': '%d disabilitati'
@@ -61,6 +62,7 @@ translations:
   120 seconds: 120 secondi
   15 seconds: 15 secondi
   180°: 180°
+  180° Upside Down: ''
   2 min: '2 min'
   2 minutes: 2 minuti
   2. Place paper between nozzle and bed: 2. Posizionare carta tra ugello e piano
@@ -69,6 +71,7 @@ translations:
   20 minutes: 20 minuti
   24 Hour: 24 ore
   270°: 270°
+  270° Clockwise: ''
   2D Heatmap: Mappa termica 2D
   2D Layers: Strati 2D
   3. Adjust screws, then re-probe to verify: 3. Regolare le viti, poi risondare per
@@ -88,6 +91,7 @@ translations:
   5V: 5V
   60 seconds: 60 secondi
   90°: 90°
+  90° Clockwise: ''
   = Loosen: = Allentare
   = Tighten: = Stringere
   A: A
@@ -130,6 +134,7 @@ translations:
     Riprovare.
   Accept: Accetta
   'Accepted Z Position: 0.000': 'Posizione Z accettata: 0.000'
+  'Accepted Z Position: {:.3f}': 'Posizione Z accettata: {:.3f}'
   Accessories: 'Accessori'
   Accuracy: Precisione
   'Act:': 'Att:'
@@ -194,6 +199,7 @@ translations:
   An unexpected printer error occurred.: Si è verificato un errore imprevisto della
     stampante.
   An update is available: È disponibile un aggiornamento
+  Analyzing data... {}%: 'Analisi dei dati... {}%'
   Android logcat: Android logcat
   Animations: Animazioni
   Anonymous data to help improve HelixScreen: Dati anonimi per migliorare HelixScreen
@@ -367,6 +373,7 @@ translations:
   Calibrate, tune jitter and scroll feel: Calibra, regola jitter e sensibilità di
     scorrimento
   Calibrated: Calibrato
+  Calibrating {} axis...: 'Calibrazione dell''asse {}...'
   Calibrating...: Calibrazione in corso...
   Calibration & Tools: Calibrazione e Strumenti
   Calibration Complete!: Calibrazione completata!
@@ -528,7 +535,11 @@ translations:
   Complete!: Completato!
   Completed: Completato
   Completed in %d probe%s: Completato in %d sonda%s
+  Completed just now: 'Completato adesso'
   Completed prints will appear here: Le stampe completate appariranno qui
+  Completed {}d ago: 'Completato {} g fa'
+  Completed {}h ago: 'Completato {} h fa'
+  Completed {}m ago: 'Completato {} min fa'
   Computing calibration...: Calcolo calibrazione...
   Config Dir: Dir configurazione
   Config-defined (read-only): Definito nella configurazione (sola lettura)
@@ -619,8 +630,8 @@ translations:
   Could not analyze PRINT_START macro. Some print options may be unavailable.: Impossibile
     analizzare la macro PRINT_START. Alcune opzioni di stampa potrebbero non essere
     disponibili.
-  Could not check webcam status.\nCheck printer connection.: Impossibile verificare
-    stato webcam.\nControllare la connessione della stampante.
+  ? "Could not check webcam status.\nCheck printer connection."
+  : "Impossibile verificare stato webcam.\nControllare la connessione della stampante."
   Could not forget device: Impossibile dimenticare il dispositivo
   Could not load printer database: Impossibile caricare il database della stampante
   Could not parse tips database: Impossibile analizzare il database dei suggerimenti
@@ -932,10 +943,10 @@ translations:
     per modifica: {}'
   'Failed to download G-code for remap: {}': 'Impossibile scaricare G-code per rimappatura:
     {}'
-  Failed to download helixscreen.conf.\nCheck printer connection.: Download helixscreen.conf
-    fallito.\nControllare la connessione della stampante.
-  Failed to download moonraker.conf.\nCheck printer connection.: Download moonraker.conf
-    fallito.\nControllare la connessione della stampante.
+  ? "Failed to download helixscreen.conf.\nCheck printer connection."
+  : "Download helixscreen.conf fallito.\nControllare la connessione della stampante."
+  ? "Failed to download moonraker.conf.\nCheck printer connection."
+  : "Download moonraker.conf fallito.\nControllare la connessione della stampante."
   Failed to duplicate spool: Duplicazione bobina fallita
   Failed to enable tuning tower: Abilitazione torre di regolazione fallita
   'Failed to exclude ''{}'': {}': 'Impossibile escludere ''{}'': {}'
@@ -1007,11 +1018,11 @@ translations:
   'Failed to toggle timelapse: {}': 'Impossibile attivare/disattivare timelapse: {}'
   'Failed to turn off heaters: {}': 'Impossibile spegnere riscaldatori: {}'
   'Failed to unload: {}': 'Impossibile scaricare: {}'
-  Failed to update configuration.\nCheck printer connection.: Aggiornamento configurazione
-    fallito.\nControllare la connessione della stampante.
+  ? "Failed to update configuration.\nCheck printer connection."
+  : "Aggiornamento configurazione fallito.\nControllare la connessione della stampante."
   Failed to update moonraker.conf.: Aggiornamento moonraker.conf fallito.
-  Failed to update moonraker.conf.\nCheck printer connection.: Aggiornamento moonraker.conf
-    fallito.\nControllare la connessione della stampante.
+  ? "Failed to update moonraker.conf.\nCheck printer connection."
+  : "Aggiornamento moonraker.conf fallito.\nControllare la connessione della stampante."
   Failed to update phase tracking: Aggiornamento tracciamento fase fallito
   'Failed to upload modified G-code: {}': 'Impossibile caricare G-code modificato:
     {}'
@@ -1101,13 +1112,8 @@ translations:
   Found 1 printer: 1 stampante trovata
   Framerate: Frequenza fotogrammi
   Frequency Delta: Delta di frequenza
-  ? 'Frequency Delta: Difference between Path A and B. Ideally under 5 Hz; over 15
-    Hz needs adjustment.\n\nPath Similarity: How closely the vibration profiles match.
-    Above 90% is excellent; below 70% suggests uneven tension.'
-  : 'Delta di frequenza: differenza tra il percorso A e B. Idealmente sotto i 5 Hz;
-    oltre i 15 Hz richiede una regolazione.\n\nSomiglianza dei percorsi: quanto i
-    profili di vibrazione corrispondono. Sopra il 90% è eccellente; sotto il 70% indica
-    una tensione non uniforme.'
+  ? "Frequency Delta: Difference between Path A and B. Ideally under 5 Hz; over 15 Hz needs adjustment.\n\nPath Similarity: How closely the vibration profiles match. Above 90% is excellent; below 70% suggests uneven tension."
+  : "Delta di frequenza: differenza tra il percorso A e B. Idealmente sotto i 5 Hz; oltre i 15 Hz richiede una regolazione.\n\nSomiglianza dei percorsi: quanto i profili di vibrazione corrispondono. Sopra il 90% è eccellente; sotto il 70% indica una tensione non uniforme."
   From Buffer: Dal buffer
   From Version: Dalla versione
   Full: Completo
@@ -1115,6 +1121,8 @@ translations:
   G-code Preview: Anteprima G-code
   G-code commands will appear here: I comandi G-code appariranno qui
   GCode Console: 'Console G-code'
+  ? "Game Over!\nScore: {}\nTap to restart"
+  : "Partita finita!\nPunteggio: {}\nTocca per ricominciare"
   Gear Buffer Speed: 'Velocità dell''ingranaggio dal buffer'
   Gear Spool Speed: 'Velocità dell''ingranaggio dalla bobina'
   Gear Unload Speed: 'Velocità di scarico dell''ingranaggio'
@@ -1170,7 +1178,7 @@ translations:
   Heating (%d°C below minimum): Riscaldamento (%d°C sotto il minimo)
   Heating Bed...: Riscaldamento piatto...
   Heating Nozzle...: Riscaldamento ugello...
-  Heating to %d\xC2\xB0C... %.0f\xC2\xB0C: Riscaldamento a %d\xC2\xB0C... %.0f\xC2\xB0C
+  Heating to %d°C... %.0f°C: Riscaldamento a %d°C... %.0f°C
   Heating to {}°C before {}...: Riscaldamento a {}°C prima di {}...
   Heating to {}°C for {}...: Riscaldamento a {}°C per {}...
   Heating to {}°C...: Riscaldamento a {}°C...
@@ -1289,8 +1297,8 @@ translations:
   'Install the HelixPrint plugin to enable fast G-code modifications. Run this command via SSH on your printer:': 'Installa
     il plugin HelixPrint per abilitare modifiche G-code rapide. Esegui questo comando
     via SSH sulla stampante:'
-  Install the timelapse plugin via SSH,\nthen tap \"Check Again\".: Installare il
-    plugin timelapse via SSH,\npoi toccare "Ricontrolla".
+  ? "Install the timelapse plugin via SSH,\nthen tap \"Check Again\"."
+  : "Installare il plugin timelapse via SSH,\npoi toccare \"Ricontrolla\"."
   Install timelapse plugin: Installa plugin timelapse
   Installation Failed: Installazione fallita
   Installation failed: Installazione fallita
@@ -1321,6 +1329,7 @@ translations:
     risoluzione dei problemi e richieste di funzionalità.
   Jump directly to motion control / jogging: 'Vai direttamente al controllo movimento / spostamento'
   Just now: Adesso
+  Just queued: 'Appena messo in coda'
   KEYBOARD LAYOUT: LAYOUT TASTIERA
   KLICKY CONTROLS: CONTROLLI KLICKY
   Keep Navigation Bar: Mantieni barra di navigazione
@@ -1463,6 +1472,7 @@ translations:
   MISSING CONFIGURED: CONFIGURATO MANCANTE
   MMU command failed: Comando MMU fallito
   MPC: MPC
+  MPC thermal model calibrated for {} at {}°C.: 'Modello termico MPC calibrato per {} a {}°C.'
   Machine Limits: Limiti macchina
   Macro: Macro
   Macro Browser: Browser macro
@@ -1527,6 +1537,8 @@ translations:
   Measurement Failed: Misurazione fallita
   Measuring Path A... %d%%: Misurazione percorso A... %d%%
   Measuring Path B... %d%%: Misurazione percorso B... %d%%
+  Measuring accelerometer noise...: 'Misurazione del rumore dell''accelerometro...'
+  Measuring vibrations... {}%: 'Misurazione delle vibrazioni... {}%'
   Memory: Memoria
   Memory (MB): Memoria (MB)
   Memory Snapshot: Istantanea della memoria
@@ -1549,8 +1561,8 @@ translations:
   Moonraker: Moonraker
   Moonraker restarted but Spoolman not connected. Check server.: Moonraker riavviato
     ma Spoolman non connesso. Controllare il server.
-  Moonraker restarting...\nWaiting for reconnection...: Moonraker in riavvio...\nIn
-    attesa di riconnessione...
+  ? "Moonraker restarting...\nWaiting for reconnection..."
+  : "Moonraker in riavvio...\nIn attesa di riconnessione..."
   'Moonraker: ': 'Moonraker: '
   More points = more accurate, but takes longer.: Più punti = più preciso, ma richiede
     più tempo.
@@ -1584,6 +1596,8 @@ translations:
   My Custom Theme: Il mio tema personalizzato
   My Panel: Il mio pannello
   My Printer: La mia stampante
+  ? "NEW HIGH SCORE!\n{}\nTap to play again"
+  : "NUOVO RECORD!\n{}\nTocca per rigiocare"
   NEWLY DISCOVERED: APPENA RILEVATO
   Name: Nome
   Name (optional): Nome (facoltativo)
@@ -1638,8 +1652,8 @@ translations:
   No camera — use USB barcode scanner: Nessuna telecamera — usa scanner USB per codici
     a barre
   No chamber temperature sensor detected: 'Nessun sensore di temperatura della camera rilevato'
-  No changes selected.\n\nClick Cancel to close.: Nessuna modifica selezionata.\n\nClicca
-    Annulla per chiudere.
+  ? "No changes selected.\n\nClick Cancel to close."
+  : "Nessuna modifica selezionata.\n\nClicca Annulla per chiudere."
   No changes to revert: Nessuna modifica da annullare
   No color: Nessun colore
   No dryer available. Store filament in a sealed dry box with desiccant for best results.: Nessun
@@ -1691,11 +1705,12 @@ translations:
   No temperature sensors detected: 'Nessun sensore di temperatura rilevato'
   No timelapse videos found: Nessun video timelapse trovato
   No vendors found: Nessun fornitore trovato
-  No webcam detected.\nA webcam is required for timelapse.: Nessuna webcam rilevata.\nUna
-    webcam è necessaria per il timelapse.
+  ? "No webcam detected.\nA webcam is required for timelapse."
+  : "Nessuna webcam rilevata.\nUna webcam è necessaria per il timelapse."
   No width sensor detected: 'Nessun sensore di larghezza rilevato'
   None: Nessuno
   None (disable): Nessuno (disabilita)
+  Normal: ''
   Not Enough Filament: Filamento insufficiente
   Not Now: Non ora
   Not calibrated: Non calibrato
@@ -1870,8 +1885,8 @@ translations:
   Plugin installed successfully.: Plugin installato con successo.
   Plugin installed successfully. Moonraker is restarting...: Plugin installato correttamente.
     Moonraker è in riavvio...
-  Plugin not responding after restart.\nIt may need more time to load.: Plugin non
-    risponde dopo il riavvio.\nPotrebbe necessitare più tempo per il caricamento.
+  ? "Plugin not responding after restart.\nIt may need more time to load."
+  : "Plugin non risponde dopo il riavvio.\nPotrebbe necessitare più tempo per il caricamento."
   Plugin uninstalled successfully.: Plugin disinstallato correttamente.
   Plugins: Plugin
   Plugins are discovered on application startup: I plugin vengono rilevati all'avvio
@@ -2004,6 +2019,8 @@ translations:
   Probing Bed Screws...: Sondaggio viti piano...
   Probing Bed...: Sondaggio piano...
   Probing Failed: Sondaggio fallito
+  Probing point {} of {}: 'Punto di sondaggio {} di {}'
+  Probing... ({} points): 'Sondaggio in corso... ({} punti)'
   Proceed: Procedi
   # Source: abort_progress_modal.xml:20
   Processing...: 'Elaborazione in corso...'
@@ -2035,8 +2052,11 @@ translations:
   Quad Gantry Level: Livellamento gantry quadruplo
   Quad Gantry Level complete: QGL completato
   Quad Gantry Level started...: QGL avviato...
+  'Queue: Paused': 'Coda: In pausa'
   'Queue: Ready': 'Coda: Pronta'
   Queued print jobs: 'Lavori di stampa in coda'
+  Queued {}h {}m ago: 'In coda da {} h {} min'
+  Queued {}m ago: 'In coda da {} min'
   Quick: Rapido
   Quick Actions: Azioni rapide
   Quick Button 1: Pulsante rapido 1
@@ -2062,8 +2082,8 @@ translations:
   Ready to Apply: Pronto per applicare
   Ready to load: Pronto per il caricamento
   Reason: Motivo
-  'Reason: {}\n\nThe printer cannot resume this print. Restart from the beginning?': 'Motivo:
-    {}\n\nLa stampante non può riprendere questa stampa. Ricominciare dall''inizio?'
+  ? "Reason: {}\n\nThe printer cannot resume this print. Restart from the beginning?"
+  : "Motivo: {}\n\nLa stampante non può riprendere questa stampa. Ricominciare dall'inizio?"
   Reboot: Riavvia
   Reboot failed: Riavvio fallito
   Reboot failed — host is still reachable: Riavvio fallito — l'host è ancora raggiungibile
@@ -2192,7 +2212,7 @@ translations:
   'Role:': 'Ruolo:'
   Rotating tips and helpful information: 'Suggerimenti a rotazione e informazioni utili'
   Rotation: Rotazione
-  'Rotation: %d\xc2\xb0 - %ds remaining (or wait to retry)': 'Rotazione: %d\xc2\xb0
+  'Rotation: %d° - %ds remaining (or wait to retry)': 'Rotazione: %d°
     - %ds rimanenti (o attendi per riprovare)'
   Rounded: Arrotondato
   Run: Esegui
@@ -2213,6 +2233,8 @@ translations:
   Running {}...: Esecuzione {}...
   Runout: 'Esaurimento'
   Runout Sensor: Sensore esaurimento
+  ? 'SAVE_CONFIG failed: {}. Z-offset was applied but not saved. Run SAVE_CONFIG manually or the offset will be lost on restart.'
+  : 'SAVE_CONFIG non riuscito: {}. L''offset Z è stato applicato ma non salvato. Esegui SAVE_CONFIG manualmente o l''offset andrà perso al riavvio.'
   SETTINGS: IMPOSTAZIONI
   SHIPPED IMAGES: IMMAGINI INCLUSE
   SOFTWARE: SOFTWARE
@@ -2273,9 +2295,12 @@ translations:
   Scanning for networks...: Scansione reti...
   Scanning...: Scansione...
   'Score: 0': 'Punteggio: 0'
+  'Score: {}': 'Punteggio: {}'
+  'Score: {}  |  Best: {}': 'Punteggio: {}  |  Record: {}'
   Screen: 'Schermo'
   Screen Blank: Schermo spento
   Screen Dim: Attenuazione schermo
+  Screen Rotation: ''
   Screen dims to lower brightness after period of inactivity: Lo schermo si attenua
     dopo un periodo di inattività
   Screen lock and PIN settings: Blocco schermo e impostazioni PIN
@@ -2354,12 +2379,8 @@ translations:
   'Set ': 'Imposta '
   Set Active: Imposta attivo
   Set PIN: Imposta PIN
-  ? 'Set a phone strobe app to %.1f Hz and aim at the belt. Adjust until the belt
-    appears stationary.\n\nRecommended apps:\n  Android: Strobily, Strobe Light\n  iOS:
-    Strobe Light Tachometer, myStroboscope'
-  : 'Imposta un''app stroboscopica del telefono a %.1f Hz e puntala sulla cinghia.
-    Regola finché la cinghia non appare ferma.\n\nApp consigliate:\n  Android: Strobily,
-    Strobe Light\n  iOS: Strobe Light Tachometer, myStroboscope'
+  ? "Set a phone strobe app to %.1f Hz and aim at the belt. Adjust until the belt appears stationary.\n\nRecommended apps:\n  Android: Strobily, Strobe Light\n  iOS: Strobe Light Tachometer, myStroboscope"
+  : "Imposta un'app stroboscopica del telefono a %.1f Hz e puntala sulla cinghia. Regola finché la cinghia non appare ferma.\n\nApp consigliate:\n  Android: Strobily, Strobe Light\n  iOS: Strobe Light Tachometer, myStroboscope"
   Set local timezone for time display: Imposta fuso orario locale per l'ora
   Set logging verbosity for troubleshooting: Imposta il livello di dettaglio del log
     per la risoluzione dei problemi
@@ -2510,7 +2531,8 @@ translations:
   Stop Drying: Ferma essiccazione
   Stop Print?: Fermare stampa?
   Stop failed: Arresto fallito
-  Stop printing \"{}\"?\n\nThis cannot be undone after 5 seconds.: 'Interrompere la stampa di \"{}\"?\n\nNon sarà possibile annullare dopo 5 secondi.'
+  ? "Stop printing \"{}\"?\n\nThis cannot be undone after 5 seconds."
+  : "Interrompere la stampa di \"{}\"?\n\nNon sarà possibile annullare dopo 5 secondi."
   Stopped between Hub and Toolhead: Fermo tra Hub e testina
   Stopped between Lane and Hub: Fermo tra corsia e Hub
   Stopped between Spool and Lane: Fermo tra bobina e corsia
@@ -2560,11 +2582,12 @@ translations:
   Takes 3-5 min. Do not interrupt.: Richiede 3-5 min. Non interrompere.
   Tap + to add: Tocca + per aggiungere
   Tap again to confirm this orientation: Tocca di nuovo per confermare questo orientamento
+  Tap an object to exclude it | {} objects ({} excluded): 'Tocca un oggetto per escluderlo | {} oggetti ({} esclusi)'
   Tap anywhere if this text is right-side up: Tocca ovunque se questo testo è dritto
   Tap anywhere to begin: Tocca ovunque per iniziare
   Tap anywhere to begin calibration: Tocca ovunque per avviare la calibrazione
-  Tap the crosshair (point %1$d of 3) \xe2\x80\x94 touch %2$d of %3$d: Tocca il mirino
-    (punto %1$d di 3) \xe2\x80\x94 tocco %2$d di %3$d
+  Tap the crosshair (point %1$d of 3) — touch %2$d of %3$d: Tocca il mirino
+    (punto %1$d di 3) — tocco %2$d di %3$d
   Tap to assign: Tocca per assegnare
   Target Frequency: Frequenza obiettivo
   Target Temperature: Temperatura target
@@ -2583,6 +2606,7 @@ translations:
   Temperature Graph Config: Configurazione grafico temperature
   # Source: calibration_pid_panel.xml:333
   Temperature Sensors: 'Sensori di temperatura'
+  Temperature control optimized for {} at {}°C.: 'Controllo della temperatura ottimizzato per {} a {}°C.'
   Temperatures: Temperature
   Temperatures saved: Temperature salvate
   Template: Modello
@@ -2600,7 +2624,7 @@ translations:
   Test Screensaver: Prova salvaschermo
   Test Tracker: Test Tracker
   Test label printed: Etichetta di prova stampata
-  'Testing rotation: %d\xc2\xb0 (%d/%d) - %ds remaining': 'Test rotazione: %d\xc2\xb0
+  'Testing rotation: %d° (%d/%d) - %ds remaining': 'Test rotazione: %d°
     (%d/%d) - %ds rimanenti'
   Testing, servo, and motor operations: 'Operazioni di test, servo e motore'
   Thanks! Anonymous usage data helps improve HelixScreen.: Grazie! I dati anonimi
@@ -2620,14 +2644,8 @@ translations:
   The filament system reported an error: Il sistema filamento ha segnalato un errore
   The heater will cycle on and off several times.: Il riscaldatore si accenderà e
     spegnerà diverse volte.
-  ? The motor vibrates the belt while a strobe light flashes at the same frequency.
-    When the belt appears to stand still (frozen), you have found the resonant frequency.\n\nUse
-    the frequency buttons to sweep through values until the belt looks stationary,
-    then lock the reading.
-  : Il motore fa vibrare la cinghia mentre una luce stroboscopica lampeggia alla stessa
-    frequenza. Quando la cinghia sembra ferma (immobile), hai trovato la frequenza
-    di risonanza.\n\nUsa i pulsanti della frequenza per scorrere i valori finché la
-    cinghia non appare ferma, poi blocca la lettura.
+  ? "The motor vibrates the belt while a strobe light flashes at the same frequency. When the belt appears to stand still (frozen), you have found the resonant frequency.\n\nUse the frequency buttons to sweep through values until the belt looks stationary, then lock the reading."
+  : "Il motore fa vibrare la cinghia mentre una luce stroboscopica lampeggia alla stessa frequenza. Quando la cinghia sembra ferma (immobile), hai trovato la frequenza di risonanza.\n\nUsa i pulsanti della frequenza per scorrere i valori finché la cinghia non appare ferma, poi blocca la lettura."
   ? The print is paused. Changing tools now moves the toolhead and swaps the filament at the nozzle. Resume the print once the change finishes.
   : La stampa è in pausa. Cambiare utensile ora muove la testina e sostituisce il
     filamento all'ugello. Riprendi la stampa al termine del cambio.
@@ -2669,10 +2687,10 @@ translations:
   This channel offers v{}, older than the installed v{}. Anything added since then will be removed.: 'Questo canale offre la v{}, precedente alla v{} installata. Tutto ciò che è stato aggiunto da allora verrà rimosso.'
   This clears every spool's failover assignment. The print will stop on runout until you set up failover again.: 'Questo cancella l''assegnazione della bobina di riserva di ogni bobina. La stampa si fermerà all''esaurimento finché non la riconfiguri.'
   This device has no wired network connection. If you turn WiFi off, it can only be turned back on from this screen.: Questo dispositivo non dispone di una connessione di rete cablata. Se disattivi il WiFi, potrà essere riattivato solo da questa schermata.
-  ? This device has only {} MB of RAM. Resonance calibration is memory-intensive and can make the printer firmware report a \"Timer Too Close\" error or restart mid-test. Continue anyway?
-  : Questo dispositivo ha solo {} MB di RAM. La calibrazione della risonanza usa molta memoria e può causare un errore \"Timer Too Close\" nel firmware della stampante o un riavvio a metà test. Continuare comunque?
-  ? This device has very little RAM. Resonance calibration is memory-intensive and may cause a \"Timer Too Close\" error. Continue anyway?
-  : Questo dispositivo ha pochissima RAM. La calibrazione della risonanza usa molta memoria e può causare un errore \"Timer Too Close\". Continuare comunque?
+  ? This device has only {} MB of RAM. Resonance calibration is memory-intensive and can make the printer firmware report a "Timer Too Close" error or restart mid-test. Continue anyway?
+  : Questo dispositivo ha solo {} MB di RAM. La calibrazione della risonanza usa molta memoria e può causare un errore "Timer Too Close" nel firmware della stampante o un riavvio a metà test. Continuare comunque?
+  ? This device has very little RAM. Resonance calibration is memory-intensive and may cause a "Timer Too Close" error. Continue anyway?
+  : Questo dispositivo ha pochissima RAM. La calibrazione della risonanza usa molta memoria e può causare un errore "Timer Too Close". Continuare comunque?
   This doesn't match the linked Spoolman spool. Add it as a new spool, or update the linked one to match?: Non corrisponde alla bobina Spoolman collegata. Aggiungerla come nuova bobina o aggiornare quella collegata?
   This file was sliced for {} but {} is loaded.: Questo file è stato sezionato per
     {} ma è caricato {}.
@@ -2780,8 +2798,8 @@ translations:
   Touch anywhere to verify accuracy: Tocca ovunque per verificare la precisione
   Touch input did not track the new calibration. Your previous settings were kept.: L'input touch non ha seguito la nuova calibrazione. Sono state mantenute le impostazioni precedenti.
   Touch screen to wake from sleep: Tocca lo schermo per riattivare
-  Touch the target (point %1$d of 3) \xe2\x80\x94 touch %2$d of %3$d: Tocca il bersaglio
-    (punto %1$d di 3) \xe2\x80\x94 tocco %2$d di %3$d
+  Touch the target (point %1$d of 3) — touch %2$d of %3$d: Tocca il bersaglio
+    (punto %1$d di 3) — tocco %2$d di %3$d
   TouchCalibration: Calibrazione touch
   Trace: Traccia
   Trigger: Attivazione
@@ -2797,6 +2815,7 @@ translations:
   Turn On LEDs: 'Accendi i LED'
   Turn on LEDs when printer starts: Accendi LED all'avvio della stampante
   Turn the extruder heater off after a load or unload finishes: Spegni il riscaldatore dell'estrusore al termine di un caricamento o scaricamento
+  Turn the picture to match how the screen is mounted. Applies after restart.: ''
   Type: Tipo
   Type to preview input field...: Digita per visualizzare anteprima campo input...
   'Type:': 'Tipo:'
@@ -2809,15 +2828,8 @@ translations:
   USB printer access denied — check permissions: Accesso alla stampante USB negato
     — controlla i permessi
   Understanding Results: Capire i risultati
-  ? Uneven belt tension causes print artifacts like layer shifts, VFAs (vertical fine
-    artifacts), and ringing.\n\nThis tool vibrates each belt path and measures the
-    resonant frequency \u2014 matched frequencies mean balanced tension.\n\nFor CoreXY,
-    Path A and B should be within a few Hz of each other.
-  : Una tensione non uniforme della cinghia causa artefatti di stampa come spostamenti
-    di strato, VFA (artefatti verticali fini) e ringing.\n\nQuesto strumento fa vibrare
-    ciascun percorso della cinghia e misura la frequenza di risonanza — frequenze
-    corrispondenti indicano una tensione bilanciata.\n\nPer CoreXY, il percorso A
-    e B dovrebbero differire di pochi Hz.
+  ? "Uneven belt tension causes print artifacts like layer shifts, VFAs (vertical fine artifacts), and ringing.\n\nThis tool vibrates each belt path and measures the resonant frequency — matched frequencies mean balanced tension.\n\nFor CoreXY, Path A and B should be within a few Hz of each other."
+  : "Una tensione non uniforme della cinghia causa artefatti di stampa come spostamenti di strato, VFA (artefatti verticali fini) e ringing.\n\nQuesto strumento fa vibrare ciascun percorso della cinghia e misura la frequenza di risonanza — frequenze corrispondenti indicano una tensione bilanciata.\n\nPer CoreXY, il percorso A e B dovrebbero differire di pochi Hz."
   Uninstall HelixPrint Plugin: Disinstalla plugin HelixPrint
   Uninstall script not found.: Script di disinstallazione non trovato.
   'Uninstall: Coming soon': 'Disinstallazione: In arrivo'
@@ -2976,6 +2988,7 @@ translations:
   X Axis: Asse X
   X Offset: Offset X
   X axis applied, but Y axis failed: Asse X applicato, ma asse Y fallito
+  X axis done, starting Y...: 'Asse X completato, avvio di Y...'
   X jog blocked at bed edge: Movimento X bloccato al bordo del piano
   'X:': 'X:'
   XY: XY
@@ -2984,19 +2997,17 @@ translations:
   Y Offset: Offset Y
   Y jog blocked at bed edge: Movimento Y bloccato al bordo del piano
   'Y:': 'Y:'
+  ? "YOU WIN!\nScore: {}\nTap to play again"
+  : "HAI VINTO!\nPunteggio: {}\nTocca per rigiocare"
   Year: Anno
   'Yes': Sì
-  ? You can now skip these operations when starting prints.\n\nLook for the new options
-    in the print details before starting each print.\n\nA backup of your config was
-    saved automatically.
-  : Ora puoi saltare queste operazioni quando avvii le stampe.\n\nCerca le nuove opzioni
-    nei dettagli della stampa prima di avviare ogni stampa.\n\nUn backup della tua
-    configurazione è stato salvato automaticamente.
+  ? "You can now skip these operations when starting prints.\n\nLook for the new options in the print details before starting each print.\n\nA backup of your config was saved automatically."
+  : "Ora puoi saltare queste operazioni quando avvii le stampe.\n\nCerca le nuove opzioni nei dettagli della stampa prima di avviare ogni stampa.\n\nUn backup della tua configurazione è stato salvato automaticamente."
   You can skip this and calibrate later in Settings.: Puoi saltare e calibrare più
     tardi nelle Impostazioni.
   You have unsaved changes. Discard them?: Hai modifiche non salvate. Scartarle?
-  Your PRINT_START macro will be updated to give you control over:\n\n: La tua macro
-    PRINT_START verrà aggiornata per darti il controllo su:\n\n
+  ? "Your PRINT_START macro will be updated to give you control over:\n\n"
+  : "La tua macro PRINT_START verrà aggiornata per darti il controllo su:\n\n"
   Your completed prints will appear here: Le stampe completate appariranno qui
   Your print start is already fully configured!: Il tuo avvio stampa è già completamente
     configurato!
@@ -3031,7 +3042,6 @@ translations:
   Z-offset saved - Klipper restarting...: Z-offset salvato - Riavvio Klipper...
   'Z:': 'Z:'
   'Z: 0.000': 'Z: 0.000'
-  \"%s\" failed to load: Caricamento di \"%s\" non riuscito
   bed: piano
   by Preston Brown: di Preston Brown
   chamber heater: riscaldatore camera
@@ -3071,7 +3081,6 @@ translations:
   remaining before clog detection triggers: rimanente prima che si attivi il rilevamento
     intasamento
   rendering: rendering
-  set to: impostato a
   slots): slot)
   started: avviato
   steppers: motori passo-passo
@@ -3115,7 +3124,11 @@ translations:
   '{} configured item not found': '{} elemento configurato non trovato'
   '{} configured items not found': '{} elementi configurati non trovati'
   '{} critical hardware issues': '{} problemi hardware critici'
+  '{} disabled': '{} disabilitato'
+  '{} enabled': '{} abilitato'
+  '{} failed: {}': '{} non riuscito: {}'
   '{} filament sensors available': '{} sensori filamento disponibili'
+  '{} filament • {}': '{} di filamento • {}'
   '{} heater turned off': Riscaldatore {} spento
   '{} is installed but its backup-spool switching is turned off, so no automatic swap will happen.': '{} è installato ma il passaggio alla bobina di riserva è disattivato, quindi non avverrà alcun cambio automatico.'
   '{} is installed, but its backup-spool setting could not be read - do not count on an automatic swap.': '{} è installato, ma non è stato possibile leggere la sua impostazione della bobina di riserva - non contare su un cambio automatico.'
@@ -3127,6 +3140,9 @@ translations:
   '{} needs the HelixPrint plugin. Printing original file.': '{} richiede il plugin HelixPrint. Verrà stampato il file originale.'
   '{} new hardware available': '{} nuovo hardware disponibile'
   '{} preset{}': '{} preset{}'
+  '{} set to {}': '{} impostato su {}'
+  '{} set to {} {}': '{} impostato su {} {}'
+  '{} started': '{} avviato'
   '{} target set to {}°C': Obiettivo {} impostato a {}°C
   ? '{} will switch to a slot whose filament type AND colour both match the active spool and whose own port sensor reads filament present.'
   : '{} passerà a uno slot il cui tipo di filamento E colore corrispondono entrambi alla bobina attiva e il cui sensore di porta rileva filamento presente.'

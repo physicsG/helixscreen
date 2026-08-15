@@ -1152,18 +1152,21 @@ static void sync_from_ams_state(AmsMiniStatusData* data) {
         return;
     }
 
+    // Get multi-unit info from system info. Fetched ONCE: get_system_info()
+    // deep-copies every unit, slot and string under the backend mutex, and this
+    // runs on every state event on the always-live home screen -- the
+    // owned_spool_slots() call below takes it rather than fetching its own copy.
+    AmsSystemInfo info = backend->get_system_info();
+
     // One bar per SPOOL, not per slot. A slot fed from another unit is a view of
     // that unit's spool — drawing both shows one physical spool twice, which is
     // how a 4-head U1 with one 4-bay ACE came to advertise 8 spools instead of 7.
     // `owned` maps bar index -> global slot index; every read below goes through
     // it, so the skipped slot is the duplicate rather than whichever happens to
     // sit last.
-    const std::vector<int> owned = backend->owned_spool_slots();
+    const std::vector<int> owned = backend->owned_spool_slots(info);
     int slot_count = static_cast<int>(owned.size());
     data->slot_count = slot_count;
-
-    // Get multi-unit info from system info
-    AmsSystemInfo info = backend->get_system_info();
     data->unit_count = static_cast<int>(info.units.size());
     {
         // Row extents are expressed in BAR indices, so recount per unit against

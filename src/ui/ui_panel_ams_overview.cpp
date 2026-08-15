@@ -319,7 +319,7 @@ void AmsOverviewPanel::refresh_units() {
     } else {
         // Same number of units - update existing cards in place
         for (int i = 0; i < new_unit_count; ++i) {
-            update_unit_card(unit_cards_[i], info.units[i]);
+            update_unit_card(unit_cards_[i], info.units[i], info);
         }
     }
 
@@ -396,13 +396,7 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
             lv_label_set_text(uc.name_label, ams_draw::get_unit_display_name(unit, i).c_str());
         }
 
-        // Not unit.slot_count: a slot fed from another unit is a view of that
-        // unit's spool, not one of this unit's. On multiACE the U1 card reads 3,
-        // because its fourth head shows the ACE's spool.
-        auto* count_backend = AmsState::instance().get_backend();
-        set_slot_count_label(uc.slot_count_label, count_backend
-                                                      ? count_backend->unit_spool_slot_count(i)
-                                                      : unit.slot_count);
+        set_owned_slot_count_label(uc, unit, info);
 
         // Create the mini bars for this unit (dynamic — slot count varies)
         create_mini_bars(uc, unit);
@@ -426,7 +420,22 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
                   static_cast<int>(unit_cards_.size()), info.supports_bypass);
 }
 
-void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit) {
+void AmsOverviewPanel::set_owned_slot_count_label(UnitCard& card, const AmsUnit& unit,
+                                                  const AmsSystemInfo& info) {
+    // Not unit.slot_count: a slot fed from another unit is a view of that
+    // unit's spool, not one of this unit's, and counting it here double-counts
+    // one physical spool across two cards. On multiACE the U1 card reads 3,
+    // because its fourth head shows the ACE's spool. The overload that takes
+    // `info` -- every caller here already holds it -- rather than the one that
+    // re-fetches the whole system per card.
+    auto* backend = AmsState::instance().get_backend();
+    set_slot_count_label(card.slot_count_label,
+                         backend ? backend->unit_spool_slot_count(card.unit_index, info)
+                                 : unit.slot_count);
+}
+
+void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit,
+                                        const AmsSystemInfo& info) {
     if (!card.card) {
         return;
     }
@@ -450,15 +459,8 @@ void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit) {
         create_mini_bars(card, unit);
     }
 
-    // Update slot count — the spools this unit OWNS, not the slots it has. A
-    // slot fed from another unit shows that unit's spool, so counting it here
-    // double-counts one physical spool across two cards.
-    {
-        auto* backend = AmsState::instance().get_backend();
-        set_slot_count_label(card.slot_count_label,
-                             backend ? backend->unit_spool_slot_count(card.unit_index)
-                                     : unit.slot_count);
-    }
+    // Update slot count — the spools this unit OWNS, not the slots it has.
+    set_owned_slot_count_label(card, unit, info);
 
     // Update error badge visibility and color
     if (card.error_badge) {
@@ -624,35 +626,13 @@ void AmsOverviewPanel::refresh_system_path(const AmsSystemInfo& info, int curren
             ui_system_path_canvas_set_unit_tools(system_path_, i, utl.tool_count,
                                                  utl.first_physical_tool);
 
-            // Which of those tools does this unit actually FEED? A toolchanger
+            // Which of those tools does this unit actually FEED. A toolchanger
             // head fed by an MMU belongs to the U1 but is supplied by the ACE,
             // and drawing a line from both units to one nozzle says two things
-            // feed it. Clear the bit for any tool whose slot on THIS unit has
-            // its identity owned elsewhere.
-            uint32_t mask = 0;
-            auto* b = AmsState::instance().get_backend();
-            for (int t = 0; t < utl.tool_count && t < 32; ++t) {
-                bool feeds = true;
-                if (b && i < static_cast<int>(info.units.size())) {
-                    const auto& u = info.units[i];
-                    const int phys = utl.first_physical_tool + t;
-                    for (int sl = 0; sl < static_cast<int>(u.slots.size()); ++sl) {
-                        const auto& slot = u.slots[sl];
-                        auto it = tool_layout.virtual_to_physical.find(slot.mapped_tool);
-                        if (it == tool_layout.virtual_to_physical.end() || it->second != phys) {
-                            continue;
-                        }
-                        if (b->slot_identity_owner_unit(u.first_slot_global_index + sl)
-                                .has_value()) {
-                            feeds = false;
-                        }
-                    }
-                }
-                if (feeds) {
-                    mask |= (1u << t);
-                }
-            }
-            ui_system_path_canvas_set_unit_tool_mask(system_path_, i, mask);
+            // feed it. The layout answers this from the same walk that placed
+            // the nozzles (UnitToolLayout::feeds_mask); this panel only forwards
+            // it. A mask of 0 is a real answer here -- every head fed elsewhere.
+            ui_system_path_canvas_set_unit_tool_mask(system_path_, i, utl.feeds_mask);
         }
     }
 
@@ -804,11 +784,19 @@ void AmsOverviewPanel::show_unit_detail(int unit_index) {
     }
 
     // Drilling from one unit's detail straight into another's ("Open in <unit>")
-    // is the only way this is entered while already in detail mode, and Back
-    // from it belongs at the unit we came from rather than at the cards. Entering
-    // from the cards clears the target, so Back there stays the cards.
-    detail_return_unit_ =
-        (detail_unit_index_ >= 0 && detail_unit_index_ != unit_index) ? detail_unit_index_ : -1;
+    // is entered while already in detail mode, and Back from it belongs at the
+    // unit we came from rather than at the cards. Entering from the cards clears
+    // the target, so Back there stays the cards. RE-ENTERING the unit already
+    // shown -- on_activate()'s refresh after a cover (the slot editor, a modal)
+    // is dismissed -- is neither: it changes nothing about how the user got
+    // here, so the target it found is the target it keeps. Recomputing it there
+    // reset it to the cards, and Back from an ACE opened via "Open in ACE" then
+    // skipped the U1 detail the moment any editor had been opened and closed.
+    if (detail_unit_index_ < 0) {
+        detail_return_unit_ = -1; // from the cards
+    } else if (detail_unit_index_ != unit_index) {
+        detail_return_unit_ = detail_unit_index_; // drilled from another unit
+    }
 
     detail_unit_index_ = unit_index;
     const AmsUnit& unit = info.units[unit_index];
@@ -1419,52 +1407,14 @@ void AmsOverviewPanel::show_detail_context_menu(int slot_index, lv_obj_t* near_w
 
 void AmsOverviewPanel::on_toolhead_clicked(int tool_index, void* user_data) {
     auto* self = static_cast<AmsOverviewPanel*>(user_data);
-    if (!self || !self->system_path_) {
+    if (!self) {
         return;
     }
-
-    // The canvas hands back the VIRTUAL tool number off the badge, and every
-    // backend call below is slot-indexed — so it has to be in range before it
-    // reaches get_slot_info(). AmsPanel::on_path_toolhead_clicked() has always
-    // checked this; the check was lost when that handler was copied here.
-    const int slot_count = lv_subject_get_int(AmsState::instance().get_slot_count_subject());
-    if (tool_index < 0 || tool_index >= slot_count) {
-        spdlog::warn("[AmsOverview] Ignoring toolhead click - invalid tool {} (slot_count={})",
-                     tool_index, slot_count);
-        return;
-    }
-
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (!backend) {
-        return;
-    }
-
-    // Live touch point, read synchronously while the indev still reports the
-    // press coordinates, so the menu opens where the finger is.
-    lv_point_t click_pt = {0, 0};
-    if (lv_indev_t* indev = lv_indev_active()) {
-        lv_indev_get_point(indev, &click_pt);
-    }
-
-    // Created once and reused: the menu owns lv_subjects registered under fixed
-    // names, so one instance per tap would re-register them and destroy the
-    // previous owner's storage on every press.
-    if (!self->toolhead_menu_) {
-        self->toolhead_menu_ = std::make_unique<helix::ui::AmsToolheadMenu>();
-        self->toolhead_menu_->set_action_callback(
-            [self](helix::ui::AmsToolheadMenu::ToolheadAction a, int tool) {
-                self->dispatch_toolhead_action(a, tool);
-            });
-    }
-    // Returns false when the head has no applicable action — a deliberate
-    // no-op, not an error.
-    self->toolhead_menu_->show_at(self->parent_screen_, self->system_path_, click_pt, tool_index,
-                                  backend);
-}
-
-void AmsOverviewPanel::dispatch_toolhead_action(helix::ui::AmsToolheadMenu::ToolheadAction a,
-                                                int tool_index) {
-    helix::ui::dispatch_toolhead_menu_action(a, tool_index);
+    // The canvas hands back the tool number off the badge; the helper (shared
+    // with AmsPanel) range-checks it, reads the touch point, builds the menu on
+    // first use and wires the shared dispatch.
+    helix::ui::show_toolhead_menu_at_touch(self->toolhead_menu_, self->parent_screen_,
+                                           self->system_path_, tool_index);
 }
 
 void AmsOverviewPanel::on_bypass_spool_clicked(lv_event_t* e) {

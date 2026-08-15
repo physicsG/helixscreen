@@ -1730,11 +1730,14 @@ TEST_CASE("AFC tool mapping single-element list maps like a string", "[ams][afc]
     REQUIRE(helper.get_tool_mapping()[3] == 1);
 }
 
-TEST_CASE("AFC tool mapping multi-tool list keeps the lowest tool", "[ams][afc][tool_mapping]") {
-    // Virtual tools: a lane carries several tools at once. SlotRegistry holds one
-    // tool per lane, so the lowest wins — stable as virtual tools are added and
-    // removed above it. AFC's own order is NOT sorted (its UI showed "T14, T13, T1"),
-    // so feed it unsorted to prove we do not just take the first element.
+TEST_CASE("AFC tool mapping multi-tool list without current_map keeps the lowest tool",
+          "[ams][afc][tool_mapping]") {
+    // FALLBACK ONLY. When AFC does not tell us which tool is active — pre-#605
+    // firmware, or a delta that omits current_map before we have ever seen one —
+    // SlotRegistry still holds exactly one tool per lane and we must pick something.
+    // The lowest is an arbitrary but stable choice, NOT a claim about AFC's
+    // semantics: its order is not sorted, so feed it unsorted to prove we do not
+    // just take the first element.
     AmsBackendAfcTestHelper helper;
     helper.initialize_test_lanes_with_slots(4);
 
@@ -1743,10 +1746,130 @@ TEST_CASE("AFC tool mapping multi-tool list keeps the lowest tool", "[ams][afc][
     REQUIRE(helper.get_slot_mapped_tool(0) == 1);
     REQUIRE(helper.get_tool_mapping()[1] == 0);
 
-    // Removing the virtual tools leaves the lane on the same tool it already had —
-    // the whole point of picking the lowest rather than the first.
+    // Removing the virtual tools leaves the lane on the same tool it already had.
     helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::array({"T1"})}});
     REQUIRE(helper.get_slot_mapped_tool(0) == 1);
+}
+
+TEST_CASE("AFC current_map picks the active tool over the lowest", "[ams][afc][tool_mapping]") {
+    // CORE REGRESSION for the lowest-wins heuristic. AFC #605 added current_map,
+    // which names the tool a multi-tool lane is ACTUALLY on. This is the shape
+    // upstream published: map is unsorted and current_map is not its minimum, so
+    // picking the lowest would put the lane on T10 while AFC drives T11.
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    helper.feed_afc_stepper(
+        "lane1", {{"map", nlohmann::json::array({"T11", "T10"})}, {"current_map", "T11"}});
+
+    REQUIRE(helper.get_slot_mapped_tool(0) == 11);
+    // Forward map too — this is what change_tool() resolves through
+    REQUIRE(helper.get_tool_mapping()[11] == 0);
+    REQUIRE(helper.get_tool_mapping()[10] == -1);
+}
+
+TEST_CASE("AFC current_map alone retargets the lane", "[ams][afc][tool_mapping]") {
+    // current_map is the field that moves while map stays put — that is its whole
+    // purpose. Moonraker sends DELTAS, so a tool change inside a multi-tool lane
+    // arrives as current_map with NO map key. Handling the pick only under
+    // `if (data.contains("map"))` would drop it silently.
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    helper.feed_afc_stepper(
+        "lane1", {{"map", nlohmann::json::array({"T11", "T10"})}, {"current_map", "T11"}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 11);
+
+    helper.feed_afc_stepper("lane1", {{"current_map", "T10"}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 10);
+    REQUIRE(helper.get_tool_mapping()[10] == 0);
+    REQUIRE(helper.get_tool_mapping()[11] == -1);
+}
+
+TEST_CASE("AFC current_map survives a later map-only delta", "[ams][afc][tool_mapping]") {
+    // The mirror of the case above: once AFC has told us the lane is on T11, a
+    // subsequent delta carrying only map must NOT fall back to the lowest and yank
+    // the lane onto a tool AFC is not driving. Growing the lane's tool list is
+    // exactly when this happens — AFC_ADD_MAPPING sends map without current_map.
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    helper.feed_afc_stepper(
+        "lane1", {{"map", nlohmann::json::array({"T11", "T10"})}, {"current_map", "T11"}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 11);
+
+    helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::array({"T11", "T10", "T5"})}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 11); // not T5
+}
+
+TEST_CASE("AFC current_map dropped from map falls back to the lowest", "[ams][afc][tool_mapping]") {
+    // Self-healing: AFC_REMOVE_MAPPING can strip the very tool current_map named.
+    // The remembered pick must not outlive its membership in map, or the lane stays
+    // pinned to a tool the firmware no longer routes to it.
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    helper.feed_afc_stepper(
+        "lane1", {{"map", nlohmann::json::array({"T11", "T10"})}, {"current_map", "T11"}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 11);
+
+    helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::array({"T10"})}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 10);
+    REQUIRE(helper.get_tool_mapping()[11] == -1);
+}
+
+TEST_CASE("AFC current_map outside map is ignored", "[ams][afc][tool_mapping]") {
+    // map is the authority on which tools a lane owns; current_map only SELECTS
+    // among them. A current_map naming a tool absent from a present map is drift we
+    // do not understand, so fall back rather than route a tool AFC never listed.
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    helper.feed_afc_stepper(
+        "lane1", {{"map", nlohmann::json::array({"T11", "T10"})}, {"current_map", "T7"}});
+
+    REQUIRE(helper.get_slot_mapped_tool(0) == 10); // lowest of map, not T7
+    REQUIRE(helper.get_tool_mapping()[7] == -1);
+}
+
+TEST_CASE("AFC empty current_map does not unmap a mapped lane", "[ams][afc][tool_mapping]") {
+    // Upstream describes current_map as holding the active tool "when more than one
+    // T(n) is mapped to that lane", so a single-tool lane may well send it null or
+    // empty. Treating a present-but-empty current_map as authoritative would unmap
+    // every ordinary lane — the same tripwire that made the array shape unsafe.
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    helper.feed_afc_stepper("lane1",
+                            {{"map", nlohmann::json::array({"T2"})}, {"current_map", nullptr}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 2);
+
+    helper.feed_afc_stepper("lane2", {{"map", nlohmann::json::array({"T3"})}, {"current_map", ""}});
+    REQUIRE(helper.get_slot_mapped_tool(1) == 3);
+
+    // And alone in a delta it means "no news", not "unmap"
+    helper.feed_afc_stepper("lane1", {{"current_map", nullptr}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 2);
+}
+
+TEST_CASE("AFC unmapping a lane forgets its current_map", "[ams][afc][tool_mapping]") {
+    // The remembered pick is per-lane state. An authoritative unmap must clear it,
+    // or a lane later remapped to an unrelated tool list could resurrect a stale
+    // tool that happens to reappear in it.
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    helper.feed_afc_stepper(
+        "lane1", {{"map", nlohmann::json::array({"T11", "T10"})}, {"current_map", "T11"}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 11);
+
+    helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::array()}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == -1);
+
+    // Remapped with T11 present again, but AFC never re-stated current_map →
+    // lowest, not the stale T11.
+    helper.feed_afc_stepper("lane1", {{"map", nlohmann::json::array({"T11", "T4"})}});
+    REQUIRE(helper.get_slot_mapped_tool(0) == 4);
 }
 
 TEST_CASE("AFC tool mapping empty list unmaps the lane", "[ams][afc][tool_mapping]") {

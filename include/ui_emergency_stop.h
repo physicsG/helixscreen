@@ -226,6 +226,12 @@ class EmergencyStopOverlay {
     lv_subject_t recovery_message_subject_;
     char recovery_message_buf_[512]{};
     lv_subject_t recovery_can_restart_; // 1=show restart buttons, 0=hide (disconnected)
+    // Klipper error code split out of a JSON state_message (e.g. "key1"). Rendered
+    // dim in the dialog header; recovery_has_code_ drives its visibility, since
+    // bind_flag_if_eq compares ints and cannot test a string for emptiness.
+    lv_subject_t recovery_code_subject_;
+    char recovery_code_buf_[64]{};
+    lv_subject_t recovery_has_code_; // 1=code present, 0=none (hides the label)
 
     bool subjects_initialized_ = false;
 

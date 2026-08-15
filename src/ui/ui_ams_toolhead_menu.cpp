@@ -14,6 +14,7 @@
 #include "data_root_resolver.h"
 #include "filament_op_slot_resolver.h"
 #include "printer_state.h"
+#include "static_subject_registry.h"
 
 #include <spdlog/spdlog.h>
 
@@ -21,46 +22,18 @@
 
 namespace helix::ui {
 
-namespace {
-
-/// The slot that feeds virtual tool @p tool_index, or @p tool_index unchanged
-/// when nothing maps to it.
-///
-/// The path canvas hands its click back as the VIRTUAL tool number shown on the
-/// badge (ui_system_path_canvas.h says so explicitly), but every backend call
-/// this menu makes is SLOT-indexed — including can_unload_from_toolhead(),
-/// whose name says toolhead while its parameter is documented as a slot. The
-/// two coincide on the U1, where slot N feeds tool N, and diverge on a
-/// toolchanger under ASSIGN_TOOL remapping (see AmsBackend's note on tool
-/// numbers vs slots), which is when a menu keyed on the wrong one acts on the
-/// wrong head.
-///
-/// Falling back to the raw index preserves the identity behaviour for any
-/// backend that publishes no mapped_tool at all.
-int slot_for_tool(const AmsSystemInfo& info, int tool_index) {
-    for (const auto& unit : info.units) {
-        for (const auto& slot : unit.slots) {
-            if (slot.mapped_tool == tool_index) {
-                return slot.global_index;
-            }
-        }
-    }
-    return tool_index;
-}
-
-} // namespace
-
-/// Test seam for slot_for_tool() — see the anonymous-namespace definition.
-int slot_for_tool_for_test(const AmsSystemInfo& info, int tool_index) {
-    return slot_for_tool(info, tool_index);
-}
-
 // Static member initialization
 bool AmsToolheadMenu::callbacks_registered_ = false;
-AmsToolheadMenu* AmsToolheadMenu::s_active_instance_ = nullptr;
+lv_subject_t AmsToolheadMenu::s_show_select_subject_;
+lv_subject_t AmsToolheadMenu::s_show_park_subject_;
+lv_subject_t AmsToolheadMenu::s_show_load_subject_;
+lv_subject_t AmsToolheadMenu::s_show_unload_subject_;
+lv_subject_t AmsToolheadMenu::s_title_subject_;
+char AmsToolheadMenu::s_title_buf_[32] = {0};
+bool AmsToolheadMenu::s_subjects_initialized_ = false;
 
 // ============================================================================
-// The rule (pure — no LVGL, no backend)
+// The rules (pure — no LVGL, no backend)
 // ============================================================================
 
 ToolheadMenuModel toolhead_menu_model(int tool_index, int mounted_tool, bool supports_park,
@@ -95,6 +68,14 @@ ToolheadMenuModel toolhead_menu_model(int tool_index, int mounted_tool, bool sup
     return m;
 }
 
+int toolhead_slot_for_tool(const AmsSystemInfo& info, int tool_index) {
+    // ">1 == toolchanger" in resolve_op_button_slot()'s terms. Pinned rather
+    // than read off ToolState: this surface only exists on a toolchanger, and
+    // ToolState is not initialised in every test that reaches here.
+    constexpr int TOOLCHANGER = 2;
+    return resolve_op_button_slot(info, tool_index, TOOLCHANGER);
+}
+
 // ============================================================================
 // Construction / Destruction
 // ============================================================================
@@ -105,41 +86,44 @@ AmsToolheadMenu::AmsToolheadMenu() {
 }
 
 void AmsToolheadMenu::init_subjects() {
-    if (subject_initialized_ || !lv_is_initialized()) {
+    if (s_subjects_initialized_ || !lv_is_initialized()) {
         return;
     }
-    lv_subject_init_int(&show_select_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_toolhead_show_select", &show_select_subject_);
-    lv_subject_init_int(&show_park_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_toolhead_show_park", &show_park_subject_);
-    lv_subject_init_int(&show_load_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_toolhead_show_load", &show_load_subject_);
-    lv_subject_init_int(&show_unload_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_toolhead_show_unload", &show_unload_subject_);
+    lv_subject_init_int(&s_show_select_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_toolhead_show_select", &s_show_select_subject_);
+    lv_subject_init_int(&s_show_park_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_toolhead_show_park", &s_show_park_subject_);
+    lv_subject_init_int(&s_show_load_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_toolhead_show_load", &s_show_load_subject_);
+    lv_subject_init_int(&s_show_unload_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_toolhead_show_unload", &s_show_unload_subject_);
 
-    lv_subject_init_string(&title_subject_, title_buf_, nullptr, sizeof(title_buf_), "");
-    lv_xml_register_subject(nullptr, "ams_toolhead_title", &title_subject_);
+    lv_subject_init_string(&s_title_subject_, s_title_buf_, nullptr, sizeof(s_title_buf_), "");
+    lv_xml_register_subject(nullptr, "ams_toolhead_title", &s_title_subject_);
 
-    subject_initialized_ = true;
+    s_subjects_initialized_ = true;
+    // Torn down with every other static subject: after the panels (and so every
+    // card bound to these) are gone, before lv_deinit().
+    StaticSubjectRegistry::instance().register_deinit("AmsToolheadMenu", deinit_subjects);
+}
+
+void AmsToolheadMenu::deinit_subjects() {
+    if (!s_subjects_initialized_) {
+        return;
+    }
+    lv_subject_deinit(&s_show_select_subject_);
+    lv_subject_deinit(&s_show_park_subject_);
+    lv_subject_deinit(&s_show_load_subject_);
+    lv_subject_deinit(&s_show_unload_subject_);
+    lv_subject_deinit(&s_title_subject_);
+    s_subjects_initialized_ = false;
 }
 
 AmsToolheadMenu::~AmsToolheadMenu() {
-    // Clear active instance before base destructor calls hide()
-    if (s_active_instance_ == this) {
-        s_active_instance_ = nullptr;
-    }
-    // Tear the widgets down BEFORE the subjects they observe. ~ContextMenu would
-    // otherwise hide() after this body has already deinit'd them, leaving the
-    // card's bind_flag observers pointing at reclaimed subjects.
+    // The subjects are the class's, not this instance's, and outlive it. Only
+    // the widget tree comes down here (the base would hide() too; doing it in
+    // this body keeps the order explicit).
     hide();
-    if (subject_initialized_ && lv_is_initialized()) {
-        lv_subject_deinit(&show_select_subject_);
-        lv_subject_deinit(&show_park_subject_);
-        lv_subject_deinit(&show_load_subject_);
-        lv_subject_deinit(&show_unload_subject_);
-        lv_subject_deinit(&title_subject_);
-        subject_initialized_ = false;
-    }
     spdlog::trace("[AmsToolheadMenu] Destroyed");
 }
 
@@ -152,23 +136,33 @@ void AmsToolheadMenu::set_action_callback(ActionCallback callback) {
 }
 
 void AmsToolheadMenu::publish_model() {
-    if (!subject_initialized_) {
+    if (!s_subjects_initialized_) {
         return;
     }
-    lv_subject_set_int(&show_select_subject_, model_.show_select ? 1 : 0);
-    lv_subject_set_int(&show_park_subject_, model_.show_park ? 1 : 0);
-    lv_subject_set_int(&show_load_subject_, model_.show_load ? 1 : 0);
-    lv_subject_set_int(&show_unload_subject_, model_.show_unload ? 1 : 0);
+    lv_subject_set_int(&s_show_select_subject_, model_.show_select ? 1 : 0);
+    lv_subject_set_int(&s_show_park_subject_, model_.show_park ? 1 : 0);
+    lv_subject_set_int(&s_show_load_subject_, model_.show_load ? 1 : 0);
+    lv_subject_set_int(&s_show_unload_subject_, model_.show_unload ? 1 : 0);
 
-    snprintf(title_buf_, sizeof(title_buf_), "%s T%d", lv_tr("Toolhead"),
+    snprintf(s_title_buf_, sizeof(s_title_buf_), "%s T%d", lv_tr("Toolhead"),
              tool_index_ >= 0 ? tool_index_ : 0);
-    lv_subject_copy_string(&title_subject_, title_buf_);
+    lv_subject_copy_string(&s_title_subject_, s_title_buf_);
 }
 
 bool AmsToolheadMenu::show_at(lv_obj_t* parent, lv_obj_t* anchor, lv_point_t click_pt,
                               int tool_index, AmsBackend* backend) {
     register_callbacks();
     init_subjects();
+
+    // A toolchanger surface only. Every entry is a carriage or per-head
+    // operation, and on a hub/selector backend `mounted_tool` never exists (the
+    // rule would then offer Select for every head -- selector motion on Happy
+    // Hare, a full feed on an ACE, a refusal on CFS/AFC). See the header.
+    if (backend && backend->get_topology() != PathTopology::PARALLEL) {
+        spdlog::debug("[AmsToolheadMenu] Not a toolchanger topology - no toolhead menu for T{}",
+                      tool_index);
+        return false;
+    }
 
     backend_ = backend;
     tool_index_ = tool_index;
@@ -184,7 +178,7 @@ bool AmsToolheadMenu::show_at(lv_obj_t* parent, lv_obj_t* anchor, lv_point_t cli
         // One fetch: get_system_info() returns by value under the backend mutex.
         const AmsSystemInfo info = backend->get_system_info();
         mounted = info.mounted_tool; // tool-space, compared against tool_index
-        slot_index = slot_for_tool(info, tool_index);
+        slot_index = toolhead_slot_for_tool(info, tool_index);
         supports_park = backend->supports_toolhead_park();
         present = backend->get_slot_info(slot_index).is_present();
         can_unload = backend->can_unload_from_toolhead(slot_index);
@@ -219,23 +213,20 @@ bool AmsToolheadMenu::show_at(lv_obj_t* parent, lv_obj_t* anchor, lv_point_t cli
     }
 
     publish_model();
-
-    s_active_instance_ = this;
     set_click_point(click_pt);
 
-    bool result = show_near_widget(parent, tool_index, anchor);
-    if (!result) {
-        s_active_instance_ = nullptr;
-    }
+    // Base class handles: XML creation, on_created callback, positioning, and
+    // claiming the active-menu slot the static callbacks resolve through.
+    const bool result = show_near_widget(parent, tool_index, anchor);
 
-    spdlog::debug("[AmsToolheadMenu] Shown for T{} (select={} park={} load={} unload={})",
-                  tool_index, model_.show_select, model_.show_park, model_.show_load,
+    spdlog::debug("[AmsToolheadMenu] Shown for T{} (slot {}; select={} park={} load={} unload={})",
+                  tool_index, slot_index, model_.show_select, model_.show_park, model_.show_load,
                   model_.show_unload);
     return result;
 }
 
 // ============================================================================
-// ContextMenu override
+// ContextMenu overrides
 // ============================================================================
 
 void AmsToolheadMenu::on_created(lv_obj_t* menu_obj) {
@@ -250,6 +241,11 @@ void AmsToolheadMenu::on_created(lv_obj_t* menu_obj) {
     }
 }
 
+void AmsToolheadMenu::on_backdrop_clicked() {
+    spdlog::debug("[AmsToolheadMenu] Backdrop clicked");
+    dispatch_toolhead_action(ToolheadAction::CANCELLED);
+}
+
 // ============================================================================
 // Event Handlers
 // ============================================================================
@@ -257,20 +253,13 @@ void AmsToolheadMenu::on_created(lv_obj_t* menu_obj) {
 void AmsToolheadMenu::dispatch_toolhead_action(ToolheadAction action) {
     ActionCallback callback_copy = action_callback_;
     const int tool = tool_index_;
+    const int slot = slot_index_;
 
-    if (s_active_instance_ == this) {
-        s_active_instance_ = nullptr;
-    }
     hide();
 
     if (callback_copy) {
-        callback_copy(action, tool);
+        callback_copy(action, tool, slot);
     }
-}
-
-void AmsToolheadMenu::handle_backdrop_clicked() {
-    spdlog::debug("[AmsToolheadMenu] Backdrop clicked");
-    dispatch_toolhead_action(ToolheadAction::CANCELLED);
 }
 
 void AmsToolheadMenu::handle_select() {
@@ -311,8 +300,9 @@ void AmsToolheadMenu::register_callbacks() {
     lv_xml_register_component_from_file(
         helix::asset_component_uri("ui_xml/ams_toolhead_menu.xml").c_str());
 
+    // The backdrop's callback is the shared context_menu_backdrop_cb, owned by
+    // ContextMenu; only the entries are this menu's own.
     register_xml_callbacks({
-        {"ams_toolhead_backdrop_cb", on_backdrop_cb},
         {"ams_toolhead_select_cb", on_select_cb},
         {"ams_toolhead_park_cb", on_park_cb},
         {"ams_toolhead_load_cb", on_load_cb},
@@ -324,71 +314,57 @@ void AmsToolheadMenu::register_callbacks() {
 }
 
 // ============================================================================
-// Static Callbacks (Instance Lookup via Static Pointer)
+// Static Callbacks (Instance Lookup via ContextMenu::active())
 // ============================================================================
 
 AmsToolheadMenu* AmsToolheadMenu::get_active_instance() {
-    if (!s_active_instance_) {
+    auto* self = ContextMenu::active_as<AmsToolheadMenu>();
+    if (!self) {
         spdlog::warn("[AmsToolheadMenu] No active instance for event");
     }
-    return s_active_instance_;
-}
-
-void AmsToolheadMenu::on_backdrop_cb(lv_event_t* /*e*/) {
-    auto* self = get_active_instance();
-    if (self) {
-        self->handle_backdrop_clicked();
-    }
+    return self;
 }
 
 void AmsToolheadMenu::on_select_cb(lv_event_t* /*e*/) {
-    auto* self = get_active_instance();
-    if (self) {
+    if (auto* self = get_active_instance()) {
         self->handle_select();
     }
 }
 
 void AmsToolheadMenu::on_park_cb(lv_event_t* /*e*/) {
-    auto* self = get_active_instance();
-    if (self) {
+    if (auto* self = get_active_instance()) {
         self->handle_park();
     }
 }
 
 void AmsToolheadMenu::on_load_cb(lv_event_t* /*e*/) {
-    auto* self = get_active_instance();
-    if (self) {
+    if (auto* self = get_active_instance()) {
         self->handle_load();
     }
 }
 
 void AmsToolheadMenu::on_unload_cb(lv_event_t* /*e*/) {
-    auto* self = get_active_instance();
-    if (self) {
+    if (auto* self = get_active_instance()) {
         self->handle_unload();
     }
 }
 
 // ============================================================================
-// Shared dispatch
+// Shared wiring — the panels call these
 // ============================================================================
 
-void dispatch_toolhead_menu_action(AmsToolheadMenu::ToolheadAction action, int tool_index) {
+void dispatch_toolhead_menu_action(AmsToolheadMenu::ToolheadAction action, int tool_index,
+                                   int slot_index) {
     using TA = AmsToolheadMenu::ToolheadAction;
-    if (action == TA::CANCELLED) {
-        return;
-    }
     AmsBackend* backend = AmsState::instance().get_backend();
     if (!backend) {
         return;
     }
 
-    // Same conversion as show_at(): the caller passes the VIRTUAL tool number,
-    // and select_slot/load_filament/unload_filament are all slot-indexed.
-    const int slot_index = slot_for_tool(backend->get_system_info(), tool_index);
-
     AmsError err{};
     switch (action) {
+    case TA::CANCELLED:
+        return;
     case TA::SELECT:
         // select_slot() on a toolchanger IS the tool change (`T{n}`) -- see
         // AmsBackendSnapmaker::select_slot_moves_toolhead().
@@ -404,13 +380,49 @@ void dispatch_toolhead_menu_action(AmsToolheadMenu::ToolheadAction action, int t
     case TA::UNLOAD:
         err = backend->unload_filament(slot_index);
         break;
-    case TA::CANCELLED:
-        return;
     }
 
     if (err.result != AmsResult::SUCCESS) {
+        spdlog::warn("[AmsToolheadMenu] T{} (slot {}) action failed: {}", tool_index, slot_index,
+                     err.technical_msg);
         notify_ams_error(err, lv_tr("Toolhead command failed"));
     }
+}
+
+bool show_toolhead_menu_at_touch(std::unique_ptr<AmsToolheadMenu>& menu, lv_obj_t* parent_screen,
+                                 lv_obj_t* canvas, int tool_index) {
+    if (!canvas) {
+        return false;
+    }
+    // In range before it reaches get_slot_info(): the canvas hands back a tool
+    // number, and every backend call the menu makes is slot-indexed.
+    const int slot_count = lv_subject_get_int(AmsState::instance().get_slot_count_subject());
+    if (tool_index < 0 || tool_index >= slot_count) {
+        spdlog::warn("[AmsToolheadMenu] Ignoring toolhead click - invalid tool {} (slot_count={})",
+                     tool_index, slot_count);
+        return false;
+    }
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        return false;
+    }
+
+    // Live touch point, read synchronously while the indev still reports the
+    // press coordinates, so the menu opens where the finger is.
+    lv_point_t click_pt = {0, 0};
+    if (lv_indev_t* indev = lv_indev_active()) {
+        lv_indev_get_point(indev, &click_pt);
+    }
+
+    // Created once per panel and reused: a menu keeps its widget tree between
+    // shows. The dispatch is the shared one -- pure backend work.
+    if (!menu) {
+        menu = std::make_unique<AmsToolheadMenu>();
+        menu->set_action_callback(dispatch_toolhead_menu_action);
+    }
+    // false when the head has no applicable action, or the backend is not a
+    // toolchanger: a deliberate no-op, not an error worth reporting.
+    return menu->show_at(parent_screen, canvas, click_pt, tool_index, backend);
 }
 
 } // namespace helix::ui

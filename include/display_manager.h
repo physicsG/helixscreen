@@ -613,6 +613,31 @@ class DisplayManager : public helix::ICalibrationSink {
      */
     void register_resize_callback(ResizeCallback callback);
 
+    /**
+     * @brief Suspend/resume the debounced resize-callback fanout
+     *
+     * While suspended, a SIZE_CHANGED on the monitored screen arms no debounce
+     * timer and an already-armed one expires without fanning out. The rotation
+     * probe holds this for its whole run: every rotation it tests would
+     * otherwise fire the registered callbacks, and the theme layout refresh
+     * among them takes seconds on a slow panel (measured 2.9s on a K1C) inside
+     * the lv_timer_handler() call that the probe's tap poll loop makes on every
+     * iteration. The probe re-applies the confirmed rotation when it finishes
+     * and Application::run_rotation_probe_and_layout() refreshes the theme and
+     * the LayoutManager after it returns, so the suppressed intermediate
+     * refreshes are not needed.
+     *
+     * @param suspended True to suspend fanout, false to resume
+     */
+    void set_resize_fanout_suspended(bool suspended);
+
+    /**
+     * @brief Whether the debounced resize-callback fanout is suspended
+     */
+    bool resize_fanout_suspended() const {
+        return m_resize_fanout_suspended;
+    }
+
   private:
     // Test-only seam (#1049): grants the test harness access to the private
     // sleep/wake/power-off members so the idle paths can be exercised without a
@@ -711,6 +736,7 @@ class DisplayManager : public helix::ICalibrationSink {
     // Resize handler state
     std::vector<ResizeCallback> m_resize_callbacks;
     lv_timer_t* m_resize_debounce_timer = nullptr;
+    bool m_resize_fanout_suspended = false;
     static constexpr uint32_t RESIZE_DEBOUNCE_MS = 250;
 
     static void resize_event_cb(lv_event_t* e);

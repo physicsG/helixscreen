@@ -713,6 +713,44 @@ else
   echo "⚠️  check_responsive_token_scope.py not found — skipping"
 fi
 
+echo ""
+
+echo "📜 Checking panel-widget scroll declarations..."
+
+# <lv_obj> keeps LVGL's LV_OBJ_FLAG_SCROLLABLE default, which is ON. Our theme
+# overrides lv_obj's size/border/background/padding but NOT scrollable, so an
+# author who reads it as a pure layout container gets a scroll container. That
+# shipped chevrons drawn over the print-status thumbnail on an 800x480 K-Touch
+# (7d69130df), and inside a drag-scrolled home grid it also steals the drag.
+#
+# Ratcheting baseline. The rule is declared INTENT - scrollable="true" passes
+# just as well as "false"; only saying nothing fails. The remaining 21 sites are
+# not fixed in bulk on purpose: each needs its author's intent, and some really
+# should scroll. The number may go DOWN, never up.
+if [ -f "scripts/check_panel_widget_scrollable.py" ]; then
+  # Pre-commit: scan the post-commit tree (index + HEAD), not the dirty working
+  # tree - so another session's unstaged WIP cannot trip the ratchet on a clean
+  # commit. CI and manual runs use the whole-working-tree scan (no flag).
+  if [ "$STAGED_ONLY" = true ]; then
+    PW_SCROLLABLE_ARGS="--staged-only"
+  else
+    PW_SCROLLABLE_ARGS=""
+  fi
+  # shellcheck disable=SC2086
+  if python3 scripts/check_panel_widget_scrollable.py --max-allowed 21 --summary $PW_SCROLLABLE_ARGS \
+      >/tmp/panel_widget_scrollable.out 2>&1; then
+    tail -1 /tmp/panel_widget_scrollable.out
+  else
+    cat /tmp/panel_widget_scrollable.out
+    echo "   Run: python3 scripts/check_panel_widget_scrollable.py --list"
+    EXIT_CODE=1
+  fi
+else
+  echo "⚠️  check_panel_widget_scrollable.py not found - skipping"
+fi
+
+echo ""
+
 # ESP32 firmware app_srcs manifest drift. The manifest is a hand-maintained
 # subset of src/ (v1 Core+AMS cut); a new src/ file that misses it breaks the
 # firmware link ~25 min into esp32-build CI. This makes the drift loud here.
@@ -742,6 +780,23 @@ if [ -f "assets/config/printer_database.json" ] && [ -f "scripts/check_printer_i
   fi
 else
   echo "⚠️  printer database or image gate not found — skipping"
+fi
+
+# An async pytest case whose plugin is not in requirements.txt does not read as a
+# missing dependency: plain pytest collects it and fails it with "async def
+# functions are not natively supported", so CI shows N broken tests instead. That
+# is how the moonraker-plugin suite went red for a day while passing locally on a
+# .venv that had pytest-asyncio installed by hand. The gate also catches the
+# mirror case — an unmarked async test, which strict mode SKIPS silently.
+if [ -f "scripts/check_pytest_asyncio_deps.py" ]; then
+  if python3 scripts/check_pytest_asyncio_deps.py >/tmp/pytest_asyncio_deps.out 2>&1; then
+    cat /tmp/pytest_asyncio_deps.out
+  else
+    cat /tmp/pytest_asyncio_deps.out
+    EXIT_CODE=1
+  fi
+else
+  echo "⚠️  pytest asyncio deps gate not found — skipping"
 fi
 
 echo ""
@@ -1179,7 +1234,7 @@ if [ -f "scripts/check_imperative_ui.py" ]; then
   # as deliberate pragmatism (the XML engine couldn't express it at the time), some
   # are plain mistakes — both are debt. The number may go DOWN (port a site, then
   # lower this baseline) but must never go up.
-  if python3 scripts/check_imperative_ui.py --max-allowed 384 --summary >/tmp/imperative_ui.out 2>&1; then
+  if python3 scripts/check_imperative_ui.py --max-allowed 380 --summary >/tmp/imperative_ui.out 2>&1; then
     section_time $SECTION_START
     echo ""
     tail -1 /tmp/imperative_ui.out
@@ -1239,7 +1294,7 @@ if [ -f "scripts/check_timer_destructor_cancel.py" ]; then
   # cancel through cleanup()/detach()/deinit_subjects() passes. Timers whose
   # callback is LifetimeToken-guarded or routed through a singleton accessor are
   # safe by another mechanism — annotate those `// TIMER_DTOR_OK: <reason>`.
-  if python3 scripts/check_timer_destructor_cancel.py --max-allowed 3 >/tmp/timer_dtor.out 2>&1; then
+  if python3 scripts/check_timer_destructor_cancel.py --max-allowed 0 >/tmp/timer_dtor.out 2>&1; then
     section_time $SECTION_START
     echo ""
     tail -1 /tmp/timer_dtor.out
@@ -1255,6 +1310,58 @@ else
   section_time $SECTION_START
   echo ""
   echo "⚠️  check_timer_destructor_cancel.py not found — skipping"
+fi
+
+echo ""
+
+SECTION_START=$(date +%s)
+echo -n "🖥️  Checking DRM dumb-buffer mmap offset width..."
+
+# DRM allocates dumb-buffer mmap offsets from 4 GiB upward, so a 32-bit off_t
+# truncates them and the mapping fails. HelixScreen then falls back to fbdev and
+# the KMS path is silently dead on every 32-bit device (pi32).
+if [ -f "scripts/check_drm_mmap_lfs.py" ]; then
+  if python3 scripts/check_drm_mmap_lfs.py >/tmp/drm_mmap_lfs.out 2>&1; then
+    section_time $SECTION_START
+    echo ""
+    echo "✅ DRM mmap uses a 64-bit file offset"
+  else
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/drm_mmap_lfs.out
+    echo "   Run: python3 scripts/check_drm_mmap_lfs.py"
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  check_drm_mmap_lfs.py not found — skipping"
+fi
+
+echo ""
+
+SECTION_START=$(date +%s)
+echo -n "📄 Checking gcode reader large-file support..."
+
+# The static_assert in gcode_data_source.cpp only fires on a 32-bit build, and
+# pi32/ad5m/cc1/k1 are in release.yml's matrix rather than build.yml's - so a
+# dropped mk/rules.mk override stays green here and detonates at release.
+if [ -f "scripts/check_gcode_lfs.py" ]; then
+  if python3 scripts/check_gcode_lfs.py >/tmp/gcode_lfs.out 2>&1; then
+    section_time $SECTION_START
+    echo ""
+    echo "✅ gcode reader builds with a 64-bit off_t"
+  else
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/gcode_lfs.out
+    echo "   Run: python3 scripts/check_gcode_lfs.py"
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  check_gcode_lfs.py not found — skipping"
 fi
 
 echo ""

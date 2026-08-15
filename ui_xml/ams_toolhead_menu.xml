@@ -2,21 +2,22 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
-  <!-- Full-screen backdrop overlay - tap to dismiss -->
-  <view name="toolhead_backdrop"
-        extends="lv_obj" width="100%" height="100%" style_bg_opa="128" style_bg_color="0x000000" style_border_width="0"
-        style_pad_all="0" style_radius="0" clickable="true">
-    <event_cb trigger="clicked" callback="ams_toolhead_backdrop_cb"/>
-    <!-- Toolhead context menu card - positioned by C++ -->
-    <lv_obj name="toolhead_menu"
+  <!-- The shared context-menu backdrop: full-screen dim, tap to dismiss through
+       context_menu_backdrop_cb, which helix::ui::ContextMenu owns and routes to
+       AmsToolheadMenu::on_backdrop_clicked(). -->
+  <view name="toolhead_backdrop" extends="context_menu_backdrop">
+    <!-- The card. Named context_menu (ContextMenu::menu_card_name()'s default)
+         so the base can size and position it. Not the shared context_menu_card
+         on purpose: that component titles itself imperatively (its users
+         lv_label_set_text the header at runtime), while this header is BOUND to
+         ams_toolhead_title so the C++ side never touches a label. -->
+    <lv_obj name="context_menu"
             width="content" height="content" style_bg_color="#elevated_bg" style_bg_opa="255"
             style_radius="#border_radius" style_pad_all="#space_sm" style_pad_gap="#space_xs" flex_flow="column"
             style_flex_main_place="start" scrollable="false" clickable="true">
       <!-- Header names the head that was tapped, e.g. "Toolhead T3" -->
       <text_small name="menu_header" bind_text="ams_toolhead_title"/>
-      <!-- Header Divider -->
-      <lv_obj width="100%"
-              height="1" style_bg_color="#text_muted" style_bg_opa="38" style_pad_all="0" scrollable="false"/>
+      <divider_horizontal color="#text_muted" opacity="38" clickable="false"/>
       <!-- Select: bring this head to the carriage (T{n}). Hidden for the head
            already mounted — the C++ side rewrites the label to carry its
            number. Mutually exclusive with Park. -->

@@ -497,7 +497,9 @@ TEST_CASE("Mock backend: slots have valid Spoolman IDs and filament data",
         REQUIRE(slot.spoolman_id == i + 1);
         // Should have non-empty filament data
         REQUIRE_FALSE(slot.material.empty());
-        REQUIRE_FALSE(slot.brand.empty());
+        // No brand: Happy Hare's gate map cannot carry one, so a real lane gets
+        // its vendor from the Spoolman identity cache or a user override.
+        REQUIRE(slot.brand.empty());
         REQUIRE_FALSE(slot.color_name.empty());
         REQUIRE(slot.color_rgb != 0);
         REQUIRE(slot.total_weight_g > 0);
@@ -515,23 +517,25 @@ TEST_CASE("Mock backend: slot data matches first N Spoolman mock spools",
     backend->start();
 
     struct Expected {
-        const char* brand;
         const char* material;
         const char* color_name;
     };
     const Expected expected[] = {
-        {"Polymaker", "PLA", "Jet Black"},
-        {"eSUN", "Silk PLA", "Silk Blue"},
-        {"Elegoo", "ASA", "Pop Blue"},
-        {"Flashforge", "ABS", "Fire Engine Red"},
+        {"PLA", "Jet Black"},
+        {"Silk PLA", "Silk Blue"},
+        {"ASA", "Pop Blue"},
+        {"ABS", "Fire Engine Red"},
     };
 
     for (int i = 0; i < 4; ++i) {
         auto slot = backend->get_slot_info(i);
         CAPTURE(i, slot.brand, slot.material, slot.color_name);
-        REQUIRE(slot.brand == expected[i].brand);
         REQUIRE(slot.material == expected[i].material);
         REQUIRE(slot.color_name == expected[i].color_name);
+        // The vendor is deliberately absent from the slot -- firmware never
+        // reports one. That it still matches the Spoolman record is checked in
+        // test_mock_spool_consistency.cpp, which has the spools to compare to.
+        REQUIRE(slot.brand.empty());
     }
 
     backend->stop();

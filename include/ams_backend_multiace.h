@@ -122,11 +122,16 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     ///
     /// Global layout: slots 0..3 are the U1's heads (unit 0), then each ACE
     /// contributes ACE_SLOTS_PER_UNIT bays in unit order. `head` is the head
-    /// that ACE feeds in head mode, or -1 when no head is bound to it.
+    /// THIS BAY feeds — in head mode the one head its ACE is bound to, in multi
+    /// mode the same-numbered head — or -1 when nothing is bound. It is the same
+    /// rule that gives the bay its `mapped_tool`, by construction: both go
+    /// through bay_feeds_head_locked(). They used to be two hand-written copies,
+    /// and the dispatch copy only knew head mode, so in multi mode a bay's Load
+    /// either named the wrong head or refused a perfectly valid bay.
     struct BaySource {
         int ace_index = -1; ///< multiACE's own 0-based device index
         int bay = -1;       ///< Bay within that ACE
-        int head = -1;      ///< Head this ACE feeds, or -1
+        int head = -1;      ///< Head this bay feeds, or -1
     };
     /// nullopt when @p slot_index is a head rather than a bay, or out of range.
     [[nodiscard]] std::optional<BaySource> bay_source(int slot_index) const;
@@ -202,6 +207,14 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     AmsError do_load_filament(int slot_index) override;
     AmsError do_unload_filament(int slot_index) override;
 
+    /// The one network call fetch_slot_overrides() makes, split out so a test
+    /// can hold the callbacks and complete them in an order of its choosing --
+    /// the in-flight/re-issue rule is not observable any other way. Production
+    /// asks Moonraker's file API for `extended/multiace/slot_overrides.json`.
+    /// Both callbacks may run on a BACKGROUND thread.
+    virtual void download_slot_overrides(std::function<void(const std::string&)> on_success,
+                                         std::function<void(const MoonrakerError&)> on_error);
+
   private:
     /// Which head ACE @p ace_index actually FEEDS, or -1. Caller must hold mutex_.
     ///
@@ -212,6 +225,21 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// stock feeder head, for ACE 0's bays. That is exactly how a bay load was
     /// dispatched to the wrong toolhead, and the rule was written out twice.
     [[nodiscard]] int head_fed_by_ace_locked(int ace_index) const;
+
+    /// Which head bay @p bay of ACE @p ace_index feeds, or -1. Caller must hold
+    /// mutex_. THE rule for the slot->head relation, and the only copy of it:
+    /// rebuild_ace_units_locked() writes it into `mapped_tool`, bay_source()
+    /// hands it to the dispatchers as `BaySource::head`.
+    ///
+    /// Head mode: the one head the ACE is bound to (head_ace, falling back to
+    /// whatever of this ACE is seated when the wiring map has not arrived).
+    /// Multi mode: bay s feeds head s -- multiACE's own web UI sends
+    /// `ACE_LOAD_HEAD HEAD=<slot>` there, and its aceHeadForAce() reverse lookup
+    /// is used ONLY under `state.mode === "head"`.
+    [[nodiscard]] int bay_feeds_head_locked(int ace_index, int bay) const;
+
+    /// bay_source() without the lock. Caller must hold mutex_.
+    [[nodiscard]] std::optional<BaySource> bay_source_locked(int slot_index) const;
 
     /// Parse the `ace` object. Caller must hold mutex_.
     void parse_ace_object_locked(const nlohmann::json& ace, bool& changed);
@@ -251,6 +279,16 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
 
     std::array<HeadSource, NUM_TOOLS> head_kind_{
         {HeadSource::UNKNOWN, HeadSource::UNKNOWN, HeadSource::UNKNOWN, HeadSource::UNKNOWN}};
+    /// The two source maps as LAST SEEN, per head, nullopt until a frame has
+    /// carried that map. Klippy diffs the `ace` object per field, and
+    /// `head_manual` and `head_feeder` are separate fields: toggling a head
+    /// between ACE and MANUAL resends `head_manual` alone while `head_feeder`,
+    /// value-identical, is omitted. Deciding the kind from the frame's maps
+    /// alone read the absent one as "false for every head" and relabelled the
+    /// stock-feeder heads ACE-fed. The decision has to be made from the union
+    /// of what is known, so both maps are cached and re-derived from here.
+    std::array<std::optional<bool>, NUM_TOOLS> head_manual_{};
+    std::array<std::optional<bool>, NUM_TOOLS> head_feeder_{};
     std::array<std::optional<SeatedSource>, NUM_TOOLS> head_seated_{};
     /// Which ACE feeds each head, off `head_ace`. Meaningful ONLY once
     /// head_kind_ says the head is ACE-fed — head_ace names an ACE for every
@@ -300,11 +338,49 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
             std::optional<uint32_t> color_rgb;
             // No weight here on purpose — Spoolman owns remaining AND total, and
             // multiACE's `weight_g` is only a copy of it. See where this is applied.
+
+            // Every field, so a vendor-only edit counts as a change. The
+            // hand-written comparison this replaces listed five of the seven
+            // and left `vendor` out -- correcting a spool's brand in multiACE
+            // updated the cache and told nobody, and the bay kept its old
+            // brand until something else moved.
+            bool operator==(const BaySpool& o) const {
+                return bound == o.bound && material == o.material && vendor == o.vendor &&
+                       label == o.label && sku == o.sku && spoolman_id == o.spoolman_id &&
+                       color_rgb == o.color_rgb;
+            }
+            bool operator!=(const BaySpool& o) const {
+                return !(*this == o);
+            }
         };
         std::array<BaySpool, ACE_SLOTS_PER_UNIT> spool{};
         /// nullopt = the ACE reported no colour, so keep SlotInfo's default
         /// rather than painting the slot black.
         std::array<std::optional<uint32_t>, ACE_SLOTS_PER_UNIT> color_rgb{};
+
+        /// Whole-state equality, so the parser can say whether a frame actually
+        /// moved anything. It used to mark every `aces` entry as changed
+        /// unconditionally, and Klippy resends the whole array whenever one
+        /// element ticks -- so a dryer's temperature ramp forced a full
+        /// AmsState resync and UI rebuild for the length of every dry cycle.
+        bool operator==(const AceUnitState& o) const {
+            return connected == o.connected && protocol == o.protocol && temp == o.temp &&
+                   humidity == o.humidity && drying == o.drying &&
+                   dryer_target_c == o.dryer_target_c &&
+                   dryer_duration_min == o.dryer_duration_min &&
+                   dryer_remaining_min == o.dryer_remaining_min && has_auto_dry == o.has_auto_dry &&
+                   auto_dry_enabled == o.auto_dry_enabled &&
+                   auto_dry_running == o.auto_dry_running &&
+                   auto_dry_rh_start == o.auto_dry_rh_start &&
+                   auto_dry_rh_end == o.auto_dry_rh_end && auto_dry_temp_c == o.auto_dry_temp_c &&
+                   auto_dry_master == o.auto_dry_master &&
+                   auto_dry_add_time_min == o.auto_dry_add_time_min &&
+                   gate_present == o.gate_present && material == o.material && spool == o.spool &&
+                   color_rgb == o.color_rgb;
+        }
+        bool operator!=(const AceUnitState& o) const {
+            return !(*this == o);
+        }
     };
     std::array<AceUnitState, MAX_ACE_UNITS> ace_units_{};
 
@@ -321,8 +397,13 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     OverrideMap slot_overrides_{};
     int64_t overrides_fetched_seq_ = -1;
     bool override_fetch_in_flight_ = false;
-    /// Set under mutex_ when a frame's event_seq outruns overrides_fetched_seq_;
-    /// read and cleared by handle_status_update AFTER the lock is dropped, since
-    /// the fetch must not be issued while holding it.
+    /// "A fetch is owed." Set under mutex_ when a frame's event_seq outruns
+    /// overrides_fetched_seq_, and CONSUMED only by the fetch that actually goes
+    /// out (fetch_slot_overrides(), which must be called with the lock dropped).
+    /// While a fetch is in flight the flag stays set, and whichever completion
+    /// handler lands next re-issues it. It used to be cleared by the caller
+    /// before the fetch was attempted, so a second event_seq that arrived during
+    /// the download was recorded as fetched and never was: the pre-edit file was
+    /// applied and the bay showed a stale material until some unrelated bump.
     bool override_refetch_wanted_ = false;
 };

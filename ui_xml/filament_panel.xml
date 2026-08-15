@@ -178,7 +178,7 @@
                 hidden="true">
 
           <!-- AMS mini status (auto-binds to AmsState, fills width, stretches to row height) -->
-          <ams_mini_status flex_grow="1" height="100%"/>
+          <ams_mini_status name="ams_mini_status" flex_grow="1" height="100%"/>
           <!-- Manage Button (shown when single-tool AMS, hidden when multi-tool) -->
           <ui_button name="btn_manage_slots"
                      width="content" height="#button_height" text="Manage" translation_tag="Manage"
@@ -352,19 +352,19 @@
                 style_pad_gap="#space_sm">
           <text_small text="Length:" translation_tag="Length:"/>
           <ui_button name="purge_5mm"
-                     height="#button_height_sm" flex_grow="1" text="5mm" translation_tag="5mm" style_text_font="#font_small">
+                     height="#button_height_sm" flex_grow="1" text="5mm" style_text_font="#font_small">
             <bind_style name="purge_btn_selected" subject="filament_purge_5mm_active" ref_value="1"/>
             <bind_style name="purge_btn_unselected" subject="filament_purge_5mm_active" ref_value="0"/>
             <event_cb trigger="clicked" callback="on_filament_purge_5mm"/>
           </ui_button>
           <ui_button name="purge_10mm"
-                     height="#button_height_sm" flex_grow="1" text="10mm" translation_tag="10mm" style_text_font="#font_small">
+                     height="#button_height_sm" flex_grow="1" text="10mm" style_text_font="#font_small">
             <bind_style name="purge_btn_selected" subject="filament_purge_10mm_active" ref_value="1"/>
             <bind_style name="purge_btn_unselected" subject="filament_purge_10mm_active" ref_value="0"/>
             <event_cb trigger="clicked" callback="on_filament_purge_10mm"/>
           </ui_button>
           <ui_button name="purge_25mm"
-                     height="#button_height_sm" flex_grow="1" text="25mm" translation_tag="25mm" style_text_font="#font_small">
+                     height="#button_height_sm" flex_grow="1" text="25mm" style_text_font="#font_small">
             <bind_style name="purge_btn_selected" subject="filament_purge_25mm_active" ref_value="1"/>
             <bind_style name="purge_btn_unselected" subject="filament_purge_25mm_active" ref_value="0"/>
             <event_cb trigger="clicked" callback="on_filament_purge_25mm"/>

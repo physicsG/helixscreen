@@ -763,10 +763,11 @@ ifeq ($(YOCTO_BUILD),yes)
         LDFLAGS += -lssl -lcrypto
     endif
     LDFLAGS += $(TARGET_LDFLAGS)
-    # Keep the debug sections compressed in the LINKED output too. Without this
-    # the linker decompresses what -gz compressed, so the objects shrink and the
-    # binary does not — which is the half that dominates `ls -la build/bin`.
-    # Both binaries go through this: mk/rules.mk links helix-tests with $(LDFLAGS).
+    # No -gz here on purpose. DEBUG_SIZE_FLAGS is defined only on the non-Yocto
+    # branch, and there it reaches the linker through CXXFLAGS (mk/rules.mk
+    # links both binaries with $(CXX) $(CXXFLAGS) ... $(LDFLAGS)), so the debug
+    # sections stay compressed in the linked output without a separate LDFLAGS
+    # entry. On this Yocto branch nothing is -gz-compressed to begin with.
 
     PLATFORM := Linux-yocto
     # No submodule wpa_client to depend on — wpa-supplicant recipe installs libwpa_client.

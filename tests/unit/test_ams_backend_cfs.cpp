@@ -20,6 +20,7 @@
 #include <type_traits>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -686,18 +687,19 @@ TEST_CASE("CFS K1 macro variant (#968)", "[ams][cfs]") {
     using V = helix::printer::CfsMacroVariant;
 
     SECTION("K1 load gcode mirrors BOX_LOAD_MATERIAL_WITHOUT_MATERIAL (#968)") {
-        // Fresh load, nozzle empty. Mirrors the firmware
-        // BOX_LOAD_MATERIAL_WITHOUT_MATERIAL step list with explicit TNN=, and
-        // ADDS the missing BOX_EXTRUDER_EXTRUDE (root cause of "no auto-extrude
-        // after load"). All commands are confirmed-present in the reporter's
-        // box.cfg. Homing is handled upstream by dispatch_action_script.
+        // Fresh load, nozzle empty. Feed steps follow the firmware
+        // BOX_LOAD_MATERIAL_WITHOUT_MATERIAL chain, with explicit TNN= on the
+        // two commands that take it, and ADD the missing BOX_EXTRUDER_EXTRUDE
+        // (root cause of "no auto-extrude after load"). BOX_MATERIAL_FLUSH is
+        // bare: it takes LEN/VELOCITY/TEMP only, never TNN. Homing is handled
+        // upstream by dispatch_action_script.
         const std::string expected_a = "SAVE_GCODE_STATE NAME=helix_cfs_load\n"
                                        "BOX_ERROR_CLEAR\n"
                                        "BOX_CHECK_MATERIAL\n"
                                        "BOX_GO_TO_EXTRUDE_POS\n"
                                        "BOX_EXTRUDE_MATERIAL TNN=T1A\n"
                                        "BOX_EXTRUDER_EXTRUDE TNN=T1A\n"
-                                       "BOX_MATERIAL_FLUSH TNN=T1A\n"
+                                       "BOX_MATERIAL_FLUSH\n"
                                        "BOX_NOZZLE_CLEAN\n"
                                        "BOX_MOVE_TO_SAFE_POS\n"
                                        "RESTORE_GCODE_STATE NAME=helix_cfs_load";
@@ -711,7 +713,7 @@ TEST_CASE("CFS K1 macro variant (#968)", "[ams][cfs]") {
         // The fix: BOX_EXTRUDER_EXTRUDE must appear between EXTRUDE and FLUSH.
         const auto pos_extrude = g.find("BOX_EXTRUDE_MATERIAL TNN=T1B");
         const auto pos_extruder = g.find("BOX_EXTRUDER_EXTRUDE TNN=T1B");
-        const auto pos_flush = g.find("BOX_MATERIAL_FLUSH TNN=T1B");
+        const auto pos_flush = g.find("BOX_MATERIAL_FLUSH\n");
         REQUIRE(pos_extrude != std::string::npos);
         REQUIRE(pos_extruder != std::string::npos);
         REQUIRE(pos_flush != std::string::npos);
@@ -779,6 +781,7 @@ TEST_CASE("CFS K1 macro variant (#968)", "[ams][cfs]") {
     SECTION("K1 swap gcode mirrors BOX_LOAD_MATERIAL_WITH_MATERIAL for slot 5 (T2B) (#968)") {
         // Nozzle loaded: cut old, retract, position, clean, then load new slot
         // with the missing BOX_EXTRUDER_EXTRUDE between EXTRUDE and FLUSH.
+        // BOX_MATERIAL_FLUSH is bare — it has no TNN parameter.
         const std::string expected = "SAVE_GCODE_STATE NAME=helix_cfs_load\n"
                                      "BOX_ERROR_CLEAR\n"
                                      "BOX_CHECK_MATERIAL\n"
@@ -788,7 +791,7 @@ TEST_CASE("CFS K1 macro variant (#968)", "[ams][cfs]") {
                                      "BOX_NOZZLE_CLEAN\n"
                                      "BOX_EXTRUDE_MATERIAL TNN=T2B\n"
                                      "BOX_EXTRUDER_EXTRUDE TNN=T2B\n"
-                                     "BOX_MATERIAL_FLUSH TNN=T2B\n"
+                                     "BOX_MATERIAL_FLUSH\n"
                                      "BOX_MOVE_TO_SAFE_POS\n"
                                      "RESTORE_GCODE_STATE NAME=helix_cfs_load";
         REQUIRE(AmsBackendCfs::swap_gcode(5, V::K1) == expected);
@@ -803,10 +806,10 @@ TEST_CASE("CFS K1 macro variant (#968)", "[ams][cfs]") {
             REQUIRE(g.find("BOX_RETRUDE_MATERIAL") != std::string::npos);
             REQUIRE(g.find("BOX_EXTRUDE_MATERIAL TNN=") != std::string::npos);
             REQUIRE(g.find("BOX_EXTRUDER_EXTRUDE TNN=") != std::string::npos);
-            REQUIRE(g.find("BOX_MATERIAL_FLUSH TNN=") != std::string::npos);
+            REQUIRE(g.find("BOX_MATERIAL_FLUSH\n") != std::string::npos);
             // The missing extrude primitive must sit between EXTRUDE and FLUSH.
             REQUIRE(g.find("BOX_EXTRUDE_MATERIAL TNN=") < g.find("BOX_EXTRUDER_EXTRUDE TNN="));
-            REQUIRE(g.find("BOX_EXTRUDER_EXTRUDE TNN=") < g.find("BOX_MATERIAL_FLUSH TNN="));
+            REQUIRE(g.find("BOX_EXTRUDER_EXTRUDE TNN=") < g.find("BOX_MATERIAL_FLUSH\n"));
             // Swap ends with flush of new slot — wipe before parking.
             REQUIRE(g.find("BOX_NOZZLE_CLEAN") != std::string::npos);
             REQUIRE(g.find("BOX_MOVE_TO_SAFE_POS") != std::string::npos);
@@ -840,6 +843,64 @@ TEST_CASE("CFS K1 macro variant (#968)", "[ams][cfs]") {
                 std::string::npos);
         REQUIRE(AmsBackendCfs::unload_gcode(V::K1).find("BOX_GO_TO_EXTRUDE_POS") ==
                 std::string::npos);
+    }
+
+    SECTION("K1 BOX_MATERIAL_FLUSH is emitted bare — it has no TNN parameter (#968)") {
+        // Genuine K1 CFS firmware (Creality OTA V2.3.5.34, board CR4CU220812S11):
+        // the shipped box.cfg — byte-identical across all 11 per-model configs —
+        // documents the parameter forms as
+        //     BOX_EXTRUDE_MATERIAL TNN=T1A
+        //     BOX_EXTRUDER_EXTRUDE TNN=T1A
+        //     BOX_MATERIAL_FLUSH LEN=100 VELOCITY=360 TEMP=220
+        //     BOX_RETRUDE_MATERIAL_WITH_TNN TNN=T1A
+        // TNN is on three commands and deliberately not on the flush, and every
+        // shipped BOX_LOAD_MATERIAL_* macro invokes the flush bare. Disassembly
+        // of box_wrapper...so agrees: cmd_material_flush reads only LEN /
+        // VELOCITY / TEMP and never touches TNN or the Tnn_map lookup.
+        //
+        // Sending TNN= is inert rather than fatal (Klipper's GCodeCommand
+        // ignores unread parameters), which is exactly why it needs pinning —
+        // nothing at runtime would ever complain if it came back.
+        //
+        // Extract each emitted flush line and require it to be exactly bare.
+        auto flush_lines = [](const std::string& g) {
+            std::vector<std::string> out;
+            const std::string needle = "BOX_MATERIAL_FLUSH";
+            for (size_t p = g.find(needle); p != std::string::npos; p = g.find(needle, p + 1)) {
+                const size_t end = g.find('\n', p);
+                out.push_back(g.substr(p, end == std::string::npos ? std::string::npos : end - p));
+            }
+            return out;
+        };
+
+        // Load and swap both flush; unload does not (nozzle is empty post-cut).
+        for (int idx : {0, 1, 5, 15}) {
+            for (const std::string& g :
+                 {AmsBackendCfs::load_gcode(idx, V::K1), AmsBackendCfs::swap_gcode(idx, V::K1)}) {
+                const auto lines = flush_lines(g);
+                INFO("idx=" << idx << " gcode:\n" << g);
+                REQUIRE(lines.size() == 1);
+                REQUIRE(lines[0] == "BOX_MATERIAL_FLUSH");
+            }
+        }
+        // Unload emits no flush at all.
+        REQUIRE(flush_lines(AmsBackendCfs::unload_gcode(V::K1)).empty());
+
+        // No K1 builder may put TNN on the flush, and none may reach for the
+        // TNN-aware BOX_MATERIAL_CHANGE_FLUSH — it exists in this firmware but
+        // no shipped macro uses it, so adopting it would be a behavior change.
+        for (const std::string& g :
+             {AmsBackendCfs::load_gcode(0, V::K1), AmsBackendCfs::unload_gcode(V::K1),
+              AmsBackendCfs::swap_gcode(0, V::K1)}) {
+            REQUIRE(g.find("BOX_MATERIAL_FLUSH TNN=") == std::string::npos);
+            REQUIRE(g.find("BOX_MATERIAL_CHANGE_FLUSH") == std::string::npos);
+        }
+
+        // The commands that genuinely DO take TNN must keep it — this guard
+        // must not be "fixed" by stripping TNN everywhere.
+        const std::string load = AmsBackendCfs::load_gcode(5, V::K1);
+        REQUIRE(load.find("BOX_EXTRUDE_MATERIAL TNN=T2B") != std::string::npos);
+        REQUIRE(load.find("BOX_EXTRUDER_EXTRUDE TNN=T2B") != std::string::npos);
     }
 
     SECTION("K2 default preserved when variant omitted") {

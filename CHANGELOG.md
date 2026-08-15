@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.99.114] - 2026-08-14
+
+**This is the 1.0 release candidate.** It is the code intended to ship as 1.0.0, published as
+an ordinary 0.99.x update so that everyone gets it rather than only people who opted into a
+beta channel. If it holds up in the field, 1.0.0 follows with no further changes. If it does
+not, the fix ships as 0.99.115 and no bad 1.0.0 ever exists.
+
+The bulk of this release is a sweep through every issue still open against 1.0. Several turned
+out to be real defects that had gone unnoticed because the wrong thing was being measured: the
+Lifetime Print Stats tile was quietly reporting only your most recent 500 jobs, accelerometers
+were never discovered at all so Settings > Sensors was empty on every printer that has one, and
+two printers were missing the database entry that applies their preset, so a Centauri Carbon
+installed by any route other than the factory image got none of its tuned defaults.
+
+### Fixed
+
+- The Lifetime Print Stats tile now reports true lifetime totals from Moonraker instead of
+  summing the most recent 500 jobs. If your totals disagreed with Mainsail, this was why
+  ([#1272](https://github.com/prestonbrown/helixscreen/issues/1272)).
+- Accelerometers are discovered again. Settings > Sensors listed nothing and showed a count of
+  zero on every printer with an ADXL345 or LIS2DW
+  ([#1262](https://github.com/prestonbrown/helixscreen/issues/1262)).
+- The Elegoo Centauri Carbon and Artillery M1 Pro now pick up their presets. Without the
+  database link, neither printer received any of its preset settings unless it was installed
+  from the factory image ([#1260](https://github.com/prestonbrown/helixscreen/issues/1260)).
+- Creality CFS filament changes on K1-family printers no longer pass a parameter the firmware
+  does not accept, so the purge runs on its configured length rather than silently falling back
+  to defaults. Confirmed against Creality's own CFS firmware
+  ([#968](https://github.com/prestonbrown/helixscreen/issues/968)).
+- Unlocking beta features, selecting the Dev update channel, then locking beta again no longer
+  leaves the app fetching from Dev with no way back to Stable.
+- A printer preset no longer applies its panel's display and touch settings to a different
+  machine's screen when HelixScreen is talking to that printer over the network.
+- Screen rotation is now a setting in Display & Sound rather than something only reachable by
+  editing config, and the rotation probe no longer misses every tap.
+- Several dialogs that could grow past the screen on small displays are capped and scroll
+  properly: AMS loading errors, the shutdown and recovery dialogs, and action prompts. The AFC
+  fault diagram no longer sits inside the scrolling text area.
+- The print status header no longer shows an empty action button during a print.
+- Page-scroll chevrons on the home screen stop landing on a widget's own content.
+- Large g-code files are handled correctly on 32-bit builds, and the DRM backend keeps its
+  64-bit buffer offset there, fixing display init on 32-bit Pi images.
+- Translations resolve all C escape sequences in keys, not just hex ones, so a further batch of
+  text stops falling back to English.
+- A fresh install no longer loses its shipped platform preset when an earlier `printer_data`
+  directory outlives the install.
+- AFC lanes follow the firmware's own `current_map` rather than guessing the lowest tool number,
+  so multi-tool lanes drive the tool the firmware actually selected.
+
+### Added
+
+- `helix-screen ctl` can address unnamed widgets and set label text directly, which makes far
+  more of the interface reachable for scripted testing and screenshots.
+
+### Internal
+
+- The AddressSanitizer and ThreadSanitizer CI gates could not report failure. Both piped through
+  `tee` without `pipefail` and then printed a success banner unconditionally, so a run with real
+  sanitizer errors was reported green. Fixed, along with a genuine use-after-scope in a test
+  fixture that had been hiding behind it.
+- The `Build` workflow had been red for a day because the Moonraker plugin test dependency was
+  never declared. Declared, with a gate so it cannot recur silently.
+- The ESP32 firmware build is green again after a missing link stub.
+- Emergency-stop overlay observers now carry a lifetime token, closing a use-after-free that
+  reproduces deterministically when the guard is removed.
+
 ## [0.99.113] - 2026-08-13
 
 A fix release for two problems that showed up in the field on the Adventurer 5X. Uploading a

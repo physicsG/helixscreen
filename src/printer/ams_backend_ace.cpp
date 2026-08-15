@@ -165,13 +165,10 @@ void AmsBackendAce::handle_status_update(const json& notification) {
     if (use_rest_fallback_)
         return; // Using REST polling, ignore subscriptions
 
-    // notify_status_update format: {"params": [{...}, timestamp]}
-    const json* status = &notification;
-    if (notification.contains("params") && notification["params"].is_array() &&
-        !notification["params"].empty()) {
-        status = &notification["params"][0];
-    }
-    if (!status->is_object())
+    // Wrapped notification or bare initial-query status -- see
+    // AmsSubscriptionBackend::unwrap_status_notification().
+    const json* status = unwrap_status_notification(notification);
+    if (!status)
         return;
 
     // Native Anycubic GoKlipper publishes under `filament_hub`; community

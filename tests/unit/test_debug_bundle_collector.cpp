@@ -1259,6 +1259,12 @@ TEST_CASE_METHOD(HelixTestFixture, "UpdateChecker: config snapshot tracks a chan
     REQUIRE(config != nullptr);
     auto& checker = UpdateChecker::instance();
 
+    // Beta and Dev are only effective while /beta_features is unlocked —
+    // get_channel() clamps to stable otherwise, so without this the snapshot
+    // would read "stable" no matter what the channel key says.
+    const bool prev_beta = config->get<bool>("/beta_features", false);
+    config->set<bool>("/beta_features", true);
+
     config->set<int>("/update/channel", 1); // Beta
     checker.refresh_config_snapshot();
     REQUIRE(checker.config_snapshot().channel == "beta");
@@ -1272,6 +1278,7 @@ TEST_CASE_METHOD(HelixTestFixture, "UpdateChecker: config snapshot tracks a chan
     // The snapshot lives on the process-wide singleton, which the fixture does
     // not reset. Put it back so a later test in this shard sees a clean value.
     config->set<int>("/update/channel", 0);
+    config->set<bool>("/beta_features", prev_beta);
     checker.refresh_config_snapshot();
 }
 

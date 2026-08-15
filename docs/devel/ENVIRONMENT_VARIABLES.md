@@ -249,6 +249,23 @@ HELIX_DISPLAY_ROTATION=180 ./build/bin/helix-screen
 
 **Touch auto-rotation:** On fbdev, touch coordinates are automatically rotated to match the display rotation for non-USB-HID devices (e.g., Goodix, sun4i_ts). USB HID touchscreens (e.g., BTT HDMI) report logical coordinates natively and are not transformed. `HELIX_TOUCH_SWAP_AXES` is still available as a manual override for edge cases.
 
+### `HELIX_SHOW_ROTATION_SETTING`
+
+Reveal the **Screen Rotation** row in Settings → Display & Sound on an SDL desktop build. The row is hidden there by default because SDL renders in DIRECT mode and ignores `/display/rotate` entirely, so the control would be inert. Only affects visibility - the setting still writes `/display/rotate` and still takes effect on the next start of an fbdev/DRM build.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `1` (show the row) |
+| **Default** | Unset (row hidden on SDL, always shown on fbdev/DRM) |
+| **Files** | `src/system/display_settings_manager.cpp`, `ui_xml/settings_display_sound_overlay.xml` |
+
+```bash
+# Drive the rotation row on desktop
+HELIX_SHOW_ROTATION_SETTING=1 ./build/bin/helix-screen --test -vv
+```
+
+Unlike `HELIX_FORCE_ROTATION_PROBE`, this does not start the interactive probe.
+
 ### `HELIX_FORCE_ROTATION_PROBE`
 
 Force the rotation probe to run on next startup, even if it has already run or a rotation is configured. Useful for testing the probe UI on SDL or re-running on a device.
@@ -275,6 +292,15 @@ HELIX_FORCE_ROTATION_PROBE=1 ./build/bin/helix-screen
 - Sets `/display/rotation_probed` flag so it doesn't re-run on subsequent boots
 - Skips entirely if: rotation is already configured (config, env var, or CLI), or the probe has already run
 - Runs after translations are loaded (Phase 8c) so probe strings are translatable via `lv_tr()`
+
+**The probe cannot be driven by `helix-screen ctl`.** It blocks in startup Phase 8b, and the
+remote-control server does not start until Phase 14c - measured at 0.45s *after* the probe
+gives up, so there is no socket to connect to while any probe screen is on display. `ctl press`
+would not reach it in any case: that drives the synthetic `RemotePointer` indev, while the probe
+reads the built-in pointer's callback directly. A tap has to come from the real touchscreen or
+mouse. Cover tap-detection logic with the `[rotation_probe]` unit tests instead
+(`tests/unit/test_rotation_probe_tap_detection.cpp`), and use `HELIX_FORCE_ROTATION_PROBE=1` for
+what it can still show you: that the probe runs, cycles, times out, and hands off cleanly.
 
 ### `HELIX_SCREEN_SIZE`
 
@@ -1834,6 +1860,28 @@ set values, capture screenshots — so it is a debugging aid to switch on for a 
 something to leave enabled on a shared machine. Pin `HELIX_REMOTE_SOCKET` when more than one
 instance could be running, since a bare `ctl` silently drives whichever started first and
 still reports success. See `docs/devel/HELIXCTL.md`.
+
+### `HELIX_HANG_THRESHOLD_SEC`
+
+How long the LVGL main loop may go without ticking before it is reported as hung. The main loop bumps a counter every iteration and `MemoryMonitor`'s existing background thread samples it; when the counter stops moving for this long, the stall is logged at error level, recorded to telemetry as `ui`/`main_loop_hang`, and left as a crash-handler breadcrumb.
+
+Detection only — nothing is killed. A deadlocked UI thread leaves the process alive and the screen lit, so `helix-watchdog` cannot see it: it supervises process exit, and by that measure the app is perfectly healthy.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `0`–`3600` seconds. `0` disables detection. Out-of-range and unparseable values are ignored with a warning. |
+| **Default** | `60` (`MainLoopHangDetector::DEFAULT_THRESHOLD_MS`) |
+| **File** | `src/application/application.cpp` (wiring), `include/main_loop_heartbeat.h` (logic) |
+
+```bash
+# Trip it quickly while testing the detector
+HELIX_HANG_THRESHOLD_SEC=5 ./build/bin/helix-screen --test -vv
+
+# Turn it off entirely
+HELIX_HANG_THRESHOLD_SEC=0 ./build/bin/helix-screen
+```
+
+The threshold has to clear the longest *legitimate* main-thread block, and those are real: the startup XML parse alone runs about 8s on an AD5M. Detection is only armed after the loop has completed its first iteration, so a slow startup can never register as a stall.
 
 ### `HELIX_LOG_RING_LINES`
 

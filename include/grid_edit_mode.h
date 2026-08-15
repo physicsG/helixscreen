@@ -171,6 +171,14 @@ class GridEditMode {
     void update_resize_preview_px(int x, int y, int w, int h, bool valid);
     void commit_resize_with_snap(const ResizeResult& result);
 
+    /// Stop the resize snap animation if one is in flight.
+    ///
+    /// Its completion callback holds a raw `this` and dereferences config_, so
+    /// both exit() (which nulls config_) and the destructor must run this. The
+    /// animation's deleted_cb frees the heap context and clears
+    /// snap_anim_preview_, so this is also the leak-free cancel path.
+    void cancel_snap_animation();
+
     // Widget catalog placement
     void place_widget_from_catalog(const std::string& widget_id);
     bool hit_test_any_widget(int screen_x, int screen_y) const;
@@ -211,6 +219,11 @@ class GridEditMode {
     bool resizing_ = false;
     ResizeEdge resize_edge_ = ResizeEdge::None;
     lv_obj_t* resize_preview_ = nullptr; // Pixel-tracking preview overlay
+
+    // Widget the resize snap animation is driving, or nullptr when none is in
+    // flight. It is the animation's `var`, which is what lets LVGL auto-cancel
+    // on widget deletion and what cancel_snap_animation() cancels by.
+    lv_obj_t* snap_anim_preview_ = nullptr;
 
     // Widget catalog placement: grid cell where the long-press originated
     int catalog_origin_col_ = -1;

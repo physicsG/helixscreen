@@ -77,8 +77,8 @@
         <!-- Bound to formatter-driven proxy subjects so pinning to a specific tool
              (via the chevron picker) actually changes the displayed temperature.
              The formatter rebinds its underlying observer on pin change. -->
-        <temp_display size="xs"
-                      show_target="true" bind_current="print_status_nozzle_current"
+        <temp_display name="detailed_nozzle_temp"
+                      size="xs" show_target="true" bind_current="print_status_nozzle_current"
                       bind_target="print_status_nozzle_target" hide_target_below_bp="small"
                       event_cb="on_print_status_nozzle_temp_clicked"/>
       </lv_obj>
@@ -86,9 +86,9 @@
               height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
               style_flex_cross_place="center" scrollable="false" clickable="false" event_bubble="true">
         <heater_icon src="radiator" glyph_name="bed_icon_glyph" size="sm"/>
-        <temp_display size="xs"
-                      show_target="true" bind_current="bed_temp" bind_target="bed_target" hide_target_below_bp="small"
-                      event_cb="on_print_status_bed_temp_clicked"/>
+        <temp_display name="detailed_bed_temp"
+                      size="xs" show_target="true" bind_current="bed_temp" bind_target="bed_target"
+                      hide_target_below_bp="small" event_cb="on_print_status_bed_temp_clicked"/>
       </lv_obj>
       <lv_obj width="content"
               height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
@@ -98,14 +98,15 @@
         <!-- Two variants: with target when a chamber heater exists, current-only
              for sensor-only chambers (passive enclosure). Mutually exclusive on
              printer_has_chamber_heater. -->
-        <temp_display size="xs"
-                      show_target="true" bind_current="chamber_temp" bind_target="chamber_effective_target"
+        <temp_display name="detailed_chamber_temp"
+                      size="xs" show_target="true" bind_current="chamber_temp" bind_target="chamber_effective_target"
                       bind_mode="chamber_mode" hide_target_below_bp="small"
                       event_cb="on_print_status_chamber_temp_clicked">
           <bind_flag_if_eq subject="printer_has_chamber_heater" flag="hidden" ref_value="0"/>
         </temp_display>
-        <temp_display size="xs"
-                      show_target="false" bind_current="chamber_temp" event_cb="on_print_status_chamber_temp_clicked">
+        <temp_display name="detailed_chamber_temp_sensor_only"
+                      size="xs" show_target="false" bind_current="chamber_temp"
+                      event_cb="on_print_status_chamber_temp_clicked">
           <bind_flag_if_eq subject="printer_has_chamber_heater" flag="hidden" ref_value="1"/>
         </temp_display>
       </lv_obj>

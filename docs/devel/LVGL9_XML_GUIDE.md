@@ -708,14 +708,21 @@ Our theme system sets these defaults on all `lv_obj` containers:
 | `border_width` | `0` | No border by default |
 | `bg_opa` | `0` | Transparent background |
 | `pad_all` | `0` | No internal padding |
+| `scrollable` | **`true`** | **NOT overridden by our theme** - this is LVGL's own default (`LV_OBJ_FLAG_SCROLLABLE`) and it is ON. Write `scrollable="false"` explicitly on any container that is not a real scroll region. |
 
-This means `lv_obj` acts as a pure layout container by default - no visual styling unless explicitly added.
+This means `lv_obj` acts as a pure layout container *visually* by default - no background, border, or padding unless explicitly added. Behaviorally it is not inert: it is still scrollable, so it can absorb drags and qualify for a page-scroll gutter. Turn that off with `scrollable="false"` unless the container is meant to scroll.
 
 ```xml
 <!-- These are equivalent in HelixScreen -->
 <lv_obj flex_flow="row">...</lv_obj>
 <lv_obj flex_flow="row" height="content" style_border_width="0" style_bg_opa="0" style_pad_all="0">...</lv_obj>
+
+<!-- ...but neither of the above is scroll-inert. A pure layout wrapper wants: -->
+<lv_obj flex_flow="row" scrollable="false">...</lv_obj>
 ```
+
+`helix-screen ctl geom <name>` reports the `scrollable` flag and the scroll extents, so it
+tells you directly whether a container is scrollable (see `HELIXCTL.md:566-567`).
 
 ### Flex Layout (Flexbox)
 

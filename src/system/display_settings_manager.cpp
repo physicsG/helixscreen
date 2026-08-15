@@ -259,6 +259,12 @@ void DisplaySettingsManager::init_subjects() {
     int is_android = helix::is_android_platform() ? 1 : 0;
     UI_MANAGED_SUBJECT_INT(is_android_subject_, is_android, "settings_is_android", subjects_);
 
+    // Screen rotation availability for XML row visibility (ephemeral). The
+    // rotation VALUE needs no subject: it is applied once at display init and
+    // the dropdown is seeded from config when the overlay activates.
+    UI_MANAGED_SUBJECT_INT(rotation_available_subject_, rotation_setting_available() ? 1 : 0,
+                           "settings_rotation_available", subjects_);
+
     // Bed mesh render mode (default: 0 = Auto)
     int bed_mesh_mode = config->get<int>("/display/bed_mesh_render_mode", 0);
     bed_mesh_mode = std::clamp(bed_mesh_mode, 0, 2);
@@ -644,6 +650,76 @@ void DisplaySettingsManager::set_sleep_while_printing(bool enabled) {
     Config* config = Config::get_instance();
     config->set<bool>("/display/sleep_while_printing", enabled);
     config->save();
+}
+
+// =============================================================================
+// SCREEN ROTATION
+// =============================================================================
+
+int DisplaySettingsManager::rotation_degrees_to_index(int degrees) {
+    switch (degrees) {
+    case 90:
+        return 1;
+    case 180:
+        return 2;
+    case 270:
+        return 3;
+    default:
+        return 0; // 0 and every unrecognized value
+    }
+}
+
+int DisplaySettingsManager::index_to_rotation_degrees(int index) {
+    switch (index) {
+    case 1:
+        return 90;
+    case 2:
+        return 180;
+    case 3:
+        return 270;
+    default:
+        return 0; // index 0 and out-of-range
+    }
+}
+
+bool DisplaySettingsManager::rotation_setting_available() {
+#ifdef HELIX_DISPLAY_SDL
+    return std::getenv("HELIX_SHOW_ROTATION_SETTING") != nullptr;
+#else
+    return true;
+#endif
+}
+
+int DisplaySettingsManager::get_display_rotation() const {
+    int degrees = Config::get_instance()->get<int>("/display/rotate", 0);
+    if (degrees != 90 && degrees != 180 && degrees != 270) {
+        // A hand-edited or corrupt settings.json can hold any integer.
+        // DisplayManager only applies 90/180/270, so anything else reads as 0.
+        return 0;
+    }
+    return degrees;
+}
+
+bool DisplaySettingsManager::set_display_rotation(int degrees) {
+    if (degrees != 0 && degrees != 90 && degrees != 180 && degrees != 270) {
+        spdlog::warn("[DisplaySettingsManager] set_display_rotation({}) rejected - "
+                     "must be 0, 90, 180 or 270",
+                     degrees);
+        return false;
+    }
+
+    bool changed = get_display_rotation() != degrees;
+
+    Config* config = Config::get_instance();
+    config->set<int>("/display/rotate", degrees);
+    // Pin the first-boot probe gate in Application::run_rotation_probe_and_layout():
+    // an explicit choice must survive a later auto-detect or interactive probe.
+    config->set<bool>("/display/rotation_probed", true);
+    config->save();
+
+    spdlog::info("[DisplaySettingsManager] set_display_rotation({}) saved (restart required)",
+                 degrees);
+    return changed;
 }
 
 // =============================================================================

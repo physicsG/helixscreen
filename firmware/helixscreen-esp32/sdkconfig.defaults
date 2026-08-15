@@ -99,14 +99,22 @@ CONFIG_ESP_PHY_REDUCE_TX_POWER=y
 # PSRAM bursts for the framebuffer reads.)
 CONFIG_ESPTOOLPY_FLASHMODE_DOUT=y
 
-# Bounce-buffer scan-out must survive cache-disabled flash windows (WiFi PHY
-# cal writes to NVS, OTA health marks otadata — both fire around first
-# render). LCD_RGB_ISR_IRAM_SAFE is NOT usable here: the refill ISR reads the
-# PSRAM framebuffer, which is unreachable while cache is off ("Cache disabled
-# but cached memory region accessed" panic, measured). Instead the ISR pauses
-# and DMA restarts on the next vsync, so an underrun costs one glitched frame
-# rather than permanently desyncing the panel into its test pattern.
-CONFIG_LCD_RGB_RESTART_IN_VSYNC=y
+# RESTART_IN_VSYNC must stay OFF (measured 2026-08-14, IDF v5.5.5 driver bug):
+# the bounce refill targets bounce_buffer[bb_eof_count % 2], and the driver
+# resets bb_eof_count each vsync ONLY in the non-RESTART_IN_VSYNC branch. With
+# it on, the DMA re-aligns to buffer 0 every vsync while the count never
+# resyncs, so ONE coalesced EOF interrupt (6-34 per boot measured under the
+# panel-build burst) flips the parity and every refill then writes the buffer
+# the DMA is TRANSMITTING — permanent whole-screen banding until the next odd
+# miss or reboot. That was the per-boot "sometimes it glitches constantly"
+# coin toss on the K-Touch. The default (off) branch resets the count every
+# vsync AND still restarts on a detected desync (bb_eof_count < expected), so
+# recovery survives the cache-disabled flash windows (WiFi PHY cal, OTA
+# otadata) that motivated the old =y: interrupts resume, the next vsync sees
+# the miss, and the panel restarts cleanly instead of latching corrupt.
+# LCD_RGB_ISR_IRAM_SAFE remains unusable: the refill ISR reads the PSRAM
+# framebuffer, unreachable while cache is off (panic, measured).
+# CONFIG_LCD_RGB_RESTART_IN_VSYNC is not set
 
 # Task WDT window: default 5s. Deferred panels are built on first navigation via
 # a single un-yieldable lv_xml_create on the UI thread that starves the idle task

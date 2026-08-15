@@ -34,6 +34,7 @@ Applied in order by `mk/patches.mk`. Grouped by subsystem.
 | `lvgl-fbdev-bgr-swap.patch` | `lv_linux_fbdev.c`, `.h` | Auto-detect BGR framebuffers and swap R/B channels (Allwinner R818) | PR #9832 |
 | `lvgl-fbdev-buffer-align.patch` | `lv_linux_fbdev.c` | Over-allocate for LV_DRAW_BUF_ALIGN alignment | PR #9832 |
 | `lvgl-drm-flush-rotation.patch` | `lv_linux_drm.c`, `.h` | DRM plane rotation API + 180deg software rotation via shadow buffer + legacy drmModeSetCrtc fallback | Project-specific |
+| `lvgl-drm-mmap64.patch` | `lv_linux_drm.c` | `_FILE_OFFSET_BITS 64` so the dumb-buffer `mmap()` keeps DRM's >4 GiB map offset on 32-bit targets (pi32), widen `drm_buffer_t::offset` to 64 bits, fix the `%u`/`%lu` log formats | Upstream bug, not yet submitted |
 | `lvgl-drm-egl-getters.patch` | `lv_linux_drm_egl.c` | EGL display/context/config getters (implementation only; header decls are in drm-flush-rotation) | Project-specific |
 
 ### Draw Pipeline

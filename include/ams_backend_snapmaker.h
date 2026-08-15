@@ -171,13 +171,25 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     // buffer (is_present()). On the U1 that keeps offering Unload after a tool
     // is already unloaded — the firmware retracts the filament to the buffer
     // (channel_state preload_finish/unload_finish) but filament_exist stays
-    // true, so the slot remains AVAILABLE. Override to additionally require the
-    // channel_state load latch (loaded_at_toolhead_), which is true only while
-    // filament is loaded at the toolhead (between load_finish and the next
-    // unload_finish). The motion sensor was tried first but fails to clear after
-    // an unload on current firmware; channel_state is the authoritative signal
-    // (u1_channel_state_reference.md). Still offers Unload for every toolhead
-    // physically loaded (active or parked), preserving the per-tool unload fix.
+    // true, so the slot remains AVAILABLE. Override to ask three signals in
+    // turn, any one of which says "filament is AT this toolhead"
+    // (filament_present_at_tool_locked()):
+    //   1. the channel_state load latch (loaded_at_toolhead_) — sufficient, but
+    //      derived from a transition, so a restart leaves it false with filament
+    //      sitting in the head; gating on it alone made that filament
+    //      unremovable from the panel;
+    //   2. motion AND port sensor both present, unless a retraction has been
+    //      witnessed since (retraction_seen_ — the 20260608 firmware left the
+    //      motion sensor true after an unload; newer firmware clears it);
+    //   3. the MOUNTED head only: a spool in its channel (filament_exist), again
+    //      unless a retraction has been witnessed.
+    // Signals 2 and 3 are what let filament be removed after a restart. The
+    // cost, accepted knowingly: on 20260608 firmware a head unloaded BEFORE a
+    // restart still reads loaded (both sensors stay true, retraction_seen_ is
+    // process-local), so Unload is offered once for a head with nothing at the
+    // nozzle — a pointless heat-and-retract, not a wedge. Still offers Unload
+    // for every toolhead physically loaded (active or parked), preserving the
+    // per-tool unload fix.
     [[nodiscard]] bool can_unload_from_toolhead(int slot_index) const override;
 
     // The U1 is a toolchanger: `PARK_EXTRUDER` returns the mounted head to its

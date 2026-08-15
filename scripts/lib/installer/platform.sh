@@ -1071,6 +1071,14 @@ setup_config_symlink() {
 
         # If the install dir has a real file (not a symlink), move it to printer_data
         if [ -f "$install_file" ] && [ ! -L "$install_file" ]; then
+            # A settings.json already in printer_data outlived the install dir,
+            # so extract_release's "no user config existed" verdict was wrong:
+            # the packaged config below is about to be dropped in favour of that
+            # file.  Clear the marker rather than leave it to answer for some
+            # later unversioned document at this path.
+            if [ "$file" = "settings.json" ] && [ -f "$pd_file" ]; then
+                $(file_sudo "$install_config") rm -f "${install_config}/.helix-fresh-install" 2>/dev/null
+            fi
             if [ ! -f "$pd_file" ]; then
                 # Move the file to printer_data — check for success before removing original.
                 # A silent cp failure followed by rm would permanently destroy the user's config.

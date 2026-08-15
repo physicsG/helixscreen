@@ -1536,11 +1536,30 @@ extract_release() {
     # so the .old directory on the real filesystem acts as a safety net.)
     $(file_sudo "${INSTALL_DIR}") mkdir -p "${INSTALL_DIR}/config" 2>/dev/null || true
 
-    # Remove tarball's default settings.json if we have a backup to restore.
-    # If Phase 6 restore fails, we want the file to be MISSING so that
-    # Config::init()'s restore_from_backup() safety net kicks in.
-    # Without this, a failed restore leaves the tarball defaults in place,
-    # which Config::init() loads without attempting backup recovery.
+    # Does a user config actually exist to restore?  Must match the candidate
+    # chain the restore below walks, or the removal here outruns it.
+    #
+    # ORIGINAL_INSTALL_EXISTS is not that test: it is set from `[ -d INSTALL_DIR ]`
+    # alone, and embedded targets keep logs and cache under the install dir
+    # (K1: /usr/data/helixscreen/{logs,cache}), so the directory routinely
+    # predates a first install with no config in it.
+    _have_restore_candidate=false
+    if [ -n "${BACKUP_CONFIG:-}" ] && [ -s "$BACKUP_CONFIG" ]; then
+        _have_restore_candidate=true
+    elif [ -n "${INSTALL_BACKUP:-}" ] && { [ -f "${INSTALL_BACKUP}/config/settings.json" ] ||
+        [ -f "${INSTALL_BACKUP}/config/helixconfig.json" ] ||
+        [ -f "${INSTALL_BACKUP}/settings.json" ] ||
+        [ -f "${INSTALL_BACKUP}/helixconfig.json" ]; }; then
+        _have_restore_candidate=true
+    fi
+
+    # Remove the archive's settings.json only when a restore candidate exists.
+    # If the restore below then fails, we want the file to be MISSING so that
+    # Config::init()'s restore_from_backup() safety net kicks in.  Removing it
+    # with nothing to put back instead strands the app with no config at all -
+    # and on the preset platforms (k1/k2/cc1/ad5m/ad5x/snapmaker_u1, see
+    # mk/cross.mk) that file IS the platform preset carrying display rotation
+    # and hardware mapping.
     #
     # Note: helixscreen.env is NOT removed here — there is no Config::init
     # safety net for env files, and the restore step below uses `cp` which
@@ -1548,7 +1567,7 @@ extract_release() {
     # behaviors (user backup wins if present, bundled default stays otherwise).
     # Removing it caused the env file to disappear permanently across upgrades
     # when no backup existed (Pi user report 2026-05-13).
-    if [ "$ORIGINAL_INSTALL_EXISTS" = true ]; then
+    if [ "$_have_restore_candidate" = true ]; then
         rm -f "${INSTALL_DIR}/config/settings.json" 2>/dev/null
     fi
 
@@ -1578,9 +1597,26 @@ extract_release() {
             _restore_config_file "${INSTALL_BACKUP}/helixconfig.json" "$_config_dest" "settings.json from .old backup (legacy root location)"
         fi
     fi
-    if [ ! -f "$_config_dest" ] && [ "$ORIGINAL_INSTALL_EXISTS" = true ]; then
+    if [ ! -f "$_config_dest" ] && [ "$_have_restore_candidate" = true ]; then
         log_warn "Could not restore settings.json from any backup source!"
         log_warn "User configuration may have been lost."
+    fi
+
+    # Mark a packaged config the installer deliberately kept.
+    #
+    # A packaged settings.json is ambiguous to Config::init(): byte-for-byte the
+    # same document ships with a fresh install and is what Moonraker's type:web
+    # update leaves behind after its rmtree() destroys the user's copy.  Nothing
+    # inside the document, and neither the age nor the richness of the rolling
+    # backup, separates the two.  The installer can: it knows there was no user
+    # config here.  Moonraker never runs the installer and its rmtree() takes
+    # the marker with it, so an absent marker means the config was clobbered and
+    # Config::init() should restore the rolling backup over it.
+    _fresh_marker="${INSTALL_DIR}/config/.helix-fresh-install"
+    if [ "$_have_restore_candidate" = false ] && [ -f "$_config_dest" ]; then
+        $(file_sudo "${INSTALL_DIR}/config") touch "$_fresh_marker" 2>/dev/null || true
+    else
+        $(file_sudo "${INSTALL_DIR}/config") rm -f "$_fresh_marker" 2>/dev/null || true
     fi
 
     # Restore helixscreen.env — user may have customized HELIX_LOG_LEVEL,

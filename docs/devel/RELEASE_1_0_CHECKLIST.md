@@ -30,21 +30,45 @@ also cannot help if 1.1.0 > 1.0.0, which is exactly the dangerous case: publishi
 
 ## 2. Before tagging `v1.0.0`
 
-- [ ] Close or punt the open 1.0-milestone issues:
-  - #1201 — Toolchanger: `can_unload_from_toolhead` assumes one mounted tool; IDEX has two carriages
-  - #1065 — AD5X native ZMOD IFS: purge-timeout + Chan-authority/power-cycle gaps
-  - #986 — Sovol SV06 Ace bugs
-- [ ] `VERSION.txt`: `0.99.111` → `1.0.0`. Every existing install is on `0.99.x`,
+- [ ] Close the open 1.0-milestone issues:
+  - #1272 — Print stats between HS and Mainsail don't match (lifetime totals truncated
+    at the 500-job history cache)
+  - #1262 — Accelerometers never discovered: Settings > Sensors is empty on every
+    printer that has one
+  - #1260 — Orphaned printer presets: a DB entry with no `preset` key applies none
+    of its preset's settings
+- [ ] Green CI on `main`. `Build`, `esp32-build`, and the nightly suite were all red
+      on 2026-08-14; the first two have known causes and fixes, the nightly SIGSEGV in
+      `test_recovery_dialog_threading.cpp` is still unreproduced.
+- [ ] `VERSION.txt`: `0.99.113` → `1.0.0`. Every existing install is on `0.99.x`,
       so this is an ordinary forward step for the updater — no special handling.
-- [ ] Confirm the `ALLOW_CHANNEL_DOWNGRADE` repository variable is **unset**. It
+- [x] Confirm the `ALLOW_CHANNEL_DOWNGRADE` repository variable is **unset**. It
       is the escape hatch for the downgrade guard and must be off by default.
-- [ ] Decide on **tar.gz Phase 2**. Dropping tar.gz production is a separate,
-      telemetry-gated rollout that is *not* automatically part of 1.0 — Phase 1
-      (zip-primary manifest) shipped in `a8d2320ee`. Re-pull telemetry before
-      deciding; the last count was 3 of 510 active devices on pre-v0.99.31, none
-      self-updating. If Phase 2 is in scope for 1.0, `generate-manifest.sh` and
-      `dev-release.sh` must be converted off their `*.tar.gz` globs **in the same
-      change** as the `mk/cross.mk` / `release.yml` producer edits.
+      *Verified 2026-08-14 (`gh variable list`): not set.*
+- [x] **tar.gz Phase 2 — DEFERRED, not in 1.0.** Decided 2026-08-14 on fresh
+      telemetry (549 actives, 30d).
+
+      The pre-v0.99.31 count this item was written around is still tiny (3–5 of
+      549, ~0.5–0.9%, none meaningfully self-updating) — but it was never the
+      real gate. `scripts/generate-manifest.sh:36` sets
+      `ZIP_EXCLUDE_PLATFORMS="ad5m ad5x cc1 k1 k2 snapmaker-u1"`, six platforms
+      deliberately served tar.gz as their **only** manifest asset because
+      pre-v0.99.102 updaters verify with `unzip -tqq` and BusyBox lacks `unzip -t`
+      before 1.32 (K1 ships 1.31.1, AD5M 1.29.3, K2's OpenWrt has none — #993).
+      **Those six platforms are 344 of 549 actives, 62.7% of the fleet.** Dropping
+      tar.gz production today strands the majority, not the stragglers.
+
+      v0.99.102 (which fixes the verifier) shipped 2026-07-26; the 7-day view has
+      those fleets at 80–100% on 102+, but the 30-day view is 40–50%, and the
+      long-tail device that boots monthly is exactly the one that would brick.
+
+      **Decision rule for later: Phase 2 unblocks when `ZIP_EXCLUDE_PLATFORMS` is
+      empty**, not when the pre-v0.99.31 count reaches zero. Retire platforms from
+      that list one at a time as each fleet clears v0.99.102. Realistically 1.1+.
+
+      Caveat on all of the above: telemetry is opt-in and default OFF, so 549 is a
+      self-selected floor. The bias runs the wrong way — a user who disables
+      telemetry is plausibly the same user who does not update.
 
 ---
 
@@ -64,10 +88,13 @@ The two-track routing has never run end-to-end against real R2. Verify both.
       populated: `stable` uses `/releases/latest` (excludes prereleases —
       correct), `beta` scans for the first prerelease.
 
-**Known behaviour change to watch:** `stable` no longer publishes to the `dev`
-channel. Anyone currently pinned to Dev who is tracking the stable line stops
-receiving updates until a beta/devel release publishes. Check the Dev population
-first — telemetry reports `auto_update_channel`.
+**Known behaviour change — checked, nobody is affected.** `stable` no longer
+publishes to the `dev` channel, so anyone pinned to Dev while tracking the stable
+line would stop receiving updates. Telemetry 2026-08-14 (`auto_update_channel`
+from raw `settings_snapshot` events, 483 of 484 actives reporting):
+**Stable 453 (93.8%), Beta 30 (6.2%), Dev 0.** Re-confirmed on a 3-day August
+sample: Stable 34, Beta 2, Dev 0. Nobody is on Dev — consistent with the dropdown
+being a 7-tap easter egg. No action needed.
 
 ---
 
@@ -105,8 +132,31 @@ while running 0.99.111):
 
 - [ ] The downgrade path on a **real device**, not desktop mock. In particular the
       install actually completing and the older binary coming up on its own config.
-- [ ] A full devel → stable → devel config round trip with real settings. The unit
-      tests pin the version stamp and unknown-key survival
-      (`tests/unit/test_config_migration_future.cpp`); they do not prove every
-      individual migration is idempotent if a stamp is ever rolled back by some
-      other route.
+- [x] **A full devel → stable → devel config round trip — verified 2026-08-14, safe
+      for the reachable range.** `tests/unit/test_config_migration_future.cpp` now
+      carries 10 round-trip cases (tag `[config][migration][roundtrip]`) driving a
+      populated config — two printers, macros, LED auto-state maps, filament slot
+      overrides, widget layout, material presets, a captured touch affine. Rollback
+      to config_version 18/19/20 and back is **byte-identical on the whole
+      document**, and a sweep of 43 untargeted settings survives every rollback
+      depth. Mutation-verified.
+
+      **Five migrations are NOT idempotent**, and are pinned as current behavior
+      rather than fixed: `config.cpp:343` (jitter 15→5, fires below v3), `:446` and
+      `:488` (brightness 50→80, below v7/v9), `:457` (toolhead_style 2→5/3→2, a
+      rotation — below v8), `:812` (writes `recheck_pending` unconditionally, below
+      v18; the flag can invalidate a captured touch calibration at boot via
+      `should_invalidate_legacy_calibration`).
+
+      **Why this is accepted, not a blocker:** every one of them requires rolling
+      the stamp below config_version 18, i.e. below v0.99.80 (2026-06-18). The
+      in-app updater only ever offers what a channel's manifest serves — after the
+      cut that is 1.0.0 on stable and 1.1.x on beta — so reaching that range means
+      hand-installing a 2026-06 build. Not a path the product exposes. The
+      forward-compat guard (v0.99.112, `7e3d6f05d`) additionally stops a newer
+      config being stamped down at all, and both 1.0 and 1.1 carry it.
+
+      If a migration below v18 ever becomes reachable again, `:812` and `:457` are
+      the two to fix first — `:457` is a rotation and cannot be made idempotent
+      without a marker.
+

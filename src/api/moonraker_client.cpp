@@ -19,6 +19,7 @@
 
 #include "abort_manager.h"
 #include "app_globals.h"
+#include "callback_drain.h"
 #include "helix_version.h"
 #include "host_identity.h"
 #include "printer_state.h"
@@ -33,6 +34,11 @@ namespace {
 // Rate limiting flags for reconnection notifications
 std::atomic<bool> g_already_notified_max_attempts{false};
 std::atomic<bool> g_already_notified_disconnect{false};
+
+// How long disconnect() waits for in-flight callbacks to drain before giving up.
+// Generous enough that a merely slow callback still wins the race, short enough
+// that a wedged one costs a visible stutter instead of a dead touchscreen.
+constexpr std::chrono::milliseconds CALLBACK_DRAIN_TIMEOUT{3000};
 
 // "ws://192.168.1.171:7125/websocket" -> "192.168.1.171:7125". The bare
 // host:port is what a user can act on: compare it against the printer, or find
@@ -303,8 +309,32 @@ void MoonrakerClient::disconnect() {
     lifetime_guard_ = std::make_shared<bool>(true);
 
     // Wait for any in-flight callbacks to finish before we modify shared state.
-    // Callbacks hold a shared lock; acquiring exclusive blocks until they complete.
-    { std::unique_lock<std::shared_mutex> lk(callback_lifecycle_mutex_); }
+    // Callbacks hold a shared lock; acquiring exclusive waits until they complete.
+    //
+    // Bounded, unlike the destructor's drain. Callers reach this from the UI
+    // thread (printer switch, wizard, force_reconnect), and blocking that thread
+    // forever is a lit screen that ignores touch — a failure the watchdog cannot
+    // even see, because the process is still alive and merely parked in
+    // pthread_rwlock_wrlock.
+    //
+    // It is also the backstop for re-entry. A caller that already holds this
+    // mutex shared and then reaches disconnect() self-deadlocks outright, since
+    // std::shared_mutex is neither recursive nor upgradeable. on_ws_message()
+    // used to do exactly that on an oversized frame and now defers instead, but
+    // the bound is what keeps the next such caller to a logged stall rather than
+    // a dead event loop.
+    //
+    // A callback still running after this long is wedged, not slow, and blocking
+    // on it forever is the worse failure either way.
+    //
+    // Proceeding after a timeout does race that callback. lifetime_guard_ was
+    // already invalidated above, so it early-returns at its next guard check, but
+    // the window is real — hence the error log rather than a silent carry-on.
+    if (!helix::drain_shared_holders(callback_lifecycle_mutex_, CALLBACK_DRAIN_TIMEOUT)) {
+        spdlog::error("[Moonraker Client] In-flight callbacks still running after {}ms — "
+                      "proceeding with disconnect anyway",
+                      CALLBACK_DRAIN_TIMEOUT.count());
+    }
 
     // Now safe to stop timer and close — no callbacks can restart the timer or
     // access our state because the lifetime guard is invalidated.
@@ -562,7 +592,28 @@ void MoonrakerClient::on_ws_message(const std::string& msg) {
                                    msg.size()),
                        true);
 
-            disconnect();
+            // Deferred, not inline. disconnect() takes callback_lifecycle_mutex_
+            // exclusively, and the onmessage trampoline that called us still holds
+            // that same mutex SHARED on this very thread. std::shared_mutex is
+            // neither recursive nor upgradeable, so acquiring exclusive here is an
+            // unconditional self-deadlock of the event loop — the socket stops
+            // being serviced and every later request times out with no clue why.
+            //
+            // queueInLoop() rather than runInLoop(): the latter runs inline when
+            // already on the loop thread, which is exactly the case here and would
+            // reproduce the deadlock. Queuing lands it on the next loop iteration,
+            // after the trampoline has returned and dropped its shared lock.
+            if (auto l = loop()) {
+                l->queueInLoop([this, dg = std::weak_ptr<bool>(destruction_guard_)]() {
+                    // Same liveness contract as the trampolines: a null lock() means
+                    // the destructor already ran, so never touch `this`.
+                    auto live = dg.lock();
+                    if (!live || is_destroying_.load(std::memory_order_acquire)) {
+                        return;
+                    }
+                    disconnect();
+                });
+            }
             return;
         }
 

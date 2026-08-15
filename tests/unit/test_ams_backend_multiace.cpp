@@ -1159,3 +1159,232 @@ TEST_CASE_METHOD(HelixTestFixture, "a feeder head's unload keeps the plain Retra
     REQUIRE_FALSE(unload.steps.empty());
     CHECK(unload.steps.back().label == std::string("Retract"));
 }
+
+// ============================================================================
+// Dispatch in multi mode, one-map deltas, override refetch, change gating
+// ============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "multiACE multi mode dispatches a bay to its OWN head",
+                 "[ams][multiace][bay_load]") {
+    // In multi mode bay s feeds head s. The badge already said so (mapped_tool
+    // == s), but the dispatch resolved the head through the HEAD-MODE reverse
+    // lookup: with no head_ace map that answered -1 and every valid bay was
+    // refused; with the wiring the firmware persists across a mode switch it
+    // answered the FIRST head wired to the ACE, and bay 2's Load emitted
+    // HEAD=0 -- bay 2's filament fed toward head 0.
+    CapturingMultiAce backend;
+    json ace = json{{"mode", "multi"},
+                    {"device_count", 1},
+                    {"head_feeder", {{"0", false}, {"1", false}, {"2", false}, {"3", false}}},
+                    {"aces", json::array({json{{"idx", 0},
+                                               {"connected", true},
+                                               {"gate_status", json::array({1, 1, 1, 1})}}})}};
+
+    SECTION("with no head_ace map at all") {
+        backend.handle_status_update(wrap(ace));
+    }
+    SECTION("with the head-mode wiring the firmware keeps across a mode switch") {
+        ace["head_ace"] = json{{"0", 0}, {"1", 0}, {"2", 0}, {"3", 0}};
+        backend.handle_status_update(wrap(ace));
+    }
+
+    // Global slot 6 = ACE 0, bay 2. The badge and the dispatch must agree.
+    REQUIRE(backend.get_system_info().units[1].slots[2].mapped_tool == 2);
+    auto bay = backend.bay_source(6);
+    REQUIRE(bay.has_value());
+    CHECK(bay->head == 2);
+
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.load_filament(6).success());
+    REQUIRE(backend.captured_gcodes.size() == 1);
+    CHECK(backend.captured_gcodes[0] == "ACE_LOAD_HEAD HEAD=2 ACE=0 SLOT=2");
+
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.unload_filament(6).success());
+    REQUIRE(backend.captured_gcodes.size() == 1);
+    CHECK(backend.captured_gcodes[0] == "ACE_UNLOAD_HEAD HEAD=2");
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "multiACE keeps feeder heads across a ONE-map delta",
+                 "[ams][multiace]") {
+    // Klippy diffs `ace` per field, and head_manual / head_feeder are separate
+    // fields: toggling a head between ACE and MANUAL resends head_manual alone
+    // while head_feeder, value-identical, is omitted. Deciding the kind from the
+    // frame's own maps read the absent one as all-false, and every stock-feeder
+    // head became ACE-fed -- the wrong command path, and preload_finish then
+    // ended their native unload early. The live frame has heads 0-2 on feeders.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    REQUIRE(backend.head_source_kind(0) == HeadSource::FEEDER);
+    REQUIRE(backend.head_source_kind(3) == HeadSource::ACE);
+
+    SECTION("head_manual alone: head 3 goes manual, the feeder heads stay feeder") {
+        backend.handle_status_update(
+            wrap(json{{"head_manual", {{"0", false}, {"1", false}, {"2", false}, {"3", true}}}}));
+        CHECK(backend.head_source_kind(3) == HeadSource::MANUAL);
+        CHECK(backend.head_source_kind(0) == HeadSource::FEEDER);
+        CHECK(backend.head_source_kind(1) == HeadSource::FEEDER);
+        CHECK(backend.head_source_kind(2) == HeadSource::FEEDER);
+
+        // ...and back to ACE, again with head_manual alone.
+        backend.handle_status_update(
+            wrap(json{{"head_manual", {{"0", false}, {"1", false}, {"2", false}, {"3", false}}}}));
+        CHECK(backend.head_source_kind(3) == HeadSource::ACE);
+        CHECK(backend.head_source_kind(0) == HeadSource::FEEDER);
+    }
+
+    SECTION("head_feeder alone: head 2 leaves its feeder, head 3 stays ACE") {
+        backend.handle_status_update(
+            wrap(json{{"head_feeder", {{"0", true}, {"1", true}, {"2", false}, {"3", false}}}}));
+        CHECK(backend.head_source_kind(2) == HeadSource::ACE);
+        CHECK(backend.head_source_kind(0) == HeadSource::FEEDER);
+        CHECK(backend.head_source_kind(3) == HeadSource::ACE);
+    }
+
+    SECTION("the behavioural half: a feeder head still takes the native path") {
+        backend.handle_status_update(
+            wrap(json{{"head_manual", {{"0", false}, {"1", false}, {"2", false}, {"3", false}}}}));
+        backend.captured_gcodes.clear();
+        REQUIRE(backend.load_filament(0).success());
+        REQUIRE(backend.captured_gcodes.size() == 1);
+        CHECK(backend.captured_gcodes[0].find("ACE_") == std::string::npos);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "multiACE emits on a vendor-only spool edit",
+                 "[ams][multiace][spools]") {
+    // The change detection spelled out five of BaySpool's seven fields and left
+    // `vendor` out: correcting a spool's brand in multiACE updated the cache and
+    // told nobody, so the bay kept its old brand until something else moved.
+    // Observable directly now that the unit rebuild only runs on a change.
+    CapturingMultiAce backend;
+    int state_events = 0;
+    backend.set_event_callback([&](const std::string& name, const std::string&) {
+        if (name == AmsBackend::EVENT_STATE_CHANGED) {
+            ++state_events;
+        }
+    });
+    auto spool = [](const char* vendor) {
+        return json{{"15", json{{"id", "15"},
+                                {"material", "PETG"},
+                                {"vendor", vendor},
+                                {"color", "83AFFF"},
+                                {"label", "Silver"},
+                                {"spoolman_id", "15"}}}};
+    };
+    backend.handle_status_update(
+        wrap(json{{"mode", "head"},
+                  {"device_count", 1},
+                  {"head_ace", {{"0", 0}, {"1", 1}, {"2", 2}, {"3", 0}}},
+                  {"head_feeder", {{"0", true}, {"1", true}, {"2", true}, {"3", false}}},
+                  {"aces", json::array({json{{"idx", 0}, {"connected", true}}})},
+                  {"spool_binding", {{"0_0", "15"}}},
+                  {"spools", spool("Generic")}}));
+    REQUIRE(backend.get_system_info().units[1].slots[0].brand == "Generic");
+    const int before = state_events;
+
+    backend.handle_status_update(wrap(json{{"spools", spool("Polymaker")}}));
+    CHECK(backend.get_system_info().units[1].slots[0].brand == "Polymaker");
+    CHECK(state_events == before + 1);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "multiACE stays quiet on an aces frame that changes nothing",
+                 "[ams][multiace]") {
+    // Klippy resends the whole `aces` array whenever ONE element's field ticks,
+    // and every entry used to be marked changed unconditionally -- a dryer's
+    // temperature ramp forced a full AmsState resync and UI rebuild per frame.
+    // "An entry was present" is not "an entry changed".
+    CapturingMultiAce backend;
+    int state_events = 0;
+    backend.set_event_callback([&](const std::string& name, const std::string&) {
+        if (name == AmsBackend::EVENT_STATE_CHANGED) {
+            ++state_events;
+        }
+    });
+    const json ace = live_ace_object();
+    backend.handle_status_update(wrap(ace));
+    const int after_first = state_events;
+    REQUIRE(after_first >= 1);
+
+    // The identical inventory again: nothing moved, nothing to say.
+    backend.handle_status_update(wrap(json{{"aces", ace["aces"]}}));
+    CHECK(state_events == after_first);
+
+    // One degree on one unit IS a change, and still emits exactly once.
+    json warmer = ace["aces"];
+    warmer[0]["temp"] = warmer[0].value("temp", 0) + 1;
+    backend.handle_status_update(wrap(json{{"aces", warmer}}));
+    CHECK(state_events == after_first + 1);
+}
+
+namespace {
+
+/// Holds the override download's callbacks so the test can complete them in
+/// the order it needs -- the in-flight/re-issue rule cannot be seen otherwise.
+class RefetchMultiAce : public CapturingMultiAce {
+  public:
+    struct Pending {
+        std::function<void(const std::string&)> on_success;
+        std::function<void(const MoonrakerError&)> on_error;
+    };
+    std::vector<Pending> downloads;
+
+  protected:
+    void download_slot_overrides(std::function<void(const std::string&)> on_success,
+                                 std::function<void(const MoonrakerError&)> on_error) override {
+        downloads.push_back({std::move(on_success), std::move(on_error)});
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLTestFixture, "multiACE re-fetches overrides that moved while a fetch was out",
+                 "[ams][multiace][spools]") {
+    // Two quick edits in multiACE's web UI: event_seq 5 starts the download of
+    // slot_overrides.json, event_seq 6 lands during the round-trip. The seq was
+    // recorded as fetched and the fetch skipped as in-flight, so the pre-edit-2
+    // file was applied and nothing ever asked again -- the bay showed a stale
+    // material until some unrelated bump. The completion of the FIRST fetch
+    // must re-issue.
+    RefetchMultiAce backend;
+    const json base = json{{"mode", "head"},
+                           {"device_count", 1},
+                           {"head_ace", {{"0", 0}, {"1", 1}, {"2", 2}, {"3", 0}}},
+                           {"head_feeder", {{"0", true}, {"1", true}, {"2", true}, {"3", false}}},
+                           {"aces", json::array({json{{"idx", 0}, {"connected", true}}})}};
+
+    json first = base;
+    first["event_seq"] = 5;
+    backend.handle_status_update(wrap(first));
+    REQUIRE(backend.downloads.size() == 1); // fetch for seq 5 goes out
+
+    json second = base;
+    second["event_seq"] = 6;
+    backend.handle_status_update(wrap(second));
+    CHECK(backend.downloads.size() == 1); // still in flight: nothing new yet
+
+    // A frame with the SAME seq must not be what re-arms it -- that was the
+    // comment's claim, and no such frame ever changes the answer.
+    backend.handle_status_update(wrap(second));
+    CHECK(backend.downloads.size() == 1);
+
+    SECTION("completion re-issues") {
+        backend.downloads[0].on_success(R"({"0_0": {"material": "PETG", "brand": "Old"}})");
+        helix::ui::UpdateQueue::instance().drain();
+        REQUIRE(backend.downloads.size() == 2);
+
+        // The second answer is what the bay ends up showing.
+        backend.downloads[1].on_success(R"({"0_0": {"material": "ASA", "brand": "New"}})");
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(backend.get_system_info().units[1].slots[0].material == "ASA");
+        CHECK(backend.downloads.size() == 2); // ...and it does not loop
+    }
+
+    SECTION("a failed fetch re-issues too") {
+        MoonrakerError err;
+        err.message = "not found";
+        backend.downloads[0].on_error(err);
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(backend.downloads.size() == 2);
+    }
+}

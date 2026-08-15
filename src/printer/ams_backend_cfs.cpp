@@ -2108,22 +2108,31 @@ std::string AmsBackendCfs::load_gcode(int idx, CfsMacroVariant variant) {
         return "";
     }
     if (variant == CfsMacroVariant::K1) {
-        // K1 official CFS upgrade firmware — fresh load, nozzle empty. Mirrors
-        // the firmware orchestrator BOX_LOAD_MATERIAL_WITHOUT_MATERIAL step
-        // list with explicit TNN= (the box's bare-macro "current TN" set via
-        // BOX_MODIFY_TN no-ops on K1, per the reporter):
-        //   ERROR_CLEAR → CHECK_MATERIAL → EXTRUDE → EXTRUDER_EXTRUDE → FLUSH
+        // K1 official CFS upgrade firmware — fresh load, nozzle empty. The feed
+        // steps follow the firmware's BOX_LOAD_MATERIAL_WITHOUT_MATERIAL chain
+        //   (M104 → CHECK_MATERIAL → EXTRUDE → EXTRUDER_EXTRUDE → FLUSH),
+        // but this is not a literal mirror of it: we carry explicit TNN= on the
+        // two commands that take it (the box's bare-macro "current TN" set via
+        // BOX_MODIFY_TN no-ops on K1, per the reporter), and BOX_GO_TO_EXTRUDE_POS
+        // plus the trailing BOX_NOZZLE_CLEAN are ours — the WITHOUT_MATERIAL
+        // macro has neither. Both commands are defined in box.cfg and used by
+        // the WITH_MATERIAL chain.
+        //
+        // BOX_MATERIAL_FLUSH is emitted BARE. It has no TNN parameter: box.cfg
+        // documents it as `BOX_MATERIAL_FLUSH LEN=100 VELOCITY=360 TEMP=220`,
+        // and cmd_material_flush reads only LEN/VELOCITY/TEMP, defaulting from
+        // the [box] Tn_retrude / Tn_extrude_velocity / Tn_extrude_temp keys.
+        //
         // BOX_EXTRUDER_EXTRUDE is the root-cause fix for "no auto-extrude after
         // load" (#968): the firmware's WITHOUT_MATERIAL chain drives the main
         // extruder after the cassette feed, and we previously omitted it.
         // Homing is handled upstream by dispatch_action_script; do NOT add
         // IF_NEED_HOME here. Envelope (wrap_with_envelope_k1) adds ERROR_CLEAR /
-        // CHECK_MATERIAL / MOVE_TO_SAFE_POS; the body carries positioning, the
-        // feed steps, and the post-feed wipe. All commands confirmed in box.cfg.
+        // CHECK_MATERIAL / MOVE_TO_SAFE_POS.
         return wrap_with_envelope_k1("BOX_GO_TO_EXTRUDE_POS\n"
                                      "BOX_EXTRUDE_MATERIAL TNN=" +
                                      tnn + "\nBOX_EXTRUDER_EXTRUDE TNN=" + tnn +
-                                     "\nBOX_MATERIAL_FLUSH TNN=" + tnn + "\nBOX_NOZZLE_CLEAN");
+                                     "\nBOX_MATERIAL_FLUSH\nBOX_NOZZLE_CLEAN");
     }
     // Use CR_BOX_* commands directly — M8200 macro's Jinja2 `params.I|int` is broken
     // on Creality's Klipper fork (always evaluates to 0, loading T1A regardless of I= value).
@@ -2187,21 +2196,22 @@ std::string AmsBackendCfs::swap_gcode(int idx, CfsMacroVariant variant) {
         return "";
     }
     if (variant == CfsMacroVariant::K1) {
-        // K1: nozzle loaded — mirror the firmware BOX_LOAD_MATERIAL_WITH_MATERIAL
-        // step list with explicit TNN=:
+        // K1: nozzle loaded — follows the firmware BOX_LOAD_MATERIAL_WITH_MATERIAL
+        // step list, with explicit TNN= on the commands that take it:
         //   ERROR_CLEAR → CHECK_MATERIAL → CUT → RETRUDE → GO_TO_EXTRUDE_POS →
         //   NOZZLE_CLEAN → EXTRUDE → EXTRUDER_EXTRUDE → FLUSH → safe park.
         // No BOX_MODE_WAIT on K1 firmware. BOX_EXTRUDER_EXTRUDE between EXTRUDE
         // and FLUSH is the same auto-extrude fix as the fresh-load path (#968).
         // Wipe (NOZZLE_CLEAN) precedes the new feed here exactly as the firmware
-        // WITH_MATERIAL chain does. Homing handled upstream.
+        // WITH_MATERIAL chain does. BOX_MATERIAL_FLUSH is bare — it takes
+        // LEN/VELOCITY/TEMP only, never TNN. Homing handled upstream.
         return wrap_with_envelope_k1("BOX_CUT_MATERIAL\n"
                                      "BOX_RETRUDE_MATERIAL\n"
                                      "BOX_GO_TO_EXTRUDE_POS\n"
                                      "BOX_NOZZLE_CLEAN\n"
                                      "BOX_EXTRUDE_MATERIAL TNN=" +
                                      tnn + "\nBOX_EXTRUDER_EXTRUDE TNN=" + tnn +
-                                     "\nBOX_MATERIAL_FLUSH TNN=" + tnn);
+                                     "\nBOX_MATERIAL_FLUSH");
     }
     // Full swap: unload current (cut+retract) then load new slot, all in one
     // session. BOX_MODE_WAIT interposed after CR_BOX_CUT (let the cutter

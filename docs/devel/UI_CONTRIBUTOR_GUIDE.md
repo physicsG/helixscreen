@@ -595,6 +595,8 @@ Remove the debug styles before submitting your PR.
 
 Our theme makes `lv_obj` a pure layout container by default: transparent background, no border, no padding, sized to content. You don't need to clear any of these -- just use `lv_obj` as a flexbox wrapper and it stays invisible.
 
+**Scrolling is the exception.** Our theme does not touch `LV_OBJ_FLAG_SCROLLABLE`, and LVGL's own default for it is ON. A wrapper you think of as inert can still absorb drags and pick up a page-scroll gutter. Add `scrollable="false"` on any container that is not a real scroll region.
+
 ### Common Gotchas
 
 | Wrong | Right | Why |
@@ -607,6 +609,7 @@ Our theme makes `lv_obj` a pure layout container by default: transparent backgro
 | Hardcoded `style_text_font="..."` | `<text_body>` | Use semantic typography components |
 | `style_bg_color="#2e3440"` | `style_bg_color="#screen_bg"` | Use color tokens, not hex values |
 | `width="#overlay_width_destination"` | *(no width attribute)* | Overlay width is resolved at push time |
+| `<lv_obj>` layout wrapper with no `scrollable` attribute | `<lv_obj scrollable="false">` | LVGL's scrollable default is ON and our theme does not override it, so the wrapper absorbs drags and can get a page-scroll gutter |
 | `height="100%"` inside a `height="content"` parent | `height="content"` | The two depend on each other and both collapse to zero |
 | `flex_grow` on children of a `*_wrap` container | percentage widths + `style_flex_main_place="space_between"` | Grow items contribute zero base size, so nothing ever wraps |
 | `<style flex_flow="row"/>` | `<style layout="flex" flex_flow="row"/>` | `flex_flow` in a style is inert without `layout="flex"` |

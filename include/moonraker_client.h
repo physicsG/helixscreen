@@ -791,6 +791,8 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
     // Callback synchronization mutex
     // Callbacks take a shared (read) lock; the destructor takes an exclusive (write) lock.
     // This ensures all in-flight callbacks complete before destruction proceeds.
+    // disconnect() drains this from the UI thread via drain_shared_holders(), which is
+    // bounded — an unbounded acquire there freezes the main loop permanently.
     mutable std::shared_mutex callback_lifecycle_mutex_;
 
     bool ws_callbacks_installed_ =

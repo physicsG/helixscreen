@@ -401,19 +401,22 @@ void ams_detail_update_tray(AmsDetailWidgets& w) {
     lv_obj_set_height(w.slot_tray, total_height);
     lv_obj_align(w.slot_tray, LV_ALIGN_BOTTOM_MID, 0, 0);
 
-    // Attach draw callbacks once per object instance.
-    // Use LV_OBJ_FLAG_USER_1 as guard — user_data may already be set by XML (L069).
+    // Attach draw callbacks once per object instance. This function runs on every
+    // panel rebuild, so remove-then-add is what keeps it idempotent:
+    // lv_obj_remove_event_cb() strips every prior registration of that callback
+    // function, leaving exactly one after the add. No object flag is involved -
+    // LV_OBJ_FLAG_USER_1 belongs to ui_dialog, which uses it to mark a dialog root
+    // so ThemeManager::is_on_elevated_surface() can find it by walking parents.
+    // Neither caller invokes this from inside a draw dispatch of these objects, so
+    // mutating their event lists here is safe.
 
     // Back wall on slot_grid (DRAW_MAIN = behind spool children)
-    if (!lv_obj_has_flag(w.slot_grid, LV_OBJ_FLAG_USER_1)) {
-        lv_obj_add_flag(w.slot_grid, LV_OBJ_FLAG_USER_1);
-        lv_obj_add_event_cb(w.slot_grid, tray_back_draw_cb, LV_EVENT_DRAW_MAIN, nullptr);
-    }
+    lv_obj_remove_event_cb(w.slot_grid, tray_back_draw_cb);
+    lv_obj_add_event_cb(w.slot_grid, tray_back_draw_cb, LV_EVENT_DRAW_MAIN, nullptr);
+
     // Front face + side walls on slot_tray (IN FRONT of spools)
-    if (!lv_obj_has_flag(w.slot_tray, LV_OBJ_FLAG_USER_1)) {
-        lv_obj_add_flag(w.slot_tray, LV_OBJ_FLAG_USER_1);
-        lv_obj_add_event_cb(w.slot_tray, tray_front_draw_cb, LV_EVENT_DRAW_POST, nullptr);
-    }
+    lv_obj_remove_event_cb(w.slot_tray, tray_front_draw_cb);
+    lv_obj_add_event_cb(w.slot_tray, tray_front_draw_cb, LV_EVENT_DRAW_POST, nullptr);
 
     spdlog::debug("[AmsDetail] Tray 3D box: {}px front, depth={}, dx={}, dy={}", tray_height, depth,
                   dx, dy);
@@ -550,8 +553,17 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
     // Plumb per-slot metadata (mapped_tool, extruder identity, hub routing) to
     // path canvas. The extruder name is what actually names a toolhead; the
     // mapped_tool alias stays as the fallback for backends that publish neither.
-    if (unit_index >= 0 && unit_index < static_cast<int>(info.units.size())) {
-        const auto& unit = info.units[unit_index];
+    //
+    // mapped_tool and the extruder identity go to the WHOLE-SYSTEM view too
+    // (slot_offset 0, every slot): the badges are the same rule there, and the
+    // toolhead menu reads the tapped badge's number back off the canvas, so an
+    // unplumbed whole-system view badged a remapped lane with its lane index
+    // and the menu then acted on the head that number really names. Only hub
+    // routing is a per-unit property and stays unit-scoped.
+    {
+        const AmsUnit* unit = (unit_index >= 0 && unit_index < static_cast<int>(info.units.size()))
+                                  ? &info.units[static_cast<size_t>(unit_index)]
+                                  : nullptr;
         std::vector<int> extruder_tools(static_cast<size_t>(slot_count), -1);
         for (int i = 0; i < slot_count; ++i) {
             int gi = slot_offset + i;
@@ -560,8 +572,8 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
             if (const auto n = helix::tool_number_for_extruder(slot.extruder_name)) {
                 extruder_tools[static_cast<size_t>(i)] = *n;
             }
-            if (i < static_cast<int>(unit.lane_is_hub_routed.size())) {
-                ui_filament_path_canvas_set_slot_hub_routed(canvas, i, unit.lane_is_hub_routed[i]);
+            if (unit && i < static_cast<int>(unit->lane_is_hub_routed.size())) {
+                ui_filament_path_canvas_set_slot_hub_routed(canvas, i, unit->lane_is_hub_routed[i]);
             }
         }
         ui_filament_path_canvas_set_extruder_tools(canvas, extruder_tools.data(), slot_count);

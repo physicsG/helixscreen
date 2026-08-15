@@ -639,6 +639,42 @@ SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const Ams
 
     result.total_physical_tools = total_physical;
 
+    // Which of its nozzles each unit actually FEEDS. Decided after every unit is
+    // placed, because a unit's slots resolve to physical nozzles through the
+    // finished virtual_to_physical map. One backend query per slot: a slot
+    // whose identity is owned by another unit (an ACE-fed U1 head) clears the
+    // bit for the nozzle it maps to. Without a backend nothing is owned
+    // elsewhere and every bit stays set.
+    for (size_t i = 0; i < result.units.size() && i < info.units.size(); ++i) {
+        auto& utl = result.units[i];
+        uint32_t mask = 0;
+        for (int t = 0; t < utl.tool_count && t < 32; ++t) {
+            mask |= (1u << t);
+        }
+        if (backend) {
+            const auto& unit = info.units[i];
+            for (size_t sl = 0; sl < unit.slots.size(); ++sl) {
+                const auto& slot = unit.slots[sl];
+                if (slot.mapped_tool < 0) {
+                    continue;
+                }
+                auto it = result.virtual_to_physical.find(slot.mapped_tool);
+                if (it == result.virtual_to_physical.end()) {
+                    continue;
+                }
+                const int t = it->second - utl.first_physical_tool;
+                if (t < 0 || t >= utl.tool_count || t >= 32) {
+                    continue;
+                }
+                if (backend->slot_identity_owner_unit(unit.first_slot_global_index +
+                                                      static_cast<int>(sl))) {
+                    mask &= ~(1u << t);
+                }
+            }
+        }
+        utl.feeds_mask = mask;
+    }
+
     // Build physical→virtual label map
     result.physical_to_virtual_label.resize(total_physical, -1);
     for (const auto& utl : result.units) {

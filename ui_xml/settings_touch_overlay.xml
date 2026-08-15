@@ -11,7 +11,7 @@
             style_pad_bottom="#space_lg" scrollable="true" flex_flow="column">
       <!-- All touch settings live in a single grouped-list card (no section
            headers in this overlay); the card owns the horizontal inset. -->
-      <setting_group>
+      <setting_group name="group_touch">
         <setting_action_row name="row_touch_calibration"
                             label="Touch Calibration" label_tag="Touch Calibration" icon="cursor_move"
                             callback="on_touch_calibration_clicked">

@@ -33,16 +33,14 @@ std::map<int, SpoolInfo> fetch_mock_spools() {
     return by_id;
 }
 
-/// Does the mocked firmware report a vendor of its own?
-///
-/// AFC does not: read_vendor() in ams_backend_afc.cpp has nothing to read until
-/// upstream AFC #808 ships, so a real lane's brand is empty and the vendor can
-/// only come from the Spoolman identity cache. Mocking a brand onto the slot
-/// there hides exactly the bug #1264 was.
-enum class FirmwareVendor { Reported, Absent };
-
-void check_backend_against_spoolman(AmsBackendMock& mock, int slot_count,
-                                    FirmwareVendor vendor = FirmwareVendor::Reported) {
+/// No mocked backend reports a vendor from firmware, because none of the real
+/// ones do: AFC's read_vendor() has nothing to read until upstream AFC #808
+/// ships, and Happy Hare's gate map cannot carry a brand at all. The vendor
+/// reaches the label through the Spoolman identity cache instead, so a slot that
+/// carries its own brand is mocking something hardware never sends -- which is
+/// what hid #1264. (CFS, Snapmaker and QIDI do read a vendor from firmware, but
+/// none of them has a mock backend.)
+void check_backend_against_spoolman(AmsBackendMock& mock, int slot_count) {
     auto spools = fetch_mock_spools();
     REQUIRE(!spools.empty());
 
@@ -57,13 +55,9 @@ void check_backend_against_spoolman(AmsBackendMock& mock, int slot_count,
         const SpoolInfo& spool = it->second;
 
         CHECK(slot.material == spool.material);
-        if (vendor == FirmwareVendor::Reported) {
-            CHECK(slot.brand == spool.vendor);
-        } else {
-            // The Spoolman record still knows the vendor; the slot must not.
-            CHECK(slot.brand.empty());
-            CHECK(!spool.vendor.empty());
-        }
+        // The Spoolman record still knows the vendor; the slot must not.
+        CHECK(slot.brand.empty());
+        CHECK(!spool.vendor.empty());
         // Spoolman's filament.name is a filament name, not a colour word, so it
         // lands on spool_name. SlotInfo::color_name stays a colour label and is
         // left unset by apply_spool_to_slot — the label resolver derives one
@@ -85,12 +79,13 @@ TEST_CASE("AFC mock slots match mock Spoolman spools (spec §9 drift)",
           "[mock][spoolman][ams_edit_overlay]") {
     AmsBackendMock mock(8);
     mock.set_afc_mode(true);
-    check_backend_against_spoolman(mock, 8, FirmwareVendor::Absent);
+    check_backend_against_spoolman(mock, 8);
 }
 
 TEST_CASE("Happy Hare mock slots match mock Spoolman spools (spec §9 drift)",
           "[mock][spoolman][ams_edit_overlay]") {
     AmsBackendMock mock(8);
+    // Happy Hare reports no vendor either: its gate map cannot carry one.
     check_backend_against_spoolman(mock, 8);
 }
 

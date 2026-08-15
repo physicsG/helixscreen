@@ -15,6 +15,7 @@
 #include "filament_database.h"
 #include "filament_op_slot_resolver.h"
 #include "printer_state.h"
+#include "static_subject_registry.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -23,82 +24,55 @@ namespace helix::ui {
 
 // Static member initialization
 bool AmsContextMenu::callbacks_registered_ = false;
+lv_subject_t AmsContextMenu::s_slot_is_loaded_subject_;
+lv_subject_t AmsContextMenu::s_slot_can_load_subject_;
+lv_subject_t AmsContextMenu::s_slot_source_external_subject_;
+bool AmsContextMenu::s_subjects_initialized_ = false;
 
 // ============================================================================
 // Construction / Destruction
 // ============================================================================
 
 AmsContextMenu::AmsContextMenu() {
-    // Initialize subjects for button enabled states
-    lv_subject_init_int(&slot_is_loaded_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_slot_is_loaded", &slot_is_loaded_subject_);
-
-    lv_subject_init_int(&slot_can_load_subject_, 1);
-    lv_xml_register_subject(nullptr, "ams_slot_can_load", &slot_can_load_subject_);
-
-    lv_subject_init_int(&slot_source_external_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_slot_source_external", &slot_source_external_subject_);
-
-    subject_initialized_ = true;
+    init_subjects();
     spdlog::debug("[AmsContextMenu] Constructed");
 }
 
+void AmsContextMenu::init_subjects() {
+    if (s_subjects_initialized_ || !lv_is_initialized()) {
+        return;
+    }
+    // Subjects for button enabled states -- one set for every instance; see the
+    // header for why.
+    lv_subject_init_int(&s_slot_is_loaded_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_slot_is_loaded", &s_slot_is_loaded_subject_);
+
+    lv_subject_init_int(&s_slot_can_load_subject_, 1);
+    lv_xml_register_subject(nullptr, "ams_slot_can_load", &s_slot_can_load_subject_);
+
+    lv_subject_init_int(&s_slot_source_external_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_slot_source_external", &s_slot_source_external_subject_);
+
+    s_subjects_initialized_ = true;
+    // Torn down with every other static subject: after the panels (and so every
+    // card bound to these) are gone, before lv_deinit().
+    StaticSubjectRegistry::instance().register_deinit("AmsContextMenu", deinit_subjects);
+}
+
+void AmsContextMenu::deinit_subjects() {
+    if (!s_subjects_initialized_) {
+        return;
+    }
+    lv_subject_deinit(&s_slot_is_loaded_subject_);
+    lv_subject_deinit(&s_slot_can_load_subject_);
+    lv_subject_deinit(&s_slot_source_external_subject_);
+    s_subjects_initialized_ = false;
+}
+
 AmsContextMenu::~AmsContextMenu() {
-    // Clean up subjects
-    if (subject_initialized_ && lv_is_initialized()) {
-        lv_subject_deinit(&slot_is_loaded_subject_);
-        lv_subject_deinit(&slot_can_load_subject_);
-        lv_subject_deinit(&slot_source_external_subject_);
-        subject_initialized_ = false;
-    }
+    // The subjects are the class's, not this instance's, and outlive it; the
+    // base destructor takes the widget tree down.
     spdlog::trace("[AmsContextMenu] Destroyed");
-}
-
-AmsContextMenu::AmsContextMenu(AmsContextMenu&& other) noexcept
-    : ContextMenu(std::move(other)), action_callback_(std::move(other.action_callback_)),
-      subject_initialized_(other.subject_initialized_), backend_(other.backend_),
-      total_slots_(other.total_slots_), tool_dropdown_(other.tool_dropdown_),
-      backup_dropdown_(other.backup_dropdown_), pending_is_loaded_(other.pending_is_loaded_) {
-    // Transfer subject ownership
-    if (other.subject_initialized_) {
-        slot_is_loaded_subject_ = other.slot_is_loaded_subject_;
-        slot_can_load_subject_ = other.slot_can_load_subject_;
-        slot_source_external_subject_ = other.slot_source_external_subject_;
-    }
-    other.backend_ = nullptr;
-    other.total_slots_ = 0;
-    other.tool_dropdown_ = nullptr;
-    other.backup_dropdown_ = nullptr;
-    other.subject_initialized_ = false;
-}
-
-AmsContextMenu& AmsContextMenu::operator=(AmsContextMenu&& other) noexcept {
-    if (this != &other) {
-        // Let base class handle its state, including the active-menu registry
-        ContextMenu::operator=(std::move(other));
-
-        action_callback_ = std::move(other.action_callback_);
-        backend_ = other.backend_;
-        total_slots_ = other.total_slots_;
-        tool_dropdown_ = other.tool_dropdown_;
-        backup_dropdown_ = other.backup_dropdown_;
-        pending_is_loaded_ = other.pending_is_loaded_;
-
-        // Transfer subject ownership
-        if (other.subject_initialized_) {
-            slot_is_loaded_subject_ = other.slot_is_loaded_subject_;
-            slot_can_load_subject_ = other.slot_can_load_subject_;
-            slot_source_external_subject_ = other.slot_source_external_subject_;
-        }
-        subject_initialized_ = other.subject_initialized_;
-
-        other.backend_ = nullptr;
-        other.total_slots_ = 0;
-        other.tool_dropdown_ = nullptr;
-        other.backup_dropdown_ = nullptr;
-        other.subject_initialized_ = false;
-    }
-    return *this;
 }
 
 // ============================================================================
@@ -111,8 +85,10 @@ void AmsContextMenu::set_action_callback(ActionCallback callback) {
 
 bool AmsContextMenu::show_near_widget(lv_obj_t* parent, int slot_index, lv_obj_t* near_widget,
                                       bool is_loaded, AmsBackend* backend) {
-    // Register callbacks once (idempotent)
+    // Register callbacks and the class's subjects once (both idempotent; the
+    // subjects again here in case this was constructed before LVGL was up).
     register_callbacks();
+    init_subjects();
 
     // Store AMS-specific state BEFORE base class calls on_created
     backend_ = backend;
@@ -135,8 +111,9 @@ bool AmsContextMenu::show_near_widget(lv_obj_t* parent, int slot_index, lv_obj_t
 }
 
 bool AmsContextMenu::show_for_external_spool(lv_obj_t* parent, lv_obj_t* anchor_widget) {
-    // Register callbacks once (idempotent)
+    // Register callbacks and the class's subjects once (both idempotent)
     register_callbacks();
+    init_subjects();
 
     // Configure for external spool mode (no backend operations)
     backend_ = nullptr;
@@ -180,7 +157,7 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
             source_owner_unit_ = *owner;
         }
     }
-    lv_subject_set_int(&slot_source_external_subject_, source_owner_unit_ >= 0 ? 1 : 0);
+    lv_subject_set_int(&s_slot_source_external_subject_, source_owner_unit_ >= 0 ? 1 : 0);
     spdlog::debug("[AmsContextMenu] slot {} identity owner unit = {} (backend={})", slot_index,
                   source_owner_unit_, backend_ ? "yes" : "null");
 
@@ -195,8 +172,8 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
             lv_obj_add_flag(btn_unload, LV_OBJ_FLAG_HIDDEN);
 
         // Disable subject-driven states so hidden buttons stay hidden
-        lv_subject_set_int(&slot_is_loaded_subject_, 0);
-        lv_subject_set_int(&slot_can_load_subject_, 0);
+        lv_subject_set_int(&s_slot_is_loaded_subject_, 0);
+        lv_subject_set_int(&s_slot_can_load_subject_, 0);
 
         // Set header to "External Spool"
         lv_obj_t* slot_header = lv_obj_find_by_name(menu_obj, "slot_header");
@@ -312,7 +289,7 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     const bool unload_enabled =
         decide_unload_enabled(system_busy, unload_mode_, print_blocks_op,
                               backend_ && backend_->cold_lane_ops_refused_during_print());
-    lv_subject_set_int(&slot_is_loaded_subject_, unload_enabled ? 1 : 0);
+    lv_subject_set_int(&s_slot_is_loaded_subject_, unload_enabled ? 1 : 0);
 
     lv_obj_t* btn_unload = lv_obj_find_by_name(menu_obj, "btn_unload");
     if (btn_unload) {
@@ -356,7 +333,7 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // Disable Load if: system busy, slot empty, OR filament is already at the head.
     bool can_load = decide_can_load(system_busy, toolhead_unload, slot_has_filament,
                                     print_blocks_op, source_owner_unit_ >= 0);
-    lv_subject_set_int(&slot_can_load_subject_, can_load ? 1 : 0);
+    lv_subject_set_int(&s_slot_can_load_subject_, can_load ? 1 : 0);
     if (!can_load) {
         spdlog::debug("[AmsContextMenu] Load disabled for slot {}: busy={}, loaded={} "
                       "(live={}), has_filament={}, print_blocks_op={}",

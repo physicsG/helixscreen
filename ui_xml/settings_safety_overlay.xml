@@ -13,7 +13,7 @@
             style_pad_bottom="#space_lg" scrollable="true" flex_flow="column">
       <!-- All safety settings live in a single grouped-list card (no section
            headers in this overlay); the card owns the horizontal inset. -->
-      <setting_group>
+      <setting_group name="group_safety">
         <!-- ================================================================== -->
         <!-- E-STOP CONFIRMATION -->
         <!-- ================================================================== -->
@@ -85,8 +85,7 @@
                               description_tag="Lowest notification level that interrupts with a toast"
                               options="All&#10;Warnings &amp; errors&#10;Errors only"
                               options_tag="All&#10;Warnings &amp; errors&#10;Errors only"
-                              bind_selected="settings_min_toast_severity"
-                              callback="on_min_toast_severity_changed"/>
+                              bind_selected="settings_min_toast_severity" callback="on_min_toast_severity_changed"/>
       </setting_group>
     </lv_obj>
   </view>

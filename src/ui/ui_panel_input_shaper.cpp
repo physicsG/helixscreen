@@ -23,6 +23,7 @@
 #include "static_panel_registry.h"
 #include "static_subject_registry.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -627,8 +628,8 @@ void InputShaperPanel::proceed_with_preflight(char axis) {
     recommended_freq_ = 0.0f;
 
     // Show checking accelerometer status
-    snprintf(is_measuring_axis_label_buf_, sizeof(is_measuring_axis_label_buf_),
-             "Checking accelerometer...");
+    snprintf(is_measuring_axis_label_buf_, sizeof(is_measuring_axis_label_buf_), "%s",
+             lv_tr("Checking accelerometer..."));
     lv_subject_copy_string(&is_measuring_axis_label_, is_measuring_axis_label_buf_);
     lv_subject_copy_string(&is_measuring_step_label_, "");
     lv_subject_set_int(&is_measuring_progress_, 0);
@@ -708,8 +709,9 @@ void InputShaperPanel::start_calibration(char axis) {
     }
 
     // Update measuring labels
-    snprintf(is_measuring_axis_label_buf_, sizeof(is_measuring_axis_label_buf_),
-             "Calibrating %c axis...", axis);
+    const std::string axis_label = fmt::format(lv_tr("Calibrating {} axis..."), axis);
+    snprintf(is_measuring_axis_label_buf_, sizeof(is_measuring_axis_label_buf_), "%s",
+             axis_label.c_str());
     lv_subject_copy_string(&is_measuring_axis_label_, is_measuring_axis_label_buf_);
 
     if (calibrate_all_mode_) {
@@ -739,18 +741,21 @@ void InputShaperPanel::start_calibration(char axis) {
                 lv_subject_set_int(&is_measuring_progress_, percent);
                 lv_subject_set_int(&is_measuring_has_progress_, 1);
                 if (percent < 55) {
+                    const std::string step =
+                        fmt::format(lv_tr("Measuring vibrations... {}%"), percent);
                     snprintf(is_measuring_step_label_buf_, sizeof(is_measuring_step_label_buf_),
-                             "Measuring vibrations... %d%%", percent);
+                             "%s", step.c_str());
                 } else if (percent < 100) {
+                    const std::string step = fmt::format(lv_tr("Analyzing data... {}%"), percent);
                     snprintf(is_measuring_step_label_buf_, sizeof(is_measuring_step_label_buf_),
-                             "Analyzing data... %d%%", percent);
+                             "%s", step.c_str());
                 } else {
                     if (calibrate_all_mode_ && current_axis_ == 'X') {
                         snprintf(is_measuring_step_label_buf_, sizeof(is_measuring_step_label_buf_),
-                                 "X axis done, starting Y...");
+                                 "%s", lv_tr("X axis done, starting Y..."));
                     } else {
                         snprintf(is_measuring_step_label_buf_, sizeof(is_measuring_step_label_buf_),
-                                 "Complete");
+                                 "%s", lv_tr("Complete"));
                     }
                 }
                 lv_subject_copy_string(&is_measuring_step_label_, is_measuring_step_label_buf_);
@@ -780,8 +785,8 @@ void InputShaperPanel::measure_noise() {
         return;
     }
 
-    snprintf(is_measuring_axis_label_buf_, sizeof(is_measuring_axis_label_buf_),
-             "Measuring accelerometer noise...");
+    snprintf(is_measuring_axis_label_buf_, sizeof(is_measuring_axis_label_buf_), "%s",
+             lv_tr("Measuring accelerometer noise..."));
     lv_subject_copy_string(&is_measuring_axis_label_, is_measuring_axis_label_buf_);
     calibration_lifetime_.invalidate();
     auto cal_tok = calibration_lifetime_.token();

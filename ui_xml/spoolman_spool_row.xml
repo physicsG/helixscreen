@@ -44,7 +44,7 @@
             style_flex_cross_place="end" style_pad_gap="#space_xs" clickable="false">
       <!-- Remaining Weight (e.g., "850g") -->
       <text_body name="weight_text"
-                 width="100%" text="850g" translation_tag="850g" style_text_color="#text" style_text_align="right"
+                 width="100%" text="850g" style_text_color="#text" style_text_align="right"
                  style_pad_all="0" clickable="false"/>
       <!-- Percentage (e.g., "85%") -->
       <text_small name="percent_text"

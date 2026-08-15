@@ -497,9 +497,6 @@ class PrintStatusPanel : public OverlayBase {
     // Print error badge (animated on print error)
     lv_obj_t* error_badge_ = nullptr;
 
-    // Header bar (for e-stop visibility control)
-    lv_obj_t* overlay_header_ = nullptr;
-
     //
     // === Temperature & Tuning Overlays ===
     //

@@ -784,16 +784,21 @@ void KeyboardManager::keyboard_event_cb(lv_event_t* e) {
                 if (mgr.context_textarea_) {
                     const char* cur = lv_textarea_get_text(mgr.context_textarea_);
                     if (cur != nullptr) {
+                        // Everything read off `cur` happens BEFORE set_text:
+                        // lv_textarea_get_text() returns the label's live
+                        // buffer, and lv_textarea_set_text() frees and
+                        // reallocates it. Reading cur[0] after the set was a
+                        // use-after-free that decided the cursor position.
+                        const bool had_minus = (cur[0] == '-');
                         std::string next =
-                            (cur[0] == '-') ? std::string(cur + 1) : ("-" + std::string(cur));
+                            had_minus ? std::string(cur + 1) : ("-" + std::string(cur));
                         // Cursor position is in characters, so dropping or adding
                         // the sign shifts it by exactly one either way.
                         const uint32_t pos = lv_textarea_get_cursor_pos(mgr.context_textarea_);
                         lv_textarea_set_text(mgr.context_textarea_, next.c_str());
                         lv_textarea_set_cursor_pos(
                             mgr.context_textarea_,
-                            static_cast<int32_t>(cur[0] == '-' ? (pos > 0 ? pos - 1 : 0)
-                                                               : pos + 1));
+                            static_cast<int32_t>(had_minus ? (pos > 0 ? pos - 1 : 0) : pos + 1));
                     }
                 }
                 spdlog::trace("[KeyboardManager] Sign toggle");
@@ -1107,9 +1112,13 @@ void KeyboardManager::init(lv_obj_t* parent) {
     lv_obj_remove_style(keyboard_, nullptr, LV_PART_ITEMS | LV_STATE_EDITED);
 #endif
 
-    lv_keyboard_set_map(keyboard_, LV_KEYBOARD_MODE_NUMBER,
-                        keyboard_layout_get_map(KEYBOARD_LAYOUT_NUMERIC, false),
-                        keyboard_layout_get_ctrl_map(KEYBOARD_LAYOUT_NUMERIC));
+    // No lv_keyboard_set_map(LV_KEYBOARD_MODE_NUMBER, ...) here on purpose. The
+    // manager never drives LVGL's own mode table: every layout, the numeric one
+    // included, is applied straight to the button matrix by
+    // apply_keyboard_mode() (MODE_NUMERIC <- keyboard_hint="numeric"), and
+    // nothing ever switches the widget into MODE_NUMBER -- lv_keyboard_def_event_cb
+    // is removed above and only ever toggles TEXT/SPECIAL anyway. A registration
+    // here looked like a second live route to the keypad and was not.
 
     spdlog::debug("[KeyboardManager] Using keyboard with long-press alternatives");
     mode_ = MODE_ALPHA_LC;

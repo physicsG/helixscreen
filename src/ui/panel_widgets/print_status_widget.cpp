@@ -43,6 +43,7 @@
 #include "thumbnail_processor.h"
 #include "tool_state.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <chrono>
@@ -1957,20 +1958,26 @@ void PrintStatusWidget::DetailedFormatter::update_idle_fields() {
     double now_s =
         std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
     long delta_s = static_cast<long>(now_s - job.end_time);
+    // Each branch is a whole sentence with the number as a placeholder. The unit
+    // stays inside the key rather than being appended, because a locale may put
+    // it before the number or attach a particle to it.
+    std::string when;
     if (delta_s < 60) {
-        snprintf(idle_when_buf_, sizeof(idle_when_buf_), "Completed just now");
+        when = lv_tr("Completed just now");
     } else if (delta_s < 3600) {
-        snprintf(idle_when_buf_, sizeof(idle_when_buf_), "Completed %ldm ago", delta_s / 60);
+        when = fmt::format(lv_tr("Completed {}m ago"), delta_s / 60);
     } else if (delta_s < 86400) {
-        snprintf(idle_when_buf_, sizeof(idle_when_buf_), "Completed %ldh ago", delta_s / 3600);
+        when = fmt::format(lv_tr("Completed {}h ago"), delta_s / 3600);
     } else {
-        snprintf(idle_when_buf_, sizeof(idle_when_buf_), "Completed %ldd ago", delta_s / 86400);
+        when = fmt::format(lv_tr("Completed {}d ago"), delta_s / 86400);
     }
+    snprintf(idle_when_buf_, sizeof(idle_when_buf_), "%s", when.c_str());
     lv_subject_copy_string(&idle_when_subject_, idle_when_buf_);
 
     if (!job.filament_str.empty() && !job.duration_str.empty()) {
-        snprintf(idle_meta_buf_, sizeof(idle_meta_buf_), "%s filament • %s",
-                 job.filament_str.c_str(), job.duration_str.c_str());
+        const std::string meta =
+            fmt::format(lv_tr("{} filament • {}"), job.filament_str, job.duration_str);
+        snprintf(idle_meta_buf_, sizeof(idle_meta_buf_), "%s", meta.c_str());
     } else if (!job.duration_str.empty()) {
         snprintf(idle_meta_buf_, sizeof(idle_meta_buf_), "%s", job.duration_str.c_str());
     } else if (job.total_duration > 0) {

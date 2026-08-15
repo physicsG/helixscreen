@@ -297,7 +297,10 @@ void PrinterImageWidget::check_or_generate_cache() {
     // Check if a cached .bin exists at exact widget dimensions
     std::string cache_path = helix::get_cached_printer_image_path(current_source_path_, w, h);
 
-    if (std::filesystem::exists(cache_path)) {
+    // error_code overload: the ESP32 VFS reports missing paths as ENODATA,
+    // which the throwing exists(p) treats as an error, not "not found".
+    std::error_code cache_ec;
+    if (std::filesystem::exists(cache_path, cache_ec)) {
         // Cache hit — load directly, no scaling needed
         std::string lvgl_path = "A:" + cache_path;
         lv_image_set_src(img, lvgl_path.c_str());

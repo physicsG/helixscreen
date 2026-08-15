@@ -2623,6 +2623,20 @@ UpdateChecker::UpdateChannel UpdateChecker::get_channel() const {
         return UpdateChannel::Stable;
     }
     int channel = config->get<int>("/update/channel", 0);
+
+    // /update/channel persists independently of /beta_features, but the dropdown
+    // that sets it is gated on show_beta_features (about_settings_overlay.xml).
+    // A user who unlocks beta with the 7-tap easter egg, picks Dev, then re-locks
+    // keeps fetching from the arbitrary /update/dev_url with the dropdown hidden
+    // and no route back to Stable. Clamp the EFFECTIVE channel here rather than
+    // rewriting the stored value, so re-unlocking beta restores the channel the
+    // user actually picked instead of silently resetting it to Stable.
+    if (channel != 0 && !config->is_beta_features_enabled()) {
+        spdlog::info("[UpdateChecker] Channel {} needs beta features (disabled) — using stable",
+                     channel);
+        return UpdateChannel::Stable;
+    }
+
     switch (channel) {
     case 1:
         return UpdateChannel::Beta;

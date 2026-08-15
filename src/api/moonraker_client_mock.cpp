@@ -6,12 +6,14 @@
 #include "ui_update_queue.h"
 
 #include "../tests/mocks/mock_printer_state.h"
+#include "accel_sensor_manager.h"
 #include "app_globals.h"
 #include "gcode_parser.h"
 #include "macro_param_cache.h"
 #include "moonraker_client_mock_internal.h"
 #include "power_device_state.h"
 #include "printer_state.h"
+#include "probe_sensor_manager.h"
 #include "runtime_config.h"
 #include "sensor_state.h"
 
@@ -612,9 +614,7 @@ void MoonrakerClientMock::populate_capabilities() {
     // Mock accelerometer configuration for input shaper wizard testing
     // Real Klipper doesn't expose accelerometers in objects list (no get_status()),
     // so we simulate what parse_config_keys() would find from configfile.config
-    json mock_config;
-    mock_config["adxl345"] = json::object();
-    mock_config["resonance_tester"] = json::object();
+    json mock_config = mock_internal::get_mock_accel_config();
     // Bed screws — same story as the accelerometers: screws_tilt_adjust has no
     // get_status(), so Klipper never lists it and the capability is detected
     // from configfile.config. Without this the whole mock screws-tilt state
@@ -642,6 +642,9 @@ void MoonrakerClientMock::populate_capabilities() {
     mock_config["printer"] = {{"kinematics", mock_kinematics}};
     // Add gcode_macro entries for param detection (shared with configfile.config response)
     mock_config.merge_patch(mock_internal::get_mock_gcode_macro_config());
+    // Probe section — shared with the configfile.config query/subscribe responses
+    // so all three payloads describe the same probe.
+    mock_config.merge_patch(mock_internal::get_mock_probe_config());
 
     std::unordered_set<std::string> macros_snapshot;
     discovery_.modify_hardware([&](PrinterDiscovery& hw) {
@@ -753,6 +756,16 @@ void MoonrakerClientMock::discover_printer(
     // Populate hardware based on printer type (may have already been done in constructor)
     populate_hardware();
 
+    // This shortcut never queries configfile, so the accelerometer seeding the
+    // real sequence does in moonraker_discovery_sequence.cpp is missing here.
+    // Without it AccelSensorManager stays empty under --test and Settings >
+    // Sensors shows no accelerometer on a mock printer that reports one.
+    // Main thread only — discover_from_config() sets LVGL subjects.
+    json accel_config = mock_internal::get_mock_accel_config();
+    helix::ui::queue_update([accel_config]() {
+        helix::sensors::AccelSensorManager::instance().discover_from_config(accel_config);
+    });
+
     // Generate synthetic bed mesh data (may have already been done in constructor)
     generate_mock_bed_mesh();
 
@@ -860,6 +873,21 @@ void MoonrakerClientMock::discover_printer(
             // Must be called BEFORE discovery_complete to match real implementation timing
             spdlog::debug("[MoonrakerClientMock] Invoking early hardware discovery callback");
             discovery_.invoke_hardware_discovered();
+
+            // Seed probe z_offset from the mock configfile, mirroring Step 4 of
+            // MoonrakerDiscoverySequence. This shortcut of a discover_printer()
+            // never queries configfile, so without it the whole configfile→probe
+            // path — the one that rescues probes whose runtime status reports a
+            // null z_offset — is unreachable under --test.
+            //
+            // Queued, not called inline, for ordering: ProbeSensorManager's
+            // sensor list is populated by the hardware-discovered callback just
+            // above, which Application also queues. Seeding runs on a sensor list
+            // that does not exist yet if it jumps the queue. FIFO puts it second.
+            helix::ui::queue_update("MoonrakerClientMock::probe_config_seed", []() {
+                helix::sensors::ProbeSensorManager::instance().discover_from_config(
+                    mock_internal::get_mock_probe_config());
+            });
 
             // Invoke discovery complete callback with hardware (for PrinterState binding)
             discovery_.invoke_discovery_complete();

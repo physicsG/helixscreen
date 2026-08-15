@@ -181,6 +181,24 @@ class AmsSubscriptionBackend : public AmsBackend {
     /// Handle incoming Moonraker status notification. Called from background thread.
     virtual void handle_status_update(const nlohmann::json& notification) = 0;
 
+    /// The status object inside a Moonraker notification, or nullptr.
+    ///
+    /// notify_status_update arrives as `{"method":..., "params":[{...}, ts]}`,
+    /// while the initial query response is the bare status object; both must
+    /// parse. THE unwrapping, in one place: five backends had spelled it out by
+    /// hand, one of them noting "it must match exactly" what its base class
+    /// did one call earlier -- the exact fork that would have had the U1 half
+    /// of a multiACE frame parse and the ACE half silently go inert.
+    [[nodiscard]] static const nlohmann::json*
+    unwrap_status_notification(const nlohmann::json& notification) {
+        const nlohmann::json* status = &notification;
+        if (notification.contains("params") && notification["params"].is_array() &&
+            !notification["params"].empty()) {
+            status = &notification["params"][0];
+        }
+        return status->is_object() ? status : nullptr;
+    }
+
     /// Return log tag like "[AMS AFC]" for log messages.
     virtual const char* backend_log_tag() const = 0;
 
