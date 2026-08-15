@@ -227,6 +227,15 @@ struct UnitToolLayout {
     int min_virtual_tool = -1;   ///< Minimum mapped_tool value (for labeling)
     int hub_tool_label =
         -1; ///< Override label for HUB units (from extruder index, -1 = use min_virtual_tool)
+    /// Bit t = this unit actually SUPPLIES physical nozzle first_physical_tool + t.
+    /// A unit can own a nozzle it does not feed: a toolchanger head fed by an
+    /// MMU (an ACE-fed U1 head) belongs to the head's unit, but its slot's
+    /// identity is owned by the MMU -- AmsBackend::slot_identity_owner_unit().
+    /// Cleared for those, so the canvas draws no supply line from the owner to
+    /// filament it is not supplying. Computed HERE, once, from the same walk
+    /// that placed the nozzles: the overview used to re-derive it inline from
+    /// the same data with a per-(tool, slot) backend query.
+    uint32_t feeds_mask = ~0u;
 };
 
 /**

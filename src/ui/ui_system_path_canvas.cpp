@@ -3,9 +3,11 @@
 
 #include "ui_system_path_canvas.h"
 
+#include "ui_filament_path_canvas.h" // hub_box_hit()
 #include "ui_fonts.h"
 #include "ui_spool_drawing.h"
 
+#include "ams_types.h" // PathTopology
 #include "filament_path_geometry.h"
 #include "filament_tube_stroker.h"
 #include "helix-xml/src/xml/lv_xml.h"
@@ -82,10 +84,16 @@ struct SystemPathData {
     // Per-unit tool routing (mixed topology support)
     int unit_tool_count[MAX_UNITS] = {};     // Tools per unit (BT=4, OpenAMS=1)
     /// Bit t = "this unit actually supplies physical tool first_tool + t".
-    /// Defaults to all-set. Cleared for a tool this unit owns the NOZZLE of but
-    /// does not feed — an MMU-fed toolhead on a toolchanger — so the unit does
-    /// not draw a supply line to filament it is not supplying.
+    /// Cleared for a tool this unit owns the NOZZLE of but does not feed — an
+    /// MMU-fed toolhead on a toolchanger — so the unit does not draw a supply
+    /// line to filament it is not supplying. Consulted only once SET (the flag
+    /// below): until then every tool is drawn. The value 0 used to double as
+    /// "unset", and a unit that feeds NONE of its nozzles -- a U1 with every
+    /// head ACE-fed -- legitimately computes 0, which then drew all four
+    /// feeder lines on top of the ACE's: the double-feed the mask exists to
+    /// prevent.
     uint32_t unit_tool_mask[MAX_UNITS] = {};
+    bool unit_tool_mask_set[MAX_UNITS] = {};
     int unit_first_tool[MAX_UNITS] = {};     // First tool index for this unit
     int unit_topology[MAX_UNITS] = {};       // 0=LINEAR, 1=HUB, 2=PARALLEL
     int total_tools = 0;                     // Total tool count across all units
@@ -617,15 +625,17 @@ static void system_path_click_cb(lv_event_t* e) {
     SysLayout L = compute_sys_layout(data, coords);
 
     // Generous vertical band: the nozzle glyph plus its badge underneath, which
-    // is the whole thing a finger aims at.
+    // is the whole thing a finger aims at. hub_box_hit() is the one shared,
+    // unit-tested box test (inclusive edges) -- the filament-path canvas uses
+    // it for the same tap dispatch. Its arguments are full width and height.
     const int32_t band = LV_MAX(18, L.height / 5);
     if (p.y < L.tools_y - band || p.y > L.tools_y + band) {
-        return;
+        return; // outside the row: skip the per-tool loop
     }
     for (int t = 0; t < data->total_tools; ++t) {
         int32_t tx = calc_tool_x(t, data->total_tools, L.x_off, L.width);
         int32_t half = LV_MAX(16, L.width / (data->total_tools * 2 + 1));
-        if (p.x >= tx - half && p.x <= tx + half) {
+        if (helix::ui::hub_box_hit(p, tx, L.tools_y, half * 2, band * 2, 0)) {
             // Report the VIRTUAL tool the badge shows, not the physical column:
             // callers act on a head number, and with cross-unit sharing the two
             // are not the same index.
@@ -684,11 +694,13 @@ static int collect_parallel_mixed_routes(SystemPathData* data, const SysLayout& 
 
     int32_t spread = LV_MIN(L.width / 6, tool_count > 1 ? 60 : 0);
     const uint32_t mask = data->unit_tool_mask[i];
+    const bool mask_set = data->unit_tool_mask_set[i];
     for (int t = 0; t < tool_count && (first_tool + t) < data->total_tools; ++t) {
         // A cleared bit means this unit owns the nozzle but does not feed it —
         // an MMU-fed head on a toolchanger. Drawing the line anyway claims a
-        // supply that does not exist, with two units feeding one nozzle.
-        if (mask != 0 && (mask & (1u << t)) == 0) {
+        // supply that does not exist, with two units feeding one nozzle. Only a
+        // mask that was actually set says anything; 0 is a real answer.
+        if (mask_set && t < 32 && (mask & (1u << t)) == 0) {
             continue;
         }
         int tool_idx = first_tool + t;
@@ -774,9 +786,22 @@ static int collect_hub_route_and_draw_stem(lv_layer_t* layer, SystemPathData* da
     // nozzle is simply shared. multiACE is the case — an ACE bound to a U1 head
     // drew a hub box sitting on E3, as though the U1's own head were a combiner.
     // Draw a plain route to the shared nozzle instead.
+    //
+    // "Belongs to another unit" means a unit whose nozzles are individual HEADS
+    // (a PARALLEL or MIXED unit): the U1's, a toolchanger's. Two HUB units on
+    // one nozzle -- two OpenAMS boxes into one extruder -- share it as equals,
+    // and range containment alone made each see the other's [first, last) and
+    // BOTH drop their box, leaving a combiner-less pair where the pre-existing
+    // rendering drew the (coincident) box. A hub keeps its box unless a
+    // heads-unit owns the nozzle.
     bool tool_is_shared = false;
     for (int u = 0; u < data->unit_count && u < SystemPathData::MAX_UNITS; ++u) {
         if (u == i) {
+            continue;
+        }
+        const int other_topo = data->unit_topology[u];
+        if (other_topo != static_cast<int>(PathTopology::PARALLEL) &&
+            other_topo != static_cast<int>(PathTopology::MIXED)) {
             continue;
         }
         const int other_first = data->unit_first_tool[u];
@@ -1464,9 +1489,10 @@ void ui_system_path_canvas_set_unit_tool_mask(lv_obj_t* obj, int unit_index, uin
     auto* data = get_data(obj);
     if (!data || unit_index < 0 || unit_index >= SystemPathData::MAX_UNITS)
         return;
-    if (data->unit_tool_mask[unit_index] == mask)
+    if (data->unit_tool_mask_set[unit_index] && data->unit_tool_mask[unit_index] == mask)
         return;
     data->unit_tool_mask[unit_index] = mask;
+    data->unit_tool_mask_set[unit_index] = true;
     lv_obj_invalidate(obj);
 }
 

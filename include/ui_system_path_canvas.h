@@ -267,8 +267,10 @@ void ui_system_path_canvas_set_toolhead_callback(lv_obj_t* obj,
  * Bit @c t corresponds to physical tool <tt>first_tool + t</tt>. A cleared bit
  * means the unit owns that nozzle but does not supply its filament — a
  * toolchanger head fed by an MMU — so no line is drawn from this unit to it.
- * A mask of 0 means "unset": every tool is drawn, which is the default and what
- * every single-source system wants.
+ * Until a mask is set for a unit every tool is drawn, which is what every
+ * single-source system wants. A SET mask of 0 is a real answer — the unit
+ * feeds none of its nozzles (a U1 with every head ACE-fed) — and draws no
+ * supply lines; 0 used to double as "unset" and drew all of them.
  *
  * @param obj The system_path_canvas widget
  * @param unit_index Unit whose mask to set
