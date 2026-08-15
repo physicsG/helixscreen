@@ -174,6 +174,11 @@ AmsError AmsSubscriptionBackend::claim_filament_op(FilamentOp op, bool check_sta
         break;
     case FilamentOp::SelectSlot:
     case FilamentOp::ChangeTool:
+    case FilamentOp::Park:
+        // Park is carriage motion like a select/tool change, and the closest
+        // name the busy refusal can carry. Left off this switch it fell to the
+        // initialiser above, and a contender was refused with "Loading in
+        // progress" for a load that was never started.
         pending = AmsAction::SELECTING;
         break;
     }

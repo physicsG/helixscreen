@@ -1108,16 +1108,12 @@ SnapmakerRfidInfo AmsBackendSnapmaker::parse_rfid_info(const nlohmann::json& jso
 // ============================================================================
 
 void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notification) {
-    // notify_status_update format: {"method":"notify_status_update","params":[{...}, timestamp]}
-    // Initial query responses send unwrapped status directly — handle both.
-    const nlohmann::json* status_ptr = &notification;
-    if (notification.contains("params") && notification["params"].is_array() &&
-        !notification["params"].empty()) {
-        status_ptr = &notification["params"][0];
-    }
-    const auto& status = *status_ptr;
-    if (!status.is_object())
+    // Wrapped notification or bare initial-query status: unwrap_status_notification()
+    // handles both, for this class and its multiACE subclass alike.
+    const nlohmann::json* status_ptr = unwrap_status_notification(notification);
+    if (!status_ptr)
         return;
+    const auto& status = *status_ptr;
 
     bool changed = false;
     // Set when the active-tool port-present flag changed this parse (#991), so
