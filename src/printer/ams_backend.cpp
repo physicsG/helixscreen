@@ -628,7 +628,7 @@ std::unique_ptr<AmsBackend> AmsBackend::create(AmsType detected_type, IMoonraker
 
     case AmsType::MULTIACE:
         if (!api || !client) {
-            spdlog::error("[AMS Backend] multiACE requires MoonrakerAPI and MoonrakerClient");
+            spdlog::error("[AMS Backend] multiACE requires IMoonrakerAPI and MoonrakerClient");
             return nullptr;
         }
         spdlog::debug("[AMS Backend] Creating multiACE backend (U1 SnapSwap + ACE units)");
