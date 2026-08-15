@@ -261,6 +261,17 @@ endif
 	}
 	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(PCH_FLAGS) $(INCLUDES) $(LV_CONF),$<,$@)
 
+# Large-file support for the gcode reader. FileDataSource addresses gcode by
+# uint64_t but seeks with fseeko/ftello, whose off_t is 32-bit on our 32-bit
+# targets, so a file past 2 GB truncates. The define has to arrive on the command
+# line: $(PCH_FLAGS) force-includes lvgl_pch.h ahead of the source, so a #define
+# inside the .cpp is read after the system headers have already latched the value.
+# Scoped to this one object because it widens off_t for the whole translation
+# unit; off_t crosses no TU boundary here (see the comment in the source).
+# Side effect: the flags no longer match $(PCH), so this object re-parses
+# lvgl_pch.h from source instead of using the precompiled copy.
+$(OBJ_DIR)/rendering/gcode_data_source.o: CXXFLAGS += -D_FILE_OFFSET_BITS=64
+
 # Compile app Objective-C++ sources (macOS .mm files)
 # Uses DEPFLAGS to generate .d files for header dependency tracking
 # Emits .ccj fragment for incremental compile_commands.json generation

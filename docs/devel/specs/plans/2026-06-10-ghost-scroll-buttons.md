@@ -23,6 +23,10 @@
 > not Auto/On/Off, and attachment became automatic rather than per-call-site. Read the plan for
 > the LVGL floating-child and lifetime research it captured, which is still accurate. Do not
 > read it as a build order.
+>
+> **Superseded by `docs/devel/PAGE_SCROLL_BUTTONS.md`** - that is the current description of
+> what shipped, including where the gutter auto-attaches and why the walk stops at a home
+> panel widget tile.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

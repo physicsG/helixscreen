@@ -95,16 +95,40 @@ static bool s_cur_valid;
 static int32_t s_cur_y1;
 static int32_t s_cur_y2;
 
+// Scan-out underrun tripwire. In bounce mode the driver streams the PSRAM FB
+// through the bounce ring via an EOF-ISR memcpy with a hard per-buffer
+// deadline; when PSRAM bus contention makes that copy miss, the DMA re-sends
+// stale lines (the one-frame downward-ghost glitch RESTART_IN_VSYNC then
+// recovers). Public-API detector: on_frame_buf_complete fires once per frame
+// ONLY when bounce_pos wraps the full FB — a frame whose EOFs coalesced never
+// wraps, so (vsyncs - frame_completes) counts hard-underrun frames. Refills
+// late by less than a full buffer period glitch identically but keep the wrap
+// count, so this UNDERCOUNTS mild contention — a nonzero reading is proof, a
+// zero is not exoneration (measured 741 late refills vs 34 counted here in one
+// 10-line-bounce boot).
+static volatile uint32_t s_vsync_n;
+static volatile uint32_t s_frame_complete_n;
+
 static bool flush_on_vsync(esp_lcd_panel_handle_t panel,
                            const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx) {
     (void)panel;
     (void)edata;
     (void)user_ctx;
+    s_vsync_n++;
     BaseType_t high_task_woken = pdFALSE;
     if (s_vsync_sem) {
         xSemaphoreGiveFromISR(s_vsync_sem, &high_task_woken);
     }
     return high_task_woken == pdTRUE;
+}
+
+static bool on_frame_buf_complete(esp_lcd_panel_handle_t panel,
+                                  const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx) {
+    (void)panel;
+    (void)edata;
+    (void)user_ctx;
+    s_frame_complete_n++;
+    return false;
 }
 
 // LVGL draw buffers — INTERNAL DRAM, PARTIAL mode (unchanged from the working
@@ -289,7 +313,8 @@ static void* ui_thread_main(void* arg) {
     // on_vsync is not IRAM-safe here (the bounce ISR runs with cache on —
     // LCD_RGB_ISR_IRAM_SAFE is off), so no IRAM_ATTR and no logging inside it.
     s_vsync_sem = xSemaphoreCreateBinary();
-    esp_lcd_rgb_panel_event_callbacks_t lcd_cbs = {.on_vsync = flush_on_vsync};
+    esp_lcd_rgb_panel_event_callbacks_t lcd_cbs = {.on_vsync = flush_on_vsync,
+                                                   .on_frame_buf_complete = on_frame_buf_complete};
     esp_lcd_rgb_panel_register_event_callbacks(s_panel, &lcd_cbs, NULL);
 
     lv_init();
@@ -338,7 +363,29 @@ static void* ui_thread_main(void* arg) {
     s_ui_build();
     ota_health_confirm();
     ESP_LOGI(TAG, "ui: render loop");
+    int64_t underrun_log_us = esp_timer_get_time();
+    int32_t underrun_prev_drift = 0;
     while (true) {
+        // Scan-out underrun tripwire: drift = glitched frames since boot (see
+        // the comment above flush_on_vsync). Checked every 10s, logged ONLY
+        // when the window saw new underruns, so a healthy panel stays silent
+        // and a contention burst is attributable to whatever the log shows in
+        // the same window.
+        int64_t now_us = esp_timer_get_time();
+        if (now_us - underrun_log_us >= 10 * 1000 * 1000) {
+            underrun_log_us = now_us;
+            uint32_t v = s_vsync_n;
+            uint32_t f = s_frame_complete_n;
+            // The wrap callback leads the vsync ISR within a frame, so drift can
+            // transiently read -1; signed math keeps that from exploding.
+            int32_t drift = (int32_t)(v - f);
+            if (drift - underrun_prev_drift > 0) {
+                ESP_LOGW(TAG, "[scanout] vsync=%lu frame_complete=%lu underruns=%ld (%+ld/10s)",
+                         (unsigned long)v, (unsigned long)f, (long)drift,
+                         (long)(drift - underrun_prev_drift));
+            }
+            underrun_prev_drift = drift;
+        }
         // Cycle-time tripwire: a long lv_timer_handler starves the polled touch
         // indev — taps during the window are silently dropped. Pairs with the
         // flush_cb slow-refresh log to split "render slow" from "handler slow".

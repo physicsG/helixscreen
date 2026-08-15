@@ -52,6 +52,21 @@ GridEditMode::~GridEditMode() {
     if (active_) {
         exit();
     }
+    // Unconditional, not just when active_: the snap animation's completion
+    // callback holds a raw `this`, and Application::shutdown() only reaches
+    // lv_anim_delete_all() after the owning panel has been destroyed.
+    cancel_snap_animation();
+}
+
+void GridEditMode::cancel_snap_animation() {
+    // Drop our handle BEFORE cancelling. lv_anim_delete() runs the animation's
+    // deleted_cb synchronously and that callback writes this same member, so
+    // the order keeps it from racing us back to a stale value.
+    lv_obj_t* target = snap_anim_preview_;
+    snap_anim_preview_ = nullptr;
+    if (target && lv_is_initialized()) {
+        lv_anim_delete(target, nullptr);
+    }
 }
 
 void GridEditMode::enter(lv_obj_t* container, PanelWidgetConfig* config, int page_index) {
@@ -102,6 +117,10 @@ void GridEditMode::exit() {
     }
     dragging_ = false;
     resizing_ = false;
+    // Before config_ is nulled below: the snap animation's completion callback
+    // dereferences it unconditionally, and the deferred rebuild scheduled here
+    // is what destroys the widget that animation is driving.
+    cancel_snap_animation();
     drag_cfg_idx_ = -1;
     drag_orig_col_ = -1;
     drag_orig_row_ = -1;
@@ -1928,15 +1947,15 @@ void GridEditMode::commit_resize_with_snap(const ResizeResult& result) {
     // the animation is still in flight (the preview is a container child).
     if (resize_preview_ && DisplaySettingsManager::instance().get_animations_enabled()) {
         struct SnapData {
-            lv_obj_t* preview;
             int target_x, target_y, target_w, target_h;
             int start_x, start_y, start_w, start_h;
             GridEditMode* self;
             std::string resized_id;
         };
 
+        lv_obj_t* preview = resize_preview_;
+
         auto* data = new SnapData();
-        data->preview = resize_preview_;
         data->target_x = target_x;
         data->target_y = target_y;
         data->target_w = target_w;
@@ -1950,27 +1969,50 @@ void GridEditMode::commit_resize_with_snap(const ResizeResult& result) {
 
         lv_anim_t anim;
         lv_anim_init(&anim);
-        lv_anim_set_var(&anim, data);
+        // `var` must be the widget being animated, not the heap context.
+        // lv_obj_destructor cancels animations by `var == obj`
+        // (lib/lvgl/src/core/lv_obj.c), so an animation keyed on anything else
+        // keeps running — and keeps writing — after its target is freed. The
+        // context rides along in user_data, which custom_exec_cb can reach
+        // because it receives the lv_anim_t rather than the bare var.
+        lv_anim_set_var(&anim, preview);
+        lv_anim_set_user_data(&anim, data);
         lv_anim_set_values(&anim, 0, 255);
         lv_anim_set_duration(&anim, 150);
         lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
-        lv_anim_set_exec_cb(&anim, [](void* var, int32_t val) {
-            auto* d = static_cast<SnapData*>(var);
+        lv_anim_set_custom_exec_cb(&anim, [](lv_anim_t* a, int32_t val) {
+            auto* d = static_cast<SnapData*>(a->user_data);
+            auto* obj = static_cast<lv_obj_t*>(a->var);
             int t = val; // 0..255
             int x = d->start_x + (d->target_x - d->start_x) * t / 255;
             int y = d->start_y + (d->target_y - d->start_y) * t / 255;
             int w = d->start_w + (d->target_w - d->start_w) * t / 255;
             int h = d->start_h + (d->target_h - d->start_h) * t / 255;
-            lv_obj_set_pos(d->preview, x, y);
-            lv_obj_set_size(d->preview, w, h);
+            lv_obj_set_pos(obj, x, y);
+            lv_obj_set_size(obj, w, h);
+        });
+        // Frees SnapData on EVERY exit path. anim_completed_handler() and
+        // remove_anim() both call deleted_cb (lib/lvgl/src/misc/lv_anim.c), so
+        // this covers normal completion, cancel_snap_animation(), the widget's
+        // own destructor, and Application::shutdown()'s lv_anim_delete_all().
+        // completed_cb runs first and must not free it.
+        lv_anim_set_deleted_cb(&anim, [](lv_anim_t* a) {
+            auto* d = static_cast<SnapData*>(a->user_data);
+            if (!d) {
+                return;
+            }
+            if (d->self && d->self->snap_anim_preview_ == a->var) {
+                d->self->snap_anim_preview_ = nullptr;
+            }
+            delete d;
         });
         lv_anim_set_completed_cb(&anim, [](lv_anim_t* a) {
-            auto* d = static_cast<SnapData*>(a->var);
+            auto* d = static_cast<SnapData*>(a->user_data);
             auto* self = d->self;
             std::string rid = std::move(d->resized_id);
             // Preview will be destroyed by the rebuild (it's a container child).
-            // No need to manually delete it.
-            delete d;
+            // No need to manually delete it. SnapData is freed by deleted_cb,
+            // which LVGL calls immediately after this returns.
             // Now safe to rebuild — animation is complete
             self->selected_ = nullptr;
             self->selection_overlay_ = nullptr;
@@ -2003,8 +2045,12 @@ void GridEditMode::commit_resize_with_snap(const ResizeResult& result) {
             });
         });
         lv_anim_start(&anim);
+        snap_anim_preview_ = preview;
 
-        resize_preview_ = nullptr; // Ownership transferred to animation
+        // The animation drives the preview from here on; snap_anim_preview_ is
+        // the handle now. The widget itself stays owned by the container and
+        // dies with the rebuild.
+        resize_preview_ = nullptr;
     } else {
         // No animation: clean up and rebuild immediately
         helix::ui::safe_delete_deferred(resize_preview_);

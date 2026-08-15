@@ -1011,6 +1011,15 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     // not once per status update.
     std::set<std::string> multi_tool_warned_lanes_;
 
+    // lane_name → tool number AFC last reported in "current_map" (virtual tools,
+    // #605). Remembered across updates because Moonraker sends deltas and the two
+    // fields move independently: AFC_ADD_MAPPING sends "map" alone, a tool change
+    // within a lane sends "current_map" alone. Without this, a map-only delta would
+    // fall back to the lowest tool and yank the lane off the one AFC is driving.
+    // Cleared when the lane is unmapped, and ignored whenever the tool is no longer
+    // a member of a present "map".
+    std::unordered_map<std::string, int> lane_current_tool_;
+
     // AFC state strings outside our known vocabulary — dedupes the schema-drift
     // warning so it fires once per distinct string, not once per status update.
     std::set<std::string> unknown_state_warned_;

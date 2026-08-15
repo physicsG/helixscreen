@@ -401,19 +401,22 @@ void ams_detail_update_tray(AmsDetailWidgets& w) {
     lv_obj_set_height(w.slot_tray, total_height);
     lv_obj_align(w.slot_tray, LV_ALIGN_BOTTOM_MID, 0, 0);
 
-    // Attach draw callbacks once per object instance.
-    // Use LV_OBJ_FLAG_USER_1 as guard — user_data may already be set by XML (L069).
+    // Attach draw callbacks once per object instance. This function runs on every
+    // panel rebuild, so remove-then-add is what keeps it idempotent:
+    // lv_obj_remove_event_cb() strips every prior registration of that callback
+    // function, leaving exactly one after the add. No object flag is involved -
+    // LV_OBJ_FLAG_USER_1 belongs to ui_dialog, which uses it to mark a dialog root
+    // so ThemeManager::is_on_elevated_surface() can find it by walking parents.
+    // Neither caller invokes this from inside a draw dispatch of these objects, so
+    // mutating their event lists here is safe.
 
     // Back wall on slot_grid (DRAW_MAIN = behind spool children)
-    if (!lv_obj_has_flag(w.slot_grid, LV_OBJ_FLAG_USER_1)) {
-        lv_obj_add_flag(w.slot_grid, LV_OBJ_FLAG_USER_1);
-        lv_obj_add_event_cb(w.slot_grid, tray_back_draw_cb, LV_EVENT_DRAW_MAIN, nullptr);
-    }
+    lv_obj_remove_event_cb(w.slot_grid, tray_back_draw_cb);
+    lv_obj_add_event_cb(w.slot_grid, tray_back_draw_cb, LV_EVENT_DRAW_MAIN, nullptr);
+
     // Front face + side walls on slot_tray (IN FRONT of spools)
-    if (!lv_obj_has_flag(w.slot_tray, LV_OBJ_FLAG_USER_1)) {
-        lv_obj_add_flag(w.slot_tray, LV_OBJ_FLAG_USER_1);
-        lv_obj_add_event_cb(w.slot_tray, tray_front_draw_cb, LV_EVENT_DRAW_POST, nullptr);
-    }
+    lv_obj_remove_event_cb(w.slot_tray, tray_front_draw_cb);
+    lv_obj_add_event_cb(w.slot_tray, tray_front_draw_cb, LV_EVENT_DRAW_POST, nullptr);
 
     spdlog::debug("[AmsDetail] Tray 3D box: {}px front, depth={}, dx={}, dy={}", tray_height, depth,
                   dx, dy);

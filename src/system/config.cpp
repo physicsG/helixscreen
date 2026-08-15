@@ -15,6 +15,7 @@
 #include "config_backup.h"
 #include "config_testing.h"
 #include "data_root_resolver.h"
+#include "host_identity.h"
 #include "json_utils.h"
 #include "platform_capabilities.h"
 #include "printer_detector.h"
@@ -1665,8 +1666,33 @@ void Config::init(const std::string& config_path) {
                 // type_error.302, which lands in the catch below and destroys the
                 // user's settings.json (renamed .corrupt, then reset to defaults)
                 // over a single bad field.
+                //
+                // The packaged document alone cannot say which of the two
+                // happened: a fresh install ships the identical bytes, and
+                // neither the backup's age (the archive's stored mtime is the
+                // release build date, newer than the backup in both cases) nor
+                // its richness differs between them.  The installer settles it.
+                // It leaves FRESH_INSTALL_MARKER beside settings.json whenever
+                // it kept the packaged config because no user config existed to
+                // restore; Moonraker's rmtree() removes the marker and the
+                // re-extract does not bring it back, since it is not in the
+                // archive.  Consumed here so it only ever answers for the
+                // config it shipped beside.
                 if (helix::json_util::safe_int(data, "config_version", 0) == 0) {
-                    std::string backup_src = find_backup(config_backup_search_paths());
+                    const fs::path fresh_marker =
+                        fs::path(path).parent_path() / AppConstants::Update::FRESH_INSTALL_MARKER;
+                    std::error_code marker_ec;
+                    const bool installer_kept_it = fs::exists(fresh_marker, marker_ec);
+                    if (installer_kept_it) {
+                        spdlog::info("[Config] Packaged config kept - installer marked a fresh "
+                                     "install ({})",
+                                     fresh_marker.string());
+                        fs::remove(fresh_marker, marker_ec);
+                    }
+
+                    std::string backup_src = installer_kept_it
+                                                 ? std::string{}
+                                                 : find_backup(config_backup_search_paths());
                     if (!backup_src.empty()) {
                         try {
                             auto backup_data = json::parse(std::ifstream(backup_src));
@@ -2330,6 +2356,30 @@ void Config::clear_preset() {
     }
 }
 
+namespace {
+
+/// True when HelixScreen is running on the same machine as the Moonraker at
+/// `host` — i.e. this really is the printer's own embedded screen.
+///
+/// An absent/empty host reads as on-device, and that is deliberate: no preset
+/// file carries `moonraker_host`, so a factory tarball whose baked settings.json
+/// IS a preset can reach the merge with the key missing. An unset host means
+/// "nobody has pointed us at a remote printer yet", not "we are remote".
+bool preset_targets_this_device(const std::string& moonraker_host) {
+#if defined(HELIX_SPLASH_ONLY) || defined(HELIX_WATCHDOG)
+    // Neither binary can reach this: PrinterDetector is the only caller of
+    // apply_preset_file() and is excluded from both object lists, and
+    // host_identity.o is not linked into either. Keep the symbol out rather
+    // than grow two size-sensitive embedded binaries for dead weight.
+    (void)moonraker_host;
+    return false;
+#else
+    return helix::is_moonraker_on_same_host(moonraker_host);
+#endif
+}
+
+} // namespace
+
 bool Config::apply_preset_file(const std::string& preset_name) {
     // Guard: only full-apply if wizard hasn't been completed for this printer.
     // Post-wizard, still allow a narrow migration for filament_sensors so that
@@ -2489,8 +2539,33 @@ bool Config::apply_preset_file(const std::string& preset_name) {
         printer_node.merge_patch(patch);
     }
 
+    // The device-level "display" and "input" blocks below describe the PRINTER'S
+    // OWN PANEL — rotation and white balance in one, the touch calibration matrix
+    // and jitter threshold in the other. Seeding them is correct only when
+    // HelixScreen is the thing driving that panel. A separate host that merely
+    // talks to the printer over the network (a Pi with its own touchscreen that
+    // detected a Centauri Carbon during the wizard, say) would otherwise come up
+    // rotated with a foreign touch matrix — and `display.rotation_probed: true`
+    // then suppresses the first-boot rotation probe that would have corrected it.
+    //
+    // The per-printer "printer" merge above stays unconditional: that block is
+    // about the printer, which is equally true from across the network.
+    //
+    // Both call paths have the host by this point. The wizard persists it in the
+    // Connection step (3), which runs before PrinterIdentify (4) applies the
+    // preset; auto-detection can only run once a connection using that same key
+    // succeeded.
+    const std::string moonraker_host = get<std::string>(df() + "moonraker_host", "");
+    const bool on_this_device = preset_targets_this_device(moonraker_host);
+
+    if (!on_this_device) {
+        spdlog::info("[Config] Preset '{}': Moonraker host '{}' is not this machine — "
+                     "leaving device display/input settings alone",
+                     preset_name, moonraker_host);
+    }
+
     // Deep-merge device-level display settings (preserves keys not in preset)
-    if (preset_json.contains("display") && preset_json["display"].is_object()) {
+    if (on_this_device && preset_json.contains("display") && preset_json["display"].is_object()) {
         if (!data.contains("display") || !data["display"].is_object()) {
             data["display"] = json::object();
         }
@@ -2502,7 +2577,7 @@ bool Config::apply_preset_file(const std::string& preset_name) {
     // /input/calibration/*) and jitter_threshold — which is distinct from the
     // per-printer "printer.input" block above. Pre-wizard only (guarded by
     // wizard_completed), so it's safe to seed scaffolded defaults.
-    if (preset_json.contains("input") && preset_json["input"].is_object()) {
+    if (on_this_device && preset_json.contains("input") && preset_json["input"].is_object()) {
         if (!data.contains("input") || !data["input"].is_object()) {
             data["input"] = json::object();
         }

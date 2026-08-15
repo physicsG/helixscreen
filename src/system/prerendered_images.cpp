@@ -24,7 +24,14 @@ bool prerendered_exists(const std::string& path) {
     // Callers pass a relative "assets/images/..." path. Resolve it against the
     // asset root so the check works on firmware (bundle mounted at /assets ->
     // /assets/assets/images/...); identity on desktop (asset_root ".").
-    return std::filesystem::exists(asset_path(path));
+    //
+    // error_code overload, NOT exists(p): an existence probe must never throw.
+    // The throwing overload only maps ENOENT/ENOTDIR to "not found"; the ESP32
+    // VFS reports missing frogfs paths as ENODATA, which std::filesystem treats
+    // as an error — on firmware exists(p) throws filesystem_error for every
+    // miss, and the escaping exception blanked the home-panel printer image.
+    std::error_code ec;
+    return std::filesystem::exists(asset_path(path), ec);
 }
 
 const char* get_splash_size_name(int screen_width) {
@@ -249,9 +256,10 @@ bool generate_cached_printer_image(const std::string& source_image_path, int wid
     // resizing from the PNG costs one extra decode ONCE per widget size and gives a
     // genuinely sharp result instead of a permanently soft one. Downscaling from
     // the tier is still preferred (it is smaller and already the right colours).
+    std::error_code png_ec;
     if (std::string png = png_source_for_prerendered(fs_path);
         !png.empty() && std::max(width, height) > prerendered_tier_size(fs_path) &&
-        std::filesystem::exists(png)) {
+        std::filesystem::exists(png, png_ec)) {
         spdlog::debug("[PrinterCache] {}x{} exceeds the prerendered tier; sourcing from {}", width,
                       height, png);
         fs_path = png;

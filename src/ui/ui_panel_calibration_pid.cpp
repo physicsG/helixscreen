@@ -23,6 +23,7 @@
 #include "temperature_service.h"
 #include "thermal_rate_model.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <cctype>
@@ -920,13 +921,14 @@ void PIDCalibrationPanel::on_calibration_result(bool success, float kp, float ki
         format_pid_value(val_buf, sizeof(val_buf), kd, old_kd_);
         lv_subject_copy_string(&subj_pid_kd_, val_buf);
 
-        // Set human-readable result summary
+        // Set human-readable result summary. One whole sentence with both
+        // variables as placeholders, and the heater name translated too -- the
+        // bare snprintf here left the entire line English in all nine locales.
         const char* heater_label =
-            (selected_heater_ == Heater::EXTRUDER) ? "extruder" : "heated bed";
-        char summary[128];
-        snprintf(summary, sizeof(summary), "Temperature control optimized for %s at %d°C.",
-                 heater_label, target_temp_);
-        lv_subject_copy_string(&subj_result_summary_, summary);
+            (selected_heater_ == Heater::EXTRUDER) ? lv_tr("extruder") : lv_tr("heated bed");
+        const std::string summary = fmt::format(
+            lv_tr("Temperature control optimized for {} at {}°C."), heater_label, target_temp_);
+        lv_subject_copy_string(&subj_result_summary_, summary.c_str());
 
         // Save config (will transition to COMPLETE when done)
         set_state(State::SAVING);
@@ -1381,13 +1383,11 @@ void PIDCalibrationPanel::on_mpc_result(const MoonrakerAdvancedAPI::MPCResult& r
     lv_subject_copy_string(&subj_mpc_ambient_transfer_, buf);
     lv_subject_copy_string(&subj_mpc_fan_transfer_, result.fan_ambient_transfer.c_str());
 
-    const char* heater_label = (selected_heater_ == Heater::EXTRUDER) ? "extruder" : "heated bed";
-    char summary[128];
-    snprintf(summary, sizeof(summary),
-             "MPC thermal model calibrated for %s at %d\xC2\xB0"
-             "C.",
-             heater_label, target_temp_);
-    lv_subject_copy_string(&subj_result_summary_, summary);
+    const char* heater_label =
+        (selected_heater_ == Heater::EXTRUDER) ? lv_tr("extruder") : lv_tr("heated bed");
+    const std::string summary = fmt::format(lv_tr("MPC thermal model calibrated for {} at {}°C."),
+                                            heater_label, target_temp_);
+    lv_subject_copy_string(&subj_result_summary_, summary.c_str());
 
     spdlog::info("[PIDCal] MPC result: heat_cap={:.4f} sensor_resp={:.6f} ambient={:.6f} fan='{}'",
                  result.block_heat_capacity, result.sensor_responsiveness, result.ambient_transfer,

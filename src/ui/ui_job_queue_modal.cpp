@@ -11,10 +11,12 @@
 #include "app_globals.h"
 #include "i_moonraker_api.h"
 #include "job_queue_state.h"
+#include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "theme_manager.h"
 
 #include <lvgl/lvgl.h>
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <cstdio>
@@ -159,11 +161,10 @@ void JobQueueModal::update_queue_state_ui() {
     const auto& state = jqs->get_queue_state();
     bool is_paused = (state == "paused");
 
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "Queue: %s", is_paused ? "Paused" : "Ready");
-    lv_label_set_text(state_label, buf);
+    // Whole strings, not "Queue: %s" over an untranslated state word.
+    lv_label_set_text(state_label, is_paused ? lv_tr("Queue: Paused") : lv_tr("Queue: Ready"));
     if (toggle_btn) {
-        ui_button_set_text(toggle_btn, is_paused ? "Start" : "Pause");
+        ui_button_set_text(toggle_btn, is_paused ? lv_tr("Start") : lv_tr("Pause"));
     }
 }
 
@@ -275,15 +276,15 @@ void JobQueueModal::populate_job_list() {
             int mins = static_cast<int>(job.time_in_queue / 60);
             int hours = mins / 60;
             mins = mins % 60;
-            char time_buf[64];
+            std::string queued;
             if (hours > 0) {
-                std::snprintf(time_buf, sizeof(time_buf), "Queued %dh %dm ago", hours, mins);
+                queued = fmt::format(lv_tr("Queued {}h {}m ago"), hours, mins);
             } else if (mins > 0) {
-                std::snprintf(time_buf, sizeof(time_buf), "Queued %dm ago", mins);
+                queued = fmt::format(lv_tr("Queued {}m ago"), mins);
             } else {
-                std::snprintf(time_buf, sizeof(time_buf), "Just queued");
+                queued = lv_tr("Just queued");
             }
-            lv_label_set_text(time_label, time_buf);
+            lv_label_set_text(time_label, queued.c_str());
             if (small_font)
                 lv_obj_set_style_text_font(time_label, small_font, 0);
             lv_obj_set_style_text_color(time_label, muted_color, 0);

@@ -528,6 +528,10 @@ TEST_CASE("UpdateChecker callback is optional", "[update_checker][callback]") {
     // reset_config_singleton() wipes these keys again for the next test.
     auto* config = Config::get_instance();
     REQUIRE(config != nullptr);
+    // Dev and Beta are gated behind /beta_features — get_channel() reports Stable
+    // for either one while beta is locked, which would send this check at the real
+    // stable endpoint instead of the loopback port below.
+    config->set<bool>("/beta_features", true);
     config->set<int>("/update/channel", 2); // Dev
     config->set<std::string>("/update/dev_url", "http://127.0.0.1:1/");
 

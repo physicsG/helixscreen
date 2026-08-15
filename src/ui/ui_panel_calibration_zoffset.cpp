@@ -23,6 +23,7 @@
 #include "toolhead_homing.h"
 #include "z_offset_utils.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <cstdio>
@@ -862,9 +863,9 @@ void ZOffsetCalibrationPanel::on_calibration_result(bool success, const std::str
     if (success) {
         // Update final offset display
         if (final_offset_label_) {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "Accepted Z Position: %.3f", final_offset_);
-            lv_label_set_text(final_offset_label_, buf);
+            const std::string accepted =
+                fmt::format(lv_tr("Accepted Z Position: {:.3f}"), final_offset_);
+            lv_label_set_text(final_offset_label_, accepted.c_str());
         }
         turn_off_bed_if_needed();
         set_state(State::COMPLETE);

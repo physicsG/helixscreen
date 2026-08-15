@@ -438,6 +438,16 @@ $(PATCHES_STAMP): $(PATCH_FILES) $(LVGL_HEAD) $(LIBHV_HEAD)
 	else \
 		echo "$(GREEN)✓ LVGL DRM set-master patch already applied$(RESET)"; \
 	fi
+# Sentinel is `apply --check`, not a file-dirty test: three other patches already
+# dirty lv_linux_drm.c, so "is the file modified?" answers the wrong question here
+# (see patches/README.md, "Apply-check sentinels").
+	$(Q)if git -C $(LVGL_DIR) apply --check $(PATCH_DIR)/lvgl-drm-mmap64.patch 2>/dev/null; then \
+		echo "$(YELLOW)→ Applying LVGL DRM 64-bit mmap offset patch...$(RESET)"; \
+		git -C $(LVGL_DIR) apply $(PATCH_DIR)/lvgl-drm-mmap64.patch && \
+		echo "$(GREEN)✓ DRM 64-bit mmap offset patch applied$(RESET)"; \
+	else \
+		echo "$(GREEN)✓ LVGL DRM 64-bit mmap offset patch already applied$(RESET)"; \
+	fi
 	$(Q)if git -C $(LVGL_DIR) diff --quiet src/core/lv_refr.c 2>/dev/null; then \
 		echo "$(YELLOW)→ Applying LVGL refr reshape NULL guard patch...$(RESET)"; \
 		if git -C $(LVGL_DIR) apply --check $(PATCH_DIR)/lvgl_refr_reshape_null_guard.patch 2>/dev/null; then \

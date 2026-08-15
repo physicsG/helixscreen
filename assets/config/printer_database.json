@@ -2220,6 +2220,7 @@
       "name": "Elegoo Centauri Carbon",
       "manufacturer": "Elegoo",
       "image": "elegoo-centauri-carbon.png",
+      "preset": "cc1",
       "calibration": {
         "bed_mesh_gcode": "MOVE_TO_TRAY\nM140 S60\nM104 S220\nM109 S220\nM190 S60\nM729\nG28\nM400\nLOAD_CELL_SAVE_TARE\nG4 P2000\nBED_MESH_CALIBRATE_WITH_WIPE\nBED_MESH_PROFILE SAVE={profile}"
       },
@@ -5193,6 +5194,7 @@
       "name": "Artillery M1 Pro",
       "manufacturer": "Artillery",
       "image": "artillery-m1-pro.png",
+      "preset": "artillery-m1-pro",
       "print_start_profile": "artillery_m1",
       "z_offset_calibration_strategy": "firmware_managed",
       "heuristics": [

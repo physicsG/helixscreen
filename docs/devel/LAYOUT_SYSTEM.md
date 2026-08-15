@@ -294,7 +294,7 @@ Not every panel needs a layout-specific version. Start with the ones that matter
 - **`flex_flow="row"`** = horizontal layout, **`flex_flow="column"`** = vertical layout.
 - **`flex_grow="1"`** makes an element stretch to fill available space.
 - **`width="50%"` / `height="100%"`** for fixed proportions.
-- **`scrollable="false"`** prevents unintended scroll behavior on containers.
+- **`scrollable="false"`** is **required** on any container that is not a real scroll region. LVGL's scrollable default is ON and our `lv_obj` theme does not override it, so a plain layout wrapper absorbs drags and qualifies for a page-scroll gutter - which is how chevrons end up drawn over content. See `CONTRIBUTOR_GOTCHAS.md` and `PAGE_SCROLL_BUTTONS.md`.
 - **`hidden="true"`** + `bind_flag_if_*` = conditional visibility (driven by data).
 - See `LVGL9_XML_GUIDE.md` for the full XML reference.
 
@@ -472,6 +472,11 @@ So when adding a home widget:
   grid is then correct behaviour, not a bug. `tips` is the honest example: authored 4 wide,
   minimum 2, and deliberately absent from the portrait defaults because even at its minimum
   it costs a third to a half of a portrait row for rotating hints.
+- Mark every non-scrolling container in the widget's XML `scrollable="false"`. A tile is
+  scrolled by dragging it, not by a chevron gutter, so `PageScrollAutoInject` stops its walk
+  at the tile root (`src/ui/page_scroll_auto_inject.cpp:67`) - but a scrollable container
+  inside a tile still absorbs the drags the grid wants, and LVGL's scrollable default is ON
+  unless you say otherwise.
 
 `GridLayout::PlacementFailure` distinguishes `GridFull` from `TooLargeForGrid` so the toast
 and the log say which condition actually failed.

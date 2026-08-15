@@ -220,6 +220,18 @@ inline std::string env_backup_fallback() {
     return backup_fallback_dir() + "/helixscreen.env.backup";
 }
 
+/// Marker the installer drops beside settings.json when it deliberately keeps
+/// the packaged (platform preset) config because no user config existed to
+/// restore. Resolved relative to the config file's own directory.
+///
+/// A packaged settings.json is ambiguous on its own: byte-for-byte the same
+/// document ships with a fresh install and is what Moonraker's type:web update
+/// leaves behind after rmtree() destroys the user's copy. Moonraker never runs
+/// the installer, and its rmtree() takes the marker with it, so an absent
+/// marker identifies the clobber. Config::init() consumes the marker on the
+/// first boot that reads it.
+constexpr const char* FRESH_INSTALL_MARKER = ".helix-fresh-install";
+
 /// Marker file written before _exit(0) after a successful update.
 /// Watchdog checks for this to skip crash dialog on post-update restarts.
 constexpr const char* UPDATE_RESTART_MARKER_PRIMARY = "/var/lib/helixscreen/update_restart";

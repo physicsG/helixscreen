@@ -30,6 +30,7 @@
 #include "printer_state.h"
 #include "remote_screen_fb0_sink.h"
 #include "runtime_config.h"
+#include "tap_latch.h"
 #ifdef HELIX_ENABLE_SCREENSAVER
 #include "ui_nav_manager.h"
 
@@ -1738,6 +1739,64 @@ void DisplayManager::run_rotation_probe() {
     // our direct read_cb call would consume evdev events, causing missed taps.
     lv_indev_enable(m_pointer, false);
 
+    // Suppress the debounced resize fanout for the whole probe. Each rotation
+    // resizes the screen, and the registered theme/layout refresh runs inside
+    // the lv_timer_handler() call the tap poll below makes every iteration -
+    // seconds of it on a slow panel, during which no touch sample is taken.
+    // The confirmed rotation is re-applied at the end and Application refreshes
+    // the theme and LayoutManager once the probe returns.
+    struct ResizeFanoutSuspension {
+        explicit ResizeFanoutSuspension(DisplayManager* dm) : m_dm(dm) {
+            m_dm->set_resize_fanout_suspended(true);
+        }
+        ~ResizeFanoutSuspension() {
+            m_dm->set_resize_fanout_suspended(false);
+        }
+        ResizeFanoutSuspension(const ResizeFanoutSuspension&) = delete;
+        ResizeFanoutSuspension& operator=(const ResizeFanoutSuspension&) = delete;
+        DisplayManager* m_dm;
+    } resize_suspension(this);
+
+    // Latch presses on their edge instead of sampling the level. evdev drains
+    // its whole fd per read and reports only the final state, so a press and
+    // its release arriving between two polls would otherwise vanish. The
+    // coordinate half of the latch is contact-driven-device only: an SDL mouse
+    // reports motion with no button down and would latch on every wiggle.
+    helix::TapLatch tap_latch(!is_sdl);
+
+    // Sample the pointer once and feed the latch. Safe to call as often as we
+    // like; each call drains whatever evdev has buffered since the last one.
+    // The read callback is looked up per call, matching how the backend may
+    // replace the pointer device while the probe is running.
+    auto poll_pointer = [&]() {
+        lv_indev_read_cb_t read_cb = m_pointer ? lv_indev_get_read_cb(m_pointer) : nullptr;
+        if (!read_cb) {
+            return;
+        }
+        lv_indev_data_t data = {};
+        read_cb(m_pointer, &data);
+        tap_latch.feed(data);
+    };
+
+    // Poll until the contact lifts (or the deadline passes). Returns when the
+    // pointer reads RELEASED so a held finger cannot carry into the next screen.
+    auto drain_until_release = [&]() {
+        uint32_t release_deadline = get_ticks() + 2000; // 2s max
+        while (get_ticks() < release_deadline) {
+            lv_timer_handler();
+            delay(10);
+            lv_indev_read_cb_t read_cb = m_pointer ? lv_indev_get_read_cb(m_pointer) : nullptr;
+            if (!read_cb) {
+                break;
+            }
+            lv_indev_data_t release_data = {};
+            read_cb(m_pointer, &release_data);
+            if (release_data.state == LV_INDEV_STATE_RELEASED) {
+                break;
+            }
+        }
+    };
+
     // Lambda for mini event loop that watches for tap.
     // Returns immediately on confirmed tap (no post-tap delay).
     auto wait_for_tap = [&](int timeout_ms, lv_obj_t* countdown_lbl, SubtitleFn subtitle_fn,
@@ -1745,14 +1804,55 @@ void DisplayManager::run_rotation_probe() {
         uint32_t start = get_ticks();
         int last_sec = -1;
 
+        // Drop anything latched by the previous screen, and re-baseline the
+        // coordinate so the position left behind by the last tap cannot read as
+        // a fresh one. A contact that is still down here (a screen that timed
+        // out mid-press) is drained to its release rather than counted as a tap
+        // on this screen.
+        tap_latch.reset();
+        poll_pointer();
+        if (tap_latch.consume()) {
+            spdlog::debug("[DisplayManager] Rotation probe: contact still down at {}° entry, "
+                          "waiting for release",
+                          rot_deg);
+            drain_until_release();
+            tap_latch.reset();
+        }
+
+        // A tap detected here is drained to its release before returning, so a
+        // finger still down does not carry into the next screen as a phantom.
+        auto accept_tap = [&]() {
+            spdlog::info("[DisplayManager] Rotation probe: tap detected at {}° ({})", rot_deg,
+                         tap_latch.from_collapsed_read() ? "recovered from collapsed read"
+                                                         : "press observed");
+            tap_latch.consume();
+            drain_until_release();
+            tap_latch.reset();
+        };
+
         while (true) {
             uint32_t elapsed = get_ticks() - start;
             if (elapsed >= static_cast<uint32_t>(timeout_ms)) {
                 return false;
             }
 
+            // Sample either side of lv_timer_handler(): whatever it costs on
+            // this hardware, a tap that lands during it is still seen on the
+            // very next sample rather than after another full poll interval.
+            poll_pointer();
+            if (tap_latch.latched()) {
+                accept_tap();
+                return true;
+            }
+
             lv_timer_handler();
             delay(10);
+
+            poll_pointer();
+            if (tap_latch.latched()) {
+                accept_tap();
+                return true;
+            }
 
             // Update countdown label
             int remaining_sec = static_cast<int>((timeout_ms - elapsed + 999) / 1000);
@@ -1760,28 +1860,6 @@ void DisplayManager::run_rotation_probe() {
                 std::string text = subtitle_fn(rot_deg, remaining_sec);
                 lv_label_set_text(countdown_lbl, text.c_str());
                 last_sec = remaining_sec;
-            }
-
-            // Check for tap via direct indev read (LVGL indev is disabled)
-            lv_indev_data_t data = {};
-            lv_indev_read_cb_t read_cb = lv_indev_get_read_cb(m_pointer);
-            if (read_cb) {
-                read_cb(m_pointer, &data);
-                if (data.state == LV_INDEV_STATE_PRESSED) {
-                    // Drain the press — wait for release so it doesn't
-                    // carry over to the next screen as a phantom tap.
-                    uint32_t release_deadline = get_ticks() + 2000; // 2s max
-                    while (get_ticks() < release_deadline) {
-                        lv_timer_handler();
-                        delay(10);
-                        lv_indev_data_t release_data = {};
-                        read_cb(m_pointer, &release_data);
-                        if (release_data.state == LV_INDEV_STATE_RELEASED) {
-                            break;
-                        }
-                    }
-                    return true;
-                }
             }
         }
     };
@@ -1905,6 +1983,16 @@ void DisplayManager::resize_timer_cb(lv_timer_t* timer) {
         return;
     }
 
+    // A timer armed before the suspension began must not fan out either - the
+    // rotation probe polls for taps through lv_timer_handler(), and this is the
+    // callback that can sit in a multi-second theme refresh while it does.
+    if (self->m_resize_fanout_suspended) {
+        spdlog::debug("[DisplayManager] Resize fanout suspended - dropping pending debounce");
+        lv_timer_delete(timer);
+        self->m_resize_debounce_timer = nullptr;
+        return;
+    }
+
     // Refresh cached dimensions from LVGL before fanning out callbacks.
     // lv_display_set_resolution() (e.g. from the Android SDL window resize
     // path on fold/unfold) does not update m_width/m_height, so without
@@ -1945,6 +2033,13 @@ void DisplayManager::resize_event_cb(lv_event_t* e) {
         lv_coord_t width = lv_obj_get_width(screen);
         lv_coord_t height = lv_obj_get_height(screen);
 
+        if (self->m_resize_fanout_suspended) {
+            spdlog::debug("[DisplayManager] Screen size changed to {}x{} while resize fanout "
+                          "suspended - no debounce armed",
+                          width, height);
+            return;
+        }
+
         spdlog::debug("[DisplayManager] Screen size changed to {}x{}, resetting debounce timer",
                       width, height);
 
@@ -1969,6 +2064,15 @@ void DisplayManager::init_resize_handler(lv_obj_t* screen) {
     lv_obj_add_event_cb(screen, resize_event_cb, LV_EVENT_SIZE_CHANGED, this);
 
     spdlog::trace("[DisplayManager] Resize handler initialized on screen");
+}
+
+void DisplayManager::set_resize_fanout_suspended(bool suspended) {
+    if (m_resize_fanout_suspended == suspended) {
+        return;
+    }
+    m_resize_fanout_suspended = suspended;
+    spdlog::debug("[DisplayManager] Resize callback fanout {}",
+                  suspended ? "suspended" : "resumed");
 }
 
 void DisplayManager::register_resize_callback(ResizeCallback callback) {

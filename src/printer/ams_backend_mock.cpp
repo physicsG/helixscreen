@@ -106,7 +106,13 @@ AmsBackendMock::AmsBackendMock(int slot_count) {
         entry->info.color_rgb = sample.color;
         entry->info.color_name = sample.color_name;
         entry->info.material = sample.material;
-        entry->info.brand = sample.brand;
+        // No brand, for the same reason the AFC lanes carry none: Happy Hare's
+        // gate map "has no concept of brand / spool_name / total weight / colour
+        // name" (ams_backend_happy_hare.cpp), so a real lane's brand comes only
+        // from the user's override store or the Spoolman identity cache -- never
+        // from firmware. The vendor in SAMPLE_FILAMENTS is what Spoolman
+        // supplies for these lanes, which is why the ids below line up with
+        // init_mock_spools().
 
         // Mock Spoolman link — weights mirror init_mock_spools() so the slot
         // editor and Spoolman views agree (spec §9 drift fix).
@@ -1811,7 +1817,7 @@ void AmsBackendMock::set_multi_unit_mode(bool enabled) {
             entry->info.slot_index = i;
             entry->info.global_index = i;
             entry->info.material = d.material;
-            entry->info.brand = d.brand;
+            // No brand -- these are AFC units too. See set_afc_mode().
             entry->info.color_rgb = d.color;
             entry->info.color_name = d.color_name;
             entry->info.status = d.status;
@@ -1839,7 +1845,7 @@ void AmsBackendMock::set_multi_unit_mode(bool enabled) {
             entry->info.slot_index = i;
             entry->info.global_index = 4 + i;
             entry->info.material = d.material;
-            entry->info.brand = d.brand;
+            // No brand -- these are AFC units too. See set_afc_mode().
             entry->info.color_rgb = d.color;
             entry->info.color_name = d.color_name;
             entry->info.status = d.status;
@@ -2158,16 +2164,16 @@ void AmsBackendMock::set_vivid_mixed_mode(bool enabled) {
         });
 
         // Helper to populate a slot
-        auto populate_slot = [this](int gi, int si, const char* material, const char* brand,
-                                    uint32_t color, const char* color_name, SlotStatus status,
-                                    int spoolman_id, float remaining) {
+        auto populate_slot = [this](int gi, int si, const char* material, uint32_t color,
+                                    const char* color_name, SlotStatus status, int spoolman_id,
+                                    float remaining) {
             auto* entry = slots_.get_mut(gi);
             if (!entry)
                 return;
             entry->info.slot_index = si;
             entry->info.global_index = gi;
             entry->info.material = material;
-            entry->info.brand = brand;
+            // No brand -- ViViD is mocked as AFC. See set_afc_mode().
             entry->info.color_rgb = color;
             entry->info.color_name = color_name;
             entry->info.status = status;
@@ -2183,32 +2189,22 @@ void AmsBackendMock::set_vivid_mixed_mode(bool enabled) {
         };
 
         // Unit 0: Turtle_1 (Box Turtle) — lanes 1-4, HUB
-        populate_slot(0, 0, "ASA", "Bambu Lab", 0x000000, "Black", SlotStatus::LOADED, 400,
-                      1000.0f);
-        populate_slot(1, 1, "PLA", "Polymaker", 0xFF0000, "Red", SlotStatus::AVAILABLE, 401,
-                      800.0f);
-        populate_slot(2, 2, "PETG", "eSUN", 0x00FF00, "Green", SlotStatus::AVAILABLE, 402, 600.0f);
-        populate_slot(3, 3, "PLA", "Overture", 0xFFFFFF, "White", SlotStatus::AVAILABLE, 403,
-                      400.0f);
+        populate_slot(0, 0, "ASA", 0x000000, "Black", SlotStatus::LOADED, 400, 1000.0f);
+        populate_slot(1, 1, "PLA", 0xFF0000, "Red", SlotStatus::AVAILABLE, 401, 800.0f);
+        populate_slot(2, 2, "PETG", 0x00FF00, "Green", SlotStatus::AVAILABLE, 402, 600.0f);
+        populate_slot(3, 3, "PLA", 0xFFFFFF, "White", SlotStatus::AVAILABLE, 403, 400.0f);
 
         // Unit 1: Turtle_2 (Box Turtle) — lanes 5-8, HUB (shared hub with Turtle_1)
-        populate_slot(4, 0, "ABS", "Hatchbox", 0x0000FF, "Blue", SlotStatus::AVAILABLE, 410,
-                      900.0f);
-        populate_slot(5, 1, "PLA", "Prusament", 0xFDD835, "Yellow", SlotStatus::AVAILABLE, 411,
-                      750.0f);
-        populate_slot(6, 2, "PETG", "Overture", 0x8E24AA, "Purple", SlotStatus::AVAILABLE, 412,
-                      500.0f);
-        populate_slot(7, 3, "ASA", "KVP", 0xFF6F00, "Orange", SlotStatus::AVAILABLE, 413, 650.0f);
+        populate_slot(4, 0, "ABS", 0x0000FF, "Blue", SlotStatus::AVAILABLE, 410, 900.0f);
+        populate_slot(5, 1, "PLA", 0xFDD835, "Yellow", SlotStatus::AVAILABLE, 411, 750.0f);
+        populate_slot(6, 2, "PETG", 0x8E24AA, "Purple", SlotStatus::AVAILABLE, 412, 500.0f);
+        populate_slot(7, 3, "ASA", 0xFF6F00, "Orange", SlotStatus::AVAILABLE, 413, 650.0f);
 
         // Unit 2: vivid_1 (ViViD) — lanes 13-16, HUB (own hub)
-        populate_slot(8, 0, "PLA", "Bambu Lab", 0xE53935, "Red", SlotStatus::AVAILABLE, 420,
-                      1000.0f);
-        populate_slot(9, 1, "PLA-CF", "Polymaker", 0x424242, "Carbon", SlotStatus::AVAILABLE, 421,
-                      900.0f);
-        populate_slot(10, 2, "PETG", "eSUN", 0x90CAF9, "Sky Blue", SlotStatus::AVAILABLE, 422,
-                      800.0f);
-        populate_slot(11, 3, "TPU", "NinjaTek", 0x00E676, "Neon Green", SlotStatus::AVAILABLE, 423,
-                      700.0f);
+        populate_slot(8, 0, "PLA", 0xE53935, "Red", SlotStatus::AVAILABLE, 420, 1000.0f);
+        populate_slot(9, 1, "PLA-CF", 0x424242, "Carbon", SlotStatus::AVAILABLE, 421, 900.0f);
+        populate_slot(10, 2, "PETG", 0x90CAF9, "Sky Blue", SlotStatus::AVAILABLE, 422, 800.0f);
+        populate_slot(11, 3, "TPU", 0x00E676, "Neon Green", SlotStatus::AVAILABLE, 423, 700.0f);
 
         // Tool mapping: single toolhead, T0 maps to currently loaded slot
         slots_.set_tool_map({0});

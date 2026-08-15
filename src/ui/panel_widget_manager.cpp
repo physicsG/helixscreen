@@ -820,6 +820,10 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
             // Tag widget with its config ID so GridEditMode can identify it
             lv_obj_set_name(widget, slot.widget_id.c_str());
 
+            // Mark the tile root so tree walks that only make sense at page
+            // level stop here. See PANEL_WIDGET_TILE_FLAG in panel_widget.h.
+            lv_obj_add_flag(widget, PANEL_WIDGET_TILE_FLAG);
+
             spdlog::debug("[PanelWidgetManager] Placed widget '{}' at ({},{} {}x{})",
                           slot.widget_id, p.col, p.row, p.colspan, p.rowspan);
 

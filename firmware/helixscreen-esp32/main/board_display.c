@@ -51,9 +51,22 @@ esp_lcd_panel_handle_t board_display_init(void) {
         // trap below). So double-FB is closed on this hardware; tearing is handled
         // in software instead (per-refresh-cycle vsync-gated flush, lvgl_glue.c).
         .num_fbs = 1,
-        // 10-line bounce buffers: direct PSRAM scanout visibly desyncs when
-        // redraw traffic competes for PSRAM bandwidth (audit Task 1 trap).
-        .bounce_buffer_size_px = 10 * BOARD_LCD_H_RES,
+        // 20-line bounce buffers (two 32KB internal buffers). Sizing is
+        // measured, not guessed — A/B'd on-device with the [scanout] underrun
+        // tripwire (lvgl_glue.c) at verified 80MHz octal PSRAM:
+        //   10 lines: PSRAM-heavy bursts (deferred panel builds, WiFi bring-up)
+        //     starve the refill ISR's 565us deadline -> 741 late refills + 34
+        //     coalesced EOFs per boot = the one-frame downward-ghost glitches
+        //     RESTART_IN_VSYNC then recovers.
+        //   20 lines: same bursts -> 2 late + 8 hard (those 8 are the flash-
+        //     cache-off NVS windows no bounce size can absorb). Idle is clean
+        //     under both.
+        // The doubled per-refill window (1130us vs a ~600us copy) is what buys
+        // the headroom. CAUTION: only valid at PSRAM 80MHz — at 40MHz the copy
+        // itself exceeds any window and bigger buffers make it WORSE (measured:
+        // continuous idle underruns). Verify "esp_psram: Speed: 80MHz" in the
+        // boot log before trusting any scan-out measurement.
+        .bounce_buffer_size_px = 20 * BOARD_LCD_H_RES,
         .hsync_gpio_num = -1,
         .vsync_gpio_num = -1,
         .de_gpio_num = BOARD_LCD_PIN_DE,

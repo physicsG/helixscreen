@@ -13,6 +13,7 @@
 #include "abort_manager.h"
 #include "app_globals.h"
 #include "fault_modal_registry.h"
+#include "gcode_error_router.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "printer_recovery_service.h"
@@ -94,6 +95,9 @@ void EmergencyStopOverlay::init_subjects() {
     UI_MANAGED_SUBJECT_STRING(recovery_message_subject_, recovery_message_buf_, "",
                               "recovery_message", subjects_);
     UI_MANAGED_SUBJECT_INT(recovery_can_restart_, 1, "recovery_can_restart", subjects_);
+    UI_MANAGED_SUBJECT_STRING(recovery_code_subject_, recovery_code_buf_, "", "recovery_code",
+                              subjects_);
+    UI_MANAGED_SUBJECT_INT(recovery_has_code_, 0, "recovery_has_code", subjects_);
 
     // Register click callbacks for XML event binding
     register_xml_callbacks({
@@ -148,6 +152,15 @@ void EmergencyStopOverlay::deinit_subjects() {
     print_start_phase_observer_.reset();
     klippy_state_observer_.reset();
 
+    // Same reasoning as the dialog pointers above, one level up: init() stored
+    // borrowed pointers, and neither object survives what this runs ahead of.
+    // Production always re-inits before the next create() (a soft restart re-runs
+    // Application::init_panel_subjects()), but tests own a PrinterState per
+    // fixture and never re-init, so leaving these set hands the next test a
+    // singleton pointing at freed objects. Every consumer is null-guarded.
+    printer_state_ = nullptr;
+    api_ = nullptr;
+
     spdlog::debug("[EmergencyStop] Subjects deinitialized");
 }
 
@@ -162,12 +175,19 @@ void EmergencyStopOverlay::create() {
         return;
     }
 
+    // This singleton outlives any given PrinterState — tests own one per fixture,
+    // and a soft restart (Add Printer) tears the whole tree down and rebuilds it.
+    // deinit_subjects() flips this token before lv_subject_deinit() frees the
+    // observer nodes, which is the only thing that stops the guards below from
+    // calling lv_observer_remove() on freed memory (THREADING.md §5).
+    const SubjectLifetime ps_subjects = printer_state_->get_subjects_lifetime();
+
     // Subscribe to print state changes for automatic visibility updates
     // The estop_visible subject drives XML bindings in home_panel, controls_panel,
     // and print_status_panel (no FAB - buttons are embedded in each panel)
     print_state_observer_ = observe_int_sync<EmergencyStopOverlay>(
         printer_state_->get_print_state_enum_subject(), this,
-        [](EmergencyStopOverlay* self, int /*state*/) { self->update_visibility(); });
+        [](EmergencyStopOverlay* self, int /*state*/) { self->update_visibility(); }, ps_subjects);
 
     // The pre-print preparing phase (homing, heating, leveling) is physical
     // movement during which Moonraker still reports STANDBY — so the job-state
@@ -176,7 +196,7 @@ void EmergencyStopOverlay::create() {
     // from the moment motion starts, not just after PRINTING begins.
     print_start_phase_observer_ = observe_int_sync<EmergencyStopOverlay>(
         printer_state_->get_print_start_phase_subject(), this,
-        [](EmergencyStopOverlay* self, int /*phase*/) { self->update_visibility(); });
+        [](EmergencyStopOverlay* self, int /*phase*/) { self->update_visibility(); }, ps_subjects);
 
     // Reset the initial-fire guard so each (re)subscription — including
     // soft-restart after Add Printer — drops the subject's placeholder
@@ -244,7 +264,8 @@ void EmergencyStopOverlay::create() {
                     },
                     nullptr);
             }
-        });
+        },
+        ps_subjects);
 
     // Initial visibility update
     update_visibility();
@@ -504,11 +525,18 @@ void EmergencyStopOverlay::update_recovery_dialog_content() {
 
     // Use actual Klipper state_message if available (e.g. "Max force exceeded...")
     std::string message;
+    std::string code;
     if (printer_state_ && (recovery_reason_ == RecoveryReason::SHUTDOWN ||
                            recovery_reason_ == RecoveryReason::ERROR)) {
         const auto& state_msg = printer_state_->get_klippy_state_message();
         if (!state_msg.empty()) {
             message = state_msg;
+            // Klipper sometimes reports the reason as a JSON envelope
+            // (`{"code":"key1","msg":"..."}`), sometimes as prose with one spliced
+            // in. Reuse the gcode router's decoder rather than showing the user raw
+            // JSON: it lifts msg into the text and hands the code back separately for
+            // the header slot. Prose and malformed envelopes come back untouched.
+            GcodeErrorRouter::clean_error_text(message, code);
         }
     }
     if (message.empty()) {
@@ -518,6 +546,8 @@ void EmergencyStopOverlay::update_recovery_dialog_content() {
     // Update subjects — XML bindings in klipper_recovery_dialog.xml react automatically
     lv_subject_copy_string(&recovery_title_subject_, lv_tr(content.title));
     lv_subject_copy_string(&recovery_message_subject_, message.c_str());
+    lv_subject_copy_string(&recovery_code_subject_, code.c_str());
+    lv_subject_set_int(&recovery_has_code_, code.empty() ? 0 : 1);
     lv_subject_set_int(&recovery_can_restart_,
                        recovery_reason_ != RecoveryReason::DISCONNECTED ? 1 : 0);
 

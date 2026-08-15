@@ -53,6 +53,11 @@ void DisplayManager::register_resize_callback(ResizeCallback) {}
 bool DisplayManager::needs_touch_calibration() const {
     return false;
 }
+// GT911 capacitive touch reports absolute panel coordinates — there is no
+// resistive-style calibration to offer, so the settings row stays hidden.
+bool DisplayManager::supports_touch_calibration() const {
+    return false;
+}
 
 // --- crash_handler breadcrumbs (Linux signal-context crash pipeline) --------
 namespace crash_handler {
