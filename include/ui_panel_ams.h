@@ -277,8 +277,9 @@ class AmsPanel : public PanelBase {
 
     /// Nozzle taps on a PARALLEL canvas open the per-toolhead menu instead of
     /// the per-slot one — mount/park is a carriage question, not a lane one.
+    /// @p tool_index is the tool number on the badge under the nozzle;
+    /// helix::ui::show_toolhead_menu_at_touch() does the rest.
     static void on_path_toolhead_clicked(int tool_index, void* user_data);
-    void dispatch_toolhead_action(helix::ui::AmsToolheadMenu::ToolheadAction a, int tool_index);
 
     /**
      * @brief Handle click on bypass spool box in path canvas

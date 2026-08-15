@@ -550,8 +550,17 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
     // Plumb per-slot metadata (mapped_tool, extruder identity, hub routing) to
     // path canvas. The extruder name is what actually names a toolhead; the
     // mapped_tool alias stays as the fallback for backends that publish neither.
-    if (unit_index >= 0 && unit_index < static_cast<int>(info.units.size())) {
-        const auto& unit = info.units[unit_index];
+    //
+    // mapped_tool and the extruder identity go to the WHOLE-SYSTEM view too
+    // (slot_offset 0, every slot): the badges are the same rule there, and the
+    // toolhead menu reads the tapped badge's number back off the canvas, so an
+    // unplumbed whole-system view badged a remapped lane with its lane index
+    // and the menu then acted on the head that number really names. Only hub
+    // routing is a per-unit property and stays unit-scoped.
+    {
+        const AmsUnit* unit = (unit_index >= 0 && unit_index < static_cast<int>(info.units.size()))
+                                  ? &info.units[static_cast<size_t>(unit_index)]
+                                  : nullptr;
         std::vector<int> extruder_tools(static_cast<size_t>(slot_count), -1);
         for (int i = 0; i < slot_count; ++i) {
             int gi = slot_offset + i;
@@ -560,8 +569,8 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
             if (const auto n = helix::tool_number_for_extruder(slot.extruder_name)) {
                 extruder_tools[static_cast<size_t>(i)] = *n;
             }
-            if (i < static_cast<int>(unit.lane_is_hub_routed.size())) {
-                ui_filament_path_canvas_set_slot_hub_routed(canvas, i, unit.lane_is_hub_routed[i]);
+            if (unit && i < static_cast<int>(unit->lane_is_hub_routed.size())) {
+                ui_filament_path_canvas_set_slot_hub_routed(canvas, i, unit->lane_is_hub_routed[i]);
             }
         }
         ui_filament_path_canvas_set_extruder_tools(canvas, extruder_tools.data(), slot_count);

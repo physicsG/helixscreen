@@ -9,6 +9,7 @@
 
 #include <functional>
 #include <lvgl.h>
+#include <memory>
 
 // Forward declaration
 class AmsBackend;
@@ -25,22 +26,32 @@ namespace helix::ui {
  * regions opened the per-slot AmsContextMenu, so mounting or parking a head had
  * no UI at all.
  *
- * Mirrors AmsSelectorMenu (the hub/selector menu): static-instance callback
- * dispatch, capability gating in on_created(), and ContextMenu positioning.
- * This class only *presents* the menu and reports the choice via a callback;
- * the canvas→panel→menu→backend dispatch wiring lives in the panel.
+ * Mirrors AmsSelectorMenu (the hub/selector menu): ContextMenu::active_as<>()
+ * callback dispatch, the shared backdrop, capability gating at show time. This
+ * class only *presents* the menu and reports the choice via a callback; the
+ * canvas→panel→menu→backend wiring is show_toolhead_menu_at_touch() and
+ * dispatch_toolhead_menu_action() below, shared by every panel that opens it.
  *
- * ## Usage:
- * @code
- * helix::ui::AmsToolheadMenu menu;
- * menu.set_action_callback([](ToolheadAction action, int tool) {
- *     switch (action) {
- *         case ToolheadAction::SELECT: // backend->select_slot(tool)...
- *         case ToolheadAction::PARK:   // backend->park_toolhead()...
- *     }
- * });
- * menu.show_at(parent, anchor, click_pt, tool_index, backend);
- * @endcode
+ * ## The two index spaces
+ *
+ * Both canvases hand back THE TOOL NUMBER ON THE BADGE the user tapped — the
+ * system-path canvas has always said so, and the filament-path canvas now
+ * reports the same rule its badge draws with (`mapped_tool` when it was given
+ * one, else the lane). Every backend call the menu makes is SLOT-indexed, so
+ * the tool is resolved to a slot ONCE, at show time, through the same rule the
+ * filament panel's op buttons use (toolhead_slot_for_tool), and that slot
+ * travels with the action. The menu used to reverse-map a number that one
+ * canvas reported as a lane and the other as a tool, which under ASSIGN_TOOL
+ * remapping acted on a different head than the one tapped.
+ *
+ * ## Only on a toolchanger
+ *
+ * show_at() refuses (returns false) unless the backend's topology is PARALLEL.
+ * Every entry is a carriage or per-head operation: on a hub or selector backend
+ * `mounted_tool` is a concept that does not exist (always -1), so the rule
+ * offered "Select" — which on Happy Hare drives the selector, on an ACE runs a
+ * full filament feed, and on CFS/AFC is a guaranteed refusal — from a nozzle
+ * tap that had been inert before the menu existed.
  */
 
 /**
@@ -90,9 +101,18 @@ struct ToolheadMenuModel {
                                                     bool can_unload, bool print_blocks_ops = false,
                                                     bool source_is_external = false);
 
-/// Test seam for the file-local slot_for_tool(); see its definition for why the
-/// virtual tool number and the slot index are not interchangeable.
-[[nodiscard]] int slot_for_tool_for_test(const AmsSystemInfo& info, int tool_index);
+/**
+ * @brief The global slot a toolhead-menu tool number acts on.
+ *
+ * resolve_op_button_slot() with its toolchanger arm pinned: this menu only
+ * opens on a PARALLEL canvas, where a tool number IS a lane when no
+ * tool_to_slot_map entry says otherwise. (The resolver's single-tool arm
+ * answers current_slot — the loaded lane of a multi-lane AMS — which is never
+ * what a nozzle tap means.) One rule with the filament panel's op buttons, so
+ * the menu and the buttons can never name different slots for one tool;
+ * ams_tool_map_sync.h records the two encodings shipping out of step twice.
+ */
+[[nodiscard]] int toolhead_slot_for_tool(const AmsSystemInfo& info, int tool_index);
 
 /// True when the model has no entries — nothing to show, so show nothing.
 [[nodiscard]] inline bool toolhead_menu_is_empty(const ToolheadMenuModel& m) {
@@ -111,7 +131,12 @@ class AmsToolheadMenu : public ContextMenu {
         UNLOAD     ///< Unload filament from this head
     };
 
-    using ActionCallback = std::function<void(ToolheadAction action, int tool_index)>;
+    /// @param tool_index the head, as the badge numbers it
+    /// @param slot_index the slot resolved for it at show time — what every
+    ///        backend call takes. Carried with the action so the dispatch acts
+    ///        on exactly the slot the menu was shown for.
+    using ActionCallback =
+        std::function<void(ToolheadAction action, int tool_index, int slot_index)>;
 
     AmsToolheadMenu();
     ~AmsToolheadMenu() override;
@@ -120,9 +145,7 @@ class AmsToolheadMenu : public ContextMenu {
     AmsToolheadMenu(const AmsToolheadMenu&) = delete;
     AmsToolheadMenu& operator=(const AmsToolheadMenu&) = delete;
 
-    // Non-movable. Both panels hold this in a unique_ptr and nothing moves it;
-    // the move bodies existed only to re-init subjects and fix up the static
-    // active-instance pointer, which is 40 lines of unreachable subtlety.
+    // Non-movable. Both panels hold this in a unique_ptr and nothing moves it.
     AmsToolheadMenu(AmsToolheadMenu&&) = delete;
     AmsToolheadMenu& operator=(AmsToolheadMenu&&) = delete;
 
@@ -131,9 +154,10 @@ class AmsToolheadMenu : public ContextMenu {
      * @param parent Parent screen for the menu
      * @param anchor Widget to position the menu near (the canvas)
      * @param click_pt Display-coordinate click point (for positioning)
-     * @param tool_index Head that was tapped (0-based)
+     * @param tool_index Head that was tapped, as the badge numbers it
      * @param backend Backend pointer for capability gating
-     * @return true if the menu was shown; false if it had no entries to offer
+     * @return true if the menu was shown; false if the backend is not a
+     *         toolchanger (PARALLEL topology) or the head has no entries to offer
      */
     bool show_at(lv_obj_t* parent, lv_obj_t* anchor, lv_point_t click_pt, int tool_index,
                  AmsBackend* backend);
@@ -147,39 +171,48 @@ class AmsToolheadMenu : public ContextMenu {
     const char* xml_component_name() const override {
         return "ams_toolhead_menu";
     }
-    const char* menu_card_name() const override {
-        return "toolhead_menu";
-    }
+    // menu_card_name(): the default, "context_menu" -- the card in the XML
+    // carries that name so the base can size and position it.
     void on_created(lv_obj_t* menu_obj) override;
+    /// A tap outside the card cancels. The base owns the backdrop callback.
+    void on_backdrop_clicked() override;
 
   private:
     ActionCallback action_callback_;
     AmsBackend* backend_ = nullptr;
-    int tool_index_ = -1; ///< VIRTUAL tool number, as the canvas reports it
-    int slot_index_ = -1; ///< ...and the slot that feeds it — see slot_for_tool()
+    int tool_index_ = -1; ///< the badge's number, for the title and Select label
+    int slot_index_ = -1; ///< ...and the slot resolved for it -- see toolhead_slot_for_tool()
     ToolheadMenuModel model_;
 
     // Entry visibility is published as subjects and bound with <bind_flag_if_eq>
-    // in the XML, rather than hidden from C++ — declarative rule 2, and the
-    // imperative-UI gate is a ratchet that this would otherwise push upward.
-    lv_subject_t show_select_subject_; ///< 1 = offer "Select T{n}"
-    lv_subject_t show_park_subject_;   ///< 1 = offer "Park"
-    lv_subject_t show_load_subject_;   ///< 1 = offer "Load"
-    lv_subject_t show_unload_subject_; ///< 1 = offer "Unload"
-    lv_subject_t title_subject_;       ///< Card header, e.g. "Toolhead T3"
-    char title_buf_[32] = {0};
-    bool subject_initialized_ = false;
+    // in the XML, rather than hidden from C++ — declarative rule 2.
+    //
+    // ONE set for the class, not one per instance. The XML binds these by fixed
+    // name, and both the AMS panel and the overview own an instance: with
+    // per-instance subjects registered under the same names, whichever instance
+    // registered LAST owned the names, and the other's publish_model() wrote to
+    // subjects no card was bound to any more -- a blank or wrong-buttoned menu,
+    // reachable on every multi-unit rig. One menu is on screen at a time, so
+    // one set of subjects is exactly what the XML needs. Initialised once and
+    // torn down through StaticSubjectRegistry like every other static subject.
+    static lv_subject_t s_show_select_subject_; ///< 1 = offer "Select T{n}"
+    static lv_subject_t s_show_park_subject_;   ///< 1 = offer "Park"
+    static lv_subject_t s_show_load_subject_;   ///< 1 = offer "Load"
+    static lv_subject_t s_show_unload_subject_; ///< 1 = offer "Unload"
+    static lv_subject_t s_title_subject_;       ///< Card header, e.g. "Toolhead T3"
+    static char s_title_buf_[32];
+    static bool s_subjects_initialized_;
 
-    void init_subjects();
+    static void init_subjects();
+    static void deinit_subjects();
     void publish_model();
 
     /**
-     * @brief Common pattern: clear static instance, hide, invoke callback
+     * @brief Common pattern: hide, then invoke the callback
      */
     void dispatch_toolhead_action(ToolheadAction action);
 
     // === Event Handlers ===
-    void handle_backdrop_clicked();
     void handle_select();
     void handle_park();
     void handle_load();
@@ -189,10 +222,9 @@ class AmsToolheadMenu : public ContextMenu {
     static void register_callbacks();
     static bool callbacks_registered_;
 
-    // === Static Callbacks (instance lookup via static pointer) ===
-    static AmsToolheadMenu* s_active_instance_;
+    // === Static Callbacks (instance lookup via ContextMenu::active_as<>) ===
+    /// ContextMenu::active_as() that also logs the unexpected empty case.
     static AmsToolheadMenu* get_active_instance();
-    static void on_backdrop_cb(lv_event_t* e);
     static void on_select_cb(lv_event_t* e);
     static void on_park_cb(lv_event_t* e);
     static void on_load_cb(lv_event_t* e);
@@ -206,8 +238,27 @@ class AmsToolheadMenu : public ContextMenu {
  * overview — because the dispatch is pure backend work with no panel state in
  * it, and two copies would drift the moment one of them grew a case.
  * CANCELLED and a missing backend are no-ops; a failure raises the standard AMS
- * error toast.
+ * error toast. @p slot_index is the slot the menu resolved at show time.
  */
-void dispatch_toolhead_menu_action(AmsToolheadMenu::ToolheadAction action, int tool_index);
+void dispatch_toolhead_menu_action(AmsToolheadMenu::ToolheadAction action, int tool_index,
+                                   int slot_index);
+
+/**
+ * @brief Everything between a canvas nozzle tap and the menu appearing.
+ *
+ * Range-checks the tool, reads the live touch point while the indev still
+ * reports it, lazily builds the panel's menu instance, wires the shared
+ * dispatch, shows. Both panels had a ~40-line copy of this, and a range check
+ * had already been lost once in the copying.
+ *
+ * @param menu The panel's instance, created on first use and reused: a menu
+ *        holds its own widget tree between shows.
+ * @param parent_screen Screen the menu is raised on
+ * @param canvas The canvas that was tapped (positioning anchor)
+ * @param tool_index The tool number the canvas reported — the badge's
+ * @return true if a menu was shown
+ */
+bool show_toolhead_menu_at_touch(std::unique_ptr<AmsToolheadMenu>& menu, lv_obj_t* parent_screen,
+                                 lv_obj_t* canvas, int tool_index);
 
 } // namespace helix::ui

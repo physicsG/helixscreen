@@ -182,10 +182,20 @@ static void filament_path_click_cb(lv_event_t* e) {
                 int32_t slot_x = x_off + get_slot_x(data, i, x_off);
                 int32_t hit_radius_x = LV_MAX(20, tool_scale * 3);
                 if (abs(point.x - slot_x) < hit_radius_x) {
-                    spdlog::debug("[FilamentPath] Toolhead {} clicked (parallel topology)", i);
                     if (data->toolhead_callback) {
-                        data->toolhead_callback(i, data->toolhead_user_data);
+                        // Report the tool number ON THE BADGE, by the badge's own
+                        // rule (draw_slot_toolhead: mapped_tool when the canvas was
+                        // given one, else the lane) -- the same contract as the
+                        // system-path canvas. Reporting the raw lane while the
+                        // menu read it as a tool number acted on a different
+                        // head than the one tapped under ASSIGN_TOOL remapping.
+                        const int tool = (data->mapped_tool[i] >= 0) ? data->mapped_tool[i] : i;
+                        spdlog::debug("[FilamentPath] Toolhead T{} clicked (lane {}, parallel "
+                                      "topology)",
+                                      tool, i);
+                        data->toolhead_callback(tool, data->toolhead_user_data);
                     } else {
+                        spdlog::debug("[FilamentPath] Toolhead {} clicked (parallel topology)", i);
                         data->slot_callback(i, data->slot_user_data);
                     }
                     return;

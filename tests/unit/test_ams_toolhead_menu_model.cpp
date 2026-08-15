@@ -3,10 +3,16 @@
 // The toolhead context menu's entry rule, tested as a pure function — no LVGL,
 // no display, no backend. Tapping a nozzle on a PARALLEL (tool changer) canvas
 // asks a carriage question ("which head is mounted") that the per-slot menu
-// could not answer, so these four entries are the whole feature.
+// could not answer, so these four entries are the whole feature. The last
+// section wires the real menu against a mock backend under LVGL, for the one
+// rule that lives outside the pure model: it opens only on a toolchanger.
 
 #include "ui_ams_toolhead_menu.h"
+#include "ui_update_queue.h"
 
+#include "../lvgl_ui_test_fixture.h"
+#include "ams_backend_mock.h"
+#include "ams_state.h"
 #include "ams_types.h"
 
 #include "../catch_amalgamated.hpp"
@@ -160,27 +166,32 @@ TEST_CASE("An externally-fed toolhead offers Unload but not Load",
 // remapping, where a menu keyed on the wrong one acts on the wrong head.
 // =============================================================================
 
-TEST_CASE("slot_for_tool resolves through mapped_tool", "[ams][toolhead_menu][tool_index]") {
+TEST_CASE("toolhead_slot_for_tool resolves through the op-button rule",
+          "[ams][toolhead_menu][tool_index]") {
+    // The menu resolves a badge's tool number to a slot ONCE, at show time,
+    // through resolve_op_button_slot() -- the same rule the filament panel's
+    // Load/Unload buttons use -- so the two surfaces can never name different
+    // slots for one tool. It used to reverse-scan mapped_tool privately, the
+    // other encoding of the same relation, which ams_tool_map_sync.h records
+    // shipping out of step twice.
     AmsSystemInfo info;
     info.units.emplace_back();
     auto& unit = info.units.back();
     unit.slot_count = 3;
     unit.first_slot_global_index = 0;
     unit.slots.resize(3);
-    // A remapped machine: the badge numbers do NOT match the slot indices.
-    unit.slots[0].global_index = 0;
-    unit.slots[0].mapped_tool = 2;
-    unit.slots[1].global_index = 1;
-    unit.slots[1].mapped_tool = 0;
-    unit.slots[2].global_index = 2;
-    unit.slots[2].mapped_tool = 1;
+    for (int i = 0; i < 3; ++i) {
+        unit.slots[static_cast<size_t>(i)].global_index = i;
+    }
+    // A remapped machine: tool_to_slot_map is what the backend publishes.
+    info.tool_to_slot_map = {1, 2, 0}; // T0 -> slot 1, T1 -> slot 2, T2 -> slot 0
 
-    CHECK(helix::ui::slot_for_tool_for_test(info, 2) == 0);
-    CHECK(helix::ui::slot_for_tool_for_test(info, 0) == 1);
-    CHECK(helix::ui::slot_for_tool_for_test(info, 1) == 2);
+    CHECK(helix::ui::toolhead_slot_for_tool(info, 2) == 0);
+    CHECK(helix::ui::toolhead_slot_for_tool(info, 0) == 1);
+    CHECK(helix::ui::toolhead_slot_for_tool(info, 1) == 2);
 
-    // Identity machine (the U1): the two are the same number, which is why the
-    // bug was invisible there.
+    // Identity machine (the U1 publishes no map): the two are the same number,
+    // which is why the bug was invisible there.
     AmsSystemInfo u1;
     u1.units.emplace_back();
     auto& heads = u1.units.back();
@@ -191,10 +202,77 @@ TEST_CASE("slot_for_tool resolves through mapped_tool", "[ams][toolhead_menu][to
         heads.slots[static_cast<size_t>(i)].mapped_tool = i;
     }
     for (int i = 0; i < 4; ++i) {
-        CHECK(helix::ui::slot_for_tool_for_test(u1, i) == i);
+        CHECK(helix::ui::toolhead_slot_for_tool(u1, i) == i);
     }
 
-    // Nothing maps to it: fall back to the raw index rather than -1, preserving
-    // behaviour for a backend that publishes no mapped_tool at all.
-    CHECK(helix::ui::slot_for_tool_for_test(info, 9) == 9);
+    // Beyond the map: a toolchanger lane IS its tool number, so fall back to
+    // identity -- never to current_slot, which is the resolver's single-tool
+    // answer and means "the loaded lane of a multi-lane AMS".
+    u1.current_slot = 2;
+    CHECK(helix::ui::toolhead_slot_for_tool(u1, 9) == 9);
+    info.current_slot = 2;
+    CHECK(helix::ui::toolhead_slot_for_tool(info, 7) == 7);
+}
+
+// ============================================================================
+// The menu is a toolchanger surface -- wiring, with LVGL
+// ============================================================================
+
+namespace {
+/// Reaches the protected backdrop hook so the test can tap "outside the card".
+struct OpenToolheadMenu : helix::ui::AmsToolheadMenu {
+    using AmsToolheadMenu::on_backdrop_clicked;
+};
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture, "The toolhead menu opens only on a PARALLEL backend",
+                 "[ams][toolhead_menu][ui_integration]") {
+    // Every entry is a carriage or per-head operation, and on a hub/selector
+    // backend `mounted_tool` is a concept that does not exist (always -1) -- so
+    // the rule offered "Select" for every head from a nozzle tap that had been
+    // inert before the menu existed. On Happy Hare that is selector motion, on
+    // an ACE a full filament feed, on CFS/AFC a guaranteed refusal.
+    auto mock = std::make_unique<AmsBackendMock>(4);
+    auto* backend = mock.get();
+    REQUIRE(backend->start().success());
+    AmsState::instance().set_backend(std::move(mock));
+    AmsState::instance().init_subjects(true);
+    AmsState::instance().sync_from_backend();
+    helix::ui::UpdateQueue::instance().drain();
+
+    lv_obj_t* anchor = lv_obj_create(test_screen());
+    lv_obj_set_size(anchor, 200, 100);
+    lv_obj_update_layout(anchor);
+    const lv_point_t pt{50, 50};
+
+    SECTION("a selector (LINEAR) backend gets no menu") {
+        REQUIRE(backend->get_topology() != PathTopology::PARALLEL);
+        OpenToolheadMenu menu;
+        CHECK_FALSE(menu.show_at(test_screen(), anchor, pt, 0, backend));
+        CHECK(helix::ui::ContextMenu::active() == nullptr);
+    }
+
+    SECTION("a toolchanger (PARALLEL) backend does") {
+        backend->set_tool_changer_mode(true);
+        AmsState::instance().sync_from_backend();
+        helix::ui::UpdateQueue::instance().drain();
+        REQUIRE(backend->get_topology() == PathTopology::PARALLEL);
+        OpenToolheadMenu menu;
+        int cancelled = 0;
+        menu.set_action_callback([&](helix::ui::AmsToolheadMenu::ToolheadAction a, int, int) {
+            if (a == helix::ui::AmsToolheadMenu::ToolheadAction::CANCELLED) {
+                ++cancelled;
+            }
+        });
+        // T0 with nothing mounted: Select is offered, so a menu comes up.
+        CHECK(menu.show_at(test_screen(), anchor, pt, 0, backend));
+        CHECK(helix::ui::ContextMenu::active() == &menu);
+        // ...and a tap on the shared backdrop cancels it through the base hook.
+        menu.on_backdrop_clicked();
+        CHECK(cancelled == 1);
+        CHECK(helix::ui::ContextMenu::active() == nullptr);
+    }
+
+    AmsState::instance().set_backend(nullptr);
+    helix::ui::UpdateQueue::instance().drain();
 }

@@ -141,7 +141,10 @@ class AmsOverviewPanel : public PanelBase {
     void create_unit_cards(const AmsSystemInfo& info);
     // The mini bars take no current_slot: the active-lane outline comes from the
     // per-slot active-loaded subject, not from comparing against current_slot.
-    void update_unit_card(UnitCard& card, const AmsUnit& unit);
+    void update_unit_card(UnitCard& card, const AmsUnit& unit, const AmsSystemInfo& info);
+    /// The "N slots" label: the spools the unit OWNS (unit_spool_slot_count),
+    /// shared by card creation and refresh so the two cannot drift.
+    void set_owned_slot_count_label(UnitCard& card, const AmsUnit& unit, const AmsSystemInfo& info);
     void create_mini_bars(UnitCard& card, const AmsUnit& unit);
     void refresh_system_path(const AmsSystemInfo& info, int current_slot);
 
@@ -166,9 +169,9 @@ class AmsOverviewPanel : public PanelBase {
     static void on_bypass_spool_clicked(lv_event_t* e);
 
     /// Tap on a nozzle in the system path's toolhead row. @p tool_index is the
-    /// virtual tool number on the badge, which is what the backend acts on.
+    /// tool number on the badge; helix::ui::show_toolhead_menu_at_touch()
+    /// resolves it and runs the shared menu.
     static void on_toolhead_clicked(int tool_index, void* user_data);
-    void dispatch_toolhead_action(helix::ui::AmsToolheadMenu::ToolheadAction a, int tool_index);
 
     // === Sidebar ===
     std::unique_ptr<helix::ui::AmsOperationSidebar> sidebar_;
