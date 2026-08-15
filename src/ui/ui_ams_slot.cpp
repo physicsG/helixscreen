@@ -8,6 +8,7 @@
 #include "ui_observer_guard.h"
 #include "ui_spool_canvas.h"
 #include "ui_update_queue.h"
+#include "ui_utils.h"
 
 #include "ams_state.h"
 #include "ams_types.h"
@@ -728,6 +729,8 @@ static void apply_slot_error(AmsSlotData* data, const SlotInfo& slot) {
 /**
  * @brief Event handler for widget lifecycle (DELETE event for cleanup)
  */
+static void apply_source_bars(AmsSlotData* data);
+
 static void ams_slot_event_cb(lv_event_t* e) {
     lv_event_code_t code = lv_event_get_code(e);
 
@@ -739,6 +742,21 @@ static void ams_slot_event_cb(lv_event_t* e) {
 
         // Use the registry for cleanup - more reliable than user_data during lv_deinit()
         unregister_slot_data(obj);
+    }
+}
+
+/// SIZE_CHANGED on the spool container (user_data = the slot widget). The
+/// source bars are sized off the container's computed width, which is 0 when
+/// the widget is first built (mid-XML-inflation) and only real once the
+/// container itself has been laid out -- so the hook sits on the container,
+/// whose coords are final when its own event fires, not on the slot widget,
+/// whose event runs before its children are re-laid-out. Only a position fed
+/// from another unit has bars to size; apply_source_bars() returns at once for
+/// every other slot.
+static void ams_slot_container_size_cb(lv_event_t* e) {
+    auto* obj = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
+    if (auto* d = get_slot_data(obj)) {
+        apply_source_bars(d);
     }
 }
 
@@ -794,7 +812,15 @@ static void create_spool_visualization(AmsSlotData* data) {
  * so the two surfaces cannot drift apart visually.
  *
  * No-op for an ordinary slot, which keeps its spool. Safe to call repeatedly:
- * the row is built once and restyled thereafter.
+ * the row is built once and its bars rebuilt thereafter -- from
+ * ui_ams_slot_refresh() on every slots_version bump (a bay's colour edit or a
+ * spool coming and going has to reach the head that shows those bays; nothing
+ * else re-runs this, and the head's own observers only watch its own slot) and
+ * from the widget's SIZE_CHANGED (the first call lands mid-XML-inflation, when
+ * the container has no width yet and every bar would clamp to the minimum).
+ * The rebuild goes through safe_clean_children(): the refresh arrives on the
+ * slots_version observer, a queued batch where a synchronous lv_obj_clean()
+ * corrupts LVGL's event list (#776) -- same reason the overview's mini bars use it.
  */
 static void apply_source_bars(AmsSlotData* data) {
     if (!data || !data->spool_container) {
@@ -822,7 +848,16 @@ static void apply_source_bars(AmsSlotData* data) {
     // belongs to apply_slot_status(), which owns spool visibility and re-runs on
     // every update. Setting source_bars below is what tells it.
 
+    // The computed width, not the styled one -- and only once there IS one.
+    // Before the first layout pass this reads 0, and calc_bar_width() then
+    // clamps every bar to MINI_BAR_MIN_WIDTH_PX ("below this a bar is
+    // invisible") for good, since nothing re-sized them. SIZE_CHANGED brings
+    // this back once the container has been laid out.
+    lv_obj_update_layout(data->spool_container);
     const int32_t box = lv_obj_get_width(data->spool_container);
+    if (box <= 0) {
+        return;
+    }
     const int32_t gap = theme_manager_get_spacing("space_xxs");
     const int32_t bar_w = ams_draw::calc_bar_width(box, bays, gap, ams_draw::MINI_BAR_MIN_WIDTH_PX,
                                                    ams_draw::MINI_BAR_MAX_WIDTH_PX);
@@ -840,7 +875,7 @@ static void apply_source_bars(AmsSlotData* data) {
         lv_obj_remove_flag(data->source_bars, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_flag(data->source_bars, LV_OBJ_FLAG_EVENT_BUBBLE);
     } else {
-        lv_obj_clean(data->source_bars);
+        helix::ui::safe_clean_children(data->source_bars);
     }
 
     const int32_t bar_h = box > 0 ? (box * 3) / 4 : ams_draw::MINI_BAR_HEIGHT_PX;
@@ -1132,6 +1167,10 @@ static void* ams_slot_xml_create(lv_xml_parser_state_t* state, const char** attr
     // Register for cleanup
     register_slot_data(obj, data_ptr.release());
     lv_obj_add_event_cb(obj, ams_slot_event_cb, LV_EVENT_DELETE, nullptr);
+    // The registry, not the raw pointer, resolves obj on the way back in (see
+    // ams_slot_container_size_cb), so a deleted slot answers nullptr.
+    lv_obj_add_event_cb(data->spool_container, ams_slot_container_size_cb, LV_EVENT_SIZE_CHANGED,
+                        obj);
 
     // Apply responsive slot width
     int32_t space_lg = theme_manager_get_spacing("space_lg");
@@ -1278,6 +1317,11 @@ void ui_ams_slot_refresh(lv_obj_t* obj) {
         apply_tool_badge(data, slot.mapped_tool, slot.tool_mapping_override);
         apply_slot_error(data, slot);
     }
+    // A position fed from another unit paints THAT unit's bays, and its own
+    // observers watch only its own slot -- so the bays' colours and presence
+    // reached it only when the whole panel was rebuilt. This is the per-slot
+    // hook the panel runs on every slots_version bump.
+    apply_source_bars(data);
 
     spdlog::trace("[AmsSlot] Refreshed slot {}", data->slot_index);
 }
