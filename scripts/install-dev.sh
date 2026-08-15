@@ -28,9 +28,9 @@ set -eu
 # non-standard tool still resolves as a fallback.
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-# Configuration
-GITHUB_REPO="prestonbrown/helixscreen"
-SERVICE_NAME="helixscreen"
+# Configuration. Soft assignments so the environment wins (see bundle-installer.sh).
+: "${GITHUB_REPO:=prestonbrown/helixscreen}"
+: "${SERVICE_NAME:=helixscreen}"
 
 # Source modules (if running from repo, not bundled)
 if [ -z "${_HELIX_BUNDLED_INSTALLER:-}" ]; then

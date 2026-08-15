@@ -17,6 +17,21 @@ _HELIX_RELEASE_SOURCED=1
 # Plain HTTP endpoint for systems without SSL (K1, AD5M BusyBox wget)
 : "${HTTP_BASE_URL:=http://dl.helixscreen.org}"
 
+# Skip the CDN + HTTP-mirror tiers and use GitHub Releases only.
+#
+# Those two hosts serve UPSTREAM's builds, and they are consulted before GitHub
+# at every step. Pointing GITHUB_REPO at a fork without this would ask the
+# upstream CDN for the version, then download the upstream artifact under that
+# version's name and install it — a fork install that silently installs someone
+# else's binary. Set by scripts/install-fork.sh; also useful for an air-gapped
+# mirror or when testing a release that has not been pushed to the CDN.
+: "${HELIX_GITHUB_ONLY:=0}"
+
+# True when the CDN/HTTP tiers must be skipped.
+_helix_github_only() {
+    [ "${HELIX_GITHUB_ONLY}" = "1" ]
+}
+
 # Cached manifest from R2 (set by get_latest_version, consumed by download_release)
 _R2_MANIFEST=""
 
@@ -616,26 +631,32 @@ get_latest_version() {
 
     # Try HTTPS sources first (R2 CDN → GitHub API)
     if check_https_capability; then
-        # Try R2 manifest first (faster CDN, no API rate limits)
-        local manifest_url="${R2_BASE_URL}/${R2_CHANNEL}/manifest.json"
-        log_info "Fetching latest version from CDN..."
-
-        _R2_MANIFEST=$(fetch_url "$manifest_url") || true
-        _R2_MANIFEST_TRANSPORT="https"
-        if [ -n "$_R2_MANIFEST" ]; then
-            version=$(echo "$_R2_MANIFEST" | parse_manifest_version)
-            if [ -n "$version" ]; then
-                # Manifest has bare version (e.g., "0.9.5"), we need the tag (e.g., "v0.9.5")
-                version="v${version}"
-                log_info "Latest version (CDN): ${version}"
-                echo "$version"
-                return 0
-            fi
-            log_warn "CDN manifest found but version could not be parsed, trying GitHub..."
-            _R2_MANIFEST=""
-            _R2_MANIFEST_TRANSPORT=""
+        # Try R2 manifest first (faster CDN, no API rate limits) — unless we are
+        # pinned to GitHub, in which case the CDN describes a different repo's
+        # releases and its version must not be believed.
+        if _helix_github_only; then
+            log_info "Using GitHub only (HELIX_GITHUB_ONLY=1), skipping CDN..."
         else
-            log_warn "CDN unavailable, trying GitHub..."
+            local manifest_url="${R2_BASE_URL}/${R2_CHANNEL}/manifest.json"
+            log_info "Fetching latest version from CDN..."
+
+            _R2_MANIFEST=$(fetch_url "$manifest_url") || true
+            _R2_MANIFEST_TRANSPORT="https"
+            if [ -n "$_R2_MANIFEST" ]; then
+                version=$(echo "$_R2_MANIFEST" | parse_manifest_version)
+                if [ -n "$version" ]; then
+                    # Manifest has bare version (e.g., "0.9.5"), we need the tag (e.g., "v0.9.5")
+                    version="v${version}"
+                    log_info "Latest version (CDN): ${version}"
+                    echo "$version"
+                    return 0
+                fi
+                log_warn "CDN manifest found but version could not be parsed, trying GitHub..."
+                _R2_MANIFEST=""
+                _R2_MANIFEST_TRANSPORT=""
+            else
+                log_warn "CDN unavailable, trying GitHub..."
+            fi
         fi
 
         # Fallback: GitHub API
@@ -654,7 +675,12 @@ get_latest_version() {
         log_warn "HTTPS not available, trying HTTP fallback..."
     fi
 
-    # HTTP fallback for systems without SSL (K1, AD5M BusyBox wget)
+    # HTTP fallback for systems without SSL (K1, AD5M BusyBox wget). Same
+    # reasoning as the CDN tier: it is upstream's mirror.
+    if _helix_github_only; then
+        log_error "Failed to fetch latest version from GitHub (HELIX_GITHUB_ONLY=1)."
+        show_manual_install_instructions "$platform" "latest"
+    fi
     local http_manifest_url="${HTTP_BASE_URL}/${R2_CHANNEL}/manifest.json"
     log_info "Fetching latest version via HTTP..."
 
@@ -826,23 +852,30 @@ download_release() {
 
     local size
     # --- Attempt 1: R2 CDN, zip preferred ---
-    log_info "URL: $zip_r2"
-    if _try_download_candidate "$zip_r2" "$zip_dest" https "$zip_sha"; then
-        _ARCHIVE_FORMAT="zip"
-        size=$(ls -lh "$zip_dest" | awk '{print $5}')
-        log_success "Downloaded ${zip_filename} (${size}) from CDN"
-        return 0
+    # Skipped entirely when pinned to GitHub: this host serves upstream's
+    # artifacts, and it is consulted first, so a fork install would take
+    # upstream's binary under the fork's version number.
+    if _helix_github_only; then
+        log_info "Using GitHub releases only (HELIX_GITHUB_ONLY=1)"
+    else
+        log_info "URL: $zip_r2"
+        if _try_download_candidate "$zip_r2" "$zip_dest" https "$zip_sha"; then
+            _ARCHIVE_FORMAT="zip"
+            size=$(ls -lh "$zip_dest" | awk '{print $5}')
+            log_success "Downloaded ${zip_filename} (${size}) from CDN"
+            return 0
+        fi
+        rm -f "$zip_dest"
+        log_info "URL: $tar_r2"
+        if _try_download_candidate "$tar_r2" "$tar_dest" https "$tar_sha"; then
+            _ARCHIVE_FORMAT="tar.gz"
+            size=$(ls -lh "$tar_dest" | awk '{print $5}')
+            log_success "Downloaded ${tar_filename} (${size}) from CDN"
+            return 0
+        fi
+        rm -f "$tar_dest"
+        log_warn "CDN download failed, trying GitHub..."
     fi
-    rm -f "$zip_dest"
-    log_info "URL: $tar_r2"
-    if _try_download_candidate "$tar_r2" "$tar_dest" https "$tar_sha"; then
-        _ARCHIVE_FORMAT="tar.gz"
-        size=$(ls -lh "$tar_dest" | awk '{print $5}')
-        log_success "Downloaded ${tar_filename} (${size}) from CDN"
-        return 0
-    fi
-    rm -f "$tar_dest"
-    log_warn "CDN download failed, trying GitHub..."
 
     # --- Attempt 2: GitHub Releases ---
     log_info "URL: $zip_gh"
@@ -863,31 +896,40 @@ download_release() {
     rm -f "$tar_dest"
 
     # --- Attempt 3: plain-HTTP mirror (BusyBox wget fallback) ---
-    log_info "Trying HTTP fallback..."
-    log_info "URL: $zip_http"
-    if _try_download_candidate "$zip_http" "$zip_dest" http "$zip_sha"; then
-        _ARCHIVE_FORMAT="zip"
-        size=$(ls -lh "$zip_dest" | awk '{print $5}')
-        log_success "Downloaded ${zip_filename} (${size}) via HTTP"
-        return 0
+    # Also upstream's, so also skipped when pinned to GitHub.
+    if ! _helix_github_only; then
+        log_info "Trying HTTP fallback..."
+        log_info "URL: $zip_http"
+        if _try_download_candidate "$zip_http" "$zip_dest" http "$zip_sha"; then
+            _ARCHIVE_FORMAT="zip"
+            size=$(ls -lh "$zip_dest" | awk '{print $5}')
+            log_success "Downloaded ${zip_filename} (${size}) via HTTP"
+            return 0
+        fi
+        rm -f "$zip_dest"
+        log_info "URL: $tar_http"
+        if _try_download_candidate "$tar_http" "$tar_dest" http "$tar_sha"; then
+            _ARCHIVE_FORMAT="tar.gz"
+            size=$(ls -lh "$tar_dest" | awk '{print $5}')
+            log_success "Downloaded ${tar_filename} (${size}) via HTTP"
+            return 0
+        fi
+        rm -f "$tar_dest"
     fi
-    rm -f "$zip_dest"
-    log_info "URL: $tar_http"
-    if _try_download_candidate "$tar_http" "$tar_dest" http "$tar_sha"; then
-        _ARCHIVE_FORMAT="tar.gz"
-        size=$(ls -lh "$tar_dest" | awk '{print $5}')
-        log_success "Downloaded ${tar_filename} (${size}) via HTTP"
-        return 0
-    fi
-    rm -f "$tar_dest"
 
     log_error "Failed to download release."
-    log_error "Tried zip: $zip_r2"
+    if ! _helix_github_only; then
+        log_error "Tried zip: $zip_r2"
+    fi
     log_error "Tried zip: $zip_gh"
-    log_error "Tried zip: $zip_http"
-    log_error "Tried tar: $tar_r2"
+    if ! _helix_github_only; then
+        log_error "Tried zip: $zip_http"
+        log_error "Tried tar: $tar_r2"
+    fi
     log_error "Tried tar: $tar_gh"
-    log_error "Tried tar: $tar_http"
+    if ! _helix_github_only; then
+        log_error "Tried tar: $tar_http"
+    fi
     if [ -n "$_DOWNLOAD_HTTP_CODE" ] && [ "$_DOWNLOAD_HTTP_CODE" != "200" ]; then
         log_error "HTTP status: $_DOWNLOAD_HTTP_CODE"
     fi
