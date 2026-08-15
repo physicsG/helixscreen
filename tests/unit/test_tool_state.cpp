@@ -1671,6 +1671,45 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: the SEATED bay claims a tool seve
         CHECK(ts.tools()[3].spoolman_id == 0);
     }
 
+    SECTION("the per-slot path obeys the same rule: an unseated bay's edit does not claim") {
+        // The incremental update_slot() path had its own shorter copy of the
+        // guard that stopped at presence. Editing the Spoolman spool on an
+        // occupied but UNSEATED bay fires EVENT_SLOT_CHANGED for that bay, and
+        // the copy let it overwrite the seated bay's attribution -- which
+        // ToolState then persisted, and which the next full sync could not
+        // undo. Bay 1 (global slot 5) is seated; bay 3 (global slot 7) holds
+        // "Orange" and is not.
+        auto backend = std::make_unique<SyncMultiAce>();
+        auto* raw = backend.get();
+        raw->handle_status_update(ace_frame_with_seat(1));
+        ams.set_backend(std::move(backend));
+        ams.sync_from_backend();
+        REQUIRE(ts.tools()[3].spoolman_id == 10);
+
+        // What the edit overlay does: rewrite the bay's SlotInfo, then the
+        // targeted slot sync the backend's event asks for.
+        SlotInfo edited = raw->get_slot_info(7);
+        REQUIRE(edited.mapped_tool == 3);
+        REQUIRE(edited.is_present());
+        edited.spoolman_id = 99;
+        edited.spool_name = "Edited Orange";
+        REQUIRE(raw->set_slot_info(7, edited, /*persist=*/false).success());
+        ams.update_slot(7);
+
+        // Tool 3 still belongs to the seated bay.
+        CHECK(ts.tools()[3].spoolman_id == 10);
+        CHECK(ts.tools()[3].spool_name == "Gray");
+
+        // ...and the SEATED bay's edit does go through the same path.
+        SlotInfo seated = raw->get_slot_info(5);
+        seated.spoolman_id = 42;
+        seated.spool_name = "Edited Gray";
+        REQUIRE(raw->set_slot_info(5, seated, /*persist=*/false).success());
+        ams.update_slot(5);
+        CHECK(ts.tools()[3].spoolman_id == 42);
+        CHECK(ts.tools()[3].spool_name == "Edited Gray");
+    }
+
     ams.set_backend(nullptr);
     ams.deinit_subjects();
     ts.deinit_subjects();

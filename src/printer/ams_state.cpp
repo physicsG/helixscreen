@@ -40,6 +40,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstring>
+#include <map>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -1334,6 +1335,52 @@ bool tool_has_present_slot(const AmsSystemInfo& info, int tool) {
     }
     return false;
 }
+
+/// Everything the attribution rule needs to know about ONE tool, gathered in
+/// a single pass. The three questions each re-walk every slot of every unit
+/// (and the two owner queries take the backend mutex per slot), so the full
+/// sync asks them once per distinct tool rather than once per slot.
+struct ToolFeed {
+    bool fed_by_view = false;  ///< reached through a position viewing another unit's spool
+    std::optional<int> seated; ///< the one slot entitled to the tool, when fed by view
+    bool has_present = false;  ///< some slot mapped to it holds filament
+};
+
+ToolFeed tool_feed(const AmsSystemInfo& info, const AmsBackend* backend, int tool) {
+    ToolFeed f;
+    f.fed_by_view = tool_is_fed_by_view(info, backend, tool);
+    if (f.fed_by_view) {
+        f.seated = seated_slot_for_tool(info, backend, tool);
+    }
+    f.has_present = tool_has_present_slot(info, tool);
+    return f;
+}
+
+/// Whether global slot @p slot_index may attribute its spool to its mapped
+/// tool. THE rule, shared by the full sync and the per-slot update: the
+/// per-slot path had grown its own shorter copy ("same guard as the full sync
+/// above") that stopped at presence, so on an ACE-fed head an occupied but
+/// UNSEATED bay re-claimed the tool's spool the moment its Spoolman spool was
+/// edited -- overwriting the seated bay's attribution, which ToolState then
+/// persisted, and which the next full sync could not undo (the seated bay had
+/// no Spoolman link to reassert, and a U1 has no firmware persistence to clear
+/// against).
+///
+/// Where a tool is reached through a viewing position, the SEATED slot is the
+/// only one entitled to it -- nothing seated means nothing to attribute. A
+/// viewing position with no seated source describes another unit's spool and
+/// is never a spool position itself. Everywhere else, presence decides:
+/// several slots on one tool means only an occupied one can be what feeds it.
+bool slot_may_attribute_tool(const ToolFeed& feed, const AmsBackend* backend, int slot_index,
+                             const SlotInfo& slot) {
+    if (feed.fed_by_view) {
+        return feed.seated.has_value() && *feed.seated == slot_index;
+    }
+    if (backend->slot_identity_owner_unit(slot_index)) {
+        return false;
+    }
+    return slot.is_present() || !feed.has_present;
+}
 } // namespace
 
 void AmsState::sync_from_backend() {
@@ -1625,6 +1672,17 @@ void AmsState::sync_from_backend() {
     // tool_spools.json plus a Moonraker DB key, so the stale spool outlived
     // restarts. Observed on the .112 BoxTurtle: "Assigned spool 86 () to tool 0"
     // fired during an EJECT, and ToolState::clear_spool() had no callers at all.
+    // Per-tool answers, computed once each: the loop below is per SLOT, and
+    // several slots on one tool would otherwise re-walk the whole system (and
+    // re-take the backend mutex per slot) for the same tool.
+    std::map<int, ToolFeed> feeds;
+    auto feed_for = [&](int tool) -> const ToolFeed& {
+        auto it = feeds.find(tool);
+        if (it == feeds.end()) {
+            it = feeds.emplace(tool, tool_feed(info, backend, tool)).first;
+        }
+        return it->second;
+    };
     for (int i = 0; i < std::min(info.total_slots, MAX_SLOTS); ++i) {
         const SlotInfo* slot = info.get_slot_global(i);
         if (!slot || slot->mapped_tool < 0) {
@@ -1633,40 +1691,20 @@ void AmsState::sync_from_backend() {
         // Several slots can map to ONE tool — an MMU in head mode binds all of
         // its bays to a single head. assign_spool() is keyed by tool, so without
         // this every one of those bays overwrites the same entry and the last
-        // slot the loop happens to reach wins. Only a slot that actually holds
-        // filament can be what feeds the tool, so an empty one must not claim
-        // it. (A single-slot-per-tool system is unaffected: its one slot either
-        // holds filament or there is nothing to attribute anyway.)
-        // ...but presence only separates empty from occupied, and on an ACE in
-        // head mode SEVERAL bays are occupied at once while exactly one is
-        // loaded. Every one of them cleared the guard above and overwrote the
-        // same entry, so the highest-numbered occupied bay won by nothing more
-        // than loop order — tool 3 was recorded as the spool in bay 3 while the
-        // head was empty, and ToolState persists that to Moonraker's DB.
-        //
-        // Where a tool is reached through a viewing position, the SEATED slot is
-        // the only one entitled to it, and nothing seated means nothing to
-        // attribute. Backends with no such position never enter this arm:
-        // tool_is_fed_by_view() is false for them and the behaviour above stands.
-        if (tool_is_fed_by_view(info, backend, slot->mapped_tool)) {
-            const auto seated = seated_slot_for_tool(info, backend, slot->mapped_tool);
-            if (!seated) {
-                // Head empty. Clear once, from the viewing position itself, so
-                // the stale spool does not outlive the filament that left.
-                if (backend->slot_identity_owner_unit(i)) {
-                    ToolState::instance().clear_spool(slot->mapped_tool);
-                }
-                continue;
+        // slot the loop happens to reach wins. See slot_may_attribute_tool() for
+        // the rule; it is shared with update_slot() so the incremental path
+        // cannot answer differently. Backends with no viewing position never
+        // enter its first arm and keep the plain presence rule.
+        const ToolFeed& feed = feed_for(slot->mapped_tool);
+        if (feed.fed_by_view && !feed.seated) {
+            // Head empty. Clear once, from the viewing position itself, so the
+            // stale spool does not outlive the filament that left.
+            if (backend->slot_identity_owner_unit(i)) {
+                ToolState::instance().clear_spool(slot->mapped_tool);
             }
-            if (*seated != i) {
-                continue;
-            }
-        } else if (backend->slot_identity_owner_unit(i)) {
-            // A viewing position with no seated source of its own describes
-            // another unit's spool; it is not a spool position to attribute.
             continue;
         }
-        if (!slot->is_present() && tool_has_present_slot(info, slot->mapped_tool)) {
+        if (!slot_may_attribute_tool(feed, backend, i, *slot)) {
             continue;
         }
         if (slot->spoolman_id > 0) {
@@ -2018,16 +2056,21 @@ void AmsState::update_slot(int slot_index) {
             bump_slots_version();
         }
 
-        // Sync spool to ToolState if this slot maps to a tool. Same guard as the
-        // full sync above: with several slots on one tool (an MMU in head mode)
-        // an empty bay must not claim the tool's spool.
-        if (slot.mapped_tool >= 0 && slot.spoolman_id > 0 &&
-            (slot.is_present() ||
-             !tool_has_present_slot(backend->get_system_info(), slot.mapped_tool))) {
-            ToolState::instance().assign_spool(slot.mapped_tool, slot.spoolman_id, slot.spool_name,
-                                               slot.remaining_weight_g, slot.total_weight_g);
-            if (!backend->has_firmware_spool_persistence()) {
-                ToolState::instance().save_spool_assignments(get_moonraker_api());
+        // Sync spool to ToolState if this slot maps to a tool -- under THE SAME
+        // rule as the full sync (slot_may_attribute_tool), not a shorter copy of
+        // it. The copy that lived here checked presence only, and on an ACE-fed
+        // head an occupied, unseated bay claimed the tool's spool the moment its
+        // Spoolman spool was edited: assigned, then persisted below.
+        if (slot.mapped_tool >= 0 && slot.spoolman_id > 0) {
+            const AmsSystemInfo sys = backend->get_system_info();
+            const ToolFeed feed = tool_feed(sys, backend, slot.mapped_tool);
+            if (slot_may_attribute_tool(feed, backend, slot_index, slot)) {
+                ToolState::instance().assign_spool(slot.mapped_tool, slot.spoolman_id,
+                                                   slot.spool_name, slot.remaining_weight_g,
+                                                   slot.total_weight_g);
+                if (!backend->has_firmware_spool_persistence()) {
+                    ToolState::instance().save_spool_assignments(get_moonraker_api());
+                }
             }
         }
 
