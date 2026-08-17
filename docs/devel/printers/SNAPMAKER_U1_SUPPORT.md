@@ -178,11 +178,11 @@ serve upstream's artifacts — so setting `GITHUB_REPO` alone would resolve
 upstream's version number and install upstream's binary under it.
 
 ```sh
-# From the fork's default branch
-curl -fsSL https://raw.githubusercontent.com/<owner>/helixscreen/main/scripts/install-fork.sh | sh
+# From the fork's latest u1-v* release (install-fork.sh is attached to each)
+curl -fsSL https://github.com/<owner>/helixscreen/releases/latest/download/install-fork.sh | sh
 
-# From a published u1-v* release
-curl -fsSL https://github.com/<owner>/helixscreen/releases/download/u1-v0.99.114/install-fork.sh | sh
+# From a branch that carries fork support, before any release exists
+HELIX_FORK_REF=<branch> sh -c "$(curl -fsSL https://raw.githubusercontent.com/<owner>/helixscreen/<branch>/scripts/install-fork.sh)"
 
 # Offline: scp the archive over, unpack, and run the copy shipped inside it
 sh install-fork.sh --local helixscreen-snapmaker-u1.zip
@@ -190,7 +190,24 @@ sh install-fork.sh --local helixscreen-snapmaker-u1.zip
 
 Flags pass straight through to the installer. `GITHUB_REPO` overrides the
 default fork; `HELIX_FORK_REF` picks the branch/tag the installer is fetched
-from.
+from when no release provides one.
+
+Where the installer itself comes from, in order: `install.sh` beside the
+script (an unpacked archive), then the fork's **latest release**
+(`releases/latest/download/install.sh` — the installer that built the binary it
+will install), then `HELIX_FORK_REF`. Whichever it finds is **refused unless it
+knows about fork installs** (`HELIX_GITHUB_ONLY`): an older `install.sh`
+hard-assigns `GITHUB_REPO` and would take the environment this script set,
+ignore it, and quietly install upstream's binary from upstream's CDN. That is
+why the release is preferred over a branch, and why `HELIX_FORK_REF=main` fails
+loudly until the fork's `main` carries the new installer.
+
+Two consequences for the fork's releases: they are published as full releases,
+not prereleases (`/releases/latest` — the API the installer discovers versions
+through, and the download URL above — resolves to the newest *non*-prerelease,
+so a prerelease-only repo has no "latest"), and a `u1-v*` tag passes the
+installer's version normalisation untouched (only bare `0.99.x` gets a `v`
+prefixed), so `--version u1-v0.99.114` and the release URLs agree.
 
 Both the Moonraker `[update_manager helixscreen]` block and `release_info.json`
 are written with whichever repo the install came from, so the printer offers
