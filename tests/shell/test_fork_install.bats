@@ -118,7 +118,8 @@ setup() {
     tmp="$BATS_TEST_TMPDIR/rel"
     mkdir -p "$tmp"
     cp "$FORK_SH" "$tmp/"
-    # Stand-in installer that records how it was called.
+    # Stand-in installer that records how it was called. It mentions
+    # HELIX_GITHUB_ONLY, so it passes the fork-support check by construction.
     cat > "$tmp/install.sh" <<'EOF'
 #!/bin/sh
 echo "LOCAL_INSTALLER repo=${GITHUB_REPO} only=${HELIX_GITHUB_ONLY} args=$*"
@@ -140,8 +141,10 @@ EOF
     tmp="$BATS_TEST_TMPDIR/rel2"
     mkdir -p "$tmp"
     cp "$FORK_SH" "$tmp/"
+    # Carries the fork-support marker so the check lets it run.
     cat > "$tmp/install.sh" <<'EOF'
 #!/bin/sh
+: "${HELIX_GITHUB_ONLY:=0}"
 echo "repo=${GITHUB_REPO}"
 EOF
     chmod +x "$tmp/install.sh"
@@ -149,4 +152,38 @@ EOF
     GITHUB_REPO="someone/helixscreen" run sh "$tmp/install-fork.sh"
     [ "$status" -eq 0 ]
     [[ "$output" == *"repo=someone/helixscreen"* ]]
+}
+
+@test "install-fork.sh refuses an installer that predates fork support" {
+    # The trap this pins: an old install.sh (hard GITHUB_REPO=, no
+    # HELIX_GITHUB_ONLY) would take the environment this script sets, ignore
+    # it, and quietly install upstream's binary. It has to fail loudly instead.
+    tmp="$BATS_TEST_TMPDIR/rel3"
+    mkdir -p "$tmp"
+    cp "$FORK_SH" "$tmp/"
+    cat > "$tmp/install.sh" <<'EOF2'
+#!/bin/sh
+GITHUB_REPO="prestonbrown/helixscreen"
+echo "OLD_INSTALLER_RAN repo=${GITHUB_REPO}"
+EOF2
+    chmod +x "$tmp/install.sh"
+
+    run sh "$tmp/install-fork.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"OLD_INSTALLER_RAN"* ]]
+    [[ "$output" == *"predates fork support"* ]]
+}
+
+@test "install-fork.sh accepts the shipped install.sh, which carries fork support" {
+    # The real bundle must pass the same check the stand-ins are held to.
+    run grep -q 'HELIX_GITHUB_ONLY' "$INSTALL_SH"
+    [ "$status" -eq 0 ]
+    tmp="$BATS_TEST_TMPDIR/rel4"
+    mkdir -p "$tmp"
+    cp "$FORK_SH" "$tmp/"
+    # A stand-in that carries the marker, so the check passes and it runs.
+    printf '#!/bin/sh\n# HELIX_GITHUB_ONLY honoured here\necho NEW_INSTALLER_RAN\n' > "$tmp/install.sh"
+    run sh "$tmp/install-fork.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NEW_INSTALLER_RAN"* ]]
 }

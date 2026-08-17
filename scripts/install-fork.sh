@@ -18,7 +18,10 @@
 # resolves upstream's version number and downloads upstream's binary under it.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/physicsG/helixscreen/main/scripts/install-fork.sh | sh
+#   # from the fork's latest release (attached to every u1-v* release):
+#   curl -fsSL https://github.com/physicsG/helixscreen/releases/latest/download/install-fork.sh | sh
+#   # from a branch that carries fork support:
+#   HELIX_FORK_REF=<branch> sh -c "$(curl -fsSL https://raw.githubusercontent.com/physicsG/helixscreen/<branch>/scripts/install-fork.sh)"
 #   sh install-fork.sh --local helixscreen-snapmaker-u1.zip
 #   sh install-fork.sh --version u1-v0.99.114
 #   GITHUB_REPO=someone/helixscreen sh install-fork.sh
@@ -31,7 +34,8 @@ set -e
 # Which fork to install from. Override in the environment to use another.
 : "${GITHUB_REPO:=physicsG/helixscreen}"
 
-# Git ref to fetch the installer from when it is not already on disk.
+# Git ref to fetch the installer from when neither a local copy nor a release
+# provides one. A ref that predates fork support is refused (see below).
 : "${HELIX_FORK_REF:=main}"
 
 # The reason this script exists — see the header.
@@ -40,9 +44,21 @@ HELIX_GITHUB_ONLY=1
 export GITHUB_REPO HELIX_GITHUB_ONLY
 
 RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPO}/${HELIX_FORK_REF}"
+RELEASE_BASE="https://github.com/${GITHUB_REPO}/releases/latest/download"
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# The installer must be one that KNOWS about fork installs. An older bundle
+# hard-assigns GITHUB_REPO and has never heard of HELIX_GITHUB_ONLY, so it
+# would take the environment this script set, ignore it, and install
+# upstream's binary from upstream's CDN — silently, and under the fork's name.
+# That is the one outcome this script exists to prevent, so it is checked
+# rather than assumed. (Also catches a raw.githubusercontent 404 body that
+# some proxies deliver with a 200.)
+installer_supports_fork() {
+    [ -s "$1" ] && grep -q 'HELIX_GITHUB_ONLY' "$1" 2>/dev/null
+}
 
 # A release tarball unpacks with install.sh beside this script, and a git
 # checkout has scripts/install.sh — prefer either over the network.
@@ -56,6 +72,7 @@ for candidate in "${script_dir}/install.sh" "${script_dir}/../install.sh"; do
 done
 
 if [ -n "$installer" ]; then
+    installer_supports_fork "$installer" || die "the installer beside this script (${installer}) predates fork support"
     say "HelixScreen fork installer"
     say "  repo:      ${GITHUB_REPO} (GitHub releases only)"
     say "  installer: ${installer}"
@@ -64,30 +81,43 @@ if [ -n "$installer" ]; then
     exec sh "$installer" "$@"
 fi
 
-# Otherwise fetch it from the fork at the pinned ref. Downloaded to a temp file
-# rather than piped into sh: the installer reads stdin for confirmations, and a
-# pipe would hand it the rest of its own source.
+# Otherwise fetch one. Downloaded to a temp file rather than piped into sh: the
+# installer reads stdin for confirmations, and a pipe would hand it the rest of
+# its own source.
 tmp="${TMPDIR:-/tmp}/helixscreen-install.$$.sh"
 trap 'rm -f "$tmp"' EXIT INT TERM
 
-url="${RAW_BASE}/scripts/install.sh"
+fetch() { # url dest -> 0 on success
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$2" "$1"
+    else
+        die "neither curl nor wget is available"
+    fi
+}
+
 say "HelixScreen fork installer"
 say "  repo:      ${GITHUB_REPO} (GitHub releases only)"
+
+# 1. The fork's latest release ships the installer that built its binary — the
+#    two cannot drift, and it exists exactly when there is something to
+#    install. (Same arrangement as upstream, which attaches install.sh to
+#    every release.)
+# 2. Failing that, the fork's git ref — but only if that ref's installer knows
+#    about fork installs; see installer_supports_fork().
+url="${RELEASE_BASE}/install.sh"
 say "  fetching:  ${url}"
-say ""
-
-if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$tmp" || die "could not download the installer from ${url}"
-elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$tmp" "$url" || die "could not download the installer from ${url}"
+if fetch "$url" "$tmp" 2>/dev/null && installer_supports_fork "$tmp"; then
+    :
 else
-    die "neither curl nor wget is available"
+    rm -f "$tmp"
+    url="${RAW_BASE}/scripts/install.sh"
+    say "  no release installer; fetching: ${url}"
+    fetch "$url" "$tmp" || die "could not download the installer from ${url}"
+    installer_supports_fork "$tmp" || die "the installer at ${GITHUB_REPO}@${HELIX_FORK_REF} predates fork support — \
+set HELIX_FORK_REF to a branch or tag that has scripts/install-fork.sh"
 fi
-
-# A 404 from a raw.githubusercontent path arrives as a small HTML/text body with
-# a 200 on some proxies; the installer is ~9k lines, so a tiny file is wrong.
-if [ ! -s "$tmp" ] || [ "$(wc -c < "$tmp")" -lt 10000 ]; then
-    die "downloaded installer looks wrong (too small) — check GITHUB_REPO=${GITHUB_REPO} and HELIX_FORK_REF=${HELIX_FORK_REF}"
-fi
+say ""
 
 exec sh "$tmp" "$@"

@@ -229,11 +229,13 @@ jobs:
           fi
           ls -lh
 
-      # Ship the fork installer alongside the build, exactly as upstream ships
-      # install.sh with its releases — so the one-liner in the release notes can
-      # curl it from the release rather than from a branch.
-      - name: Stage the installer
-        run: cp scripts/install-fork.sh release-files/
+      # Ship BOTH installers with the build, exactly as upstream ships install.sh
+      # with its releases. install-fork.sh fetches install.sh from
+      # releases/latest/download/ first, so the installer that runs is the one
+      # that built the binary it installs — and it exists exactly when there is
+      # something to install, unlike a branch's raw file.
+      - name: Stage the installers
+        run: cp scripts/install-fork.sh scripts/install.sh release-files/
 
       - name: Checksums
         run: |
@@ -253,7 +255,7 @@ jobs:
           ## Install (on the printer)
 
           \`\`\`sh
-          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/install-fork.sh | sh
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-fork.sh | sh
           \`\`\`
 
           Or, with the archive already copied to the printer:
@@ -276,12 +278,18 @@ jobs:
           name: ${{ github.ref_name }}
           body_path: release-notes.md
           draft: false
-          # A fork build is not the upstream stable channel.
-          prerelease: true
+          # NOT a prerelease, deliberately. GitHub's /releases/latest (both the
+          # API the installer discovers versions through and the
+          # releases/latest/download/ URLs above) resolves to the newest
+          # NON-prerelease — a prerelease-only repo has no "latest" at all, and
+          # a fork install would fail to find any version. The notes already say
+          # this is an unofficial fork build.
+          prerelease: false
           files: |
             release-files/helixscreen-snapmaker-u1.zip
             release-files/helixscreen-snapmaker-u1-*.tar.gz
             release-files/install-fork.sh
+            release-files/install.sh
             release-files/SHA256SUMS
           fail_on_unmatched_files: true
         env:
