@@ -992,7 +992,7 @@ AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
     if (!ace_fed) {
         return model; // a stock feeder head retracts to its own buffer
     }
-    model.steps.back().label = lv_tr("Retract to ACE");
+    model.steps.back().label = lv_tr("Retract filament");
     return model;
 }
 
