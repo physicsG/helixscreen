@@ -74,6 +74,7 @@
 
 // UI headers
 #include "ui_ams_environment_overlay.h"
+#include "ui_ams_loading_error_modal.h"
 #include "ui_ams_mini_status.h"
 #include "ui_ams_tool_text.h"
 #include "ui_bed_mesh.h"
@@ -144,6 +145,7 @@
 #include "ui_wizard_touch_calibration.h"
 #include "ui_wizard_wifi.h"
 
+#include "color_utils.h"
 #include "preflight_validator.h"
 
 // Developer-only showcase panels (ENABLE_DEV_PANELS, excluded from release
@@ -217,7 +219,7 @@
 #include "tips_manager.h"
 #include "tool_state.h"
 #include "xml_registration.h"
-#include "zmod_zoffset.h"
+#include "z_offset_persistence.h"
 
 #include <lvgl/src/misc/cache/instance/lv_image_cache.h>
 #include <spdlog/spdlog.h>
@@ -1548,11 +1550,9 @@ bool Application::init_display() {
                      layout.name());
     });
 
-    // Initialize tips manager
-    TipsManager* tips_mgr = TipsManager::get_instance();
-    if (!tips_mgr->init(helix::find_readable("printing_tips.json"))) {
-        spdlog::warn("[Application] Failed to initialize tips manager");
-    }
+    // Tips are NOT loaded here. TipsManager::get_instance() parses the database
+    // on first use instead, so a session that never displays the tips widget
+    // never pays the 105 KB parse or keeps its cache resident.
 
     spdlog::debug("[Application] Display initialized");
     helix::MemoryMonitor::log_now("after_display_init");
@@ -1815,9 +1815,10 @@ bool Application::init_translations() {
     std::string lang = m_config->get_language();
     helix::ui::ensure_translation_loaded(lang);
 
-    // Set initial language. When no pack is loaded for a language (e.g. English
-    // with no en.xml), lv_translation_get() returns the tag itself — and since
-    // our tags ARE English, English UI works without any registered pack.
+    // Set initial language. When no pack is loaded for a language — which is
+    // the normal case for English, whose pack is skipped entirely —
+    // lv_translation_get() returns the tag itself, and since our tags ARE
+    // English the UI is already correct without any registered pack.
     lv_translation_set_language(lang.c_str());
 
     // Load CJK runtime fonts if persisted language is CJK
@@ -1908,10 +1909,14 @@ bool Application::init_panel_subjects() {
             });
             modal->set_on_abort([] { helix::AbortManager::instance().start_abort(); });
             modal->set_on_tune([] {
+                // Null callbacks, not empty lambdas: a non-null error_cb reads
+                // as "this caller reports the failure itself", which would
+                // suppress Klipper's `!!` broadcast for a rejected
+                // DEFECT_DETECTION_CONFIG and leave the user with nothing.
                 get_moonraker_client()->send_jsonrpc(
                     "printer.gcode.script",
                     nlohmann::json{{"script", "DEFECT_DETECTION_CONFIG NOODLE_SENSITIVITY=low"}},
-                    [](const nlohmann::json&) {}, [](const MoonrakerError&) {});
+                    nullptr, nullptr);
             });
             modal->show(lv_screen_active());
         });
@@ -1948,8 +1953,15 @@ bool Application::init_panel_subjects() {
 }
 
 bool Application::init_ui() {
-    // Create entire UI from XML
+    // Create entire UI from XML. Timed because this builds all six panel
+    // subtrees in one call — the other half of what per-panel deferral would
+    // move off boot and onto the first navigation.
+    auto layout_t0 = std::chrono::steady_clock::now();
     m_app_layout = static_cast<lv_obj_t*>(lv_xml_create(m_screen, "app_layout", nullptr));
+    spdlog::debug(
+        "[Application] app_layout XML create took {:.1f}ms",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - layout_t0)
+            .count());
     if (!m_app_layout) {
         spdlog::error("[Application] Failed to create app_layout from XML");
         return false;
@@ -2418,11 +2430,123 @@ bool show_demo_overlay(const std::string& name) {
         return true;
     }
 
+    if (name == "color-mismatch") {
+        // The SECOND gate on a Print tap, after the pre-flight empty-slot block:
+        // the print-start pipeline warns when a tool resolves to no slot at all.
+        // Only reachable from a real multi-tool file whose tools do not map, so
+        // mock navigation cannot get here. Text mirrors the unresolved_tools
+        // gate's dialog exactly — two unresolved tools, color name plus
+        // material per row.
+        std::string message = lv_tr("These tools have no matching filament loaded:");
+        message += "\n\n";
+        message += std::string("  ") + LV_SYMBOL_BULLET +
+                   " T2: " + helix::describe_color(0xF5A623) + " (PETG)\n";
+        message += std::string("  ") + LV_SYMBOL_BULLET +
+                   " T3: " + helix::describe_color(0x2E8B57) + " (PLA)\n";
+        message += "\n";
+        message += lv_tr("Load the required filaments or start anyway?");
+        static char demo_message[1024];
+        snprintf(demo_message, sizeof(demo_message), "%s", message.c_str());
+        helix::ui::modal_show_confirmation(lv_tr("Color Mismatch"), demo_message,
+                                           ModalSeverity::Warning, lv_tr("Start Anyway"), nullptr,
+                                           nullptr, nullptr);
+        return true;
+    }
+
     if (name == "runout-modal") {
         auto* modal = new RunoutGuidanceModal();
         modal->set_autofeed_capable(false);
         modal->set_resume_blocked(false);
         modal->show(screen);
+        return true;
+    }
+
+    if (name == "ams-loading-error") {
+        // Worst case for the modal chrome budget (prestonbrown/helixscreen#1277):
+        // a fault string long enough to drive content_container to its
+        // #dialog_content_max cap, with the AFC diagram pinned BELOW it and
+        // outside the scroll area. That combination overruns the 85% card cap on
+        // a 480x272 panel and the button row falls off the bottom. Unreachable in
+        // mock mode — AmsBackendMock never produces a recognised AFC fault — so
+        // this is the only way to check the real layout instead of arithmetic on
+        // a token table.
+        // ams_loading_error_modal.xml is registered lazily by AmsPanel, which has
+        // not necessarily run — register it here so the demo works from a cold start.
+        // Idempotent: re-registering a component replaces the identical entry.
+        lv_xml_register_component_from_file(
+            helix::asset_component_uri("ui_xml/ams_loading_error_modal.xml").c_str());
+
+        lv_subject_t* seg = lv_xml_get_subject(nullptr, "afc_fault_segment");
+        if (seg != nullptr) {
+            lv_subject_set_int(seg, static_cast<int>(PathSegment::HUB));
+        }
+        auto* modal = new helix::ui::AmsLoadingErrorModal();
+        modal->show(screen,
+                    "Filament did not reach the toolhead sensor after the "
+                    "configured load length. The lane may be jammed at the hub, "
+                    "the spool may have run out mid-load, or the bowden length "
+                    "configured for this lane may not match the physical tube "
+                    "run between the hub and the toolhead.",
+                    "Check the filament path and try again. If the lane is clear, "
+                    "verify the configured bowden length for this lane and confirm "
+                    "the hub sensor triggers when filament passes it.",
+                    []() {});
+        return true;
+    }
+
+    if (name == "action-prompt-worst") {
+        // Worst case for action_prompt_modal's chrome budget (#1277). This modal
+        // carries MORE pinned chrome than ams_loading_error_modal: the AFC
+        // diagram, a row_wrap button container that can spill to a second row,
+        // and a footer divider + footer row that are hidden by default. All of
+        // it sits below the scroll area, so it is the shape most likely to
+        // overrun the 85% card cap. Unreachable in mock mode — it needs a live
+        // Klipper `action:prompt_begin` — so this is the only way to measure it.
+        lv_subject_t* seg = lv_xml_get_subject(nullptr, "afc_fault_segment");
+        if (seg != nullptr) {
+            lv_subject_set_int(seg, static_cast<int>(PathSegment::HUB));
+        }
+        helix::PromptData data;
+        data.title = "Filament Runout Detected";
+        data.severity = "error";
+        data.text_lines = {
+            "Lane 1 ran out of filament during the print.",
+            "The toolhead has been parked and the print is paused.",
+            "Load a new spool into lane 1, then choose how to continue.",
+        };
+        data.buttons = {
+            {"Resume", "RESUME", "primary", "", false, -1},
+            {"Retry Load", "AFC_LOAD LANE=1", "secondary", "", false, -1},
+            {"Change Lane", "AFC_CHANGE_LANE", "secondary", "", false, -1},
+            {"Cancel Print", "CANCEL_PRINT", "error", "", true, -1},
+        };
+        auto* modal = new helix::ui::ActionPromptModal();
+        modal->show_prompt(screen, data);
+        return true;
+    }
+
+    if (name == "action-prompt-many") {
+        // A prompt whose buttons cannot share one row: a preheat macro offering
+        // seven material presets. Each label is far wider than a seventh of the
+        // card, so this is the case that must fall back to row_wrap instead of
+        // being squeezed into equal-width cells. Unreachable in mock mode - it
+        // needs a live Klipper `action:prompt_begin` - so this is the only way
+        // to check the wrapped layout against a real 480x272 panel.
+        helix::PromptData data;
+        data.title = "Preheat for Load";
+        data.text_lines = {"Preheat filament and choose a material."};
+        data.buttons = {
+            {"PLA 220/60", "SET_MATERIAL M=PLA", "primary", "", false, -1},
+            {"PETG 240/80", "SET_MATERIAL M=PETG", "primary", "", false, -1},
+            {"ABS 250/100", "SET_MATERIAL M=ABS", "primary", "", false, -1},
+            {"ASA 260/100", "SET_MATERIAL M=ASA", "primary", "", false, -1},
+            {"TPU 230/50", "SET_MATERIAL M=TPU", "primary", "", false, -1},
+            {"PC 280/110", "SET_MATERIAL M=PC", "primary", "", false, -1},
+            {"Nylon 260/80", "SET_MATERIAL M=NYLON", "primary", "", false, -1},
+            {"Cancel", "", "error", "", true, -1},
+        };
+        auto* modal = new helix::ui::ActionPromptModal();
+        modal->show_prompt(screen, data);
         return true;
     }
 
@@ -2601,6 +2725,110 @@ void Application::prompt_deferred_hardware_setup(std::vector<helix::wizard::Step
         this, lv_tr("Not now"));
 }
 
+void Application::settle_type_mismatch_warning() {
+    auto* cfg = Config::get_instance();
+    cfg->set<std::string>(cfg->df() + helix::wizard::TYPE_MISMATCH_SHOWN_FOR,
+                          cfg->get<std::string>(cfg->df() + helix::wizard::PRINTER_TYPE, ""));
+    if (!cfg->save()) {
+        spdlog::warn("[Application] Failed to persist type mismatch decision");
+    }
+}
+
+void Application::maybe_warn_type_mismatch(const helix::PrinterDiscovery& hardware) {
+    if (m_type_mismatch_shown)
+        return;
+    if (std::getenv("HELIX_MOCK_PRINTER"))
+        return; // mock clears the saved type each launch (moonraker_manager.cpp)
+    if (Config::get_instance()->is_wizard_required() || is_wizard_active())
+        return;
+
+    auto* cfg = Config::get_instance();
+    const std::string saved = cfg->get<std::string>(cfg->df() + helix::wizard::PRINTER_TYPE, "");
+    const std::string flag =
+        cfg->get<std::string>(cfg->df() + helix::wizard::TYPE_MISMATCH_SHOWN_FOR, "");
+
+    auto detected = PrinterDetector::auto_detect(hardware);
+    if (!detected.detected())
+        return;
+    if (!PrinterDetector::should_warn_type_mismatch(saved, detected.type_name, detected.confidence,
+                                                    flag))
+        return;
+
+    // Session guard: one prompt per boot regardless of which button dismisses it.
+    m_type_mismatch_shown = true;
+    spdlog::info("[Application] Printer type mismatch: saved '{}' but detected '{}' ({}%)", saved,
+                 detected.type_name, detected.confidence);
+
+    // modal_show_confirmation takes a plain const char* — compose the
+    // parameterized body first (fmt::runtime: the format string is the
+    // translated handle, not a compile-time literal).
+    const std::string body =
+        fmt::format(fmt::runtime(lv_tr("This printer looks like a {} ({}% confidence), but it is "
+                                       "set up as a {}. A wrong type applies incorrect pre-print "
+                                       "options and presets.")),
+                    detected.type_name, detected.confidence, saved);
+
+    helix::ui::modal_show_confirmation(
+        lv_tr("Printer type mismatch"), body.c_str(), ModalSeverity::Warning, lv_tr("Re-identify"),
+        [](lv_event_t* e) {
+            LVGL_SAFE_EVENT_CB_BEGIN("[Application] type_mismatch_confirm");
+            auto* app = static_cast<Application*>(lv_event_get_user_data(e));
+            Modal::hide(Modal::get_top());
+            // Settle first: the wizard tears itself down asynchronously, and a
+            // crash mid-run must not leave the prompt pending forever.
+            app->settle_type_mismatch_warning();
+            // Build the wizard AFTER the modal's exit animation, not inside the
+            // click that started it: Modal::hide() only marks the backdrop
+            // exiting, so creating the full-screen wizard here would put it
+            // underneath a still-fading backdrop (same 300 ms one-shot as
+            // launch_deferred_hardware_setup).
+            lv_timer_t* launch = lv_timer_create(
+                [](lv_timer_t* t) {
+                    auto* self = static_cast<Application*>(lv_timer_get_user_data(t));
+                    lv_timer_delete(t);
+                    self->launch_type_reidentify_wizard();
+                },
+                300, app);
+            lv_timer_set_repeat_count(launch, 1);
+            LVGL_SAFE_EVENT_CB_END();
+        },
+        [](lv_event_t* e) {
+            LVGL_SAFE_EVENT_CB_BEGIN("[Application] type_mismatch_decline");
+            Modal::hide(Modal::get_top());
+            // Declining is final for this saved type. Keeping the type is a
+            // deliberate choice (a heavily modified printer can legitimately
+            // outvote a 70% heuristic), and the persisted flag stops the
+            // prompt from re-appearing every boot. Re-identify remains
+            // available via the full `--wizard` run.
+            static_cast<Application*>(lv_event_get_user_data(e))->settle_type_mismatch_warning();
+            spdlog::info("[Application] Type mismatch warning declined");
+            LVGL_SAFE_EVENT_CB_END();
+        },
+        this, lv_tr("Keep current"));
+}
+
+void Application::launch_type_reidentify_wizard() {
+    spdlog::info("[Application] Launching printer re-identify wizard");
+    ui_wizard_register_event_callbacks();
+    ui_wizard_container_register_responsive_constants();
+    ui_wizard_init_subjects();
+    // Back on the first targeted step has nothing to retreat to, so give it the
+    // same dismiss semantics as the deferred hardware-setup session.
+    set_wizard_cancel_callback([]() {
+        ui_wizard_complete_targeted();
+        set_wizard_cancel_callback(nullptr);
+    });
+    Application* app = this;
+    ui_wizard_create_targeted(m_screen, {helix::wizard::StepId::PrinterIdentify}, [app]() {
+        set_wizard_cancel_callback(nullptr);
+        // The identify step's cleanup already persisted PRINTER_TYPE and applied
+        // the new preset (ui_wizard_printer_identify.cpp cleanup). The preset
+        // rewrote fan/heater role keys, so rebind the runtime mappings the same
+        // way the deferred hardware-setup session does.
+        app->reapply_hardware_roles();
+    });
+}
+
 void Application::setup_discovery_callbacks() {
     IMoonrakerClient* client = m_moonraker->client();
     IMoonrakerAPI* api = m_moonraker->api();
@@ -2714,13 +2942,14 @@ void Application::setup_discovery_callbacks() {
             crash_handler::breadcrumb::note("disc", "post_init_fans",
                                             static_cast<long>(hw.fans().size()));
 
-            // Enable ZMOD persistent z-offset reload once per session, only when
-            // idle. ZMOD saves any z-offset the user dials in, but reloading it on
-            // the next print is off by default — SAVE_ZMOD_DATA LOAD_ZOFFSET=1 turns
-            // it on so HelixScreen z-offset adjustments survive prints/reboots. The
-            // print_active subject is not yet applied from this discovery's status
-            // (see the reconfig-wizard gate below), so consult status_snapshot
-            // directly to avoid injecting gcode over a live print.
+            // Turn on the firmware's own z-offset persistence once per session,
+            // only when idle. Some firmwares store the offset themselves but ship
+            // with reload-at-print-start off, so adjustments made here would not
+            // survive. Which printers need it, and what to send, lives in
+            // include/z_offset_persistence.h. The print_active subject is not yet
+            // applied from this discovery's status (see the reconfig-wizard gate
+            // below), so consult status_snapshot directly to avoid injecting gcode
+            // over a live print.
             {
                 bool print_active =
                     lv_subject_get_int(get_printer_state().get_print_active_subject()) != 0;
@@ -2728,22 +2957,24 @@ void Application::setup_discovery_callbacks() {
                     helix::PrinterPrintState::status_indicates_active_print(*status_snapshot)) {
                     print_active = true;
                 }
-                if (helix::zmod::should_enable_persistent_zoffset(
-                        api->hardware().has_macro("SAVE_ZMOD_DATA"), print_active,
-                        app->m_zmod_zoffset_enabled)) {
-                    app->m_zmod_zoffset_enabled = true;
-                    spdlog::info("[ZMOD] Enabling persistent z-offset (SAVE_ZMOD_DATA "
-                                 "LOAD_ZOFFSET=1)");
+                const std::string enable_gcode =
+                    helix::zoffset::persistence_enable_gcode(api->hardware());
+                if (helix::zoffset::should_enable_persistence(!enable_gcode.empty(), print_active,
+                                                              app->m_zoffset_persistence_enabled)) {
+                    app->m_zoffset_persistence_enabled = true;
+                    spdlog::info("[ZOffset] Enabling firmware z-offset persistence ({})",
+                                 helix::zoffset::persistence_provider_name(api->hardware()));
                     // Fire-and-forget: callbacks are LOG-ONLY and capture nothing that
                     // can dangle, so the background response thread is lifetime-safe.
                     api->execute_gcode(
-                        "SAVE_ZMOD_DATA LOAD_ZOFFSET=1",
-                        []() { spdlog::info("[ZMOD] Persistent z-offset enabled"); },
+                        enable_gcode,
+                        []() { spdlog::info("[ZOffset] Firmware z-offset persistence enabled"); },
                         [](const MoonrakerError& err) {
-                            spdlog::warn("[ZMOD] Failed to enable persistent z-offset: {}",
+                            spdlog::warn("[ZOffset] Failed to enable z-offset persistence: {}",
                                          err.message);
                         },
-                        0, /*silent=*/true);
+                        0, /*silent=*/true, /*on_queued=*/nullptr,
+                        /*caller_surfaces_errors=*/false);
                 }
             }
 
@@ -2782,8 +3013,14 @@ void Application::setup_discovery_callbacks() {
             // Dispatch initial subscription status AFTER init_fans so fan/sensor subjects
             // exist when the status data is processed. The initial status is passed from the
             // discovery sequence rather than dispatched separately to guarantee ordering.
+            // Flagged as a cached snapshot: it was captured on the background
+            // thread when the subscribe response landed and has been carried
+            // through the rest of discovery, so it can be seconds stale by the
+            // time it lands here. Live WebSocket frames have been updating the
+            // same state the whole time — this replay must not walk a liveness
+            // signal (klippy state) backwards.
             if (!(*status_snapshot).empty()) {
-                client->dispatch_status_update((*status_snapshot));
+                client->dispatch_status_update((*status_snapshot), /*from_cached_snapshot=*/true);
             }
             crash_handler::breadcrumb::note("disc", "post_status_dispatch", n);
 
@@ -3022,6 +3259,21 @@ void Application::setup_discovery_callbacks() {
                 } else {
                     app->prompt_deferred_hardware_setup(std::move(steps));
                 }
+            }
+
+            // Saved printer type vs detected hardware (bundle F2LNLQCC: a Voron
+            // Trident saved as "FlashForge Adventurer 5M Pro" silently received
+            // AD5M pre-print options, presets, and screws-tilt direction on every
+            // boot — auto_detect_and_save self-guards on a saved type and never
+            // re-checks). One actionable prompt per saved type. Gated exactly
+            // like the reconfig wizard and deferred offer above — plus
+            // reconfig_steps.empty() and !hardware_setup_deferred so the three
+            // never stack in one discovery pass — and on the same hw_changed
+            // gate: detection is purely a function of the hardware shape.
+            if (hw_changed && !print_active && reconfig_steps.empty() && !hardware_setup_deferred &&
+                !Config::get_instance()->is_wizard_required() && !is_wizard_active() &&
+                !app->m_type_mismatch_shown) {
+                app->maybe_warn_type_mismatch(api->hardware());
             }
 
             // Save session snapshot for next comparison (even if no issues)
@@ -3396,6 +3648,11 @@ void Application::init_action_prompt() {
                 gcode, []() { spdlog::debug("[ActionPrompt] Gcode executed successfully"); },
                 [gcode](const MoonrakerError& err) {
                     spdlog::error("[ActionPrompt] Gcode execution failed: {}", err.message);
+                    // The modal already closed on the button press, and this
+                    // error_cb marks the call caller-handled so the `!!`
+                    // GcodeError toast is suppressed for the same failure.
+                    // Without this the user sees nothing at all.
+                    helix::ui::report_action_prompt_gcode_failure(err.user_message());
                 },
                 IMoonrakerAPI::MACRO_TIMEOUT_MS);
         });

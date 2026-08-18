@@ -36,6 +36,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
@@ -54,7 +55,14 @@ class MigrationFutureFixture {
     bool had_config_dir_ = false;
 
     void SetUp() {
-        temp_dir = (fs::temp_directory_path() / "helix_migration_future_test").string();
+        // Per-process directory. `make test-run` shards across ~3x cores of concurrent
+        // helix-tests processes, and a fixed path let two of them clobber each other's
+        // settings.json mid-migration — surfacing as a nlohmann operator[] abort on a
+        // key the other process had just removed. Which shard a test lands in shifts
+        // whenever test cases are added, so a shared path fails only intermittently.
+        temp_dir = (fs::temp_directory_path() /
+                    ("helix_migration_future_test_" + std::to_string(::getpid())))
+                       .string();
         fs::remove_all(temp_dir);
         fs::create_directories(temp_dir);
 

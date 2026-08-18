@@ -265,9 +265,15 @@ bool should_add_console(LogTarget effective_target, bool enable_console, bool fo
 /**
  * @brief Initialize minimal logging for early startup
  *
- * Sets up a basic console logger at WARN level. Call this FIRST in main()
- * before any log calls. The full init() can reconfigure later with user
- * preferences from CLI args and config files.
+ * Sets up a console logger at WARN level plus the debug-bundle ring sink. Call
+ * this FIRST in main() before any log calls. The full init() can reconfigure
+ * later with user preferences from CLI args and config files.
+ *
+ * The ring is installed here, not in init(), because config load runs between
+ * the two: its diagnostics (corrupt settings, restore-from-backup, parse
+ * failures) are logged while only this logger exists, and a bundle collected
+ * later has to be able to show them. init() takes over this same sink instance
+ * rather than building a new one, so nothing logged here is discarded.
  */
 void init_early();
 

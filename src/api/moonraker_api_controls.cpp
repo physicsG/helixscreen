@@ -30,7 +30,8 @@ using namespace moonraker_internal;
 // ============================================================================
 
 void MoonrakerAPI::set_temperature(const std::string& heater, double temperature,
-                                   SuccessCallback on_success, ErrorCallback on_error) {
+                                   SuccessCallback on_success, ErrorCallback on_error,
+                                   bool caller_surfaces_errors) {
     // Reject NaN/Inf before any G-code generation
     if (reject_non_finite({temperature}, "set_temperature", on_error)) {
         return;
@@ -88,7 +89,8 @@ void MoonrakerAPI::set_temperature(const std::string& heater, double temperature
     spdlog::info("[Moonraker API] Setting {} temperature to {}°C{}", heater, temperature,
                  use_m141 ? " (via M141)" : "");
 
-    execute_gcode(gcode, on_success, on_error);
+    execute_gcode(gcode, on_success, on_error, /*timeout_ms=*/0, /*silent=*/false,
+                  /*on_queued=*/nullptr, caller_surfaces_errors);
 }
 
 void MoonrakerAPI::set_fan_speed(const std::string& fan, double speed, SuccessCallback on_success,
@@ -199,7 +201,7 @@ void MoonrakerAPI::get_sensors(SensorsCallback on_success, ErrorCallback on_erro
 
 void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_success,
                                  ErrorCallback on_error, uint32_t timeout_ms, bool silent,
-                                 SuccessCallback on_queued) {
+                                 SuccessCallback on_queued, bool caller_surfaces_errors) {
     // G-code leaves here VERBATIM. Nothing is appended, rewritten, or stripped —
     // see moonraker_gcode_guards.h and tests/unit/test_gcode_verbatim.cpp.
     //
@@ -362,6 +364,16 @@ void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_su
 
     spdlog::trace("[Moonraker API] Executing G-code: {}", gcode);
 
+    // Capture the error-reporting intent from the CALLER's own on_error, BEFORE
+    // the activity-counter wrapping below. That wrapper makes error_wrapper
+    // non-null for every non-discretionary gcode even when the caller passed
+    // nullptr, so intent derived after it reads our own bookkeeping as a promise
+    // the caller never made — and silences Klipper's `!!` broadcast for an error
+    // nobody would otherwise see. See include/rpc_error_policy.h.
+    const helix::rpc_error_policy::CallerIntent intent{/*silent=*/silent,
+                                                       /*surfaces_errors=*/(on_error != nullptr) &&
+                                                           caller_surfaces_errors};
+
     // Stamp app-initiated macro activity so the busy-queue toast above can tell
     // "the user just pressed Unload here" from "something else started a bed
     // mesh" (#1206). The complement of the discretionary set is exactly the
@@ -412,7 +424,7 @@ void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_su
         };
     }
     client_.send_jsonrpc("printer.gcode.script", params, std::move(success_wrapper),
-                         std::move(error_wrapper), timeout_ms, silent);
+                         std::move(error_wrapper), timeout_ms, silent, intent);
 }
 
 // IMoonrakerAPI::is_safe_gcode_param() lives in moonraker_api_validation.cpp —

@@ -63,7 +63,7 @@ translations:
   120 seconds: 120 segundos
   15 seconds: 15 segundos
   180°: 180°
-  180° Upside Down: ''
+  180° Upside Down: 180° invertido
   2 min: '2 min'
   2 minutes: 2 minutos
   2. Place paper between nozzle and bed: 2. Coloque papel entre o bico e a mesa
@@ -72,7 +72,7 @@ translations:
   20 minutes: 20 minutos
   24 Hour: 24 horas
   270°: 270°
-  270° Clockwise: ''
+  270° Clockwise: 270° no sentido horário
   2D Heatmap: Mapa de calor 2D
   2D Layers: Camadas 2D
   3. Adjust screws, then re-probe to verify: 3. Ajuste os parafusos, depois sonde
@@ -92,7 +92,7 @@ translations:
   5V: 5V
   60 seconds: 60 segundos
   90°: 90°
-  90° Clockwise: ''
+  90° Clockwise: 90° no sentido horário
   = Loosen: = Afrouxar
   = Tighten: = Apertar
   A: A
@@ -336,12 +336,15 @@ translations:
   Button taps and navigation sounds: Sons de botões e navegação
   Buzz Servo: 'Movimentar brevemente o servo'
   Bypass: Bypass
+  Bypass Is Active: ''
   Bypass Mode: Modo Bypass
   Bypass controlled by hardware sensor: Bypass controlado por sensor de hardware
   Bypass controlled by sensor: Bypass controlado por sensor
   Bypass disabled: Bypass desativado
   Bypass enabled: Bypass ativado
   Bypass failed: Falha no bypass
+  ? Bypass is active, but this print uses AMS lanes. The printer may refuse to load a lane while bypass filament is in the toolhead. Remove the filament and turn bypass off before printing. Start anyway?
+  : ''
   Bypass toggle failed: Falha ao alternar bypass
   C: C
   CALIBRATION: CALIBRAÇÃO
@@ -1046,6 +1049,7 @@ translations:
   Filament: Filamento
   Filament Detected: Filamento Detectado
   Filament Environment: Ambiente do filamento
+  Filament In The Toolhead: ''
   Filament Mapping: Mapeamento de Filamento
   Filament Runout: Fim de Filamento
   Filament Sensor: Sensor de Filamento
@@ -1059,6 +1063,8 @@ translations:
     para compensação de fluxo
   Filament is loose: O filamento está solto
   Filament is pulling tight: O filamento está puxando com tensão
+  ? Filament is still at the nozzle after unloading. The cut or retract may not have completed. Clear the toolhead before loading another spool.
+  : ''
   'Filament load failed: {}': 'Falha ao carregar filamento: {}'
   Filament loaded: Filamento carregado
   Filament operation failed: Falha na operação de filamento
@@ -1068,6 +1074,7 @@ translations:
   : 'O filamento acabou e o CFS não encontrou um carretel compatível para trocar. Carregue um carretel do mesmo material e cor e retome.'
   Filament ran out at the toolhead: 'O filamento acabou no cabeçote'
   Filament ran out. Auto-refill is off, so the CFS will not switch spools on its own. Load filament, then resume.: 'O filamento acabou. O reabastecimento automático está desligado, então o CFS não trocará de carretel sozinho. Carregue filamento e retome.'
+  Filament ran out. The CFS knows which spools match, but those slots are empty. Load one of them, then resume.: ''
   Filament runout: Fim de filamento
   Filament runout and motion detection sensors: Sensores de detecção de fim de filamento
     e movimento
@@ -1341,6 +1348,8 @@ translations:
   Keep Navigation Bar: Manter barra de navegação
   Keep Printing: Continuar Imprimindo
   Keep Required: Manter Obrigatório
+  Keep current: ''
+  Keep Spool Info on Eject: ''
   Keep the bypass spool visible when bypass is off: Manter o carretel de bypass visível quando o bypass estiver desligado
   Kick away: 'Expulsar'
   Kinematics: Cinemática
@@ -1715,9 +1724,11 @@ translations:
   No width sensor detected: 'Nenhum sensor de largura detectado'
   None: Nenhum
   None (disable): Nenhum (desativar)
-  Normal: ''
+  Normal: Normal
   Not Enough Filament: Filamento Insuficiente
   Not Now: Agora Não
+  Not available here. Update from a terminal.: Não disponível aqui. Atualize a partir de um terminal.
+  Not available on Android: ''
   Not calibrated: Não calibrado
   Not configured: Não configurado
   Not connected: Não conectado
@@ -2000,6 +2011,7 @@ translations:
   Printer name: Nome da impressora
   Printer not ready: Impressora não está pronta
   Printer ready: Impressora pronta
+  Printer type mismatch: ''
   'Printer:': 'Impressora:'
   'Printer: ': 'Impressora: '
   PrinterIdentify: Identificar Impressora
@@ -2080,6 +2092,7 @@ translations:
   Ramming Volume: 'Volume de compactação'
   Raspberry Pi: Raspberry Pi
   Raspberry Pi (32-bit): Raspberry Pi (32-bit)
+  Re-identify: ''
   Re-probe: Sondar Novamente
   Re-read spool RFID tags and remaining length: 'Reler as etiquetas RFID dos carretéis e o comprimento restante'
   Re-syncs Happy Hare's tracked state with the hardware.: Ressincroniza o estado rastreado
@@ -2098,6 +2111,7 @@ translations:
     detalhados a qualquer momento em Configurações.
   Recent Prints: Impressões recentes
   Recently Printed: Impressas recentemente
+  Reconnect: ''
   Record Timelapse: Gravar Timelapse
   Record timelapses of your prints: Gravar timelapses das suas impressões
   Recorded timelapses will appear here: Os timelapses gravados aparecerão aqui
@@ -2125,6 +2139,7 @@ translations:
   Remap Tool: Remapear Ferramenta
   Remap needs the HelixPrint plugin: O remapeamento precisa do plugin HelixPrint
   Remap…: Remapear…
+  Remember lane spool details across an eject: ''
   Remove: Remover
   Remove PIN: Remover PIN
   Remove Spoolman?: Remover Spoolman?
@@ -2235,6 +2250,7 @@ translations:
     carregar/descarregar filamento mesmo com o bico frio (para macros que aquecem
     o bico por conta própria)
   Run test sequence on all lanes: 'Executar a sequência de teste em todas as lanes'
+  Run the HelixScreen installer with --update from a terminal on this printer. Scan for the command for your platform.: Execute o instalador do HelixScreen com --update em um terminal nesta impressora. Escaneie para ver o comando da sua plataforma.
   Run without parameter prompt: Executar sem solicitar parâmetro
   Run {}?: Executar {}?
   Running {}...: Executando {}...
@@ -2307,7 +2323,7 @@ translations:
   Screen: 'Tela'
   Screen Blank: Tela Apagada
   Screen Dim: Escurecimento da Tela
-  Screen Rotation: ''
+  Screen Rotation: Rotação da tela
   Screen dims to lower brightness after period of inactivity: A tela escurece para
     menor brilho após período de inatividade
   Screen lock and PIN settings: Configurações de bloqueio de tela e PIN
@@ -2652,6 +2668,8 @@ translations:
     interfering with prints. You can re-enable it in Settings > Display.
   : O protetor de tela animado foi desativado neste dispositivo para evitar que interfira
     nas impressões. Você pode reativá-lo em Configurações > Tela.
+  ? The filament did not reach the nozzle. The CFS reported no error, but the toolhead sensor still sees no filament. Check that the spool is seated and the path is clear, then try again.
+  : ''
   The filament system reported an error: O sistema de filamento reportou um erro
   The heater will cycle on and off several times.: O aquecedor ligará e desligará
     várias vezes.
@@ -2675,6 +2693,7 @@ translations:
   The runout sensor indicates no filament is loaded. Start print anyway?: O sensor
     de fim de filamento indica que não há filamento carregado. Iniciar a impressão
     mesmo assim?
+  The toolhead has filament but no AMS lane reports it loaded. Pull it out manually before printing. Start anyway?: ''
   The toolhead sensor indicates filament is already loaded. Proceed with load anyway?: O
     sensor do cabeçote indica que o filamento já está carregado. Prosseguir com o
     carregamento mesmo assim?
@@ -2718,6 +2737,8 @@ translations:
   This print needs about %.0fg but the spool has about %.0fg remaining. Start anyway?: Esta
     impressão precisa de cerca de %.0fg, mas o carretel tem cerca de %.0fg restantes.
     Iniciar mesmo assim?
+  ? This printer looks like a {} ({}% confidence), but it is set up as a {}. A wrong type applies incorrect pre-print options and presets.
+  : ''
   This tool probes each bed screw and tells you how much to adjust.: Esta ferramenta
     sonda cada parafuso da mesa e informa quanto ajustar.
   ? This will apply the Z-offset to your endstop and restart Klipper to save the configuration.
@@ -2824,7 +2845,7 @@ translations:
   Turn On LEDs: 'Ligar os LEDs'
   Turn on LEDs when printer starts: Ligar LEDs quando a impressora iniciar
   Turn the extruder heater off after a load or unload finishes: Desliga o aquecedor do extrusor ao concluir um carregamento ou descarregamento
-  Turn the picture to match how the screen is mounted. Applies after restart.: ''
+  Turn the picture to match how the screen is mounted. Applies after restart.: Gira a imagem para corresponder à montagem da tela. Aplicado após reiniciar.
   Type: Tipo
   Type to preview input field...: Digite para visualizar o campo de entrada...
   'Type:': 'Tipo:'
@@ -2878,13 +2899,14 @@ translations:
   Update Channel: Canal de Atualização
   Update Failed: Atualização Falhou
   Update Success: Atualização Bem-sucedida
+  Update from a Terminal: Atualizar a partir de um terminal
   Update installed!: Atualização instalada!
   Update your security PIN: Atualize seu PIN de segurança
-  Updates aren't available on this installation.: As atualizações não estão disponíveis
     nesta instalação.
   Updating Configuration...: Atualizando Configuração...
   Upgrade to AFC 1.2.0 or newer for filament names and multi-color spools.: Atualize
     para o AFC 1.2.0 ou mais recente para nomes de filamento e carretéis multicoloridos.
+  Upgrade to AFC 1.2.0 or newer for multi-color spools. It also adds filament names, which otherwise need Spoolman.: ''
   Upload: Enviar
   Upload Debug Bundle: Enviar Bundle de Debug
   Upload Failed: Falha no Envio
@@ -3080,10 +3102,8 @@ translations:
   nozzle: bico
   of: de
   'off': desligado
-  pre_print_option.ai_detect.description: Monitorar anomalias de impressão (baseado
-    na câmera do K2 Plus)
-  pre_print_option.ai_detect.label: Detecção por AI
-  pre_print_option.timelapse.label: Timelapse
+  Monitor for print abnormalities (K2 Plus camera-based): Monitorar anomalias de impressão (baseado na câmera do K2 Plus)
+  AI detection: Detecção por AI
   prints: impressões
   remaining: restante
   remaining before clog detection triggers: restante antes da detecção de obstrução
@@ -3094,32 +3114,20 @@ translations:
   steppers: motores de passo
   tall: de altura
   tool(s): ferramenta(s)
-  tour.step.advanced.body: Macros, console G-code, ferramentas de calibração (PID,
-    input shaper, z-offset), atualizações de firmware e utilitários de desenvolvedor.
-  tour.step.advanced.title: Avançado
-  tour.step.controls.body: Mova o cabeçote, referencie eixos, nivele a mesa e ajuste
-    temperaturas, ventoinhas e outras configurações de movimento.
-  tour.step.controls.title: Controles
-  tour.step.customize.body: Pressione e segure qualquer bloco para entrar no modo
-    de edição — reorganize, redimensione, remova ou adicione widgets, e adicione páginas
-    extras para o seu layout preferido.
-  tour.step.customize.title: Personalize sua tela inicial
-  tour.step.filament.body: Carregue, descarregue e troque carretéis. Visualize seu
-    sistema de múltiplos filamentos rapidamente, mapeie cores para slots e monitore
-    sensores de fim de filamento.
-  tour.step.filament.title: Filamento
-  tour.step.home_grid.body: Toque em qualquer bloco para abrir seus controles completos
-    ou alternar seu estado.
-  tour.step.home_grid.title: Sua impressora num relance
-  tour.step.print.body: Monitore impressões em andamento — tempo restante, camada
-    atual e progresso. Toque para pausar, retomar ou cancelar o trabalho ativo.
-  tour.step.print.title: Status da impressão
-  tour.step.settings.body: Rede, tela, som, configuração da impressora e muito mais.
-    Você pode repetir este tour a qualquer momento em Ajuda e sobre.
-  tour.step.settings.title: Configurações
-  tour.step.welcome.body: Vamos fazer um tour rápido para você encontrar as coisas
-    com facilidade.
-  tour.step.welcome.title: Bem-vindo ao HelixScreen
+  'Macros, G-code console, calibration tools (PID, input shaper, z-offset), firmware updates, and developer utilities.': 'Macros, console G-code, ferramentas de calibração (PID, input shaper, z-offset), atualizações de firmware e utilitários de desenvolvedor.'
+  Advanced: Avançado
+  'Move the toolhead, home axes, level the bed, and fine-tune temperatures, fans, and other motion settings.': 'Mova o cabeçote, referencie eixos, nivele a mesa e ajuste temperaturas, ventoinhas e outras configurações de movimento.'
+  Controls: Controles
+  'Long-press any tile to enter edit mode — rearrange, resize, remove, or add widgets, and add extra pages for your preferred layout.': 'Pressione e segure qualquer bloco para entrar no modo de edição — reorganize, redimensione, remova ou adicione widgets, e adicione páginas extras para o seu layout preferido.'
+  Customize your home screen: Personalize sua tela inicial
+  'Load, unload, and swap spools. View your multi-filament system at a glance, map colors to slots, and monitor runout sensors.': 'Carregue, descarregue e troque carretéis. Visualize seu sistema de múltiplos filamentos rapidamente, mapeie cores para slots e monitore sensores de fim de filamento.'
+  Tap any tile to open its full controls or toggle its state.: Toque em qualquer bloco para abrir seus controles completos ou alternar seu estado.
+  Your printer at a glance: Sua impressora num relance
+  'Monitor prints in progress — time remaining, current layer, and progress. Tap to pause, resume, or cancel the active job.': 'Monitore impressões em andamento — tempo restante, camada atual e progresso. Toque para pausar, retomar ou cancelar o trabalho ativo.'
+  Print status: Status da impressão
+  'Network, display, sound, printer setup, and more. You can replay this tour anytime from Help & About.': 'Rede, tela, som, configuração da impressora e muito mais. Você pode repetir este tour a qualquer momento em Ajuda e sobre.'
+  Let's take a quick tour so you can find things fast.: Vamos fazer um tour rápido para você encontrar as coisas com facilidade.
+  Welcome to HelixScreen: Bem-vindo ao HelixScreen
   used: usado
   v%s available: v%s disponível
   v{} installed! Restarting...: v{} instalado! Reiniciando...

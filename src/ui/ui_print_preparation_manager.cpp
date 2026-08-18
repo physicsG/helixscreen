@@ -715,7 +715,7 @@ void PrintPreparationManager::start_print(const std::string& filename,
     // Lines are concatenated with newlines; Moonraker forwards the whole
     // block to Klipper as a single gcode_script.
     const auto& db_options = get_cached_options();
-    std::vector<std::string> pre_start_lines = collect_pre_start_gcode_lines();
+    std::vector<std::string> pre_start_lines = collect_pre_start_gcode_lines(filename_to_print);
     const bool emit_printer_setup = !macro_skip_params.empty() && !db_options.setup_gcode.empty();
     std::string combined =
         build_pre_start_gcode_block(db_options.setup_gcode, pre_start_lines, emit_printer_setup);
@@ -733,25 +733,21 @@ void PrintPreparationManager::start_print(const std::string& filename,
                             [this, filename_to_print, ops_to_disable, on_navigate_to_status,
                              wrapped_completion]() {
                                 spdlog::info("[PrintPreparationManager] Pre-start gcode executed");
-                                if (!ops_to_disable.empty()) {
-                                    modify_and_print(filename_to_print, ops_to_disable, {},
-                                                     on_navigate_to_status);
-                                } else {
-                                    start_print_directly(filename_to_print, on_navigate_to_status,
-                                                         wrapped_completion);
-                                }
+                                continue_print_start(filename_to_print, ops_to_disable,
+                                                     on_navigate_to_status, wrapped_completion);
                             });
             },
-            [this, token, wrapped_completion](const MoonrakerError& err) {
+            [this, token, filename_to_print, ops_to_disable, on_navigate_to_status,
+             wrapped_completion](const MoonrakerError& err) {
                 token.defer("PrintPreparationManager::pre_start_gcode_error",
-                            [wrapped_completion, msg = err.message]() {
-                                spdlog::error(
-                                    "[PrintPreparationManager] Pre-start gcode failed: {}", msg);
-                                NOTIFY_ERROR(lv_tr("Pre-print command failed: {}"), msg);
-                                if (wrapped_completion)
-                                    wrapped_completion(false, msg);
+                            [this, filename_to_print, ops_to_disable, on_navigate_to_status,
+                             wrapped_completion, err]() {
+                                handle_pre_start_gcode_error(err, filename_to_print, ops_to_disable,
+                                                             on_navigate_to_status,
+                                                             wrapped_completion);
                             });
-            });
+            },
+            IMoonrakerAPI::PRE_START_MACRO_TIMEOUT_MS);
         return;
     }
 
@@ -1124,7 +1120,8 @@ PrintPreparationManager::collect_macro_skip_params() const {
     return skip_params;
 }
 
-std::vector<std::string> PrintPreparationManager::collect_pre_start_gcode_lines() const {
+std::vector<std::string>
+PrintPreparationManager::collect_pre_start_gcode_lines(const std::string& filename) const {
     std::vector<std::string> lines;
 
     const auto& db_options = get_cached_options();
@@ -1156,7 +1153,30 @@ std::vector<std::string> PrintPreparationManager::collect_pre_start_gcode_lines(
         }
 
         const bool enabled = (state == PrePrintOptionState::ENABLED);
-        std::string line = render_pre_start_gcode(opt, enabled);
+
+        // Macros with no "off" form opt out of the disabled emission entirely:
+        // sending Creality's BED_MESH_CALIBRATE_START_PRINT with a 0 would
+        // still mesh, so "disabled" has to mean sending nothing at all.
+        const auto* pre = std::get_if<PrePrintStrategyPreStartGcode>(&opt.strategy);
+        if (!enabled && pre && !pre->emit_when_disabled) {
+            spdlog::debug("[PrintPreparationManager] Option '{}' disabled and has no off form "
+                          "— emitting nothing",
+                          opt.id);
+            continue;
+        }
+
+        // Job temps come from the file's own START_PRINT line via the scan
+        // cache — Moonraker metadata is wrong on multi-material files. Only
+        // trust the cache when it was built for the file being printed;
+        // otherwise 0 lets the firmware macro keep its own default.
+        PreStartGcodeContext ctx;
+        ctx.filename = filename;
+        if (cached_scan_result_ && cached_scan_filename_ == filename &&
+            cached_scan_result_->print_start.found) {
+            ctx.bed_temp = cached_scan_result_->print_start.bed_temp;
+            ctx.extruder_temp = cached_scan_result_->print_start.extruder_temp;
+        }
+        std::string line = render_pre_start_gcode(opt, enabled, ctx);
         if (line.empty()) {
             // render_pre_start_gcode logs its own warning on type mismatch.
             continue;
@@ -1171,6 +1191,102 @@ std::vector<std::string> PrintPreparationManager::collect_pre_start_gcode_lines(
                      lines.size());
     }
     return lines;
+}
+
+void PrintPreparationManager::continue_print_start(
+    const std::string& filename, const std::vector<gcode::OperationType>& ops_to_disable,
+    NavigateToStatusCallback on_navigate_to_status, PrintCompletionCallback on_completion) {
+    if (!ops_to_disable.empty()) {
+        modify_and_print(filename, ops_to_disable, {}, on_navigate_to_status);
+    } else {
+        start_print_directly(filename, on_navigate_to_status, on_completion);
+    }
+}
+
+void PrintPreparationManager::handle_pre_start_gcode_error(
+    const MoonrakerError& error, const std::string& filename,
+    const std::vector<gcode::OperationType>& ops_to_disable,
+    NavigateToStatusCallback on_navigate_to_status, PrintCompletionCallback on_completion) {
+    // The RPC ceiling is not the printer's ceiling: execute_gcode blocks until
+    // the macro finishes, and a long pre-start macro can outlive the request.
+    // A timeout while Klipper still reports idle_timeout "Printing" means the
+    // macro is still running — fail only once the printer itself stops.
+    if (error.type == MoonrakerErrorType::TIMEOUT && printer_state_ &&
+        lv_subject_get_int(printer_state_->get_idle_timeout_printing_subject()) == 1) {
+        begin_pre_start_completion_wait(error, filename, ops_to_disable, on_navigate_to_status,
+                                        on_completion);
+        return;
+    }
+
+    spdlog::error("[PrintPreparationManager] Pre-start gcode failed: {} ({})", error.message,
+                  error.get_type_string());
+    NOTIFY_ERROR(lv_tr("Pre-print command failed: {}"), error.message);
+    if (on_completion) {
+        on_completion(false, error.message);
+    }
+}
+
+void PrintPreparationManager::begin_pre_start_completion_wait(
+    const MoonrakerError& timeout_error, const std::string& filename,
+    const std::vector<gcode::OperationType>& ops_to_disable,
+    NavigateToStatusCallback on_navigate_to_status, PrintCompletionCallback on_completion) {
+    spdlog::warn("[PrintPreparationManager] Pre-start RPC timed out ({}) but Klipper is still "
+                 "executing it - waiting for the busy->idle edge before starting the print",
+                 timeout_error.message);
+    pre_start_wait_active_ = true;
+
+    // Backstop: the macro already had a full ceiling on the RPC side. If the
+    // printer is STILL busy after another one, something is wedged - fail
+    // rather than spin forever. An edge that landed between the last subject
+    // update and this timer firing is handled by re-reading the subject: idle
+    // means the macro finished and we can still start the print.
+    pre_start_wait_guard_.begin(
+        IMoonrakerAPI::PRE_START_MACRO_TIMEOUT_MS,
+        [this, filename, ops_to_disable, on_navigate_to_status, on_completion, timeout_error]() {
+            const bool still_busy =
+                printer_state_ &&
+                lv_subject_get_int(printer_state_->get_idle_timeout_printing_subject()) == 1;
+            finish_pre_start_wait();
+            if (!still_busy) {
+                spdlog::info("[PrintPreparationManager] Pre-start macro finished "
+                             "(backstop re-check) - starting print");
+                continue_print_start(filename, ops_to_disable, on_navigate_to_status,
+                                     on_completion);
+                return;
+            }
+            spdlog::error("[PrintPreparationManager] Pre-start macro still "
+                          "executing after backstop - aborting print start");
+            NOTIFY_ERROR(lv_tr("Pre-print command failed: {}"),
+                         "printer still busy after extended wait");
+            if (on_completion) {
+                on_completion(false, timeout_error.message);
+            }
+        });
+
+    // The busy->idle edge is the normal completion signal. observe_int_sync
+    // defers the handler through UpdateQueue, so the observer can be torn down
+    // from inside the handler without re-entrancy.
+    pre_start_wait_observer_ = helix::ui::observe_int_sync<PrintPreparationManager>(
+        printer_state_->get_idle_timeout_printing_subject(), this,
+        [this, filename, ops_to_disable, on_navigate_to_status,
+         on_completion](PrintPreparationManager* self, int busy) {
+            if (!self->pre_start_wait_active_ || busy == 1) {
+                return;
+            }
+            self->finish_pre_start_wait();
+            spdlog::info("[PrintPreparationManager] Pre-start macro finished (idle edge) - "
+                         "starting print");
+            self->continue_print_start(filename, ops_to_disable, on_navigate_to_status,
+                                       on_completion);
+        });
+}
+
+void PrintPreparationManager::finish_pre_start_wait() {
+    pre_start_wait_active_ = false;
+    // Observer first: after reset() a queued stale apply finds the guard's
+    // epoch dead and no-ops, so a leftover notification cannot re-enter.
+    pre_start_wait_observer_.reset();
+    pre_start_wait_guard_.end();
 }
 
 std::string PrintPreparationManager::build_pre_start_gcode_block(

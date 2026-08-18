@@ -134,13 +134,19 @@ class LedEffectBackend {
     void add_effect(const LedEffectInfo& effect);
     void clear();
 
+    // `caller_surfaces_errors` says whether `on_error` actually shows the user
+    // something. A non-null handler is presumed to; pass false to opt out when
+    // it only logs, so GcodeErrorRouter keeps ownership of the `!!` broadcast
+    // that would otherwise be the only report. See include/rpc_error_policy.h.
     void activate_effect(const std::string& effect_name,
                          NativeBackend::SuccessCallback on_success = nullptr,
                          NativeBackend::ErrorCallback on_error = nullptr,
-                         NativeBackend::SuccessCallback on_queued = nullptr);
+                         NativeBackend::SuccessCallback on_queued = nullptr,
+                         bool caller_surfaces_errors = true);
     void stop_all_effects(NativeBackend::SuccessCallback on_success = nullptr,
                           NativeBackend::ErrorCallback on_error = nullptr,
-                          NativeBackend::SuccessCallback on_queued = nullptr);
+                          NativeBackend::SuccessCallback on_queued = nullptr,
+                          bool caller_surfaces_errors = true);
     void stop_effect(const std::string& effect_name,
                      NativeBackend::SuccessCallback on_success = nullptr,
                      NativeBackend::ErrorCallback on_error = nullptr,

@@ -652,15 +652,20 @@ Contributions are very welcome here and only need XML, not C++ — see the [UI C
 
 ---
 
-### A widget disappeared from the home screen (portrait screens)
+### A widget disappeared from the home screen
 
 **Symptoms:**
 
 - A widget vanished from the home screen and did not come back after a restart or an update
 - **Tips** in particular is missing on a portrait-mounted screen
 - You saw a message like *"'Tips' removed — grid full"* even though the grid looked far from full
+- You get a *"'Fan Speeds' removed — grid full"* message on **every single launch**, on a dashboard where the grid really is full
 
-**Cause:** on older versions, a widget that was wider than a portrait screen's grid could not be placed anywhere, so HelixScreen switched it off — and *saved* that off state to your settings. Fixing the placement logic does not undo the saved setting, so the widget stays off until you put it back yourself. It is not lost: it is sitting in the Widget Catalog as an available widget.
+**Cause 1 - the widget was too wide for the grid (portrait screens).** On older versions, a widget that was wider than a portrait screen's grid could not be placed anywhere, so HelixScreen switched it off - and *saved* that off state to your settings. Fixing the placement logic does not undo the saved setting, so the widget stays off until you put it back yourself. It is not lost: it is sitting in the Widget Catalog as an available widget.
+
+**Cause 2 - the grid was genuinely full.** On older versions, a widget that fit fine but found every cell taken was also switched off, and the message came back on every launch because the switch-off usually never made it to disk. That is fixed: a widget that only lacks a free cell now keeps its **enabled** setting and simply has no position, so it places itself again as soon as a cell frees up, and the message appears only when the widget was actually on your screen and lost its spot. If you are still seeing it repeat, you are on an older version - [update HelixScreen](UPGRADING.md).
+
+If your dashboard is full and you want a specific widget back, make room for it: remove a widget you care less about, or move it to a second page (see [Multiple Pages](guide/home-panel.md#multiple-pages)).
 
 Note that **Tips is now deliberately off by default on portrait screens** — it is a wide widget and takes a third to a half of a row on a narrow grid. If Tips is the only thing missing, that may simply be the new default rather than the old bug.
 
@@ -1589,6 +1594,32 @@ max_job_count: 100
 ---
 
 ## Configuration Issues
+
+### Wrong printer model identified
+
+**Symptoms:**
+- HelixScreen identifies the printer as the wrong model/type (for example, a Voron showing as "FlashForge Adventurer 5M Pro")
+- Changing the printer image in Printer Manager changes the picture but not the model — features, calibration dialogs, and the name still follow the wrong type
+
+**What's going on:**
+- The **printer type** (the model picked during setup) drives the name, image, bed size, probe type, and preset options. The image picker in Printer Manager is cosmetic only — it never changes the type.
+- **Device-specific install packages** (Creality K1, FlashForge Adventurer 5M, and similar) run a preset-mode setup that *skips printer identification entirely*: the type comes from the install package itself, not from detection. No setting can override it.
+- On **generic installs**, auto-detection picked the wrong model from the database.
+
+**Solutions:**
+
+**First, figure out which situation you're in.** What did you install, and what is HelixScreen running on? If a device-specific preset package doesn't match the machine (or its screen), that's the cause — detection never ran. Install the HelixScreen package built for your hardware, or use the [remote screen setup](../INSTALL.md#remote-screen-setup-run-on-a-separate-device) on a Pi/PC/tablet pointed at your printer's Moonraker — generic installs run full auto-detection.
+
+**If auto-detection guessed wrong (generic install), re-identify without wiping anything:**
+
+1. Enable the printer switcher: **Settings > Printers > Show printer icon in navigation bar**
+2. Open **Printer Manager > Manage Printers** and tap **+ Add Printer**
+3. The setup wizard runs for the new printer entry — at the **Printer Setup: Identity** step, pick your model by hand (Voron 2.4, Voron 0.2, Voron Trident, and Voron Switchwire are all in the database)
+4. Switch to the new entry, then delete the misidentified one from Manage Printers
+
+**Settings > System > Factory Reset** also re-runs the wizard, but it wipes all HelixScreen settings — use it only if you want a clean start anyway. Prefer the add-printer path above.
+
+If your model isn't in the database, leave it on the detected/generic profile — everything still works; you can rename the printer and set any image from Printer Manager.
 
 ### First-run wizard keeps appearing
 

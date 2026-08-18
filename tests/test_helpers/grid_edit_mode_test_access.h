@@ -37,6 +37,47 @@ struct GridEditModeTestAccess {
     static void commit_resize(GridEditMode& em, const GridEditMode::ResizeResult& result) {
         em.commit_resize_with_snap(result);
     }
+
+    /// The catalog's selection callback, called directly. Driving it through a
+    /// real row click would also need the overlay, and what a placement test
+    /// asserts on is the config this writes.
+    static void place_from_catalog(GridEditMode& em, const std::string& widget_id) {
+        em.place_widget_from_catalog(widget_id);
+    }
+
+    /// The guard handle_drag_start() uses to decide whether a gesture began on
+    /// the selected widget. Driving it through a real drag would need an indev
+    /// feeding synthetic points; what the rule asserts is pure geometry.
+    static bool press_owns_widget(const GridEditMode& em, lv_point_t origin,
+                                  const lv_area_t& area) {
+        return em.press_owns_widget(origin, area);
+    }
+
+    /// Edge grab band derived from the live grid (fallback with no container).
+    static int edge_hit_band(const GridEditMode& em) {
+        return em.edge_hit_band();
+    }
+
+    /// The pure cell-size -> band derivation, testable without a grid.
+    static int edge_hit_band_for_cell(float cell_px) {
+        return GridEditMode::edge_hit_band_for_cell(cell_px);
+    }
+
+    /// Which drag lifecycle handle_drag_start() committed the gesture to.
+    ///
+    /// resizing_ + resize_edge_ together are the direct witness that the resize
+    /// branch was taken AND which edge it classified — resize_preview_ only
+    /// proves the branch ran, and dragging_ separates "went down the move path"
+    /// from "was dropped at the guard", which both leave resizing_ false.
+    static bool resizing(const GridEditMode& em) {
+        return em.resizing_;
+    }
+    static GridEditMode::ResizeEdge resize_edge(const GridEditMode& em) {
+        return em.resize_edge_;
+    }
+    static bool dragging(const GridEditMode& em) {
+        return em.dragging_;
+    }
 };
 
 } // namespace helix

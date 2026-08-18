@@ -100,6 +100,46 @@ TEST_CASE("Connection failure degrades to a toast while a modal is open", "[moon
     }
 }
 
+TEST_CASE("Connection failure is suppressed entirely during the setup wizard",
+          "[moonraker][routing][regression]") {
+    // Bundle L53W5PKG, a fresh install on a standalone display: with no saved
+    // host the app dials the 127.0.0.1 default, the latch fires 60 s later, and
+    // the change-address prompt landed on top of the wizard's Language step. It
+    // sat there 16.5 minutes before the user dismissed it and reached the
+    // wizard's own Connection step, which is the UI that collects the address
+    // and reports success or failure inline. Two host-entry prompts competing,
+    // one of them telling a display that Klipper "runs on this printer".
+    //
+    // Suppressed rather than degraded to a toast: with a modal open the user is
+    // doing something else and needs to learn the connection failed, but inside
+    // the wizard they are already in the flow that fixes it.
+    auto d = decide_moonraker_event(MoonrakerEventType::CONNECTION_FAILED, IS_ERROR, AFTER_GRACE,
+                                    WIZARD_UP);
+    REQUIRE(d.route == MoonrakerEventRoute::Ignore);
+    REQUIRE(d.suppressed_because == MoonrakerEventSuppression::Wizard);
+
+    SECTION("and stays suppressed with a modal open on top of the wizard") {
+        auto with_modal = decide_moonraker_event(MoonrakerEventType::CONNECTION_FAILED, IS_ERROR,
+                                                 AFTER_GRACE, WIZARD_UP, MODAL_UP);
+        REQUIRE(with_modal.route == MoonrakerEventRoute::Ignore);
+    }
+
+    SECTION("but the prompt returns once the wizard is done") {
+        auto after = decide_moonraker_event(MoonrakerEventType::CONNECTION_FAILED, IS_ERROR,
+                                            AFTER_GRACE, NO_WIZARD, NO_MODAL);
+        REQUIRE(after.route == MoonrakerEventRoute::ConnectionFailedModal);
+    }
+}
+
+TEST_CASE("The wizard does not suppress other error toasts", "[moonraker][routing]") {
+    // Only the connection prompt competes with the wizard's own Connection
+    // step. An RPC failure during setup is still worth surfacing, and dropping
+    // every error would hide real breakage behind the setup flow.
+    auto d =
+        decide_moonraker_event(MoonrakerEventType::RPC_ERROR, IS_ERROR, AFTER_GRACE, WIZARD_UP);
+    REQUIRE(d.route == MoonrakerEventRoute::ErrorToast);
+}
+
 TEST_CASE("Deferred discovery is suppressed before the error routing",
           "[moonraker][routing][1219]") {
     auto d = decide_moonraker_event(MoonrakerEventType::DISCOVERY_DEFERRED, IS_ERROR, AFTER_GRACE,

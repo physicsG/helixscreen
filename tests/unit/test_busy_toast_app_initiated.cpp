@@ -31,7 +31,7 @@
 #include "../../include/moonraker_api.h"
 #include "../../include/moonraker_client_mock.h"
 #include "../../include/printer_state.h"
-#include "../lvgl_test_fixture.h"
+#include "../busy_guard_fixture.h"
 
 #include <chrono>
 
@@ -47,54 +47,10 @@ constexpr const char* MACRO = "UNLOAD_FILAMENT";
 /// trigger the spurious toast.
 constexpr const char* DISCRETIONARY = "M106 S128";
 
-class MacroActivityFixture : public LVGLTestFixture {
+class MacroActivityFixture : public helix::BusyGuardFixture {
   public:
-    MacroActivityFixture() : mock_client(MoonrakerClientMock::PrinterType::VORON_24) {
-        state.init_subjects(false);
-        // ORDERING IS LOAD-BEARING: klippy subjects initialize to SHUTDOWN, so
-        // this call is a transition that resets the volatile subjects. It must
-        // come before idle_timeout is set or the reset wipes it and the test
-        // silently exercises the non-busy path (see test_led_controller.cpp).
-        state.set_klippy_state_sync(KlippyState::READY);
-        // Default to idle/standby: nothing blocking, so sends reach the client.
-        set_print_state(PrintJobState::STANDBY);
-        set_idle_printing(false);
-        mock_client.connect("ws://mock/websocket", []() {}, []() {});
-        api = std::make_unique<MoonrakerAPI>(mock_client, state);
-    }
-
-    ~MacroActivityFixture() override {
-        mock_client.stop_temperature_simulation();
-        mock_client.disconnect();
-        api.reset();
-    }
-
-    void set_print_state(PrintJobState s) {
-        lv_subject_set_int(state.get_print_state_enum_subject(), static_cast<int>(s));
-    }
-    void set_idle_printing(bool on) {
-        lv_subject_set_int(state.get_idle_timeout_printing_subject(), on ? 1 : 0);
-    }
-
-    /// Make an external blocking op (calibration / console macro) look active.
-    void begin_blocking_episode() {
-        set_print_state(PrintJobState::STANDBY);
-        set_idle_printing(true);
-    }
-
-    /**
-     * recently_active(now) is `inflight_ > 0 || (now - last_done_ < GRACE_WINDOW)`
-     * (plus the in-flight age ceiling). Passing a `now` just past the grace
-     * window retires the second term, collapsing the call to a pure
-     * `inflight_ > 0` read — the ceiling is 10 minutes, far beyond this offset,
-     * so it stays satisfied. AppMacroActivity exposes no inflight getter; this
-     * is the supported way to isolate the counter (same idiom as
-     * test_motion_activity_pairing.cpp).
-     */
     bool macro_inflight() {
-        return state.app_macro_activity().recently_active(AppMacroActivity::clock::now() +
-                                                          AppMacroActivity::GRACE_WINDOW +
-                                                          std::chrono::seconds(1));
+        return helix::activity_inflight(state.app_macro_activity());
     }
 
     /**
@@ -106,32 +62,10 @@ class MacroActivityFixture : public LVGLTestFixture {
         return state.app_macro_activity().recently_active();
     }
 
-    /**
-     * Exact inflight count, using the only read the public API allows: the
-     * far-future call is a pure `inflight_ > 0`, so retiring the counter one
-     * note_done() at a time and counting the steps yields the exact value.
-     * Destructive — call it last in a test.
-     */
+    /// Destructive — call it last in a test.
     int drain_inflight() {
-        int n = 0;
-        while (macro_inflight() && n < 100) {
-            state.app_macro_activity().note_done();
-            ++n;
-        }
-        return n;
+        return helix::drain_activity_inflight(state.app_macro_activity());
     }
-
-    void error_cb(const MoonrakerError& err) {
-        error_called = true;
-        captured_error = err;
-    }
-
-    MoonrakerClientMock mock_client;
-    PrinterState state;
-    std::unique_ptr<MoonrakerAPI> api;
-
-    bool error_called = false;
-    MoonrakerError captured_error;
 };
 
 } // namespace

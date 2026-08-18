@@ -230,7 +230,12 @@ void TemperatureController::set_target(const std::string& klipper_name, double c
             NOTIFY_ERROR(lv_tr("Failed to set temperature: {}"), e.user_message());
         }
     };
-    api_->set_temperature(klipper_name, celsius, std::move(on_ok), std::move(on_err));
+    // opts.toast is the signal: on_err above raises NOTIFY_ERROR only when it is
+    // set, so a toast=false send has an error callback that reaches no human.
+    // Claiming otherwise would record the rejection for dedup and silence
+    // GcodeErrorRouter's `!!` report — see include/rpc_error_policy.h.
+    api_->set_temperature(klipper_name, celsius, std::move(on_ok), std::move(on_err),
+                          /*caller_surfaces_errors=*/opts.toast);
 }
 
 void TemperatureController::apply_material(double nozzle, double bed, double chamber,

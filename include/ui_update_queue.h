@@ -73,7 +73,7 @@ struct TaggedCallback {
     /// wrappers. Purely diagnostic: a tagged callback already names its
     /// producer, but an untagged one is anonymous, and "<untagged> x44" in a
     /// cross-test leak report is unactionable — there is no way to find which
-    /// of the ~600 queue_update() sites left the work behind. The crash
+    /// of the hundreds of queue_update() sites left the work behind. The crash
     /// handler still reads `tag` only; this pair is read by the test
     /// isolation listener.
     const char* file = nullptr;
@@ -84,11 +84,13 @@ struct TaggedCallback {
  * @brief Thread-safe UI update queue
  *
  * Singleton that manages pending UI updates. Call init() once at startup
- * to install a high-priority timer that processes updates every lv_timer_handler() cycle.
+ * to install a 1 ms timer that processes updates inside every
+ * lv_timer_handler() cycle (LVGL 9 timers have no priority field; the timer
+ * is created at init so it sits near the head of the timer list).
  *
  * Key insight: Using LV_EVENT_REFR_START doesn't work because it only fires when
  * LVGL decides to render. If nothing invalidates the display, the queue never drains.
- * Instead, we use a highest-priority timer that fires every lv_timer_handler() call,
+ * Instead, we use a 1 ms timer that fires every lv_timer_handler() call,
  * ensuring callbacks execute promptly regardless of render state.
  */
 class UpdateQueue {
@@ -104,8 +106,9 @@ class UpdateQueue {
     /**
      * @brief Initialize the update queue (call once at startup)
      *
-     * Creates a highest-priority timer that processes pending updates
-     * every lv_timer_handler() cycle, BEFORE the render timer runs.
+     * Creates a 1 ms timer that processes pending updates inside every
+     * lv_timer_handler() cycle. Created at init so it runs near the head
+     * of the timer list (LVGL 9 has no timer priorities).
      */
     void init() {
         if (initialized_)

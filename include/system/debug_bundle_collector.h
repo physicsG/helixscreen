@@ -65,8 +65,9 @@ using ConfigFetcher = std::function<ConfigFetchResult(const std::string& path)>;
  */
 struct UpdateDiagnostics {
     std::string install_root;            ///< app_get_install_root() ("" if unresolvable)
-    bool install_parent_writable = true; ///< dirname(install_root) writable WITHOUT escalation
-    bool self_update_supported = true;   ///< self_update_supported(): writable OR root reachable
+    bool install_parent_writable = true; ///< dirname(install_root) writable → atomic swap
+    bool install_root_writable = true;   ///< install_root itself writable → in-place update
+    bool self_update_supported = true;   ///< self_update_supported(): either of those OR root
     bool externally_managed = false;     ///< updates_externally_managed()
     std::string channel;                 ///< "stable"|"beta"|"dev"; "" → "unknown"
     std::string r2_base_url;             ///< effective manifest base URL; "" → "unknown"
@@ -125,11 +126,12 @@ class DebugBundleCollector {
     /**
      * @brief In-app update diagnostics: why the update UI is (or is not) usable.
      *
-     * The About screen gates both "Check for Updates" and "Install Update" on
-     * !in_app_updates_suppressed(); when suppressed the rows are absent and the
-     * user cannot update at all. Without this section a "cannot update" report
-     * carries no evidence of whether that happened or which of the two
-     * predicates caused it.
+     * The About screen gates the two rows separately: "Check for Updates" on
+     * !update_checks_suppressed() (firmware opt-out only), "Install Update"
+     * additionally on !update_install_suppressed() (that, or an install tree this
+     * user cannot write). Without this section a "cannot update" report carries no
+     * evidence of which predicate fired, or of which of the two writability terms
+     * behind the second one was missing.
      *
      * No LVGL access — every value comes from a plain C++ getter, so this is
      * safe from the HttpExecutor thread that upload_async() collects on.

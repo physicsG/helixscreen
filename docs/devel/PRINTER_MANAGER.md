@@ -285,7 +285,7 @@ The printer database (`config/printer_database.json`) is the source of truth for
   "manufacturer": "FlashForge",
   "image": "flashforge-adventurer-5m.png",
   "print_start_profile": "forge_x",
-  "z_offset_calibration_strategy": "gcode_offset",
+  "z_offset_calibration_strategy": "firmware_managed",
   "heuristics": [
     {
       "type": "macro_match",
@@ -311,7 +311,7 @@ The printer database (`config/printer_database.json`) is the source of truth for
 | `manufacturer` | Manufacturer name |
 | `image` | PNG filename in `assets/images/printers/` |
 | `print_start_profile` | Profile for print start phase detection |
-| `z_offset_calibration_strategy` | Z-offset approach (`gcode_offset`, etc.) |
+| `z_offset_calibration_strategy` | Z-offset calibration approach: `probe_calibrate`, `endstop`, or `firmware_managed` (firmware/macros persist it, so HelixScreen hides its own Save step). Omit to derive from probe presence. Separate from *where the value is stored* — see `include/z_offset_persistence.h` |
 | `heuristics` | Array of detection rules with confidence scores |
 | `print_start_capabilities` | PRINT_START macro parameters |
 | `screws_tilt_direction` | `"cw"` or `"ccw"` — override for the physical tightening direction of bed screws. Use when the vendor-shipped Klipper `screw_thread` disagrees with the actual screw geometry, causing `SCREWS_TILT_CALCULATE` directions to un-level the bed. When set to `"ccw"` (disagreeing with Klipper's default CW-M\* semantics), HelixScreen flips CW↔CCW in the displayed direction. Omit the field (or set `"cw"`) for printers whose Klipper config matches reality. Known use: FlashForge Adventurer 5M family. |

@@ -790,7 +790,16 @@ RequestId EspMoonrakerClient::send_jsonrpc(const std::string& method, const json
 RequestId EspMoonrakerClient::send_jsonrpc(const std::string& method, const json& params,
                                            std::function<void(const json&)> success_cb,
                                            std::function<void(const MoonrakerError&)> error_cb,
-                                           uint32_t timeout_ms, bool silent) {
+                                           uint32_t timeout_ms, bool silent,
+                                           std::optional<rpc_error_policy::CallerIntent> intent) {
+    // CallerIntent governs who surfaces a failed request's error (caller
+    // callback vs the tracker's generic toast) on the desktop client, where
+    // both surfaces exist. The shim has exactly one surface — error_cb — so
+    // every intent resolves to "the caller owns the report", which is what
+    // track_and_send() already does. Accepted for signature parity with
+    // IMoonrakerClient (esp32 CI static-asserts the full override set in
+    // coverage_assert.cpp) and deliberately not consulted beyond that.
+    (void)intent;
     if (!is_connected()) {
         // Fail fast so callers don't wait on a request that never times out.
         if (error_cb) {
@@ -1565,12 +1574,15 @@ bool EspMoonrakerClient::unregister_method_callback(const std::string& method,
     return removed;
 }
 
-void EspMoonrakerClient::dispatch_status_update(const json& status) {
+void EspMoonrakerClient::dispatch_status_update(const json& status, bool from_cached_snapshot) {
     // Wrap raw status into the notify_status_update envelope and route it through
     // the same fan-out an incoming WS notification would take. [status, eventtime].
     json wrapped;
     wrapped["method"] = "notify_status_update";
     wrapped["params"] = json::array({status, 0.0});
+    if (from_cached_snapshot) {
+        wrapped[CACHED_SNAPSHOT_MARKER] = true;
+    }
     // Notify-only fan-out (no method_callbacks_), matching desktop
     // dispatch_status_update semantics.
     dispatch_notification(wrapped, /*include_method_callbacks=*/false);

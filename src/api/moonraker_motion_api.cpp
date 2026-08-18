@@ -389,10 +389,19 @@ std::string MoonrakerMotionAPI::generate_absolute_move_gcode(char axis, double p
 // ============================================================================
 
 void MoonrakerMotionAPI::execute_gcode(const std::string& gcode, SuccessCallback on_success,
-                                       ErrorCallback on_error, uint32_t timeout_ms) {
-    // silent=true when caller provides on_error: caller handles error display,
-    // so suppress the global RPC_ERROR toast from request tracker.
-    bool silent = (on_error != nullptr);
+                                       ErrorCallback on_error, uint32_t timeout_ms,
+                                       bool caller_surfaces_errors) {
+    // Built from the CALLER's own on_error, before the activity-counter wrapping
+    // further down makes error_wrapper non-null. silent=true when the caller
+    // provides on_error: it handles error display, so the request tracker's
+    // generic RPC_ERROR toast stays quiet. surfaces_errors additionally decides
+    // whether Klipper's `!!` broadcast for the same rejection dedups against the
+    // caller's toast — only a callback that really shows something earns that.
+    // See include/rpc_error_policy.h.
+    const helix::rpc_error_policy::CallerIntent intent{/*silent=*/(on_error != nullptr),
+                                                       /*surfaces_errors=*/(on_error != nullptr) &&
+                                                           caller_surfaces_errors};
+    const bool silent = intent.silent;
 
     // Refuse motion G-code (jog/home/move) unless Klipper is READY. When klippy
     // is starting up, halted, or errored, printer.gcode.script is rejected by
@@ -457,7 +466,9 @@ void MoonrakerMotionAPI::execute_gcode(const std::string& gcode, SuccessCallback
     // busy guard can attribute the resulting idle_timeout "Printing" to us.
     // Both callbacks are wrapped: the request tracker guarantees exactly one
     // fires (success, error, or timeout), keeping the inflight count balanced.
-    // NOTE: `silent` was computed from the CALLER's on_error before wrapping.
+    // NOTE: `intent` was computed from the CALLER's on_error above, before this
+    // wrapping — error_wrapper is non-null whenever we stamp, so reading it here
+    // would report a promise the caller never made.
     const bool stamp = helix::is_discretionary_gcode(gcode);
     helix::PrinterState* ps = &state_;
     if (stamp) {
@@ -485,5 +496,5 @@ void MoonrakerMotionAPI::execute_gcode(const std::string& gcode, SuccessCallback
         };
     }
     client_.send_jsonrpc("printer.gcode.script", params, std::move(success_wrapper),
-                         std::move(error_wrapper), timeout_ms, silent);
+                         std::move(error_wrapper), timeout_ms, intent.silent, intent);
 }

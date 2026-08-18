@@ -85,7 +85,7 @@ Klipper SHAPER_CALIBRATE
 
 ## CSV Parser (`ShaperCsvParser`)
 
-Parses CSV output from Klipper's `calibrate_shaper.py`. The CSV is written to `/tmp/calibration_data_{axis}_{timestamp}.csv` on the printer's filesystem.
+Parses CSV output from Klipper's calibrate_shaper.py. The CSV is written to `/tmp/calibration_data_{axis}_{timestamp}.csv` on the printer's filesystem.
 
 ### Klipper CSV Format
 
@@ -430,7 +430,7 @@ Calibration results are cached to disk in JSON format to avoid re-running expens
 Follows XDG Base Directory Specification:
 1. `$XDG_CACHE_HOME/helix/input_shaper_cache.json`
 2. `$HOME/.cache/helix/input_shaper_cache.json` (fallback)
-3. `/tmp/helix/input_shaper_cache.json` (last resort)
+3. /tmp/helix/input_shaper_cache.json (last resort)
 
 ### Cache Format
 

@@ -63,6 +63,7 @@ reasonable, and the reason adversarial reading matters.
 | **JSON null vs missing** | A default-constructed `nlohmann::json` is null, and `.value()` throws on null. Guard with `is_object()` or initialize to `json::object()`. | L087 |
 | **Thread/network test left untagged** | Tests using `std::thread` / `condition_variable` / `hv::EventLoop` must be `[slow]`, or they deadlock parallel shards. | L052 |
 | **Claim not verified against current code** | A root cause inherited from an issue report, a commit message, or a stale comment. Grep the current tree and `git log -S` before accepting a mechanism — confident, well-argued reporter archaeology has pointed at the wrong cause more than once. | L095 |
+| **Log-only `on_error` claiming the error report** | An `execute_gcode` / `set_temperature` / `set_led` caller whose `on_error` only `spdlog`s or resets state, without `caller_surfaces_errors=false`. It records the rejection for dedup and silences `GcodeErrorRouter`'s `!!` copy — the only surface that would have told the user. Deriving intent *after* an internal callback wrapper has the same effect. | `RPC_ERROR_OWNERSHIP.md` |
 
 ---
 
@@ -123,7 +124,8 @@ to skip verification. Use `--sim-speed 4..10` to reach an active print in second
 | `check_l081_anti_pattern.py` | No bare `tok.expired()` then `this` access on a bg thread |
 | `check_subscription_null_safety.py` | Subscription-handler JSON reads are guarded (baseline 0) |
 | `check_imperative_ui.py` | XML-owned widgets driven from C++ (ratcheting baseline) |
-| `check_doc_refs.py` | Docs cite files that exist; `docs/devel/` index is complete |
+| `check_doc_refs.py` | Docs cite files that exist (CLAUDE.md files, skills, all of `docs/devel/`); `docs/devel/` index is complete |
+| `check_gcode_error_ownership.py` | Log-only error callbacks declare `caller_surfaces_errors=false` (baseline 0) |
 | `check_translation_format_specifiers.py` | Translated strings keep their placeholders |
 | spdlog-only | No `printf`/`cout`/`LV_LOG_` outside CLI subcommands |
 | design tokens | Hardcoded colors ratcheted; no private `_lv_*` APIs |

@@ -33,6 +33,7 @@ bool AmsContextMenu::s_subjects_initialized_ = false;
 // Construction / Destruction
 // ============================================================================
 
+
 AmsContextMenu::AmsContextMenu() {
     init_subjects();
     spdlog::debug("[AmsContextMenu] Constructed");
@@ -71,7 +72,10 @@ void AmsContextMenu::deinit_subjects() {
 
 AmsContextMenu::~AmsContextMenu() {
     // The subjects are the class's, not this instance's, and outlive it; the
-    // base destructor takes the widget tree down.
+    // base destructor takes the widget tree down. Deiniting them HERE is what
+    // left the XML registry resolving "ams_slot_can_load" to dead storage once
+    // any one of the three owners went away, whether or not another was still
+    // using the name — StaticSubjectRegistry retires them at shutdown instead.
     spdlog::trace("[AmsContextMenu] Destroyed");
 }
 

@@ -7,6 +7,7 @@
 
 #include "app_globals.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "klipper_extruder_naming.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "panel_widget_registry.h"
@@ -499,9 +500,7 @@ TempGraphWidget::TempGraphConfigModal::sensor_display_name(const std::string& kl
     // Extruders: defer to PrinterTemperatureState which already produces
     // "Nozzle" (single) / "Nozzle 1", "Nozzle 2", ... (multi). Keeps the
     // chip row, graph legend, and config modal aligned on one source of truth.
-    if (klipper_name == "extruder" ||
-        (klipper_name.size() > 8 && klipper_name.rfind("extruder", 0) == 0 &&
-         std::isdigit(static_cast<unsigned char>(klipper_name[8])))) {
+    if (const auto tool_number = tool_number_for_extruder(klipper_name)) {
         const auto& exts = get_printer_state().temperature_state().extruders();
         auto it = exts.find(klipper_name);
         if (it != exts.end() && !it->second.display_name.empty()) {
@@ -510,10 +509,9 @@ TempGraphWidget::TempGraphConfigModal::sensor_display_name(const std::string& kl
         // Fallback when extruders haven't been discovered yet: derive a
         // best-effort number from the klipper suffix. "extruder" -> "Nozzle 1",
         // "extruderN" -> "Nozzle N+1".
-        if (klipper_name == "extruder")
+        if (*tool_number == 0)
             return lv_tr("Nozzle");
-        return std::string(lv_tr("Nozzle")) + " " +
-               std::to_string(std::atoi(klipper_name.c_str() + 8) + 1);
+        return std::string(lv_tr("Nozzle")) + " " + std::to_string(*tool_number + 1);
     }
     if (klipper_name == "heater_bed")
         return lv_tr("Bed");
@@ -609,11 +607,7 @@ void TempGraphWidget::TempGraphConfigModal::populate_sensor_list() {
     // left them.
     {
         auto& arr = config_["sensors"];
-        auto is_extruder_name = [](const std::string& n) {
-            return n == "extruder" || (n.size() > 8 && n.rfind("extruder", 0) == 0 &&
-                                       std::isdigit(static_cast<unsigned char>(n[8])));
-        };
-        auto entry_is_extruder = [&](const nlohmann::json& entry) {
+        auto entry_is_extruder = [](const nlohmann::json& entry) {
             return entry.contains("name") && entry["name"].is_string() &&
                    is_extruder_name(entry["name"].get<std::string>());
         };

@@ -17,10 +17,9 @@
     <!-- Error text. Capped + scrollable so a long backend fault string scrolls inside
          the card instead of growing it off both screen edges. -->
     <lv_obj name="ams_error_text_scroll"
-            width="100%" height="content" style_max_height="#dialog_content_max"
-            style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="#space_lg"
-            style_pad_bottom="#space_md" flex_flow="column" style_pad_gap="#space_md"
-            scrollable="true" scroll_snap_y="none">
+            width="100%" height="content" style_max_height="#dialog_content_pinned_max" style_pad_left="#space_lg"
+            style_pad_right="#space_lg" style_pad_top="#space_lg" style_pad_bottom="#space_md" flex_flow="column"
+            style_pad_gap="#space_md" scrollable="true" scroll_snap_y="none">
       <!-- Error message text -->
       <text_body name="error_message"
                  width="100%" text="An error occurred while loading filament."

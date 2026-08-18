@@ -28,9 +28,10 @@ printer rather than your desk.
 | 6 | Never `ObserverGuard::release()` in normal cleanup — use `reset()` | Leaks `LambdaObserverContext`, corrupts rendering | #579 |
 | 7 | Never delete container children inside an input event handler | Child-list iteration corrupted → SIGSEGV | — |
 | 8 | Every `init_subjects()` self-registers its `deinit_subjects()` | Crash in `lv_observer_remove` at shutdown | — |
+| 9 | A raw `lv_timer_t*` cancelled in `cleanup()` must also be cancelled in the destructor | Armed timer firing on a freed `this` | #1173, #750, #751 |
 
-Invariants 2 and 8 have automated gates (`scripts/check_l081_anti_pattern.py`,
-`scripts/check_subscription_null_safety.py`), run by `scripts/quality-checks.sh` on every
+Invariants 2 and 9 have automated gates (`scripts/check_l081_anti_pattern.py`,
+`scripts/check_timer_destructor_cancel.py`), run by `scripts/quality-checks.sh` on every
 commit. The rest are reviewed by humans.
 
 ---
@@ -84,7 +85,7 @@ thread and drained on the main thread at the **start** of each `lv_timer_handler
 before rendering:
 
 ```
-1. UpdateQueue::process_pending()  ← drains all queued lambdas (highest priority)
+1. UpdateQueue::process_pending()  ← drains all queued lambdas (1 ms LVGL timer)
 2. LVGL timers (input polling, animations)
 3. process_notifications()         ← dequeue Moonraker JSON
 4. lv_refr_now()                   ← render to framebuffer
@@ -129,9 +130,9 @@ lv_timer_handler()       libhv Event Loop       UpdateChecker
 
 ### Reference implementations
 
-- `src/printer/printer_state.cpp` — the `set_*_internal()` pattern (`set_printer_capabilities()` →
-  `set_printer_capabilities_internal()`, and likewise for `set_klipper_version()`,
-  `set_klippy_state()`)
+- `src/printer/printer_state.cpp` — the `set_*_internal()` pattern (`set_klippy_state()` →
+  `set_klippy_state_internal()`, and likewise for `set_klipper_version()`,
+  `set_printer_connection_state()`)
 - `src/api/wifi_manager.cpp` — every event handler parses on the background thread, then
   marshals to main:
 
@@ -704,7 +705,7 @@ void PrinterState::init_subjects() {
     subjects_initialized_ = true;
 
     StaticSubjectRegistry::instance().register_deinit(
-        "PrinterState", []() { PrinterState::instance().deinit_subjects(); });
+        "PrinterState", [this]() { deinit_subjects(); });
 }
 ```
 
@@ -805,6 +806,27 @@ behind an `lv_is_initialized()` guard.
 LvglTimerGuard update_timer_;   // deleted on destruction
 ```
 
+### A raw `lv_timer_t*` must also be cancelled in the destructor
+
+`StaticPanelRegistry::destroy_all()` runs **before** `lv_deinit()` in `Application::shutdown()`
+(§7), so any teardown path that destroys the owner without the explicit stop leaves the timer
+armed in LVGL's timer list holding a freed `this` — the callback then fires on freed memory
+(#1173, twice: the wizard auto-probe timer and the PID-calibration ETA timer). The rule: **a
+raw `lv_timer_t*` cancelled in `cleanup()` must also be cancelled in the destructor.**
+
+Share one `cancel_*_timer()` helper between both paths, and cancel with
+`lv_timer_cancel_safe()` (`include/ui_timer_guard.h`) — it self-guards on
+`lv_is_initialized()` and neuters the timer instead of unlinking it, so it is safe to call
+from a destructor and from inside `lv_timer_handler()` (#750, #751). Exemplar:
+`FlyingToasterScreensaver::cancel_timer()` in `src/ui/ui_screensaver.cpp`.
+
+A `LifetimeToken`-guarded timer callback is the other valid answer — annotate those
+`// TIMER_DTOR_OK: <reason>`.
+
+**Gate:** `scripts/check_timer_destructor_cancel.py`, run by `scripts/quality-checks.sh`
+(`--max-allowed 0`). The check is transitive: a destructor that calls a `cleanup()` /
+`deinit_subjects()` which cancels the timer counts.
+
 ---
 
 ## 11. Testing
@@ -885,6 +907,7 @@ Relevant tags: `[state]` (subjects/observers), `[connection]` (WebSocket lifecyc
 | App hangs, stops answering pings | `lv_subject_set_*()` from a background thread during render | `queue_update()` (§1) |
 | Crash on shutdown in `lv_observer_remove` | `init_subjects()` never self-registered its cleanup | Register inside `init_subjects()` (§7) |
 | Crash deleting a widget during a button click | Sync deletion during `indev` dispatch | Null the pointer, let the rebuild clean (§9) |
+| Timer callback fires after its owner was destroyed | Raw `lv_timer_t*` cancelled in `cleanup()` but not the destructor | Share a `cancel_*_timer()` + `lv_timer_cancel_safe()` between both paths (§10) |
 | Rendering corrupted / observer context leaked | `ObserverGuard::release()` used for normal cleanup (#579) | `reset()` (§6) |
 | `lv_obj_delete_async()` double-free | Parent's `lv_obj_clean()` ran before the async fired | Only async-delete when no parent cleanup follows (§9) |
 | `[UpdateQueue] DROPPED (shutdown): <tag>` in a device log | Background thread enqueueing after `update_queue_shutdown()` | Real bug — find the thread that outlived shutdown (§4) |
@@ -910,3 +933,4 @@ Relevant tags: `[state]` (subjects/observers), `[connection]` (WebSocket lifecyc
 | `src/api/wifi_manager.cpp` | Backend integration reference |
 | `src/application/application.cpp` | Main loop and shutdown order |
 | `scripts/check_l081_anti_pattern.py` | L081 lint gate |
+| `scripts/check_timer_destructor_cancel.py` | Timer dtor-cancellation lint gate |

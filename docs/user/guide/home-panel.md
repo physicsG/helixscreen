@@ -276,6 +276,10 @@ On a portrait screen the defaults differ: Printer Image and Print Status stack f
 | **Firmware Restart** | Restart the Klipper firmware. Useful when Klipper enters SHUTDOWN state. This widget automatically appears during firmware errors even if disabled. | 1x1 | 1x1 | 1x1 | No | — |
 | **Lock Screen** | Locks the screen immediately with PIN protection. Only appears in the Widget Catalog after setting a PIN in Settings > Security. | 1x1 | 1x1 | 1x1 | No | PIN set in Settings |
 
+#### Shutdown/Reboot Widget
+
+The Shutdown/Reboot widget puts one-tap host shutdown/reboot on your home panel — a faster alternative to the **Settings > Advanced** shutdown entry. A confirmation dialog always appears first, so there's no risk of an accidental shutdown. For switching a PSU or smart plug instead, see the **Power** widget above.
+
 
 ### Hardware-Gated Widgets
 
@@ -547,6 +551,21 @@ When widgets don't have an explicit position (newly added, or after a reset), He
 2. Smaller widgets (1x1) fill the remaining gaps
 3. Placement scans from top-left to bottom-right
 
+### When the Grid Is Full
+
+If every cell is taken, a widget that has nowhere to sit is set aside rather than switched
+off. It stays enabled and comes back on its own the moment a cell frees up - when you remove
+another widget, when hardware another widget depends on goes away, or when the same layout is
+shown on a screen with a bigger grid. You do not have to re-add it from the catalog.
+
+You will see a *"'Fan Speeds' removed — grid full"* message only when the widget was actually
+on your screen and lost its spot. A widget that never had a spot is set aside quietly.
+
+A widget that is simply **too big for the grid at any size** is a different case: it cannot
+be placed no matter what you remove, so it is switched off and put back in the Widget
+Catalog, and the message tells you that is the reason. See
+[A widget disappeared from the home screen](../TROUBLESHOOTING.md#a-widget-disappeared-from-the-home-screen).
+
 ### What Happens on Upgrade
 
 When you update HelixScreen and new widgets are added:
@@ -554,7 +573,10 @@ When you update HelixScreen and new widgets are added:
 - **Your existing layout is preserved** — nothing moves
 - New widgets are appended with their default enabled/disabled state
 - If a new widget is enabled by default, it auto-places into available grid space
-- If the grid is full, new widgets stay disabled until you make room
+- If the grid is full, a new widget stays enabled but unplaced until you make room. It still
+  appears in the Widget Catalog as available, so you can try to place it and get a
+  *"Not enough room for this widget"* message rather than silence, and it drops into place by
+  itself as soon as a cell frees up
 
 If you downgrade and a widget type no longer exists, it's silently removed from your layout. Upgrading again restores it.
 

@@ -379,7 +379,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState publishes per-slot fill subject on s
     // slot 1: empty lane → 0 (not present).
     mock_ptr->force_slot_status(1, SlotStatus::EMPTY);
 
-    // slot 2: present, metadata only (no usable weights) → 50% fallback (#1071).
+    // slot 2: present, metadata only (no usable weights) → full fallback.
     mock_ptr->force_slot_status(2, SlotStatus::AVAILABLE);
     SlotInfo s2;
     s2.slot_index = 2;
@@ -399,7 +399,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState publishes per-slot fill subject on s
 
     CHECK(lv_subject_get_int(ams.get_slot_fill_subject(0)) == 50);
     CHECK(lv_subject_get_int(ams.get_slot_fill_subject(1)) == 0);
-    CHECK(lv_subject_get_int(ams.get_slot_fill_subject(2)) == 50);
+    CHECK(lv_subject_get_int(ams.get_slot_fill_subject(2)) == 100);
     CHECK(lv_subject_get_int(ams.get_slot_fill_subject(3)) == -1);
 
     // Out-of-range → nullptr.

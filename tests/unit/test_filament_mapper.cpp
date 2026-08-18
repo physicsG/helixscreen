@@ -1075,8 +1075,9 @@ TEST_CASE("compute_defaults flags multiple mismatches in multi-tool scenario",
 
 TEST_CASE("materials_match handles non-AMS external spool comparison",
           "[filament_mapper][material_mismatch]") {
-    // These are the exact comparisons PrintStartController::find_material_mismatches()
-    // performs for non-AMS printers (gcode filament_type vs external spool material)
+    // These are the exact comparisons the material_compatibility gate
+    // (print_start_checks.cpp) performs for non-AMS printers (gcode
+    // filament_type vs external spool material)
 
     SECTION("exact match is compatible") {
         CHECK(FilamentMapper::materials_match("PLA", "PLA"));

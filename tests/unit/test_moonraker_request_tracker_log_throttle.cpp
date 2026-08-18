@@ -95,7 +95,7 @@ PendingRequest make_pending_request(const std::string& method, std::chrono::mill
     req.id = 0; // caller supplies the map key
     req.method = method;
     req.timeout_ms = timeout_ms;
-    req.silent = false;
+    req.intent.silent = false;
     req.timestamp = std::chrono::steady_clock::now() - age;
     return req;
 }

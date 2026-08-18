@@ -37,6 +37,19 @@ class PrintStatusWidgetTestAccess {
     static void reset_to_idle(PrintStatusWidget& widget) {
         widget.reset_print_card_to_idle();
     }
+
+    // The idle thumbnail key and the freshness stamp it is validated against.
+    // Production resolves both inside reset_print_card_to_idle(), where the
+    // answer is only observable after a cache probe or a pool round-trip; a
+    // test that only wants to know WHICH history job was selected reads them
+    // straight from the two resolvers.
+    static std::string last_print_thumbnail_path(const PrintStatusWidget& widget) {
+        return widget.get_last_print_thumbnail_path();
+    }
+
+    static time_t last_print_source_modified(const PrintStatusWidget& widget) {
+        return widget.get_last_print_source_modified();
+    }
 };
 
 } // namespace helix

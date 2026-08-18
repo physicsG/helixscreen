@@ -58,6 +58,7 @@
 #include "ui/fan_spin_animation.h"
 #include "ui/ui_widget_helpers.h"
 #include "wizard_config_paths.h"
+#include "z_offset_utils.h"
 
 #include <spdlog/spdlog.h>
 
@@ -83,9 +84,6 @@ static lv_obj_t* s_cached_panel = nullptr;
 // Registered lazily on first push_overlay(); unregistered in the static
 // panel-destroy callback to prevent calls into a destroyed singleton.
 static helix::MemoryMonitor::PressureResponderId s_memory_responder_id = 0;
-
-using helix::ui::temperature::deci_to_degrees;
-using helix::ui::temperature::format_temperature_pair;
 
 // Observer factory pattern
 using helix::ui::observe_int_sync;
@@ -439,10 +437,6 @@ void PrintStatusPanel::init_subjects() {
     UI_MANAGED_SUBJECT_STRING(remaining_subject_, remaining_buf_, "0h 00m", "print_remaining",
                               subjects_);
     UI_MANAGED_SUBJECT_STRING(eta_subject_, eta_buf_, "", "print_eta", subjects_);
-    UI_MANAGED_SUBJECT_STRING(nozzle_temp_subject_, nozzle_temp_buf_, "0 / 0°C", "nozzle_temp_text",
-                              subjects_);
-    UI_MANAGED_SUBJECT_STRING(bed_temp_subject_, bed_temp_buf_, "0 / 0°C", "bed_temp_text",
-                              subjects_);
     UI_MANAGED_SUBJECT_STRING(nozzle_status_subject_, nozzle_status_buf_, "Off",
                               "print_nozzle_status", subjects_);
     UI_MANAGED_SUBJECT_STRING(bed_status_subject_, bed_status_buf_, "Off", "print_bed_status",
@@ -1698,17 +1692,6 @@ void PrintStatusPanel::update_all_displays() {
         lv_subject_copy_string(&remaining_subject_, remaining_buf_);
     }
 
-    // Use centralized temperature formatting with em dash for heater-off state
-    format_temperature_pair(deci_to_degrees(lifecycle_.nozzle_current()),
-                            deci_to_degrees(lifecycle_.nozzle_target()), nozzle_temp_buf_,
-                            sizeof(nozzle_temp_buf_));
-    lv_subject_copy_string(&nozzle_temp_subject_, nozzle_temp_buf_);
-
-    format_temperature_pair(deci_to_degrees(lifecycle_.bed_current()),
-                            deci_to_degrees(lifecycle_.bed_target()), bed_temp_buf_,
-                            sizeof(bed_temp_buf_));
-    lv_subject_copy_string(&bed_temp_subject_, bed_temp_buf_);
-
     // Heater status text (Off / Heating... / Ready)
     auto nozzle_heater = helix::ui::temperature::heater_display(lifecycle_.nozzle_current(),
                                                                 lifecycle_.nozzle_target());
@@ -2032,26 +2015,6 @@ void PrintStatusPanel::on_temperature_changed() {
     // Update only temperature-related subjects (not the full display refresh).
     // Temperature observers fire frequently during heating (4 subjects x ~1Hz each),
     // and update_all_displays() re-renders ALL subjects causing visible flickering.
-    auto& ts = helix::ToolState::instance();
-    if (ts.is_multi_tool() && ts.active_tool()) {
-        size_t prefix_len = std::snprintf(nozzle_temp_buf_, sizeof(nozzle_temp_buf_),
-                                          "%s: ", ts.active_tool()->name.c_str());
-        format_temperature_pair(deci_to_degrees(lifecycle_.nozzle_current()),
-                                deci_to_degrees(lifecycle_.nozzle_target()),
-                                nozzle_temp_buf_ + prefix_len,
-                                sizeof(nozzle_temp_buf_) - prefix_len);
-    } else {
-        format_temperature_pair(deci_to_degrees(lifecycle_.nozzle_current()),
-                                deci_to_degrees(lifecycle_.nozzle_target()), nozzle_temp_buf_,
-                                sizeof(nozzle_temp_buf_));
-    }
-    lv_subject_copy_string(&nozzle_temp_subject_, nozzle_temp_buf_);
-
-    format_temperature_pair(deci_to_degrees(lifecycle_.bed_current()),
-                            deci_to_degrees(lifecycle_.bed_target()), bed_temp_buf_,
-                            sizeof(bed_temp_buf_));
-    lv_subject_copy_string(&bed_temp_subject_, bed_temp_buf_);
-
     auto nozzle_heater = helix::ui::temperature::heater_display(lifecycle_.nozzle_current(),
                                                                 lifecycle_.nozzle_target());
     std::snprintf(nozzle_status_buf_, sizeof(nozzle_status_buf_), "%s",
@@ -2956,9 +2919,13 @@ void PrintStatusPanel::on_flow_factor_changed(int flow) {
     spdlog::trace("[{}] Flow factor updated: {}%", get_name(), flow);
 }
 
-void PrintStatusPanel::on_gcode_z_offset_changed(int microns) {
-    // Delegate to tune overlay singleton
-    get_print_tune_overlay().update_z_offset_display(microns);
+void PrintStatusPanel::on_gcode_z_offset_changed(int /* microns */) {
+    // Delegate to tune overlay singleton. Resolve the value rather than forwarding
+    // the raw live offset: ZMOD zeroes that outside a print, and handing the
+    // overlay a phantom zero would make its next baby-step adjust from the wrong
+    // base.
+    get_print_tune_overlay().update_z_offset_display(
+        helix::zoffset::displayed_z_offset_microns(printer_state_));
 }
 
 void PrintStatusPanel::on_led_state_changed(int state) {

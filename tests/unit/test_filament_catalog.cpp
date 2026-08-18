@@ -622,3 +622,98 @@ TEST_CASE_METHOD(HelixTestFixture, "validate_product_form rejects nozzle min gre
     err.clear();
     CHECK(validate_product_form(one_bound, err));
 }
+
+// ---- load_codes_cached ----
+//
+// The CFS box parser calls this on every full box update. load_codes() re-parses
+// the whole 100 KB bundled catalog each time, so the cache is what keeps a spool
+// move from costing ~872 kB of transient heap on a 114 MB printer.
+
+TEST_CASE_METHOD(HelixTestFixture, "load_codes_cached reuses one snapshot",
+                 "[filament_catalog][codes_cache]") {
+    auto a = FilamentCatalog::load_codes_cached("cfs");
+    auto b = FilamentCatalog::load_codes_cached("cfs");
+
+    REQUIRE(a != nullptr);
+    // Same object, not merely equal contents — that is the whole point.
+    CHECK(a.get() == b.get());
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "load_codes_cached agrees with an uncached load",
+                 "[filament_catalog][codes_cache]") {
+    // Caching must not change what the parser sees. Compare against a direct
+    // load of the same scheme rather than against hardcoded expectations.
+    auto direct = FilamentCatalog::load_codes("cfs");
+    auto cached = FilamentCatalog::load_codes_cached("cfs");
+    REQUIRE(cached != nullptr);
+
+    auto direct_products = direct.all_products();
+    auto cached_products = cached->all_products();
+    REQUIRE(cached_products.size() == direct_products.size());
+
+    for (const auto* p : direct_products) {
+        const auto* c = cached->resolve_id(p->id);
+        REQUIRE(c != nullptr);
+        CHECK(c->brand == p->brand);
+        CHECK(c->type == p->type);
+        CHECK(c->codes == p->codes);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "separate schemes get separate snapshots",
+                 "[filament_catalog][codes_cache]") {
+    auto cfs = FilamentCatalog::load_codes_cached("cfs");
+    auto other = FilamentCatalog::load_codes_cached("no_such_scheme");
+    REQUIRE(cfs != nullptr);
+    REQUIRE(other != nullptr);
+    CHECK(cfs.get() != other.get());
+    CHECK(other->all_products().empty()); // nothing carries that scheme
+    // The cfs entry must survive caching a second scheme.
+    CHECK(FilamentCatalog::load_codes_cached("cfs").get() == cfs.get());
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "a user-overlay save retires the snapshot",
+                 "[filament_catalog][codes_cache][user_save]") {
+    remove_save_tmp();
+    auto before = FilamentCatalog::load_codes_cached("cfs");
+    const uint64_t gen_before = FilamentCatalog::user_overlay_generation();
+
+    std::vector<nlohmann::json> products = {
+        {{"id", "acme-cache-pla"}, {"brand", "Acme"}, {"name", "Cache PLA"}, {"type", "PLA"}}};
+    REQUIRE(FilamentCatalog::save_user_products_to(products, SAVE_TMP));
+
+    CHECK(FilamentCatalog::user_overlay_generation() > gen_before);
+    auto after = FilamentCatalog::load_codes_cached("cfs");
+    // A stale snapshot here is the bug this guards: a product the user just
+    // added would stay invisible until restart.
+    CHECK(after.get() != before.get());
+
+    remove_save_tmp();
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "a held snapshot outlives its retirement",
+                 "[filament_catalog][codes_cache][user_save]") {
+    // The CFS parser runs on the WebSocket thread while a save can land on the
+    // main thread. Holding the shared_ptr must keep that catalog readable even
+    // after the cache has moved on, or the parse reads freed memory.
+    remove_save_tmp();
+    auto held = FilamentCatalog::load_codes_cached("cfs");
+    REQUIRE(held != nullptr);
+    const size_t count_before = held->all_products().size();
+    const std::string first_id =
+        count_before > 0 ? held->all_products().front()->id : std::string();
+
+    std::vector<nlohmann::json> products = {
+        {{"id", "acme-cache-pla2"}, {"brand", "Acme"}, {"name", "Cache PLA 2"}, {"type", "PLA"}}};
+    REQUIRE(FilamentCatalog::save_user_products_to(products, SAVE_TMP));
+    auto replacement = FilamentCatalog::load_codes_cached("cfs");
+    REQUIRE(replacement.get() != held.get());
+
+    // Old snapshot still intact and unchanged.
+    CHECK(held->all_products().size() == count_before);
+    if (!first_id.empty()) {
+        CHECK(held->resolve_id(first_id) != nullptr);
+    }
+
+    remove_save_tmp();
+}

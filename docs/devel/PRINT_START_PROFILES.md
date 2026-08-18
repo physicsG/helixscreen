@@ -241,7 +241,7 @@ The ThermoBot firmware outputs lines like:
 // Bed stabilizing at 60C
 ```
 
-Profile: `assets/config/print_start_profiles/thermobot.json`
+Profile: assets/config/print_start_profiles/thermobot.json
 
 ```json
 {

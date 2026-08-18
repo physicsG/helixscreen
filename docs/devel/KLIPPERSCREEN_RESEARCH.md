@@ -165,14 +165,14 @@ KlipperScreen (Gtk.Window)
 
 | File | Changes | Role |
 |------|---------|------|
-| `screen.py` | 32 | Main application logic |
-| `panels/network.py` | 9 | Network configuration |
-| `panels/job_status.py` | 9 | Print monitoring |
-| `panels/gcode_macros.py` | 9 | Macro interface |
-| `ks_includes/KlippyGtk.py` | 9 | GTK integration |
-| `ks_includes/widgets/keyboard.py` | 8 | Text input |
-| `scripts/KlipperScreen-requirements.txt` | 8 | Dependencies |
-| `panels/base_panel.py` | 7 | Base panel |
+| screen.py | 32 | Main application logic |
+| panels/network.py | 9 | Network configuration |
+| panels/job_status.py | 9 | Print monitoring |
+| panels/gcode_macros.py | 9 | Macro interface |
+| ks_includes/KlippyGtk.py | 9 | GTK integration |
+| ks_includes/widgets/keyboard.py | 8 | Text input |
+| scripts/KlipperScreen-requirements.txt | 8 | Dependencies |
+| panels/base_panel.py | 7 | Base panel |
 
 ### Development Patterns
 

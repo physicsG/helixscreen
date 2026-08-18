@@ -56,7 +56,7 @@ static std::vector<PanelWidgetDef> s_widget_defs = {
     //                                                                                                        gate_subject          gate_hint                              default col row min_c min_r max_c max_r  multi  half_c half_r
     {"printer_image",    "Printer Image",    "rotate_3d",        "3D printer visualization",    nullptr,              nullptr,                               true,  2, 2, 1, 1, 4, 3},
     {"print_status",     "Print Status",     "printer_3d",       "Print progress and file selection",     nullptr,              nullptr,                               true,  2, 2, 2, 1, 4, 3},
-    {"shutdown",         "Shutdown/Reboot",   "power",            "Shutdown or reboot the printer host",  nullptr,              nullptr,                               false, 1, 1, 1, 1, 1, 1, false, true, false},
+    {"shutdown",         "Shutdown/Reboot",   "power",            "Shutdown or reboot the printer host",  "platform_host_power_supported", "Not available on Android",       false, 1, 1, 1, 1, 1, 1, false, true, false},
     {"lock",             "Lock Screen",       "lock",             "PIN-protected screen lock",      nullptr,              nullptr,                               false, 1, 1, 1, 1, 1, 1, false, true, false},
     {"power_device",     "Power",            "power_cycle",      "Toggle Moonraker power devices",            "power_device_count", "Requires Moonraker power device",     false, 1, 1, 1, 1, 1, 1, true},
     {"network",          "Network",          "wifi_strength_4",  "Wi-Fi and ethernet connection status",          nullptr,              nullptr,                               false, 1, 1, 1, 1, 2, 1},

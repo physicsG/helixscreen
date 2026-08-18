@@ -149,30 +149,68 @@ void PanelFactory::setup_panels(lv_obj_t* screen) {
     // so the Task WDT never fires mid-build on ESP (HELIX_BOOT_YIELD is a no-op
     // everywhere else). See boot_yield.h.
 
-    // Setup home panel
-    get_global_home_panel().setup(m_panels[static_cast<int>(PanelId::Home)], screen);
+    // Per-panel setup cost, logged so the deferral tradeoff can be judged from
+    // the slowest hardware we ship rather than from a desktop. On a platform
+    // that defers a panel to first navigation, its number here is what the
+    // first tap would block for (plus that panel's XML subtree creation, which
+    // happens earlier inside the app_layout build).
+    //
+    // Measured on a CC1 (armv7, 2 cores, 114 MB) 2026-08-15, for the question
+    // "should Linux defer panels the way ESP32 does?":
+    //   app_layout XML create (all six subtrees)  564-615ms, +896 kB RSS
+    //   all six setup()                           163-170ms, +512 kB RSS
+    //   worst single panel: filament 109-113ms, print_select 47-50ms,
+    //   controls 4.7ms, settings 1.3ms, advanced/home ~0ms
+    // So the whole eager build is ~1.4 MB and ~0.73s of a ~9.3s boot. Deferring
+    // five panels could return at most ~1.2 MB, and only for panels the user
+    // never opens, against a first-tap stall with no scrim (NavTransitionScrim
+    // is ESP32-only). Not worth it on Linux — the answer came out "no", and the
+    // numbers are here so it does not have to be re-derived.
+    auto timed_setup = [](const char* name, auto&& fn) {
+        auto t0 = std::chrono::steady_clock::now();
+        fn();
+        auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                      .count();
+        spdlog::debug("[PanelFactory] setup('{}') took {:.1f}ms", name, ms);
+    };
+
+    auto panels_t0 = std::chrono::steady_clock::now();
+
+    timed_setup("home", [&] {
+        get_global_home_panel().setup(m_panels[static_cast<int>(PanelId::Home)], screen);
+    });
     HELIX_BOOT_YIELD();
 
-    // Setup controls panel
-    get_global_controls_panel().setup(m_panels[static_cast<int>(PanelId::Controls)], screen);
+    timed_setup("controls", [&] {
+        get_global_controls_panel().setup(m_panels[static_cast<int>(PanelId::Controls)], screen);
+    });
     HELIX_BOOT_YIELD();
 
-    // Setup print select panel
-    get_print_select_panel(get_printer_state(), nullptr)
-        ->setup(m_panels[static_cast<int>(PanelId::PrintSelect)], screen);
+    timed_setup("print_select", [&] {
+        get_print_select_panel(get_printer_state(), nullptr)
+            ->setup(m_panels[static_cast<int>(PanelId::PrintSelect)], screen);
+    });
     HELIX_BOOT_YIELD();
 
-    // Setup filament panel
-    get_global_filament_panel().setup(m_panels[static_cast<int>(PanelId::Filament)], screen);
+    timed_setup("filament", [&] {
+        get_global_filament_panel().setup(m_panels[static_cast<int>(PanelId::Filament)], screen);
+    });
     HELIX_BOOT_YIELD();
 
-    // Setup settings panel
-    get_global_settings_panel().setup(m_panels[static_cast<int>(PanelId::Settings)], screen);
+    timed_setup("settings", [&] {
+        get_global_settings_panel().setup(m_panels[static_cast<int>(PanelId::Settings)], screen);
+    });
     HELIX_BOOT_YIELD();
 
-    // Setup advanced panel
-    get_global_advanced_panel().setup(m_panels[static_cast<int>(PanelId::Advanced)], screen);
+    timed_setup("advanced", [&] {
+        get_global_advanced_panel().setup(m_panels[static_cast<int>(PanelId::Advanced)], screen);
+    });
     HELIX_BOOT_YIELD();
+
+    spdlog::debug(
+        "[PanelFactory] all six setup() calls took {:.1f}ms total",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - panels_t0)
+            .count());
 
     // Register C++ panel instances for lifecycle dispatch (on_activate/on_deactivate)
     auto& nav = NavigationManager::instance();

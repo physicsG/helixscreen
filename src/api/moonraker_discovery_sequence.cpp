@@ -21,6 +21,7 @@
 #include "probe_sensor_manager.h"
 #include "sensor_state.h"
 #include "unit_conversions.h"
+#include "z_offset_persistence.h"
 
 #include <algorithm>
 #include <cctype>
@@ -678,20 +679,28 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
                             spdlog::info("[Moonraker Client] Printer state: {}", state_message);
                         }
 
-                        // Set klippy state based on printer.info response
-                        // This ensures we recognize shutdown/error states at startup
+                        // Seed klippy state from the printer.info response so
+                        // shutdown/error at startup is recognised before any
+                        // webhooks frame arrives.
+                        //
+                        // SEED only, never override: this RPC's response describes
+                        // the printer as of when Moonraker answered, and discovery
+                        // runs concurrently with live WebSocket traffic. Klipper can
+                        // shut down between the request and the response, and the
+                        // stale answer would then re-enable everything against a
+                        // dead printer.
                         if (state == "shutdown" || state == "disconnected") {
                             spdlog::warn("[Moonraker Client] Printer is in {} state at startup",
                                          state);
-                            get_printer_state().set_klippy_state(KlippyState::SHUTDOWN);
+                            get_printer_state().set_klippy_state_if_unseeded(KlippyState::SHUTDOWN);
                         } else if (state == "error") {
                             spdlog::warn("[Moonraker Client] Printer is in ERROR state at startup");
-                            get_printer_state().set_klippy_state(KlippyState::ERROR);
+                            get_printer_state().set_klippy_state_if_unseeded(KlippyState::ERROR);
                         } else if (state == "startup") {
                             spdlog::info("[Moonraker Client] Printer is starting up");
-                            get_printer_state().set_klippy_state(KlippyState::STARTUP);
+                            get_printer_state().set_klippy_state_if_unseeded(KlippyState::STARTUP);
                         } else if (state == "ready") {
-                            get_printer_state().set_klippy_state(KlippyState::READY);
+                            get_printer_state().set_klippy_state_if_unseeded(KlippyState::READY);
                         }
                     }
 
@@ -1332,6 +1341,13 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
         subscription_objects["save_variables"] = nullptr;
     }
 
+    // Firmware that keeps the authoritative z-offset outside gcode_move needs
+    // whatever object stores it; without this the Z-offset row reads 0.000
+    // whenever such a printer is idle. See include/z_offset_persistence.h.
+    for (const auto& obj : helix::zoffset::required_status_objects(hw)) {
+        subscription_objects[obj] = nullptr;
+    }
+
     // ACE (Anycubic ACE Pro — ValgACE/BunnyACE/DuckACE Klipper drivers, native
     // GoKlipper `filament_hub`, or the Kobra S1 mainline-Python fork's
     // `ace_instance_N` objects, #1107). Subscribe the real detected object
@@ -1500,6 +1516,10 @@ void MoonrakerDiscoverySequence::complete_discovery_subscription(uint64_t seq) {
     }
     if (hw.mmu_type() == AmsType::AD5X_IFS) {
         spdlog::info("[Moonraker Client] Subscribing to save_variables (AD5X IFS)");
+    }
+    if (helix::zoffset::firmware_persists_z_offset(hw)) {
+        spdlog::info("[Moonraker Client] Subscribing persisted z-offset objects ({})",
+                     helix::zoffset::persistence_provider_name(hw));
     }
     if (hw.mmu_type() == AmsType::ACE) {
         spdlog::info("[Moonraker Client] Subscribing to ace object (Anycubic ACE)");

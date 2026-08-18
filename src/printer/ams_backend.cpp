@@ -198,6 +198,48 @@ AmsError AmsBackend::unload_active_filament() {
     return unload_filament(get_system_info().current_slot);
 }
 
+// Own-write spool-id expectations. Both methods run under the subclass's
+// mutex_ (see the @warning in ams_backend.h) — the same discipline as every
+// other protected hook on this base.
+void AmsBackend::record_own_spool_write(int slot_index, int new_id, int previous_firmware_id) {
+    // An unlink: nothing will echo but an id Rule 1 already ignores, so a
+    // pending expectation must not outlive the write it belonged to.
+    if (new_id <= 0) {
+        own_write_expectations_.erase(slot_index);
+        return;
+    }
+    auto it = own_write_expectations_.find(slot_index);
+    if (it != own_write_expectations_.end() && previous_firmware_id == it->second.second) {
+        // Chained re-link before the first echo landed (42->169 then
+        // 169->180): the caller's "previous" is our own prior write mirrored
+        // back, not firmware truth. Keep the ORIGINAL previous id so stale
+        // 42 frames stay suppressed too.
+        it->second.second = new_id;
+        return;
+    }
+    own_write_expectations_[slot_index] = {previous_firmware_id, new_id};
+}
+
+std::pair<int, int> AmsBackend::own_write_expectation(int slot_index, int firmware_id) {
+    auto it = own_write_expectations_.find(slot_index);
+    if (it == own_write_expectations_.end())
+        return {0, 0};
+
+    const int old_id = it->second.first;
+    const int new_id = it->second.second;
+    if (firmware_id == new_id || (firmware_id > 0 && firmware_id != old_id)) {
+        // Either the echo landed (firmware now agrees with the override) or
+        // firmware moved to a third id — a genuine external change. Both end
+        // the expectation; neither frame needs Rule-1 suppression.
+        own_write_expectations_.erase(it);
+        return {0, 0};
+    }
+    // firmware_id == old_id: a stale pre-echo frame — suppress Rule 1 for
+    // this poll, keep the entry for the next one. firmware_id <= 0: no
+    // signal; the echo may still be in flight, so the entry survives.
+    return {old_id, new_id};
+}
+
 std::string AmsBackend::normalize_material(const std::string& material) const {
     auto supported = get_supported_materials();
     if (!supported || supported->empty()) {
@@ -312,6 +354,9 @@ create_mock_with_features(int gate_count, IMoonrakerClient* mock_client = nullpt
         } else if (ams_type == "multi") {
             mock->set_multi_unit_mode(true);
             spdlog::info("[AMS Backend] Mock multi-unit mode enabled");
+        } else if (ams_type == "torture") {
+            mock->set_torture_mode(true);
+            spdlog::info("[AMS Backend] Mock torture profile enabled (5 units / 16 lanes)");
         } else if (ams_type == "vivid") {
             mock->set_vivid_mixed_mode(true);
             spdlog::info("[AMS Backend] Mock ViViD mixed mode enabled");

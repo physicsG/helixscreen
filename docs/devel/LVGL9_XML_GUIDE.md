@@ -1303,7 +1303,7 @@ lv_xml_register_event_cb(nullptr, "on_slider_changed", [](lv_event_t* e) {
 
 #### 1. Create XML Layout
 
-`ui_xml/example_panel.xml`:
+ui_xml/example_panel.xml:
 
 ```xml
 <component>
@@ -1330,7 +1330,7 @@ lv_xml_register_event_cb(nullptr, "on_slider_changed", [](lv_event_t* e) {
 
 #### 2. Create C++ Wrapper
 
-`include/example_panel.h`:
+include/example_panel.h:
 
 ```cpp
 #pragma once
@@ -1346,7 +1346,7 @@ public:
 };
 ```
 
-`src/example_panel.cpp`:
+src/example_panel.cpp:
 
 ```cpp
 #include "example_panel.h"

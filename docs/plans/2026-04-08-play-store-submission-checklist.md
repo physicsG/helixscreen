@@ -2,6 +2,22 @@
 
 **Prerequisites:** All code fixes and store assets are committed on main.
 
+> **Correction (2026-08-15).** Section 3 below names a GitHub secret
+> `ANDROID_KEYSTORE_PATH` holding the base64-encoded keystore. No such secret
+> exists and none should be created. The real secret is
+> **`ANDROID_KEYSTORE_BASE64`**; `ANDROID_KEYSTORE_PATH` is a plain env var that
+> `.github/workflows/release.yml`'s "Materialize upload keystore" step sets to
+> wherever it decoded that secret on disk, and `android/app/build.gradle` reads
+> it from the environment. The four secrets actually in use are
+> `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
+> `ANDROID_KEY_PASSWORD`. See `docs/devel/ANDROID_PLAY_STORE.md` for current
+> truth — this file is a point-in-time plan and is not maintained.
+>
+> Also settled since this was written: **accept Google's app signing key** at
+> the Play App Signing prompt during the first manual upload (section 4/9). The
+> two-signature consequence for GitHub-release APKs is written up in
+> `ANDROID_PLAY_STORE.md`.
+
 ---
 
 ## 1. Developer Account
@@ -22,7 +38,8 @@
 - [ ] Run `scripts/generate-upload-keystore.sh`
 - [ ] Save passwords securely (password manager)
 - [ ] Add GitHub Actions secrets:
-  - `ANDROID_KEYSTORE_PATH` — base64-encode the .jks: `base64 -i ~/.android-keystore/helixscreen-upload.jks | pbcopy`
+  - `ANDROID_KEYSTORE_BASE64` — base64-encode the .jks: `base64 -i ~/.android-keystore/helixscreen-upload.jks | pbcopy`
+    (this said `ANDROID_KEYSTORE_PATH`; see the correction at the top of this file)
   - `ANDROID_KEYSTORE_PASSWORD`
   - `ANDROID_KEY_ALIAS` — `helixscreen-upload`
   - `ANDROID_KEY_PASSWORD`

@@ -64,6 +64,13 @@ class AmsContextMenu : public ContextMenu {
     /// production, a parameter only so the builder stays testable.
     using SlotDisplayNumberFn = std::function<int(int slot)>;
 
+    /// Init and publish the XML subjects this menu's layout binds. Idempotent,
+    /// and called from the constructor, so production never needs it. Public for
+    /// tests that build ams_context_menu.xml without a menu instance: the names
+    /// must resolve before lv_xml_create(), or the state bindings are silently
+    /// dropped.
+    static void init_subjects();
+
     friend class ::AmsContextMenuTestAccess;
 
   public:
@@ -160,10 +167,13 @@ class AmsContextMenu : public ContextMenu {
     // under the same names, whichever instance registered LAST owned the names,
     // and every other instance's writes landed on subjects no card was bound to
     // any more -- Load/Unload greyed by another menu's stale answer, and, once
-    // an owner was destroyed, the registry pointing at reclaimed storage. One
-    // menu is on screen at a time, so one set is exactly what the XML needs.
-    // Initialised on first construction and torn down through
-    // StaticSubjectRegistry like every other static subject.
+    // an owner was destroyed, the registry pointing at reclaimed storage (that
+    // last one caught by nightly ASan, 2026-08-16). One menu is on screen at a
+    // time, so one set is exactly what the XML needs.
+    //
+    // Torn down through StaticSubjectRegistry at shutdown, never in the
+    // destructor -- a per-instance deinit is what left the registry resolving
+    // "ams_slot_can_load" to dead storage the moment any one owner went away.
     static lv_subject_t s_slot_is_loaded_subject_; ///< 1 = loaded (Unload enabled), 0 = not loaded
     static lv_subject_t s_slot_can_load_subject_;  ///< 1 = has filament (Load enabled), 0 = empty
     /// 1 = another unit owns this slot's filament identity (multiACE: an
@@ -171,7 +181,6 @@ class AmsContextMenu : public ContextMenu {
     /// "open the owner" action appears, without adding imperative visibility.
     static lv_subject_t s_slot_source_external_subject_;
     static bool s_subjects_initialized_;
-    static void init_subjects();
     static void deinit_subjects();
     /// Unit that owns this slot's identity, or -1. Held so OPEN_SOURCE_UNIT can
     /// name it without re-querying a backend that may have changed.

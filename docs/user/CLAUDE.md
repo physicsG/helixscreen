@@ -22,7 +22,7 @@ These docs are **end-user facing**. They must be written for people who are NOT 
 | `guide/creality-k1c-setup.md` | End-to-end K1/K1C/K1 Max setup: root access, Simple AF / Guilouz firmware, HelixScreen install, updating, firmware upgrade path |
 | `guide/home-panel.md` | Home dashboard, printer manager, custom images |
 | `guide/printing.md` | File selection, printing, tune overlay, Z-offset |
-| `guide/print-monitoring.md` | Pre-print filament check (empty-slot block), camera-based failure detection (Snapmaker U1 dialog, Creality K2 AI toggle) |
+| `guide/print-monitoring.md` | Pre-print filament checks (empty-slot block, unassigned-tool Color Mismatch, bypass exemption), camera-based failure detection (Snapmaker U1 dialog, Creality K2 AI toggle) |
 | `guide/temperature.md` | Nozzle/bed temperature panels, presets, reassigning preset filament types, graphs |
 | `guide/motion.md` | Jog pad, homing, distance increments, E-stop |
 | `guide/filament.md` | Extrusion, AMS, CFS, Spoolman, dryer control |

@@ -13,32 +13,42 @@ the same thing in-process is a trap: `lv_obj_get_x/y()` is *parent-relative*, so
 comparing a nested button's offset against an ancestor's screen-space edge
 compares two coordinate spaces and passes regardless of the layout.
 
+The subject-set message alone cannot reach the worst case on every breakpoint:
+recovery_message_buf_ is 512 bytes, which pegs the container at its cap on
+480x272 but leaves it under the cap on the taller tiers. The fixture therefore
+ALSO does `ctl set_text` with a ~2000-char string, which bypasses the subject
+buffer and pegs the scroll container at its cap at EVERY size — the state a
+user hits with a long translated shutdown reason.
+
 Mutation checks (measured 2026-08-14, not assumed):
-  - raise the message container's style_max_height above #dialog_content_max
-    -> the container stops scrolling and test_long_message_scrolls fails.
+  - raise the message container's style_max_height above its content token
+    -> test_long_message_scrolls fails.
        This is the load-bearing guard.
-  - dropping style_max_height from the *card* fails nothing here. Worth knowing
-    why: recovery_message_buf_ is 512 bytes, which caps the rendered text at
-    roughly 150px, and the restructured chrome (icon and title on one row, the
-    two restarts in a modal_button_row) leaves enough room that 480x272 fits
-    even uncapped. The card cap is a backstop for content that outgrows that —
-    longer translations, larger fonts — not for anything this test can produce.
+  - dropping style_max_height from the *card* fails test_recovery_card_fits at
+    800x480 and 1024x600: with the worst-case text the scroll container pegs at
+    its cap and chrome + cap exceeds the screen there. (At 480x272 and 480x320
+    the uncapped card still fits the screen; the content cap alone holds it.)
 
   - restore the pre-fix layout wholesale (`git show d44686c45:` this dialog — an
     lg icon on its own row above three full-width stacked buttons)
     -> test_recovery_card_fits fails at 480x272 AND 800x480, passes at 1024x600.
        That is the originally reported bug, and it is a small-screen bug.
 
-The two assertions catch different failure modes, and neither subsumes the other:
+The three assertions catch different failure modes, and none subsumes another:
 
   test_recovery_card_fits_the_screen   card grows past the screen (chrome too tall)
   test_dismiss_button_stays_inside     card pinned AT its cap, contents overflow it
+  test_recovery_card_honors_the_standard_cap
+                                      card raised ABOVE the shared 85% cap, the
+                                      per-dialog patch #1277 retired
 
-The second does NOT fail on the pre-fix layout: there the card and its buttons
-run off the screen together, so the button is still within the card's own bounds.
-It exists for the case that actually bit during this fix — a card clamped at
-max_height whose last child lands past the clamped edge, unreachable because the
-card is scrollable=false. That was 4px at 85%, which is why the card is at 90%.
+The second does NOT fail on a screen-overflow layout: there the card and its
+buttons run off the screen together, so the button is still within the card's
+own bounds. It exists for the case that actually bit during this fix — a card
+clamped at max_height whose last child lands past the clamped edge, unreachable
+because the card is scrollable=false. That was 4px at 85%, which this dialog
+first papered over with a 90% card cap; the tall-chrome ladder now budgets the
+second button row instead (#1277).
 """
 
 from __future__ import annotations
@@ -71,9 +81,20 @@ assert 480 <= len(_LONG_REASON) <= 511, (
     f"message must fill the 512-byte subject buffer without being truncated "
     f"mid-test; got {len(_LONG_REASON)}")
 
-# 480x272 is the smallest panel we ship (Qidi Q2, AD5M). The other two cover the
-# breakpoints where #dialog_content_max steps up.
-_SIZES = ["480x272", "800x480", "1024x600"]
+# The subject buffer cannot produce the worst case at every breakpoint (a
+# 511-char string pegs the container at 480x272 but not on the taller tiers,
+# where #dialog_content_max grows faster than the text). `set_text` writes the
+# label directly with no buffer, so this pegs the scroll container at its cap
+# at every size — chrome + full cap is the shape the 85% budget is derived from.
+_WORST_REASON = "MCU shutdown: Timer too close. " * 56
+assert len(_WORST_REASON) >= 1500, (
+    f"worst-case message must overflow the tallest content cap once wrapped; "
+    f"got {len(_WORST_REASON)}")
+
+# 480x272 is the smallest panel we ship (Qidi Q2, AD5M); 480x320 the next
+# (SonicPad). The other two cover the breakpoints where #dialog_content_max
+# steps up.
+_SIZES = ["480x272", "480x320", "800x480", "1024x600"]
 
 
 def _geom(app: HelixApp, target: str) -> dict:
@@ -103,6 +124,9 @@ def shutdown_app(request, tmp_path):
             assert _geom(app, "klipper_recovery_card") is not None, (
                 "recovery dialog never appeared; scenario 'error' may have changed")
             app.set("recovery_message", _LONG_REASON)
+            app.wait_idle()
+            # Peg the container at its cap at every size (see _WORST_REASON).
+            app.ctl("set_text", "recovery_message", _WORST_REASON)
             app.wait_idle()
             yield app, size
     finally:
@@ -146,12 +170,34 @@ def test_dismiss_button_stays_inside_the_card(shutdown_app):
         f"(card y={card['y']} h={card['h']}, button y={dismiss['y']} h={dismiss['h']})")
 
 
-@pytest.mark.parametrize("shutdown_app", _SIZES[:1], indirect=True)
+@pytest.mark.parametrize("shutdown_app", _SIZES, indirect=True)
+def test_recovery_card_honors_the_standard_cap(shutdown_app):
+    """The card cap is shared arithmetic, not a per-dialog dial (#1277).
+
+    #dialog_content_max and its sibling ladders are derived from ONE card cap —
+    85% of the screen — at every breakpoint. Raising a single card above that
+    (this dialog carried 90% for a while) unsizes every ladder it shares and is
+    how the clipped-button family keeps coming back: the extra chrome belongs
+    in the budget, via #dialog_content_tall_chrome_max, not in a taller card.
+    """
+    app, size = shutdown_app
+    screen_h = int(size.split("x")[1])
+
+    card = _geom(app, "klipper_recovery_card")
+    assert card is not None
+    cap = screen_h * 85 // 100  # LVGL floors the percentage
+    assert card["h"] <= cap, (
+        f"{size}: card is {card['h']}px against the shared {cap}px cap "
+        f"(85% of {screen_h}) — extra chrome belongs in "
+        f"#dialog_content_tall_chrome_max, not a raised card")
+
+
+@pytest.mark.parametrize("shutdown_app", _SIZES, indirect=True)
 def test_long_message_scrolls_instead_of_growing_the_card(shutdown_app):
     """A capped container with no scroll range is an inert fix, not a fix.
 
-    Only checked at 480x272: the larger breakpoints raise #dialog_content_max
-    faster than the message grows, so there the text legitimately fits.
+    The worst-case text pegs the container at every size, so the scroll range
+    is checkable everywhere.
     """
     app, _ = shutdown_app
 

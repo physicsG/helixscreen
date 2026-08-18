@@ -113,9 +113,13 @@ class MoonrakerAPI : public IMoonrakerAPI {
      * @param temperature Target temperature in Celsius
      * @param on_success Success callback
      * @param on_error Error callback
+     * @param caller_surfaces_errors Whether @p on_error actually SHOWS the user
+     *        something. Forwarded verbatim to execute_gcode(); false when the
+     *        callback only logs. Default must match IMoonrakerAPI's — default
+     *        arguments on virtuals resolve statically.
      */
     void set_temperature(const std::string& heater, double temperature, SuccessCallback on_success,
-                         ErrorCallback on_error) override;
+                         ErrorCallback on_error, bool caller_surfaces_errors = true) override;
 
     /**
      * @brief Set fan speed
@@ -145,10 +149,15 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *        execute_gcode() for the full contract. SET_LED is discretionary, so
      *        this is the LED path's only settle signal while Klipper's gcode lock
      *        is held.
+     * @param caller_surfaces_errors Whether @p on_error actually shows the user
+     *        something. Forwarded to execute_gcode() — see its contract and
+     *        include/rpc_error_policy.h. Pass false when the callback only logs.
+     *        Default must stay in sync with IMoonrakerAPI's declaration: default
+     *        arguments on virtuals resolve from the static type.
      */
     void set_led(const std::string& led, double red, double green, double blue, double white,
                  SuccessCallback on_success, ErrorCallback on_error,
-                 SuccessCallback on_queued = nullptr) override;
+                 SuccessCallback on_queued = nullptr, bool caller_surfaces_errors = true) override;
 
     // ========================================================================
     // Power Device Control Operations
@@ -223,10 +232,16 @@ class MoonrakerAPI : public IMoonrakerAPI {
      *        frame. A handler here must therefore obey the input-handler rules:
      *        no synchronous widget deletion (lv_obj_delete / lv_obj_clean /
      *        safe_delete); use the deferred forms. See CLAUDE.md § Threading.
+     * @param caller_surfaces_errors Whether @p on_error actually SHOWS the user
+     *        something. Pass false when it only logs: a spdlog line is not a
+     *        user-visible report, and letting it claim ownership of the report
+     *        suppresses Klipper's `!!` broadcast for the same failure — the
+     *        surface that would have explained it. See rpc_error_policy.h.
      */
     void execute_gcode(const std::string& gcode, SuccessCallback on_success, ErrorCallback on_error,
                        uint32_t timeout_ms = 0, bool silent = false,
-                       SuccessCallback on_queued = nullptr) override;
+                       SuccessCallback on_queued = nullptr,
+                       bool caller_surfaces_errors = true) override;
 
     // is_safe_gcode_param() is a static utility declared on IMoonrakerAPI
     // (inherited here) so consumers can validate without the concrete type.

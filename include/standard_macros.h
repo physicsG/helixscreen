@@ -262,6 +262,8 @@ class StandardMacros {
      * @param api IMoonrakerAPI instance for execution
      * @param on_success Called when macro execution starts
      * @param on_error Called on execution failure
+     * @param suppress_auto_toast Maps to helix::rpc_error_policy::CallerIntent::silent
+     *        — see the parameterized overload below for the full contract.
      * @return true if macro was found and execution attempted,
      *         false if slot is empty (no callbacks called)
      */
@@ -277,12 +279,14 @@ class StandardMacros {
      * @param on_success Called when macro execution starts
      * @param on_error Called on execution failure
      * @param timeout_ms Timeout override (0 = default macro timeout)
-     * @param suppress_auto_toast If true, the Request Tracker will NOT emit the
-     *        generic "Printer command '...' failed" RPC_ERROR toast on failure;
-     *        the caller's on_error callback is expected to surface the error
-     *        to the user with action-specific context. Also enables the
-     *        cross-source dedup that suppresses Klipper's `!!` broadcast for
-     *        the same root cause (see rpc_error_correlation.h).
+     * @param suppress_auto_toast Maps to helix::rpc_error_policy::CallerIntent::silent.
+     *        If true, the Request Tracker will NOT emit the generic "Printer
+     *        command '...' failed" RPC_ERROR toast on failure; the caller's
+     *        on_error callback is expected to surface the error to the user with
+     *        action-specific context. The cross-source dedup that suppresses
+     *        Klipper's `!!` broadcast for the same root cause follows from
+     *        on_error being a real user-facing report, not from this flag (see
+     *        rpc_error_policy.h and rpc_error_correlation.h).
      * @return true if macro was found and execution attempted
      */
     bool execute(StandardMacroSlot slot, IMoonrakerAPI* api,

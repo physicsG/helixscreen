@@ -21,10 +21,13 @@
 #include "../../lvgl/lvgl.h"
 #include "../ui_test_utils.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <regex>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -111,7 +114,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "start_resonance_test accepts X axis",
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int) {}, // progress callback
+        'X', [](int, ShaperCalibrationPhase) {}, // progress callback
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -138,7 +141,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "start_resonance_test accepts Y axis",
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'Y', [](int) {}, // progress callback
+        'Y', [](int, ShaperCalibrationPhase) {}, // progress callback
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -162,7 +165,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "start_resonance_test sends correct G-c
     std::atomic<bool> complete_called{false};
 
     api_->advanced().start_resonance_test(
-        'X', [](int) {},
+        'X', [](int, ShaperCalibrationPhase) {},
         [&](const InputShaperResult& result) {
             complete_called = true;
             // Verify parsed values from mock response
@@ -192,7 +195,7 @@ TEST_CASE_METHOD(InputShaperTestFixture,
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int) {},
+        'X', [](int, ShaperCalibrationPhase) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -223,7 +226,7 @@ TEST_CASE_METHOD(InputShaperTestFixture,
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int) {},
+        'X', [](int, ShaperCalibrationPhase) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -547,7 +550,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "start_resonance_test returns all shape
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int) {}, // progress callback
+        'X', [](int, ShaperCalibrationPhase) {}, // progress callback
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -760,7 +763,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "collector parses new Klipper recommend
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int) {},
+        'X', [](int, ShaperCalibrationPhase) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -787,7 +790,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "collector parses max_accel per shaper"
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int) {},
+        'X', [](int, ShaperCalibrationPhase) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -834,7 +837,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "collector captures CSV path",
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int) {},
+        'X', [](int, ShaperCalibrationPhase) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -857,7 +860,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "collector emits progress callbacks dur
     std::vector<int> progress_values;
 
     api_->advanced().start_resonance_test(
-        'X', [&](int percent) { progress_values.push_back(percent); },
+        'X', [&](int percent, ShaperCalibrationPhase) { progress_values.push_back(percent); },
         [&](const InputShaperResult&) { complete_called = true; },
         [&](const MoonrakerError& err) { FAIL("Error: " << err.message); });
 
@@ -888,7 +891,7 @@ TEST_CASE_METHOD(InputShaperTestFixture,
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'Y', [](int) {},
+        'Y', [](int, ShaperCalibrationPhase) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -1045,4 +1048,275 @@ TEST_CASE("Kalico recommendation regex parses smoother format", "[input_shaper][
         CHECK(match[1].str() == "mzv");
         CHECK(match[2].str() == "36.7");
     }
+}
+
+// ============================================================================
+// Sweep range + phase reporting
+//
+// Regression cover for a Voron running Kalico's default 5-135 Hz sweep: the
+// collector assumed the sweep ended at 100 Hz, so progress saturated with a
+// quarter of the frequencies still untested and the panel switched its label
+// to "Analyzing data..." while the toolhead was still moving. These tests feed
+// the collector G-code lines directly (no LVGL pump, so the mock's scripted
+// transcript stays out of the way) and assert on the phase it reports.
+// ============================================================================
+
+namespace {
+
+/// Drives one resonance run and records every (percent, phase) pair.
+struct ProgressRecorder {
+    std::vector<std::pair<int, ShaperCalibrationPhase>> samples;
+
+    [[nodiscard]] helix::ShaperProgressCallback callback() {
+        return [this](int percent, ShaperCalibrationPhase phase) {
+            samples.emplace_back(percent, phase);
+        };
+    }
+
+    [[nodiscard]] bool empty() const {
+        return samples.empty();
+    }
+
+    [[nodiscard]] int last_percent() const {
+        return samples.back().first;
+    }
+
+    [[nodiscard]] ShaperCalibrationPhase last_phase() const {
+        return samples.back().second;
+    }
+
+    [[nodiscard]] bool any_phase(ShaperCalibrationPhase phase) const {
+        return std::any_of(samples.begin(), samples.end(),
+                           [phase](const auto& s) { return s.second == phase; });
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(InputShaperTestFixture,
+                 "sweep progress scales to the printer's configured max_freq",
+                 "[calibration][input_shaper][sweep_range]") {
+    // Kalico's default range, and the one the reporting Voron actually uses.
+    mock_client_.set_resonance_sweep_range(5.0, 135.0);
+
+    ProgressRecorder progress;
+    api_->advanced().start_resonance_test(
+        'X', progress.callback(), [](const InputShaperResult&) {}, [](const MoonrakerError&) {});
+
+    // 100 Hz is where the old hardcoded ceiling sat. On this printer it is
+    // barely three quarters of the way through the sweep.
+    mock_client_.dispatch_gcode_response("Testing frequency 100 Hz");
+
+    REQUIRE_FALSE(progress.empty());
+    CHECK(progress.last_phase() == ShaperCalibrationPhase::Sweeping);
+    // (100-5)/(135-5) of the 3..54 band ≈ 40%. Assert the band rather than the
+    // exact integer so rounding tweaks don't make this brittle.
+    CHECK(progress.last_percent() > 30);
+    CHECK(progress.last_percent() < 50);
+
+    // The remaining frequencies must still move the bar, not sit pinned. 120 Hz
+    // is chosen to stay clear of the ceiling, so this measures the mapping
+    // rather than the end-of-sweep fallback.
+    mock_client_.dispatch_gcode_response("Testing frequency 120 Hz");
+    CHECK(progress.last_phase() == ShaperCalibrationPhase::Sweeping);
+    CHECK(progress.last_percent() > 40);
+    CHECK(progress.last_percent() <= 54);
+}
+
+TEST_CASE_METHOD(InputShaperTestFixture, "sweep reports its end exactly at the configured ceiling",
+                 "[calibration][input_shaper][sweep_range]") {
+    // A printer that genuinely stops at 60 Hz should reach the top of the
+    // sweep band there — proving the range was read, not defaulted.
+    mock_client_.set_resonance_sweep_range(5.0, 60.0);
+
+    ProgressRecorder progress;
+    api_->advanced().start_resonance_test(
+        'X', progress.callback(), [](const InputShaperResult&) {}, [](const MoonrakerError&) {});
+
+    mock_client_.dispatch_gcode_response("Testing frequency 60 Hz");
+
+    // Two reports come out of that one line: the sweep reaching the top of its
+    // band, then the end-of-sweep fallback handing over to the analysis phase.
+    REQUIRE(progress.samples.size() == 2);
+    CHECK(progress.samples[0].first == 54);
+    CHECK(progress.samples[0].second == ShaperCalibrationPhase::Sweeping);
+    CHECK(progress.samples[1].first == 55);
+    CHECK(progress.samples[1].second == ShaperCalibrationPhase::Analyzing);
+}
+
+TEST_CASE_METHOD(InputShaperTestFixture, "a report tagged Sweeping never enters the analyzing band",
+                 "[calibration][input_shaper][sweep_range]") {
+    mock_client_.set_resonance_sweep_range(5.0, 100.0);
+
+    ProgressRecorder progress;
+    api_->advanced().start_resonance_test(
+        'X', progress.callback(), [](const InputShaperResult&) {}, [](const MoonrakerError&) {});
+
+    // Walk to the declared ceiling and then past it. Overshooting a range we
+    // read from the printer means the config lied about this run; the bar must
+    // stay capped rather than climbing into the analysis band.
+    for (int hz : {5, 50, 100, 120, 133}) {
+        mock_client_.dispatch_gcode_response("Testing frequency " + std::to_string(hz) + " Hz");
+    }
+
+    for (const auto& [percent, phase] : progress.samples) {
+        INFO("percent=" << percent << " phase=" << static_cast<int>(phase));
+        if (phase == ShaperCalibrationPhase::Sweeping) {
+            CHECK(percent <= 54);
+        }
+    }
+
+    // 5, 50 and 100 Hz sweep; the 100 Hz line is the ceiling so it also emits
+    // the handover. The 120 and 133 Hz lines contradict the range we were given
+    // and are dropped rather than flipping the phase back — the label must not
+    // oscillate between "measuring" and "analyzing".
+    REQUIRE(progress.samples.size() == 4);
+    CHECK(progress.samples[0] == std::make_pair(3, ShaperCalibrationPhase::Sweeping));
+    CHECK(progress.samples[2] == std::make_pair(54, ShaperCalibrationPhase::Sweeping));
+    CHECK(progress.samples[3] == std::make_pair(55, ShaperCalibrationPhase::Analyzing));
+
+    // The phase never runs backwards.
+    for (size_t i = 1; i < progress.samples.size(); ++i) {
+        CHECK(static_cast<int>(progress.samples[i].second) >=
+              static_cast<int>(progress.samples[i - 1].second));
+    }
+}
+
+TEST_CASE_METHOD(InputShaperTestFixture, "Klipper's calculating line ends the sweep phase",
+                 "[calibration][input_shaper][sweep_range]") {
+    ProgressRecorder progress;
+    api_->advanced().start_resonance_test(
+        'X', progress.callback(), [](const InputShaperResult&) {}, [](const MoonrakerError&) {});
+
+    mock_client_.dispatch_gcode_response("Testing frequency 40 Hz");
+    REQUIRE(progress.last_phase() == ShaperCalibrationPhase::Sweeping);
+
+    // The exact wording Klipper and Kalico emit. The collector used to look
+    // only for "Wait for calculations..", which no released firmware prints.
+    mock_client_.dispatch_gcode_response("Calculating the best input shaper parameters for x axis");
+
+    CHECK(progress.last_phase() == ShaperCalibrationPhase::Analyzing);
+    CHECK(progress.last_percent() == 55);
+}
+
+TEST_CASE_METHOD(InputShaperTestFixture, "legacy wait-for-calculations line still ends the sweep",
+                 "[calibration][input_shaper][sweep_range]") {
+    ProgressRecorder progress;
+    api_->advanced().start_resonance_test(
+        'X', progress.callback(), [](const InputShaperResult&) {}, [](const MoonrakerError&) {});
+
+    mock_client_.dispatch_gcode_response("Testing frequency 40 Hz");
+    mock_client_.dispatch_gcode_response("Wait for calculations..");
+
+    CHECK(progress.last_phase() == ShaperCalibrationPhase::Analyzing);
+    CHECK(progress.last_percent() == 55);
+}
+
+TEST_CASE_METHOD(InputShaperTestFixture,
+                 "a fitted shaper line ends the sweep even without a marker line",
+                 "[calibration][input_shaper][sweep_range]") {
+    ProgressRecorder progress;
+    api_->advanced().start_resonance_test(
+        'X', progress.callback(), [](const InputShaperResult&) {}, [](const MoonrakerError&) {});
+
+    mock_client_.dispatch_gcode_response("Testing frequency 40 Hz");
+    mock_client_.dispatch_gcode_response(
+        "Fitted shaper 'zv' frequency = 46.4 Hz (vibrations = 30.2%, smoothing ~= 0.077)");
+
+    CHECK(progress.last_phase() == ShaperCalibrationPhase::Analyzing);
+    CHECK(progress.last_percent() > 55);
+}
+
+TEST_CASE_METHOD(InputShaperTestFixture, "completion reports the complete phase at 100 percent",
+                 "[calibration][input_shaper][sweep_range]") {
+    ProgressRecorder progress;
+    std::atomic<bool> complete_called{false};
+    api_->advanced().start_resonance_test(
+        'X', progress.callback(), [&](const InputShaperResult&) { complete_called = true; },
+        [](const MoonrakerError&) {});
+
+    mock_client_.dispatch_gcode_response("Testing frequency 40 Hz");
+    mock_client_.dispatch_gcode_response("Calculating the best input shaper parameters for x axis");
+    mock_client_.dispatch_gcode_response(
+        "Recommended shaper_type_x = mzv, shaper_freq_x = 36.7 Hz");
+    mock_client_.dispatch_gcode_response(
+        "Shaper calibration data written to /tmp/calibration_data_x_nonexistent.csv file");
+
+    REQUIRE(complete_called);
+    CHECK(progress.last_percent() == 100);
+    CHECK(progress.last_phase() == ShaperCalibrationPhase::Complete);
+}
+
+TEST_CASE_METHOD(InputShaperTestFixture,
+                 "an implausible configured range falls back to the defaults",
+                 "[calibration][input_shaper][sweep_range]") {
+    // max_freq below min_freq would divide by a negative range.
+    mock_client_.set_resonance_sweep_range(120.0, 20.0);
+
+    ProgressRecorder progress;
+    api_->advanced().start_resonance_test(
+        'X', progress.callback(), [](const InputShaperResult&) {}, [](const MoonrakerError&) {});
+
+    mock_client_.dispatch_gcode_response("Testing frequency 70 Hz");
+
+    REQUIRE_FALSE(progress.empty());
+    // Defaults are 5-135 Hz, so 70 Hz lands mid-sweep rather than clamped.
+    CHECK(progress.last_phase() == ShaperCalibrationPhase::Sweeping);
+    CHECK(progress.last_percent() > 3);
+    CHECK(progress.last_percent() < 54);
+}
+
+TEST_CASE_METHOD(InputShaperTestFixture,
+                 "reaching the configured ceiling ends the sweep without a marker line",
+                 "[calibration][input_shaper][sweep_range]") {
+    mock_client_.set_resonance_sweep_range(5.0, 135.0);
+
+    ProgressRecorder progress;
+    api_->advanced().start_resonance_test(
+        'X', progress.callback(), [](const InputShaperResult&) {}, [](const MoonrakerError&) {});
+
+    mock_client_.dispatch_gcode_response("Testing frequency 100 Hz");
+    REQUIRE(progress.last_phase() == ShaperCalibrationPhase::Sweeping);
+
+    // Klipper stops one step short of max_freq, so 134 Hz is the last line of a
+    // 135 Hz sweep. No marker line follows here — the ceiling itself is the
+    // signal, which is what makes this independent of firmware wording.
+    mock_client_.dispatch_gcode_response("Testing frequency 134 Hz");
+
+    CHECK(progress.last_phase() == ShaperCalibrationPhase::Analyzing);
+    CHECK(progress.last_percent() == 55);
+}
+
+TEST_CASE_METHOD(InputShaperTestFixture,
+                 "the sweep-end fallback stays off when the range was never read",
+                 "[calibration][input_shaper][sweep_range]") {
+    // An inverted range is rejected, so the collector keeps its 5-135 defaults
+    // and must NOT trust them as a ceiling — a printer sweeping past a guessed
+    // ceiling would otherwise claim to be analyzing mid-sweep, the original bug.
+    mock_client_.set_resonance_sweep_range(120.0, 20.0);
+
+    ProgressRecorder progress;
+    api_->advanced().start_resonance_test(
+        'X', progress.callback(), [](const InputShaperResult&) {}, [](const MoonrakerError&) {});
+
+    for (int hz : {100, 134, 150, 180}) {
+        mock_client_.dispatch_gcode_response("Testing frequency " + std::to_string(hz) + " Hz");
+    }
+
+    CHECK_FALSE(progress.any_phase(ShaperCalibrationPhase::Analyzing));
+    CHECK(progress.last_phase() == ShaperCalibrationPhase::Sweeping);
+}
+
+TEST_CASE_METHOD(InputShaperTestFixture, "stall diagnostics survive a run with no sweep at all",
+                 "[calibration][input_shaper][sweep_range]") {
+    // The timeout path calls log_stall_diagnostics() on a collector that may
+    // have parsed nothing. Exercise that shape directly: no responses, no
+    // frequencies, no fits — it must not read uninitialised state or throw.
+    ProgressRecorder progress;
+    std::atomic<bool> errored{false};
+    REQUIRE_NOTHROW(api_->advanced().start_resonance_test(
+        'X', progress.callback(), [](const InputShaperResult&) {},
+        [&](const MoonrakerError&) { errored = true; }));
+
+    CHECK(progress.empty());
 }

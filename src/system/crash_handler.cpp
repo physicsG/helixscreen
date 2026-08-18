@@ -34,6 +34,19 @@
 #include "misc/lv_types.h"
 #include "stdlib/lv_mem.h"
 
+// AddressSanitizer opt-out for the raw stack readers further down. Both the
+// frame-pointer walk and the linear stack scan deliberately read memory they
+// do not own, which ASan cannot distinguish from a genuine overflow. GCC and
+// Clang both spell the attribute no_sanitize_address.
+#if defined(__has_attribute)
+#if __has_attribute(no_sanitize_address)
+#define HELIX_NO_SANITIZE_ADDRESS __attribute__((no_sanitize_address, noinline))
+#endif
+#endif
+#ifndef HELIX_NO_SANITIZE_ADDRESS
+#define HELIX_NO_SANITIZE_ADDRESS
+#endif
+
 // ucontext_t is needed for register state capture in the signal handler.
 // On macOS, <sys/ucontext.h> is available without _XOPEN_SOURCE.
 // On Linux, <ucontext.h> or <signal.h> provides it.
@@ -496,6 +509,36 @@ static void write_kv_long(int fd, const char* key, long value, char* num_buf, si
 /// plant a saved_fp value that walks into unrelated memory, and the .text
 /// filter catches that. If any check fails we stop walking rather than
 /// wander into bad memory.
+/// Reads one machine word of raw stack memory at `base + index * word_size`.
+///
+/// Both stack walkers below read memory that belongs to other frames on
+/// purpose: recovering return addresses when the DWARF unwinder cannot get
+/// past the signal frame is the entire point of them. Those reads cross the
+/// redzones AddressSanitizer inserts between stack frames, so an instrumented
+/// build reports every one as a stack-buffer-underflow — ASan's own output
+/// tags them with its "custom stack unwind mechanism" false-positive hint.
+/// Eight such reports per run were what let the nightly ASan gate be written
+/// off as noise.
+///
+/// Routing both readers through one opted-out accessor keeps ASan live over the
+/// rest of the handler instead of blanket-disabling the file. noinline stops the
+/// attribute from being lost when the helper is folded into an instrumented
+/// caller.
+///
+/// Bounds are the caller's job and the two callers differ: fp_walk_backtrace
+/// validates every address against [sp, sp + MAX_STACK_SIZE) before walking,
+/// while the linear scan below simply reads a fixed 256 words up from SP and
+/// can run off the end of the mapping. That is pre-existing behaviour and is
+/// survivable where it runs — we are already inside a fatal signal handler —
+/// but it is a real limit of the scan, not something this accessor fixes.
+HELIX_NO_SANITIZE_ADDRESS static uintptr_t read_stack_word(uintptr_t base, size_t index,
+                                                           uintptr_t word_size) {
+    if (word_size == 8) {
+        return static_cast<uintptr_t>(*(reinterpret_cast<const volatile uint64_t*>(base) + index));
+    }
+    return static_cast<uintptr_t>(*(reinterpret_cast<const volatile uint32_t*>(base) + index));
+}
+
 static int fp_walk_backtrace(int fd, uintptr_t initial_fp, uintptr_t sp, uintptr_t word_size) {
 #if defined(__aarch64__) || defined(__x86_64__) || defined(__arm__)
     constexpr uintptr_t MAX_STACK_SIZE = 16 * 1024 * 1024;
@@ -525,15 +568,8 @@ static int fp_walk_backtrace(int fd, uintptr_t initial_fp, uintptr_t sp, uintptr
         if (fp <= prev_fp && prev_fp != 0)
             break;
 
-        uintptr_t saved_fp;
-        uintptr_t saved_lr;
-        if (word_size == 8) {
-            saved_fp = *reinterpret_cast<const volatile uint64_t*>(fp);
-            saved_lr = *reinterpret_cast<const volatile uint64_t*>(fp + word_size);
-        } else {
-            saved_fp = *reinterpret_cast<const volatile uint32_t*>(fp);
-            saved_lr = *reinterpret_cast<const volatile uint32_t*>(fp + word_size);
-        }
+        uintptr_t saved_fp = read_stack_word(fp, 0, word_size);
+        uintptr_t saved_lr = read_stack_word(fp, 1, word_size);
 
 #if defined(__arm__)
         // ARM32 LRs from Thumb callers have bit 0 set (the Thumb-interwork
@@ -1177,11 +1213,7 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ucontext) {
             constexpr int SCAN_WORDS = 256;
 
             auto read_word = [&](int i) -> uintptr_t {
-                if (WORD_SIZE == 8) {
-                    return reinterpret_cast<const uint64_t*>(sp)[i];
-                } else {
-                    return static_cast<uintptr_t>(reinterpret_cast<const uint32_t*>(sp)[i]);
-                }
+                return read_stack_word(sp, static_cast<size_t>(i), WORD_SIZE);
             };
 
             for (int i = 0; i < DUMP_WORDS; ++i) {

@@ -439,7 +439,7 @@ submodule to work around it - the application needs those patches.
 
 `scripts/quality-checks.sh` runs the suite, but only when staged changes touch
 `lib/helix-xml/` - in practice the pointer bump itself, which is exactly the change that
-alters what the suite tests. It **never configures**: if `build/helix-xml-tests/CMakeCache.txt`
+alters what the suite tests. It **never configures**: if build/helix-xml-tests/CMakeCache.txt
 is missing it skips with an instruction to run `make test-xml` once by hand, so a multi-minute
 LVGL fetch never fires from a commit hook. Once the build tree exists, a failing suite is a
 hard failure like any other test gate.

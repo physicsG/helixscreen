@@ -808,6 +808,16 @@ void MoonrakerClient::on_ws_close() {
         // Cleanup all pending requests (invoke error callbacks) — unconditional.
         tracker_.cleanup_all();
 
+        // Drop the klippy-state freshness watermark, also unconditionally — this
+        // is the one point every close funnels through, intentional teardown and
+        // dropped link alike. Klipper's eventtime is monotonic within one host
+        // uptime, so a reboot (or a switch to a different printer) restarts it near
+        // zero; carrying the old watermark across would make the next session's
+        // genuinely-current frames look older than the last session's and be
+        // rejected for the life of the process. Touches two POD members under
+        // PrinterState's own mutex — no LVGL, safe from this event-loop thread.
+        get_printer_state().reset_klippy_state_freshness();
+
         if (was_connected_) {
             spdlog::warn("[Moonraker Client] WebSocket connection closed");
             TelemetryManager::instance().record_error("websocket", "disconnected",
@@ -1003,7 +1013,7 @@ void MoonrakerClient::emit_event(MoonrakerEventType type, const std::string& mes
     }
 }
 
-void MoonrakerClient::dispatch_status_update(const json& status) {
+void MoonrakerClient::dispatch_status_update(const json& status, bool from_cached_snapshot) {
     // Parse bed mesh data before dispatching (mirrors WebSocket handler behavior)
     // This ensures bed mesh is populated on initial subscription response,
     // not just on subsequent notify_status_update messages
@@ -1025,11 +1035,17 @@ void MoonrakerClient::dispatch_status_update(const json& status) {
         }
     }
 
-    // Wrap raw status into notify_status_update format
+    // Wrap raw status into notify_status_update format. There is no eventtime to
+    // carry — a synthetic dispatch is not a Klipper frame — so 0.0 stands for
+    // "untimestamped", which is why replay provenance has to be stated separately
+    // rather than inferred from the clock value.
     json notification = {
         {"method", "notify_status_update"},
         {"params", json::array({status, 0.0})} // [status, eventtime]
     };
+    if (from_cached_snapshot) {
+        notification[CACHED_SNAPSHOT_MARKER] = true;
+    }
 
     // Dispatch to all registered callbacks
     // Two-phase: copy under lock, invoke outside to avoid deadlock
@@ -1168,7 +1184,8 @@ RequestId MoonrakerClient::send_jsonrpc(const std::string& method, const json& p
 RequestId MoonrakerClient::send_jsonrpc(const std::string& method, const json& params,
                                         std::function<void(const json&)> success_cb,
                                         std::function<void(const MoonrakerError&)> error_cb,
-                                        uint32_t timeout_ms, bool silent) {
+                                        uint32_t timeout_ms, bool silent,
+                                        std::optional<rpc_error_policy::CallerIntent> intent) {
     if (!ready_to_send(method.c_str())) {
         // Invoke error callback synchronously so callers (panels with
         // in_flight flags, etc.) see immediate failure instead of a stuck
@@ -1183,7 +1200,7 @@ RequestId MoonrakerClient::send_jsonrpc(const std::string& method, const json& p
         }
         return INVALID_REQUEST_ID;
     }
-    return tracker_.send(*this, method, params, success_cb, error_cb, timeout_ms, silent);
+    return tracker_.send(*this, method, params, success_cb, error_cb, timeout_ms, silent, intent);
 }
 
 int MoonrakerClient::gcode_script(const std::string& gcode) {

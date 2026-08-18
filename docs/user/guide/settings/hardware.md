@@ -52,11 +52,12 @@ Tap to open a standalone fullscreen camera viewer showing the live feed from you
 
 Tap to open Device Operations for quick actions, calibration, and speed settings for multi-material systems. Supports AFC, Happy Hare, ACE, and other detected filament systems.
 
-Most of what's inside varies by hardware, but three toggles appear here regardless of which system you have:
+Most of what's inside varies by hardware, but four toggles appear here regardless of which system you have:
 
 | Toggle | When it appears | What it does |
 |--------|-----------------|--------------|
 | **Unloads After Print** | AFC systems only | Retract filament back to its lane when a print finishes |
+| **Keep Spool Info on Eject** | Systems whose firmware tracks spool ids per lane (AFC, Happy Hare) | Remember lane spool details across an eject, so reloading the same spool after maintenance needs no re-selection (on by default) |
 | **Always Show Bypass Spool** | AFC systems only | Keep the external spool visible on the filament path even while bypass is disengaged. AFC reports a bypass sensor whether or not one is wired, so it's hidden by default until bypass is actually engaged |
 | **Enable Bypass Controls** | Only when your firmware reports **no** bypass | Show the bypass controls and the external spool anyway, for machines where you feed filament straight to the extruder. Applies to Creality CFS, Anycubic ACE Pro, Snapmaker U1, tool changers, QIDI Box, and any Happy Hare config with `has_bypass: 0` |
 

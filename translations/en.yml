@@ -327,12 +327,15 @@ translations:
   Button taps and navigation sounds: Button taps and navigation sounds
   Buzz Servo: Buzz Servo
   Bypass: Bypass
+  Bypass Is Active: Bypass Is Active
   Bypass Mode: Bypass Mode
   Bypass controlled by hardware sensor: Bypass controlled by hardware sensor
   Bypass controlled by sensor: Bypass controlled by sensor
   Bypass disabled: Bypass disabled
   Bypass enabled: Bypass enabled
   Bypass failed: Bypass failed
+  ? Bypass is active, but this print uses AMS lanes. The printer may refuse to load a lane while bypass filament is in the toolhead. Remove the filament and turn bypass off before printing. Start anyway?
+  : Bypass is active, but this print uses AMS lanes. The printer may refuse to load a lane while bypass filament is in the toolhead. Remove the filament and turn bypass off before printing. Start anyway?
   Bypass toggle failed: Bypass toggle failed
   C: C
   CALIBRATION: CALIBRATION
@@ -1016,6 +1019,7 @@ translations:
   Filament: Filament
   Filament Detected: Filament Detected
   Filament Environment: Filament Environment
+  Filament In The Toolhead: Filament In The Toolhead
   Filament Mapping: Filament Mapping
   Filament Runout: Filament Runout
   Filament Sensor: Filament Sensor
@@ -1029,6 +1033,8 @@ translations:
     compensation
   Filament is loose: Filament is loose
   Filament is pulling tight: Filament is pulling tight
+  ? Filament is still at the nozzle after unloading. The cut or retract may not have completed. Clear the toolhead before loading another spool.
+  : Filament is still at the nozzle after unloading. The cut or retract may not have completed. Clear the toolhead before loading another spool.
   'Filament load failed: {}': 'Filament load failed: {}'
   Filament loaded: Filament loaded
   Filament operation failed: Filament operation failed
@@ -1038,6 +1044,7 @@ translations:
   : Filament ran out and the CFS found no matching spool to switch to. Load a spool of the same material and color, then resume.
   Filament ran out at the toolhead: Filament ran out at the toolhead
   Filament ran out. Auto-refill is off, so the CFS will not switch spools on its own. Load filament, then resume.: Filament ran out. Auto-refill is off, so the CFS will not switch spools on its own. Load filament, then resume.
+  Filament ran out. The CFS knows which spools match, but those slots are empty. Load one of them, then resume.: Filament ran out. The CFS knows which spools match, but those slots are empty. Load one of them, then resume.
   Filament runout: Filament runout
   Filament runout and motion detection sensors: Filament runout and motion detection
     sensors
@@ -1305,6 +1312,8 @@ translations:
   Keep Navigation Bar: Keep Navigation Bar
   Keep Printing: Keep Printing
   Keep Required: Keep Required
+  Keep current: Keep current
+  Keep Spool Info on Eject: Keep Spool Info on Eject
   Keep the bypass spool visible when bypass is off: Keep the bypass spool visible when bypass is off
   Kick away: Kick away
   Kinematics: Kinematics
@@ -1672,6 +1681,8 @@ translations:
   Normal: Normal
   Not Enough Filament: Not Enough Filament
   Not Now: Not Now
+  Not available here. Update from a terminal.: Not available here. Update from a terminal.
+  Not available on Android: Not available on Android
   Not calibrated: Not calibrated
   Not configured: Not configured
   Not connected: Not connected
@@ -1949,6 +1960,7 @@ translations:
   Printer name: Printer name
   Printer not ready: Printer not ready
   Printer ready: Printer ready
+  Printer type mismatch: Printer type mismatch
   'Printer:': 'Printer:'
   'Printer: ': 'Printer: '
   PrinterIdentify: PrinterIdentify
@@ -2029,6 +2041,7 @@ translations:
   Ramming Volume: Ramming Volume
   Raspberry Pi: Raspberry Pi
   Raspberry Pi (32-bit): Raspberry Pi (32-bit)
+  Re-identify: Re-identify
   Re-probe: Re-probe
   Re-read spool RFID tags and remaining length: Re-read spool RFID tags and remaining length
   Re-syncs Happy Hare's tracked state with the hardware.: Re-syncs Happy Hare's tracked
@@ -2046,6 +2059,7 @@ translations:
     results anytime in Settings.
   Recent Prints: Recent Prints
   Recently Printed: Recently Printed
+  Reconnect: Reconnect
   Record Timelapse: Record Timelapse
   Record timelapses of your prints: Record timelapses of your prints
   Recorded timelapses will appear here: Recorded timelapses will appear here
@@ -2073,6 +2087,7 @@ translations:
   Remap Tool: Remap Tool
   Remap needs the HelixPrint plugin: Remap needs the HelixPrint plugin
   Remap…: Remap…
+  Remember lane spool details across an eject: Remember lane spool details across an eject
   Remove: Remove
   Remove PIN: Remove PIN
   Remove Spoolman?: Remove Spoolman?
@@ -2182,6 +2197,7 @@ translations:
     filament load/unload even when the nozzle is cold (for macros that heat the nozzle
     themselves)
   Run test sequence on all lanes: Run test sequence on all lanes
+  Run the HelixScreen installer with --update from a terminal on this printer. Scan for the command for your platform.: Run the HelixScreen installer with --update from a terminal on this printer. Scan for the command for your platform.
   Run without parameter prompt: Run without parameter prompt
   Run {}?: Run {}?
   Running {}...: Running {}...
@@ -2585,6 +2601,8 @@ translations:
     interfering with prints. You can re-enable it in Settings > Display.
   : The animated screensaver has been turned off on this device to prevent it from
     interfering with prints. You can re-enable it in Settings > Display.
+  ? The filament did not reach the nozzle. The CFS reported no error, but the toolhead sensor still sees no filament. Check that the spool is seated and the path is clear, then try again.
+  : The filament did not reach the nozzle. The CFS reported no error, but the toolhead sensor still sees no filament. Check that the spool is seated and the path is clear, then try again.
   The filament system reported an error: The filament system reported an error
   The heater will cycle on and off several times.: The heater will cycle on and off
     several times.
@@ -2604,6 +2622,7 @@ translations:
   The printer's firmware chooses the backup spool itself: The printer's firmware chooses the backup spool itself
   The runout sensor indicates no filament is loaded. Start print anyway?: The runout
     sensor indicates no filament is loaded. Start print anyway?
+  The toolhead has filament but no AMS lane reports it loaded. Pull it out manually before printing. Start anyway?: The toolhead has filament but no AMS lane reports it loaded. Pull it out manually before printing. Start anyway?
   The toolhead sensor indicates filament is already loaded. Proceed with load anyway?: The
     toolhead sensor indicates filament is already loaded. Proceed with load anyway?
   The toolhead sensor indicates no filament is present. Proceed with unload anyway?: The
@@ -2642,6 +2661,8 @@ translations:
     Once installed, use Configure PRINT_START below to enable optional steps.
   This print needs about %.0fg but the spool has about %.0fg remaining. Start anyway?: This
     print needs about %.0fg but the spool has about %.0fg remaining. Start anyway?
+  ? This printer looks like a {} ({}% confidence), but it is set up as a {}. A wrong type applies incorrect pre-print options and presets.
+  : This printer looks like a {} ({}% confidence), but it is set up as a {}. A wrong type applies incorrect pre-print options and presets.
   This tool probes each bed screw and tells you how much to adjust.: This tool probes
     each bed screw and tells you how much to adjust.
   ? This will apply the Z-offset to your endstop and restart Klipper to save the configuration.
@@ -2801,11 +2822,12 @@ translations:
   Update Channel: Update Channel
   Update Failed: Update Failed
   Update Success: Update Success
+  Update from a Terminal: Update from a Terminal
   Update installed!: Update installed!
   Update your security PIN: Update your security PIN
-  Updates aren't available on this installation.: Updates aren't available on this installation.
   Updating Configuration...: Updating Configuration...
   Upgrade to AFC 1.2.0 or newer for filament names and multi-color spools.: Upgrade to AFC 1.2.0 or newer for filament names and multi-color spools.
+  Upgrade to AFC 1.2.0 or newer for multi-color spools. It also adds filament names, which otherwise need Spoolman.: Upgrade to AFC 1.2.0 or newer for multi-color spools. It also adds filament names, which otherwise need Spoolman.
   Upload: Upload
   Upload Debug Bundle: Upload Debug Bundle
   Upload Failed: Upload Failed
@@ -3000,10 +3022,8 @@ translations:
   nozzle: nozzle
   of: of
   'off': 'off'
-  pre_print_option.ai_detect.description: Monitor for print abnormalities (K2 Plus
-    camera-based)
-  pre_print_option.ai_detect.label: AI detection
-  pre_print_option.timelapse.label: Timelapse
+  Monitor for print abnormalities (K2 Plus camera-based): Monitor for print abnormalities (K2 Plus camera-based)
+  AI detection: AI detection
   prints: prints
   remaining: remaining
   remaining before clog detection triggers: remaining before clog detection triggers
@@ -3013,28 +3033,20 @@ translations:
   steppers: steppers
   tall: tall
   tool(s): tool(s)
-  tour.step.advanced.body: Macros, G-code console, calibration tools (PID, input shaper,
-    z-offset), firmware updates, and developer utilities.
-  tour.step.advanced.title: Advanced
-  tour.step.controls.body: Move the toolhead, home axes, level the bed, and fine-tune
-    temperatures, fans, and other motion settings.
-  tour.step.controls.title: Controls
-  tour.step.customize.body: Long-press any tile to enter edit mode — rearrange, resize,
-    remove, or add widgets, and add extra pages for your preferred layout.
-  tour.step.customize.title: Customize your home screen
-  tour.step.filament.body: Load, unload, and swap spools. View your multi-filament
-    system at a glance, map colors to slots, and monitor runout sensors.
-  tour.step.filament.title: Filament
-  tour.step.home_grid.body: Tap any tile to open its full controls or toggle its state.
-  tour.step.home_grid.title: Your printer at a glance
-  tour.step.print.body: Monitor prints in progress — time remaining, current layer,
-    and progress. Tap to pause, resume, or cancel the active job.
-  tour.step.print.title: Print status
-  tour.step.settings.body: Network, display, sound, printer setup, and more. You can
-    replay this tour anytime from Help & About.
-  tour.step.settings.title: Settings
-  tour.step.welcome.body: Let's take a quick tour so you can find things fast.
-  tour.step.welcome.title: Welcome to HelixScreen
+  'Macros, G-code console, calibration tools (PID, input shaper, z-offset), firmware updates, and developer utilities.': 'Macros, G-code console, calibration tools (PID, input shaper, z-offset), firmware updates, and developer utilities.'
+  Advanced: Advanced
+  'Move the toolhead, home axes, level the bed, and fine-tune temperatures, fans, and other motion settings.': 'Move the toolhead, home axes, level the bed, and fine-tune temperatures, fans, and other motion settings.'
+  Controls: Controls
+  'Long-press any tile to enter edit mode — rearrange, resize, remove, or add widgets, and add extra pages for your preferred layout.': 'Long-press any tile to enter edit mode — rearrange, resize, remove, or add widgets, and add extra pages for your preferred layout.'
+  Customize your home screen: Customize your home screen
+  'Load, unload, and swap spools. View your multi-filament system at a glance, map colors to slots, and monitor runout sensors.': 'Load, unload, and swap spools. View your multi-filament system at a glance, map colors to slots, and monitor runout sensors.'
+  Tap any tile to open its full controls or toggle its state.: Tap any tile to open its full controls or toggle its state.
+  Your printer at a glance: Your printer at a glance
+  'Monitor prints in progress — time remaining, current layer, and progress. Tap to pause, resume, or cancel the active job.': 'Monitor prints in progress — time remaining, current layer, and progress. Tap to pause, resume, or cancel the active job.'
+  Print status: Print status
+  'Network, display, sound, printer setup, and more. You can replay this tour anytime from Help & About.': 'Network, display, sound, printer setup, and more. You can replay this tour anytime from Help & About.'
+  Let's take a quick tour so you can find things fast.: Let's take a quick tour so you can find things fast.
+  Welcome to HelixScreen: Welcome to HelixScreen
   used: used
   v%s available: v%s available
   v{} installed! Restarting...: v{} installed! Restarting...

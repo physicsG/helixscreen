@@ -22,12 +22,20 @@ helix::PrinterState& get_printer_state() {
 }
 
 // Update UX gating (app_globals.cpp on Linux). ESP32 updates ship as firmware
-// OTA, never through the in-app updater, so both answers are constant-true:
-// the settings UI hides its update affordances.
+// OTA, never through the in-app updater, so every answer is constant-true: the
+// settings UI hides its update affordances.
+//
+// On Linux the install and check gates are deliberately different predicates
+// (an unwritable install tree still gets to LOOK for an update). Here they
+// collapse, because the reason is updates_externally_managed() rather than
+// writability, and that suppresses both.
 bool updates_externally_managed() {
     return true;
 }
-bool in_app_updates_suppressed() {
+bool update_install_suppressed() {
+    return true;
+}
+bool update_checks_suppressed() {
     return true;
 }
 

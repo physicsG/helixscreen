@@ -53,7 +53,7 @@ HandlePowerKey=poweroff    # or ignore, suspend, hibernate
 
 ## 2. KlipperScreen Handling
 
-KlipperScreen has a dedicated **Shutdown Panel** (`panels/shutdown.py`) that shows confirmation dialogs:
+KlipperScreen has a dedicated **Shutdown Panel** (panels/shutdown.py) that shows confirmation dialogs:
 
 ```python
 def reboot_poweroff(self, widget, method):
@@ -264,7 +264,7 @@ This would let us:
 
 ## References
 
-- KlipperScreen shutdown panel: `KlipperScreen/panels/shutdown.py`
+- KlipperScreen shutdown panel: KlipperScreen/panels/shutdown.py
 - ForgeX power config: `ad5m-forgex/macros/headless.cfg`
 - Klipper gcode_button docs: https://www.klipper3d.org/Config_Reference.html#gcode_button
 - Klipper action:prompt docs: https://www.klipper3d.org/G-Codes.html#action-commands

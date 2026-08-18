@@ -286,6 +286,14 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                        {{"position_min", MOCK_BED_Y_MIN}, {"position_max", MOCK_BED_Y_MAX}}},
                       {"stepper_z", stepper_z_settings},
                       {"extruder", extruder_settings},
+                      // Resonance sweep bounds — the input shaper collector
+                      // reads these to scale sweep progress to the range this
+                      // printer will actually test.
+                      {"resonance_tester",
+                       {{"min_freq", self->get_resonance_min_freq()},
+                        {"max_freq", self->get_resonance_max_freq()},
+                        {"accel_per_hz", 75.0},
+                        {"hz_per_sec", 1.0}}},
                       // Bed screw geometry — the screws-tilt panel reads
                       // screw_thread from here to size its level tolerance.
                       {"screws_tilt_adjust",
@@ -682,6 +690,11 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                         {"position_max", MOCK_BED_Z_MAX},
                         {"position_endstop", 235.0}}},
                       {"extruder", extruder_settings2},
+                      {"resonance_tester",
+                       {{"min_freq", self->get_resonance_min_freq()},
+                        {"max_freq", self->get_resonance_max_freq()},
+                        {"accel_per_hz", 75.0},
+                        {"hz_per_sec", 1.0}}},
                       {"heater_bed",
                        {{"min_temp", 0.0},
                         {"max_temp", 120.0},

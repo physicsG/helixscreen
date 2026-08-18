@@ -181,8 +181,11 @@ const char* get_heating_state_variant(int current_deg, int target_deg, int toler
 HeaterDisplayResult heater_display(int current_deci, int target_deci) {
     HeaterDisplayResult result;
 
-    // Convert decidegrees to degrees (integer truncation is fine for display)
-    int current_deg = deci_to_degrees(current_deci);
+    // The reading as the UI renders it. Everything below - the string, the
+    // status word, the color - derives from this one value, so a card cannot
+    // print "223 / 220" and call itself Ready at the same time.
+    const int shown_deci = displayed_deci(current_deci);
+    int current_deg = deci_to_degrees(shown_deci);
     int target_deg = deci_to_degrees(target_deci);
 
     // Format temperature string
@@ -202,19 +205,30 @@ HeaterDisplayResult heater_display(int current_deci, int target_deci) {
         result.pct = std::clamp(pct, 0, 100);
     }
 
-    // Determine status using shared tolerance constant
-    if (target_deci <= 0) {
+    // Determine status using shared tolerance constant. Classified in
+    // decidegrees against the displayed reading so the word matches both the
+    // string above and the temp_display card showing the same heater.
+    const HeatState state =
+        classify_heat_state(shown_deci, target_deci, DEFAULT_AT_TEMP_TOLERANCE_DECI);
+    switch (state) {
+    case HeatState::Off:
         result.status = lv_tr("Off");
-    } else if (current_deg < target_deg - DEFAULT_AT_TEMP_TOLERANCE) {
+        break;
+    case HeatState::Heating:
         result.status = lv_tr("Heating...");
-    } else if (current_deg > target_deg + DEFAULT_AT_TEMP_TOLERANCE) {
+        break;
+    case HeatState::Cooling:
         result.status = lv_tr("Cooling");
-    } else {
+        break;
+    case HeatState::Neutral:
+        // classify_heat_state() (mode-unaware) never returns Neutral.
+    case HeatState::AtTemp:
         result.status = lv_tr("Ready");
+        break;
     }
 
     // Get color from the same heating state logic
-    result.color = get_heating_state_color(current_deg, target_deg, DEFAULT_AT_TEMP_TOLERANCE);
+    result.color = get_heating_state_color(state);
 
     return result;
 }

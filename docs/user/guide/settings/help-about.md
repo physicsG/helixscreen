@@ -46,7 +46,7 @@ When you need help troubleshooting an issue:
 
 Debug bundles include:
 
-- **System logs** — recent HelixScreen log output
+- **System logs** - recent HelixScreen log output, starting from the very beginning of startup. That matters for problems that happen while HelixScreen is still loading your settings - a settings file that could not be read, or one that had to be restored from backup. On older versions those messages happened before the log was being kept, so the bundle showed no trace of them even though you saw the message on screen
 - **Configuration** — your HelixScreen settings (sanitized, no passwords or API keys)
 - **Printer configuration** — your Klipper `printer.cfg` and any files it includes, so support can see how your printer is actually set up (sanitized, see below)
 - **Installed macros** — the names of your G-code macros (names only, not what they do)

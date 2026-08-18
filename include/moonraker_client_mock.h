@@ -328,12 +328,16 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @param error_cb Error callback (not invoked in mock)
      * @param timeout_ms Timeout (ignored in mock)
      * @param silent Silent mode (ignored in mock)
+     * @param intent Explicit error-reporting intent (include/rpc_error_policy.h).
+     *        Omitted, it is inferred from @p silent and the presence of
+     *        @p error_cb, exactly as MoonrakerRequestTracker::send() does.
      * @return Always returns 0 (success)
      */
-    helix::RequestId send_jsonrpc(const std::string& method, const json& params,
-                                  std::function<void(const json&)> success_cb,
-                                  std::function<void(const MoonrakerError&)> error_cb,
-                                  uint32_t timeout_ms = 0, bool silent = false) override;
+    helix::RequestId send_jsonrpc(
+        const std::string& method, const json& params, std::function<void(const json&)> success_cb,
+        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
+        bool silent = false,
+        std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt) override;
 
     /**
      * @brief Simulate G-code script command
@@ -441,7 +445,10 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @param heaters List of heater names (e.g., "extruder", "heater_bed")
      */
     void set_heaters(std::vector<std::string> heaters) {
-        discovery_.heaters() = std::move(heaters);
+        {
+            std::lock_guard<std::mutex> lock(discovery_mutex_);
+            discovery_.heaters() = std::move(heaters);
+        }
         rebuild_hardware_from_lists();
     }
 
@@ -450,7 +457,10 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @param fans List of fan names (e.g., "fan", "heater_fan hotend_fan")
      */
     void set_fans(std::vector<std::string> fans) {
-        discovery_.fans() = std::move(fans);
+        {
+            std::lock_guard<std::mutex> lock(discovery_mutex_);
+            discovery_.fans() = std::move(fans);
+        }
         rebuild_hardware_from_lists();
     }
 
@@ -459,7 +469,10 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @param leds List of LED names (e.g., "neopixel chamber_light")
      */
     void set_leds(std::vector<std::string> leds) {
-        discovery_.leds() = std::move(leds);
+        {
+            std::lock_guard<std::mutex> lock(discovery_mutex_);
+            discovery_.leds() = std::move(leds);
+        }
         rebuild_hardware_from_lists();
     }
 
@@ -468,7 +481,10 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @param sensors List of sensor names (e.g., "temperature_sensor chamber")
      */
     void set_sensors(std::vector<std::string> sensors) {
-        discovery_.sensors() = std::move(sensors);
+        {
+            std::lock_guard<std::mutex> lock(discovery_mutex_);
+            discovery_.sensors() = std::move(sensors);
+        }
         rebuild_hardware_from_lists();
     }
 
@@ -477,7 +493,10 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @param sensors List of filament sensor names (e.g., "filament_switch_sensor fsensor")
      */
     void set_filament_sensors(std::vector<std::string> sensors) {
-        discovery_.filament_sensors() = std::move(sensors);
+        {
+            std::lock_guard<std::mutex> lock(discovery_mutex_);
+            discovery_.filament_sensors() = std::move(sensors);
+        }
         rebuild_hardware_from_lists();
     }
 
@@ -543,6 +562,27 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      */
     void set_shaper_csv_writable(bool writable) {
         shaper_csv_writable_ = writable;
+    }
+
+    /**
+     * @brief Set the [resonance_tester] sweep range the mock reports and replays
+     *
+     * Drives both `configfile.settings.resonance_tester` and the frequencies
+     * the scripted SHAPER_CALIBRATE response actually sweeps, so a test can
+     * reproduce a printer whose ceiling is not the value HelixScreen assumes.
+     * Defaults mirror Kalico's out-of-the-box 5-135 Hz.
+     */
+    void set_resonance_sweep_range(double min_freq, double max_freq) {
+        resonance_min_freq_ = min_freq;
+        resonance_max_freq_ = max_freq;
+    }
+
+    [[nodiscard]] double get_resonance_min_freq() const {
+        return resonance_min_freq_;
+    }
+
+    [[nodiscard]] double get_resonance_max_freq() const {
+        return resonance_max_freq_;
     }
 
     /**
@@ -989,6 +1029,17 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
         return last_send_silent_;
     }
 
+    /// Error-reporting intent of the send currently being dispatched into the
+    /// method-handler registry. Those handlers run inline inside send_jsonrpc()
+    /// and never reach MoonrakerRequestTracker, so they read this to make the
+    /// same helix::rpc_error_policy::decide() call the tracker makes on real
+    /// hardware — otherwise mock and hardware drift on who reports an error.
+    /// It keeps the last dispatched value, so tests can also read it after the
+    /// call to assert what intent a caller declared.
+    const helix::rpc_error_policy::CallerIntent& current_send_intent() const {
+        return current_send_intent_;
+    }
+
     /// Test inspection: the most recent RPC method name passed to the 5-arg send_jsonrpc().
     const std::string& last_send_method() const {
         return last_send_method_;
@@ -1096,6 +1147,10 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     std::string last_send_script_; // `script` param when method == printer.gcode.script
     uint32_t last_send_timeout_ms_{0};
     bool last_send_silent_{false};
+
+    // Intent of the in-flight send_jsonrpc() dispatch, read by the method
+    // handlers via current_send_intent().
+    helix::rpc_error_policy::CallerIntent current_send_intent_{};
 
     // One-shot forced error injection for printer.gcode.script (test helper).
     struct ForcedGcodeError {
@@ -1291,6 +1346,25 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     std::mutex sim_mutex_;           // For condition variable wait
     std::condition_variable sim_cv_; // For interruptible sleep during shutdown
 
+    // Protects the discovery_ name lists (heaters/fans/sensors/leds/filament_sensors)
+    // against the temperature simulation thread.
+    //
+    // connect() starts that thread, and discover_printer() then REASSIGNS those
+    // vectors on the calling thread — `discovery_.fans() = {...}` frees every old
+    // std::string buffer while the simulation loop is iterating them. ASan caught
+    // this as two heap-use-after-frees (memcpy and memcmp on freed string data)
+    // from FullStackTestFixture, whose constructor does exactly that sequence.
+    //
+    // Lock discipline, verified against the call graph — do not nest these:
+    //   LOCKED   populate_hardware(), populate_capabilities(),
+    //            rebuild_hardware_from_lists(), the discovery-list setters below
+    //            (assignment only), the simulation loop's per-iteration snapshot,
+    //            and has_chamber_sensor() — the loop's third read path, which
+    //            reaches discovery_.sensors() through a call rather than inline
+    //   UNLOCKED override_chamber_heater() — reached ONLY from populate_capabilities()
+    //            and rebuild_hardware_from_lists(), both of which already hold it
+    mutable std::mutex discovery_mutex_;
+
     // Restart simulation thread (for RESTART/FIRMWARE_RESTART commands)
     std::thread restart_thread_;
     std::atomic<bool> restart_pending_{false};
@@ -1317,6 +1391,8 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     bool shaper_csv_writable_{true};     ///< When false, SHAPER_CALIBRATE skips writing the CSV
     bool stepper_z_endstop_null_{false}; ///< When true, position_endstop is reported as JSON null
     double extruder_max_temp_{300.0};    ///< Extruder max_temp reported in configfile.settings
+    double resonance_min_freq_{5.0};     ///< [resonance_tester] min_freq the mock reports/sweeps
+    double resonance_max_freq_{135.0};   ///< [resonance_tester] max_freq the mock reports/sweeps
     bool mmu_enabled_{true};             ///< MMU available (default true for existing tests)
 
     // Additional objects for testing (e.g., "mmu", "AFC", "toolchanger")

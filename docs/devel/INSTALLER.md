@@ -130,7 +130,7 @@ The `main()` function orchestrates this sequence:
 10. **Extract with atomic swap** -- Validates ELF architecture, backs up config, `mv` old to `.old`, rollback on failure
 11. **Platform hooks** -- Deploys `hooks-{platform}.sh` to `$INSTALL_DIR/platform/hooks.sh`
 12. **Install service** -- systemd unit or SysV init script (templated with `@@HELIX_USER@@`, etc.)
-13. **Moonraker integration** -- Adds `[update_manager helixscreen]` section, writes `release_info.json`
+13. **Moonraker integration** -- Adds `[update_manager helixscreen]` section, writes release_info.json
 14. **KIAUH extension** -- Auto-installs if KIAUH detected. `main.sh` calls `install_kiauh_extension` (honoring a `--skip-kiauh-registration` flag), as described in the "How the Extension Gets Installed" section below.
 15. **Install-time printer detection** -- Tier-1 model fingerprint, falling back to Tier-2 Moonraker detection with a B/C confidence gate. Seeds device defaults (and, when confident, a full preset) into `settings.json` before first launch. See [Install-Time Printer Detection](#install-time-printer-detection) below.
 16. **Config symlink** -- `printer_data/config/helixscreen` symlink for Mainsail/Fluidd access
@@ -289,11 +289,44 @@ sudo rm -rf ~/helixscreen.old
 |---------|-------|
 | **Detection** | `/etc/os-release` contains Debian/Raspbian, or `/home/pi`, `/home/biqu`, `/home/mks` exists |
 | **32/64-bit** | `getconf LONG_BIT` determines userspace bitness (64-bit kernel with 32-bit userspace is common) |
-| **Install dir** | Auto-detected based on Klipper ecosystem: `~/helixscreen` if klipper/moonraker/printer_data found, else `/opt/helixscreen` |
+| **Install dir** | Auto-detected — see the cascade below. `~/helixscreen` in every case with a non-root service user; `/opt/helixscreen` only for root installs |
 | **Klipper user** | Detected via systemd service owner, process table, printer_data scan, or well-known users (biqu, pi, mks) |
 | **Init system** | systemd (service template with `@@HELIX_USER@@` substitution) |
 | **Runtime deps** | `libdrm2`, `libinput10` installed via apt |
 | **Config symlink** | `~/printer_data/config/helixscreen` -> `$INSTALL_DIR/config` for web UI access |
+
+#### Pi install-directory cascade
+
+`detect_pi_install_dir()` in `scripts/lib/installer/platform.sh`, first match wins:
+
+| # | Condition | Result |
+|---|-----------|--------|
+| 1 | `INSTALL_DIR` set by the user | that path, after `validate_install_dir` |
+| 2 | An install already on disk (`<dir>/bin/helix-screen` exists) | that path |
+| 3 | `~/klipper` or `~/moonraker` exists | `$KLIPPER_HOME/helixscreen` |
+| 4 | `~/printer_data` exists | `$KLIPPER_HOME/helixscreen` |
+| 5 | `moonraker.service` is active | `$KLIPPER_HOME/helixscreen` |
+| 6 | Non-root service user whose home they own | `$KLIPPER_HOME/helixscreen` |
+| 7 | Otherwise (root installs) | `/opt/helixscreen` |
+
+Rule 2 exists because the cascade's answer is not stable across releases: a box that
+matched one branch on first install can match a different one later, and moving the
+install would orphan the old tree and the config inside it. An install on disk always
+wins over a fresh decision.
+
+Rule 6 exists because of how an update applies. `install.sh` prefers renaming the
+install root (`mv <root> <root>.old; mv <new> <root>`), and rename mutates the
+**parent's** directory entries — so it is the parent that has to be writable by the
+service user. `/opt` is root-owned and the service runs unprivileged, which leaves only
+the in-place fallback: delete the root's contents, then move the new ones in. That path
+works and is kept, but it deletes before it moves, so an interruption leaves a partial
+tree (#970). Escalation does not rescue it either: `helixscreen.service` sets
+`NoNewPrivileges=true`, so `sudo` fails from the app and from the `install.sh` it forks.
+
+Rule 6's shape is the standalone display: a Pi driving a panel with Klipper and
+Moonraker on another host, so rules 3-5 all miss. Before rule 6 existed those boxes
+landed on `/opt/helixscreen` and were the only layout depending on the in-place path.
+See `UPDATE_SYSTEM.md` for how `self_update_supported()` reads the resulting tree.
 
 ### FlashForge Adventurer 5M -- Forge-X Firmware (`ad5m`, `forge_x`)
 
@@ -310,7 +343,7 @@ sudo rm -rf ~/helixscreen.old
 - **Display mode**: Sets `variables.cfg` display to `GUPPY` mode (required for backlight)
 - **GuppyScreen disable**: `chmod -x` on `/opt/config/mod/.root/S80guppyscreen`
 - **tslib disable**: `chmod -x` on `/opt/config/mod/.root/S35tslib`
-- **Stock UI disable**: Comments out `ffstartup-arm` in `/opt/auto_run.sh`
+- **Stock UI disable**: Comments out `ffstartup-arm` in /opt/auto_run.sh
 - **screen.sh backlight patch**: Blocks non-100 backlight changes when HelixScreen active (allows S99root init cycle)
 - **screen.sh drawing patch**: Skips `draw_splash`, `draw_loading`, `boot_message` when HelixScreen active
 - **logged wrapper**: Wraps `/opt/config/mod/.bin/exec/logged` to strip `--send-to-screen` flag (prevents direct framebuffer writes)
@@ -415,7 +448,7 @@ The installer configures Moonraker to enable one-click updates from Mainsail/Flu
        config/.disabled_services
    ```
 
-2. **`release_info.json`** written to `$INSTALL_DIR/` -- Moonraker `type:web` needs this to detect the installed version
+2. **release_info.json** written to `$INSTALL_DIR/` -- Moonraker `type:web` needs this to detect the installed version
 
 3. **`moonraker.asvc`** -- HelixScreen added to Moonraker's service allowlist so it can restart the service after updates
 
@@ -479,7 +512,7 @@ The uninstaller reads this file and reverses each action (systemd enable, chmod 
 
 Downloads go through `releases.helixscreen.org` (Cloudflare R2 bucket):
 
-1. Fetch `stable/manifest.json` for latest version and per-platform download URLs
+1. Fetch stable/manifest.json for latest version and per-platform download URLs
 2. Download the platform-specific archive from R2
 
 ### GitHub Releases (Fallback)
@@ -536,7 +569,7 @@ bats --verbose-run tests/shell/test_platform_detection.bats
 | `test_download_validation.bats` | Archive validation, HTTPS capability |
 | `test_r2_installer.bats` | R2 CDN manifest parsing, fallback to GitHub |
 | `test_extract_release.bats` | Extraction, atomic swap, rollback |
-| `test_release_packaging_make.bats` / `_artifacts.bats` | Release archive structure |
+| `test_release_packaging_make.bats` / `test_release_packaging_artifacts.bats` | Release archive structure |
 | `test_service_install.bats` | systemd/SysV service installation |
 | `test_service_template.bats` | Service template placeholder substitution |
 | `test_moonraker_config.bats` | update_manager section add/remove/migrate |
@@ -555,7 +588,7 @@ bats --verbose-run tests/shell/test_platform_detection.bats
 | `test_no_echo_ansi.bats` | No raw ANSI in echo (BusyBox compat) |
 | `test_code_lint.bats` | Shell code quality checks |
 | `test_symbol_ci.bats` / `test_symbol_makefile.bats` | Debug symbol extraction for crash reporting |
-| `test_telemetry_pull_args.bats` / `_download.bats` | Telemetry data pull scripts |
+| `test_telemetry_pull_args.bats` / `test_telemetry_pull_download.bats` | Telemetry data pull scripts |
 | `test_resolve_backtrace.bats` | Backtrace symbol resolution |
 
 _The table above is a representative subset; the suite has 71 bats files in `tests/shell/`._
@@ -636,18 +669,18 @@ elif [ "$platform" = "myplatform" ]; then
 
 ### Step 3: Platform Hooks (Optional)
 
-If the platform needs runtime hooks (pre-start/post-start behavior), create `config/platform/hooks-myplatform.sh` in the release package and add the mapping in `install_platform_hooks()` in the bundled installer.
+If the platform needs runtime hooks (pre-start/post-start behavior), create config/platform/hooks-myplatform.sh in the release package and add the mapping in `install_platform_hooks()` in the bundled installer.
 
 ### Step 4: Firmware-Specific Module (Optional)
 
-For platforms with complex setup (like ForgeX), create a dedicated module `lib/installer/myplatform.sh`:
+For platforms with complex setup (like ForgeX), create a dedicated module lib/installer/myplatform.sh:
 - Add source guard
 - Implement install-time and uninstall-time functions
 - Source it in `install-dev.sh` and add to the `bundle-installer.sh` module list
 
 ### Step 5: Tests
 
-Create `tests/shell/test_myplatform.bats` covering:
+Create tests/shell/test_myplatform.bats covering:
 - Platform detection (positive and negative cases)
 - Install path configuration
 - Any firmware-specific patching
@@ -704,10 +737,10 @@ ssh root@printer-ip "sh /data/install.sh --local /data/helixscreen-ad5m.zip"
 
 ### Moonraker update_manager not working
 
-**Cause**: Missing `release_info.json`, wrong section type, or service not in `moonraker.asvc`.
+**Cause**: Missing release_info.json, wrong section type, or service not in `moonraker.asvc`.
 
 **Fix**:
-1. Check `release_info.json` exists in install dir
+1. Check release_info.json exists in install dir
 2. Verify section is `type: web` (the updater migrates away from `git_repo`/`zip`)
 3. Ensure `helixscreen` is in `printer_data/moonraker.asvc`
 4. Restart Moonraker: `systemctl restart moonraker`

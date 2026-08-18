@@ -355,14 +355,18 @@ void SettingsPanel::init_subjects() {
     lv_xml_register_subject(nullptr, "show_network_settings", &show_network_settings_subject_);
 
     // Update checker runs on all platforms — on Android, "Install Update"
-    // redirects to the Play Store instead of self-updating. In-app updates are
-    // suppressed for EITHER reason: firmware-managed (explicit flag) OR a
-    // physically-impossible self-update (install tree not writable). Hide the
-    // check/install controls whenever suppressed; show the firmware notice only for
-    // the flag, and a neutral "not available" notice for the physical case.
+    // redirects to the Play Store instead of self-updating.
+    //
+    // Checking and installing are gated SEPARATELY. Only a firmware opt-out hides
+    // the "Check for Updates" row, because checking is a network fetch that a
+    // read-only install tree cannot fail; an install tree we cannot write hides
+    // only "Install Update" and adds a notice saying so. Gating both on one
+    // predicate is what made a false negative unrecoverable — the whole section
+    // disappeared, so nothing could tell the user an update existed or what to do
+    // about it.
     bool externally_managed = updates_externally_managed();
-    bool suppressed = in_app_updates_suppressed();
-    lv_subject_init_int(&show_update_settings_subject_, suppressed ? 0 : 1);
+    bool install_suppressed = update_install_suppressed();
+    lv_subject_init_int(&show_update_settings_subject_, update_checks_suppressed() ? 0 : 1);
     subjects_.register_subject(&show_update_settings_subject_);
     lv_xml_register_subject(nullptr, "show_update_settings", &show_update_settings_subject_);
 
@@ -371,7 +375,8 @@ void SettingsPanel::init_subjects() {
     lv_xml_register_subject(nullptr, "updates_firmware_managed",
                             &updates_firmware_managed_subject_);
 
-    lv_subject_init_int(&updates_unavailable_subject_, (suppressed && !externally_managed) ? 1 : 0);
+    lv_subject_init_int(&updates_unavailable_subject_,
+                        (install_suppressed && !externally_managed) ? 1 : 0);
     subjects_.register_subject(&updates_unavailable_subject_);
     lv_xml_register_subject(nullptr, "updates_unavailable", &updates_unavailable_subject_);
 

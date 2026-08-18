@@ -149,7 +149,13 @@ class MoonrakerMotionAPI : public IMotionAPI {
      * @brief Execute G-code via printer.gcode.script JSON-RPC
      *
      * Annotates G-code with source comment and sends via client.
+     *
+     * @param caller_surfaces_errors Whether @p on_error actually SHOWS the user
+     *        something. Pass false when it only logs: a spdlog line is not a
+     *        user-visible report, and letting it claim ownership suppresses
+     *        Klipper's `!!` broadcast for the same failure. See
+     *        include/rpc_error_policy.h.
      */
     void execute_gcode(const std::string& gcode, SuccessCallback on_success, ErrorCallback on_error,
-                       uint32_t timeout_ms = 0);
+                       uint32_t timeout_ms = 0, bool caller_surfaces_errors = true);
 };

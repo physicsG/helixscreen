@@ -12,7 +12,6 @@
 
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
-#include "ui_filament_mapping_card.h"
 #include "ui_modal.h"
 #include "ui_nav_manager.h"
 #include "ui_panel_print_status.h"
@@ -22,18 +21,13 @@
 #include "active_print_media_manager.h"
 #include "ams_state.h"
 #include "app_constants.h"
-#include "color_utils.h"
 #include "data_root_resolver.h"
-#include "filament_database.h"
 #include "filament_sensor_manager.h"
-#include "helix_psram_attr.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "printer_state.h"
-#include "settings_manager.h"
 
-#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <chrono>
@@ -49,7 +43,7 @@ namespace helix::ui {
 // ============================================================================
 
 PrintStartController::PrintStartController(PrinterState& printer_state, IMoonrakerAPI* api)
-    : printer_state_(printer_state), api_(api) {
+    : printer_state_(printer_state), api_(api), gate_list_(helix::default_print_start_gates()) {
     spdlog::debug("[PrintStartController] Created");
 }
 
@@ -70,24 +64,12 @@ PrintStartController::~PrintStartController() {
     klippy_state_observer_.reset();
     ams_data_observer_.reset();
 
-    // Clean up any open modals - only if LVGL is still initialized
+    // Clean up an open gate dialog - only if LVGL is still initialized
     // (destructor may be called after lv_deinit() during shutdown)
     if (lv_is_initialized()) {
-        if (filament_warning_modal_) {
-            helix::ui::modal_hide(filament_warning_modal_);
-            filament_warning_modal_ = nullptr;
-        }
-        if (color_mismatch_modal_) {
-            helix::ui::modal_hide(color_mismatch_modal_);
-            color_mismatch_modal_ = nullptr;
-        }
-        if (material_mismatch_modal_) {
-            helix::ui::modal_hide(material_mismatch_modal_);
-            material_mismatch_modal_ = nullptr;
-        }
-        if (insufficient_filament_modal_) {
-            helix::ui::modal_hide(insufficient_filament_modal_);
-            insufficient_filament_modal_ = nullptr;
+        if (print_gate_modal_) {
+            helix::ui::modal_hide(print_gate_modal_);
+            print_gate_modal_ = nullptr;
         }
     }
     spdlog::trace("[PrintStartController] Destroyed");
@@ -158,47 +140,12 @@ void PrintStartController::initiate() {
         return;
     }
 
-    // Check if assigned external spool has enough filament for the print.
-    if (auto spool = AmsState::instance().get_external_spool_info();
-        spool.has_value() && spool->remaining_weight_g > 0.0f) {
-        auto metadata = detail_view_ ? detail_view_->get_file_metadata() : std::nullopt;
-        if (metadata.has_value()) {
-            float needed_g = static_cast<float>(metadata->filament_weight_total);
-            if (needed_g <= 0.0f && metadata->filament_total > 0.0) {
-                // Fall back to length-based estimate using the spool's material.
-                auto mat = filament::find_material(spool->material);
-                if (mat.has_value() && mat->density_g_cm3 > 0.0f) {
-                    needed_g = filament::length_to_weight_g(
-                        static_cast<float>(metadata->filament_total), mat->density_g_cm3, 1.75f);
-                }
-            }
-            if (needed_g > 0.0f && needed_g > spool->remaining_weight_g) {
-                spdlog::info("[PrintStartController] Pre-print warning: needs {} g, spool has {} g",
-                             needed_g, spool->remaining_weight_g);
-                show_insufficient_filament_warning(needed_g, spool->remaining_weight_g);
-                return;
-            }
-        }
-    }
-
-    // Pre-print filament-present check (auto-unload suppression + AMS lane truth
-    // / non-AMS aggregate fallback). Shared with the insufficient-filament
-    // continuation so both paths behave identically. Returns true if a warning
-    // dialog was shown — the dialog drives continuation, so we return here.
-    if (check_required_filament_present()) {
-        return;
-    }
-
-    // Check if any tools have no matching AMS slot (uses FilamentMapper results)
-    auto unresolved = find_unresolved_tools();
-    if (!unresolved.empty()) {
-        auto tool_info = detail_view_->get_filament_tool_info();
-        show_color_mismatch_warning(unresolved, tool_info);
-        return;
-    }
-
-    // Check material compatibility (both AMS and non-AMS)
-    continue_after_unresolved_check();
+    // Ordered pre-print gate pipeline: insufficient spool weight, bypass
+    // engaged on a lane print, unaccounted toolhead filament, required
+    // filament present, unresolved tools, material compatibility. Each
+    // warning dialog drives its own continuation (proceed resumes at the next
+    // gate with a freshly gathered context).
+    run_gates_from(0);
 }
 
 void PrintStartController::execute_print_start() {
@@ -493,618 +440,134 @@ void PrintStartController::initiate_reprint(const std::string& filename, const s
 }
 
 // ============================================================================
-// Filament Warning Dialog
+// Gate Pipeline
 // ============================================================================
 
-std::vector<std::pair<int, int>> PrintStartController::find_empty_required_lanes() {
-    if (!detail_view_) {
-        return {};
-    }
-    return helix::FilamentSensorManager::instance().find_empty_required_lanes(
-        detail_view_->get_tools_used(), detail_view_->get_effective_remap());
-}
+helix::PrintStartContext PrintStartController::gather_print_start_context() const {
+    helix::PrintStartContext ctx;
+    ctx.filament_color_count = filament_colors_.size();
 
-std::string PrintStartController::build_empty_lane_message(
-    const std::vector<std::pair<int, int>>& empty) const {
-    // Name the offending tool(s) and the AMS lane each routes to so the user
-    // knows exactly which lane to load. Lane numbers are 1-based for display
-    // (slot 0 -> "Lane 1") to match the rest of the slot UI.
-    std::string message;
-    if (empty.size() == 1) {
-        message = fmt::format(lv_tr("Tool {} → Lane {}: no filament loaded."), empty[0].first,
-                              empty[0].second + 1);
-    } else {
-        message = lv_tr("These tools have no filament loaded:");
-        message += "\n\n";
-        for (const auto& [tool, slot] : empty) {
-            message += fmt::format("  {} {} {} → {} {}\n", LV_SYMBOL_BULLET, lv_tr("Tool"), tool,
-                                   lv_tr("Lane"), slot + 1);
-        }
-    }
-    message += "\n\n";
-    message += lv_tr("Start print anyway?");
-    return message;
-}
-
-bool PrintStartController::check_required_filament_present() {
-    auto& sensor_mgr = helix::FilamentSensorManager::instance();
-    auto& ams_state = AmsState::instance();
-
-    // Backends that auto-unload the toolhead after each print (e.g. AD5X IFS)
-    // leave the extruder empty by design, so a "no filament" reading at
-    // print-start is expected and the warning is noise. ANY such backend
-    // suppresses the warning (matches initiate()'s original intent).
-    bool suppress_runout_warning = false;
-    bool ams_manages_filament = false;
-    for (int i = 0; i < ams_state.backend_count(); ++i) {
-        if (auto* backend = ams_state.get_backend(i)) {
-            ams_manages_filament = true;
+    auto& ams = AmsState::instance();
+    ctx.ams_available = ams.is_available();
+    ctx.any_bypass_active = ams.any_bypass_active();
+    ctx.external_spool = ams.get_external_spool_info();
+    ctx.has_active_backend = ams.get_backend() != nullptr;
+    for (int i = 0; i < ams.backend_count(); ++i) {
+        if (auto* backend = ams.get_backend(i)) {
+            ctx.ams_manages_filament = true;
             if (backend->auto_unloads_after_print()) {
-                suppress_runout_warning = true;
+                ctx.any_auto_unload_backend = true;
             }
+            ctx.toolhead_unaccounted.push_back(backend->toolhead_filament_unaccounted());
+        } else {
+            ctx.toolhead_unaccounted.push_back(std::nullopt);
         }
     }
-    if (suppress_runout_warning) {
-        return false;
+
+    if (detail_view_) {
+        ctx.has_detail_view = true;
+        ctx.metadata = detail_view_->get_file_metadata();
+        ctx.mappings = detail_view_->get_filament_mappings();
+        ctx.tool_info = detail_view_->get_filament_tool_info();
+        ctx.available_slots = detail_view_->get_available_slots();
+        ctx.filament_materials = detail_view_->get_filament_materials();
+        ctx.tools_used = detail_view_->get_tools_used();
+        ctx.effective_remap = detail_view_->get_effective_remap();
+    }
+    if (ctx.ams_manages_filament && ctx.has_active_backend) {
+        ctx.empty_required_lanes =
+            helix::FilamentSensorManager::instance().find_empty_required_lanes(ctx.tools_used,
+                                                                               ctx.effective_remap);
     }
 
-    // AMS lane-truth path: scope the check to the tools the print actually uses
-    // and consult the backend's authoritative per-slot presence (Snapmaker U1:
-    // print_task_config.filament_exist[head]) instead of the aggregate motion
-    // sensors. Avoids two false positives: a used head whose filament is staged
-    // in the lane but retracted from the toolhead, and unused empty heads. The
-    // lane scan is scoped to the ACTIVE backend (index 0), matching
-    // FilamentSensorManager's per-backend slot indexing.
-    if (ams_manages_filament && ams_state.get_backend()) {
-        auto empty = find_empty_required_lanes();
-        if (!empty.empty()) {
-            spdlog::info("[PrintStartController] {} required tool(s) have an empty lane - "
-                         "showing pre-print warning",
-                         empty.size());
-            show_filament_warning(build_empty_lane_message(empty));
-            return true;
-        }
-        return false;
-    }
-
-    // Non-AMS / no-active-backend fallback: aggregate runout-sensor check (unchanged).
-    if (sensor_mgr.is_master_enabled() &&
-        sensor_mgr.is_sensor_available(helix::FilamentSensorRole::RUNOUT) &&
-        !sensor_mgr.is_filament_detected(helix::FilamentSensorRole::RUNOUT)) {
-        spdlog::info("[PrintStartController] Runout sensor shows no filament - showing pre-print "
-                     "warning");
-        show_filament_warning();
-        return true;
-    }
-
-    return false;
+    auto& sensors = helix::FilamentSensorManager::instance();
+    ctx.runout_enabled = sensors.is_master_enabled();
+    ctx.runout_available = sensors.is_sensor_available(helix::FilamentSensorRole::RUNOUT);
+    ctx.runout_detected = sensors.is_filament_detected(helix::FilamentSensorRole::RUNOUT);
+    return ctx;
 }
 
-void PrintStartController::show_filament_warning(const std::string& message) {
-    // Close any existing dialog first
-    if (filament_warning_modal_) {
-        helix::ui::modal_hide(filament_warning_modal_);
-        filament_warning_modal_ = nullptr;
-    }
-
-    // modal_show_confirmation copies the message string into the dialog's label
-    // (via the XML attribute path), so pass it directly — no static buffer, no
-    // truncation of long multi-tool / translated messages.
-    const char* body = message.empty() ? lv_tr("The runout sensor indicates no filament is loaded. "
-                                               "Start print anyway?")
-                                       : message.c_str();
-
-    filament_warning_modal_ = helix::ui::modal_show_confirmation(
-        lv_tr("No Filament Detected"), body, ModalSeverity::Warning, lv_tr("Start Print"),
-        on_filament_warning_proceed_static, on_filament_warning_cancel_static, this);
-
-    if (!filament_warning_modal_) {
-        spdlog::error("[PrintStartController] Failed to create filament warning dialog");
-        // Re-enable print button since we couldn't show the dialog
-        if (update_print_button_) {
-            update_print_button_();
+void PrintStartController::run_gates_from(size_t index) {
+    const auto ctx = gather_print_start_context();
+    for (size_t i = index; i < gate_list_.size(); ++i) {
+        const auto result = gate_list_[i].evaluate(ctx);
+        if (result.verdict == helix::CheckResult::Verdict::Pass) {
+            continue;
         }
-        return;
-    }
-
-    spdlog::debug("[PrintStartController] Pre-print filament warning dialog shown");
-}
-
-void PrintStartController::on_filament_warning_proceed_static(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStartController] on_filament_warning_proceed_static");
-    auto* self = static_cast<PrintStartController*>(lv_event_get_user_data(e));
-    if (self) {
-        // Hide dialog first
-        if (self->filament_warning_modal_) {
-            helix::ui::modal_hide(self->filament_warning_modal_);
-            self->filament_warning_modal_ = nullptr;
-        }
-
-        // Continue with remaining checks (unresolved tools, material mismatch)
-        auto unresolved = self->find_unresolved_tools();
-        if (!unresolved.empty()) {
-            auto tool_info = self->detail_view_->get_filament_tool_info();
-            self->show_color_mismatch_warning(unresolved, tool_info);
+        if (result.verdict == helix::CheckResult::Verdict::Block) {
+            // No Block gate exists yet (declared for future hard-stops). Fail
+            // closed: do not start, do not offer proceed.
+            spdlog::error("[PrintStartController] Gate '{}' returned Block - aborting print start",
+                          gate_list_[i].name);
+            if (update_print_button_) {
+                update_print_button_();
+            }
             return;
         }
-        self->continue_after_unresolved_check();
-    }
-    LVGL_SAFE_EVENT_CB_END();
-}
 
-void PrintStartController::on_filament_warning_cancel_static(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStartController] on_filament_warning_cancel_static");
-    auto* self = static_cast<PrintStartController*>(lv_event_get_user_data(e));
-    if (self) {
-        if (self->filament_warning_modal_) {
-            helix::ui::modal_hide(self->filament_warning_modal_);
-            self->filament_warning_modal_ = nullptr;
+        if (print_gate_modal_) {
+            helix::ui::modal_hide(print_gate_modal_);
+            print_gate_modal_ = nullptr;
         }
-        // Re-enable print button since user cancelled
-        if (self->update_print_button_) {
-            self->update_print_button_();
-        }
-        if (self->on_print_cancelled_) {
-            self->on_print_cancelled_();
-        }
-        spdlog::debug("[PrintStartController] Print cancelled by user (no filament warning)");
-    }
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-// ============================================================================
-// Insufficient Filament Warning Dialog
-// ============================================================================
-
-void PrintStartController::show_insufficient_filament_warning(float needed_g, float remaining_g) {
-    if (insufficient_filament_modal_) {
-        helix::ui::modal_hide(insufficient_filament_modal_);
-        insufficient_filament_modal_ = nullptr;
-    }
-
-    char body[256];
-    std::snprintf(body, sizeof(body),
-                  lv_tr("This print needs about %.0fg but the spool has about %.0fg "
-                        "remaining. Start anyway?"),
-                  needed_g, remaining_g);
-
-    insufficient_filament_modal_ = helix::ui::modal_show_confirmation(
-        lv_tr("Not Enough Filament"), body, ModalSeverity::Warning, lv_tr("Start Anyway"),
-        on_insufficient_filament_proceed_static, on_insufficient_filament_cancel_static, this);
-
-    if (!insufficient_filament_modal_) {
-        spdlog::error("[PrintStartController] Failed to create insufficient-filament dialog");
-        if (update_print_button_) {
-            update_print_button_();
-        }
-    }
-}
-
-void PrintStartController::on_insufficient_filament_proceed_static(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStartController] on_insufficient_filament_proceed_static");
-    auto* self = static_cast<PrintStartController*>(lv_event_get_user_data(e));
-    if (!self) {
-        return;
-    }
-    if (self->insufficient_filament_modal_) {
-        helix::ui::modal_hide(self->insufficient_filament_modal_);
-        self->insufficient_filament_modal_ = nullptr;
-    }
-
-    // Continue the existing pre-print chain: filament-present check next. Uses
-    // the SAME shared gate as initiate() so the auto-unload suppression (AD5X
-    // IFS) and AMS lane truth apply identically here.
-    if (self->check_required_filament_present()) {
-        return;
-    }
-    auto unresolved = self->find_unresolved_tools();
-    if (!unresolved.empty()) {
-        auto tool_info = self->detail_view_->get_filament_tool_info();
-        self->show_color_mismatch_warning(unresolved, tool_info);
-        return;
-    }
-    self->continue_after_unresolved_check();
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PrintStartController::on_insufficient_filament_cancel_static(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStartController] on_insufficient_filament_cancel_static");
-    auto* self = static_cast<PrintStartController*>(lv_event_get_user_data(e));
-    if (!self) {
-        return;
-    }
-    if (self->insufficient_filament_modal_) {
-        helix::ui::modal_hide(self->insufficient_filament_modal_);
-        self->insufficient_filament_modal_ = nullptr;
-    }
-    if (self->update_print_button_) {
-        self->update_print_button_();
-    }
-    if (self->on_print_cancelled_) {
-        self->on_print_cancelled_();
-    }
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-// ============================================================================
-// Filament Mismatch Detection
-// ============================================================================
-
-std::vector<int> PrintStartController::find_unresolved_tools() {
-    // Skip check for single-color prints (no mapping needed)
-    if (filament_colors_.size() <= 1) {
-        return {};
-    }
-
-    // Use the already-computed FilamentMapper results from the mapping card
-    if (!detail_view_) {
-        spdlog::debug("[PrintStartController] No detail view, skipping mismatch check");
-        return {};
-    }
-
-    auto mappings = detail_view_->get_filament_mappings();
-    if (mappings.empty()) {
-        // No mappings = AMS not available or card not shown
-        spdlog::debug("[PrintStartController] No filament mappings available");
-        return {};
-    }
-
-    auto unresolved = helix::FilamentMapper::find_unresolved_tools(mappings);
-    if (!unresolved.empty()) {
-        spdlog::info("[PrintStartController] {} tools have no matching AMS slot",
-                     unresolved.size());
-    }
-    return unresolved;
-}
-
-void PrintStartController::show_color_mismatch_warning(
-    const std::vector<int>& unresolved_tools, const std::vector<helix::GcodeToolInfo>& tool_info) {
-    // Close any existing dialog first
-    if (color_mismatch_modal_) {
-        helix::ui::modal_hide(color_mismatch_modal_);
-        color_mismatch_modal_ = nullptr;
-    }
-
-    // Build message with human-readable color names
-    std::string message = lv_tr("These tools have no matching filament loaded:");
-    message += "\n\n";
-    for (int tool_idx : unresolved_tools) {
-        // Look up by real tool_index — tool_info may be used-filtered (compacted),
-        // so its vector position no longer equals the tool number.
-        const auto* tool = helix::ui::FilamentMappingCard::find_by_tool_index(tool_info, tool_idx);
-        if (tool) {
-            std::string color_name = helix::describe_color(tool->color_rgb);
-            message += "  " + std::string(LV_SYMBOL_BULLET) + " T" + std::to_string(tool_idx) +
-                       ": " + color_name;
-            if (!tool->material.empty()) {
-                message += " (" + tool->material + ")";
+        gate_resume_index_ = i;
+        print_gate_modal_ = helix::ui::modal_show_confirmation(
+            result.title.c_str(), result.body.c_str(),
+            result.severity == helix::GateSeverity::Error  ? ModalSeverity::Error
+            : result.severity == helix::GateSeverity::Info ? ModalSeverity::Info
+                                                           : ModalSeverity::Warning,
+            result.proceed_label.c_str(), on_gate_proceed_static, on_gate_cancel_static, this);
+        if (!print_gate_modal_) {
+            spdlog::error("[PrintStartController] Failed to create gate dialog for '{}'",
+                          gate_list_[i].name);
+            if (update_print_button_) {
+                update_print_button_();
             }
-            message += "\n";
+            return;
         }
+        spdlog::debug("[PrintStartController] Gate '{}' warned - showing dialog",
+                      gate_list_[i].name);
+        return; // the dialog drives continuation
     }
-    message += "\n";
-    message += lv_tr("Load the required filaments or start anyway?");
-
-    // Static buffer for message - must persist during modal lifetime (modal stores pointer).
-    // Safe because we always close any existing dialog first above,
-    // preventing concurrent access to this buffer.
-    static HELIX_PSRAM_BSS char message_buffer[1024];
-    snprintf(message_buffer, sizeof(message_buffer), "%s", message.c_str());
-
-    color_mismatch_modal_ = helix::ui::modal_show_confirmation(
-        lv_tr("Color Mismatch"), message_buffer, ModalSeverity::Warning, lv_tr("Start Anyway"),
-        on_color_mismatch_proceed_static, on_color_mismatch_cancel_static, this);
-
-    if (!color_mismatch_modal_) {
-        spdlog::error("[PrintStartController] Failed to create color mismatch warning dialog");
-        if (update_print_button_) {
-            update_print_button_();
-        }
-        return;
-    }
-
-    spdlog::debug("[PrintStartController] Color mismatch warning shown for {} tools",
-                  unresolved_tools.size());
-}
-
-void PrintStartController::on_color_mismatch_proceed_static(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStartController] on_color_mismatch_proceed_static");
-    auto* self = static_cast<PrintStartController*>(lv_event_get_user_data(e));
-    if (self) {
-        // Hide dialog first
-        if (self->color_mismatch_modal_) {
-            helix::ui::modal_hide(self->color_mismatch_modal_);
-            self->color_mismatch_modal_ = nullptr;
-        }
-        // Continue to material compatibility check before executing
-        self->continue_after_unresolved_check();
-    }
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void PrintStartController::on_color_mismatch_cancel_static(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStartController] on_color_mismatch_cancel_static");
-    auto* self = static_cast<PrintStartController*>(lv_event_get_user_data(e));
-    if (self) {
-        if (self->color_mismatch_modal_) {
-            helix::ui::modal_hide(self->color_mismatch_modal_);
-            self->color_mismatch_modal_ = nullptr;
-        }
-        // Re-enable print button since user cancelled
-        if (self->update_print_button_) {
-            self->update_print_button_();
-        }
-        if (self->on_print_cancelled_) {
-            self->on_print_cancelled_();
-        }
-        spdlog::debug("[PrintStartController] Print cancelled by user (color mismatch warning)");
-    }
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-// ============================================================================
-// Material Mismatch Detection
-// ============================================================================
-
-void PrintStartController::continue_after_unresolved_check() {
-    auto mismatches = find_material_mismatches();
-    if (!mismatches.empty()) {
-        show_material_mismatch_warning(mismatches);
-        return;
-    }
-
     execute_print_start();
 }
 
-std::vector<PrintStartController::MaterialMismatchDetail>
-PrintStartController::find_material_mismatches() {
-    std::vector<MaterialMismatchDetail> mismatches;
-
-    if (!detail_view_) {
-        return mismatches;
-    }
-
-    // Per-tool filament weights from gcode metadata. Used to skip tools the
-    // slicer assigned a material to but that never actually extrude (common
-    // when a multi-tool profile prints a single-tool file: T0..T2 inherit the
-    // profile's defaults but only T3 is used). Empty vector means the slicer
-    // didn't emit per-tool data — in that case we keep the old behavior and
-    // check every tool. Graceful fallback, no false-negatives possible.
-    std::vector<double> filament_weights;
-    if (auto md = detail_view_->get_file_metadata()) {
-        filament_weights = md->filament_weights;
-    }
-    auto tool_is_used = [&filament_weights](int tool_index) -> bool {
-        if (filament_weights.empty()) {
-            return true; // No data → check everything (old behavior).
-        }
-        if (tool_index < 0 || tool_index >= static_cast<int>(filament_weights.size())) {
-            return true; // Out-of-range → can't prove unused, be safe.
-        }
-        return filament_weights[tool_index] > 0.0;
-    };
-
-    auto& ams = AmsState::instance();
-
-    if (ams.is_available()) {
-        // AMS path: check ToolMapping.material_mismatch flags
-        auto mappings = detail_view_->get_filament_mappings();
-        auto tool_info = detail_view_->get_filament_tool_info();
-        const auto& slots = detail_view_->get_available_slots();
-
-        for (const auto& m : mappings) {
-            if (!m.material_mismatch) {
-                continue;
-            }
-            if (!tool_is_used(m.tool_index)) {
-                spdlog::debug("[PrintStartController] Skipping T{} mismatch — "
-                              "tool has zero filament usage in gcode",
-                              m.tool_index);
-                continue;
-            }
-
-            MaterialMismatchDetail detail;
-            detail.tool_index = m.tool_index;
-
-            // Get expected material from gcode tool info. Look up by real
-            // tool_index — tool_info may be used-filtered (compacted), so its
-            // vector position no longer equals the tool number.
-            if (const auto* tool =
-                    helix::ui::FilamentMappingCard::find_by_tool_index(tool_info, m.tool_index)) {
-                detail.expected_material = tool->material;
-            }
-
-            // Get loaded material from the mapped AMS slot
-            for (const auto& slot : slots) {
-                if (slot.slot_index == m.mapped_slot && slot.backend_index == m.mapped_backend) {
-                    detail.loaded_material = slot.material;
-                    break;
-                }
-            }
-
-            // Skip if either material is unknown (can't warn about unknowns)
-            if (detail.expected_material.empty() || detail.loaded_material.empty()) {
-                continue;
-            }
-
-            // Look up temperature ranges from the filament database
-            auto expected_info = filament::find_material(detail.expected_material);
-            if (expected_info) {
-                detail.expected_nozzle_min = expected_info->nozzle_min;
-                detail.expected_nozzle_max = expected_info->nozzle_max;
-                detail.expected_bed_temp = expected_info->bed_temp;
-            }
-
-            auto loaded_info = filament::find_material(detail.loaded_material);
-            if (loaded_info) {
-                detail.loaded_nozzle_min = loaded_info->nozzle_min;
-                detail.loaded_nozzle_max = loaded_info->nozzle_max;
-                detail.loaded_bed_temp = loaded_info->bed_temp;
-            }
-
-            mismatches.push_back(std::move(detail));
-        }
-    } else {
-        // Non-AMS path: compare gcode filament_type vs external spool
-        const auto& gcode_materials = detail_view_->get_filament_materials();
-        if (gcode_materials.empty()) {
-            return mismatches;
-        }
-
-        auto spool_info = SettingsManager::instance().get_external_spool_info();
-        if (!spool_info || spool_info->material.empty()) {
-            return mismatches;
-        }
-
-        // Check the first tool (single extruder)
-        const auto& expected = gcode_materials[0];
-        if (expected.empty()) {
-            return mismatches;
-        }
-
-        if (!helix::FilamentMapper::materials_match(expected, spool_info->material)) {
-            MaterialMismatchDetail detail;
-            detail.tool_index = 0;
-            detail.expected_material = expected;
-            detail.loaded_material = spool_info->material;
-
-            // Temperature from filament database for expected material
-            auto expected_info = filament::find_material(expected);
-            if (expected_info) {
-                detail.expected_nozzle_min = expected_info->nozzle_min;
-                detail.expected_nozzle_max = expected_info->nozzle_max;
-                detail.expected_bed_temp = expected_info->bed_temp;
-            }
-
-            // Temperature from external spool (user-set) or fall back to database
-            if (spool_info->nozzle_temp_min > 0 && spool_info->nozzle_temp_max > 0) {
-                detail.loaded_nozzle_min = spool_info->nozzle_temp_min;
-                detail.loaded_nozzle_max = spool_info->nozzle_temp_max;
-                detail.loaded_bed_temp = spool_info->bed_temp;
-            } else {
-                auto loaded_info = filament::find_material(spool_info->material);
-                if (loaded_info) {
-                    detail.loaded_nozzle_min = loaded_info->nozzle_min;
-                    detail.loaded_nozzle_max = loaded_info->nozzle_max;
-                    detail.loaded_bed_temp = loaded_info->bed_temp;
-                }
-            }
-
-            mismatches.push_back(std::move(detail));
-        }
-    }
-
-    if (!mismatches.empty()) {
-        spdlog::info("[PrintStartController] {} material mismatch(es) detected", mismatches.size());
-    }
-    return mismatches;
-}
-
-void PrintStartController::show_material_mismatch_warning(
-    const std::vector<MaterialMismatchDetail>& mismatches) {
-    // Close any existing dialog first
-    if (material_mismatch_modal_) {
-        helix::ui::modal_hide(material_mismatch_modal_);
-        material_mismatch_modal_ = nullptr;
-    }
-
-    std::string message;
-
-    if (mismatches.size() == 1) {
-        // Single-tool format: "This file was sliced for X but Y is loaded."
-        const auto& m = mismatches[0];
-        message = fmt::format(lv_tr("This file was sliced for {} but {} is loaded."),
-                              m.expected_material, m.loaded_material);
-
-        // Add temperature details if available
-        if (m.expected_nozzle_min > 0 && m.loaded_nozzle_min > 0) {
-            message += "\n\n";
-            message +=
-                fmt::format("  {} {}: {}\u2013{}°C {}, {}°C {}\n"
-                            "  {} {}: {}\u2013{}°C {}, {}°C {}",
-                            LV_SYMBOL_BULLET, m.expected_material, m.expected_nozzle_min,
-                            m.expected_nozzle_max, lv_tr("nozzle"), m.expected_bed_temp,
-                            lv_tr("bed"), LV_SYMBOL_BULLET, m.loaded_material, m.loaded_nozzle_min,
-                            m.loaded_nozzle_max, lv_tr("nozzle"), m.loaded_bed_temp, lv_tr("bed"));
-        }
-    } else {
-        // Multi-tool format: list each mismatched tool
-        message = lv_tr("These tools have incompatible materials loaded:");
-        message += "\n\n";
-        for (const auto& m : mismatches) {
-            std::string expected_temps;
-            if (m.expected_nozzle_min > 0) {
-                expected_temps =
-                    fmt::format(" ({}\u2013{}°C)", m.expected_nozzle_min, m.expected_nozzle_max);
-            }
-            std::string loaded_temps;
-            if (m.loaded_nozzle_min > 0) {
-                loaded_temps =
-                    fmt::format(" ({}\u2013{}°C)", m.loaded_nozzle_min, m.loaded_nozzle_max);
-            }
-            // "needs X (range): You have Y (range)" \u2014 clearer than the old
-            // "X -> Y" form, which read as a transformation rather than a
-            // comparison. Two short clauses joined by a colon scan well.
-            message += fmt::format("  {} T{}: {} {}{}: {} {}{}\n", LV_SYMBOL_BULLET, m.tool_index,
-                                   lv_tr("needs"), m.expected_material, expected_temps,
-                                   lv_tr("you have"), m.loaded_material, loaded_temps);
-        }
-    }
-
-    message += "\n\n";
-    message += lv_tr("Printing with the wrong material can cause clogs, poor adhesion, "
-                     "or failed prints.");
-
-    // Static buffer for message — must persist during modal lifetime.
-    static HELIX_PSRAM_BSS char message_buffer[2048];
-    snprintf(message_buffer, sizeof(message_buffer), "%s", message.c_str());
-
-    material_mismatch_modal_ = helix::ui::modal_show_confirmation(
-        lv_tr("Material Mismatch"), message_buffer, ModalSeverity::Warning, lv_tr("Start Anyway"),
-        on_material_mismatch_proceed_static, on_material_mismatch_cancel_static, this);
-
-    if (!material_mismatch_modal_) {
-        spdlog::error("[PrintStartController] Failed to create material mismatch warning dialog");
-        if (update_print_button_) {
-            update_print_button_();
-        }
-        return;
-    }
-
-    spdlog::debug("[PrintStartController] Material mismatch warning shown for {} tool(s)",
-                  mismatches.size());
-}
-
-void PrintStartController::on_material_mismatch_proceed_static(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStartController] on_material_mismatch_proceed_static");
-    auto* self = static_cast<PrintStartController*>(lv_event_get_user_data(e));
-    if (self) {
-        if (self->material_mismatch_modal_) {
-            helix::ui::modal_hide(self->material_mismatch_modal_);
-            self->material_mismatch_modal_ = nullptr;
-        }
-        self->execute_print_start();
+void PrintStartController::on_gate_proceed_static(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStartController] on_gate_proceed_static");
+    if (auto* self = static_cast<PrintStartController*>(lv_event_get_user_data(e))) {
+        self->on_gate_proceed();
     }
     LVGL_SAFE_EVENT_CB_END();
 }
 
-void PrintStartController::on_material_mismatch_cancel_static(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStartController] on_material_mismatch_cancel_static");
-    auto* self = static_cast<PrintStartController*>(lv_event_get_user_data(e));
-    if (self) {
-        if (self->material_mismatch_modal_) {
-            helix::ui::modal_hide(self->material_mismatch_modal_);
-            self->material_mismatch_modal_ = nullptr;
-        }
-        if (self->update_print_button_) {
-            self->update_print_button_();
-        }
-        if (self->on_print_cancelled_) {
-            self->on_print_cancelled_();
-        }
-        spdlog::debug("[PrintStartController] Print cancelled by user (material mismatch warning)");
+void PrintStartController::on_gate_proceed() {
+    if (print_gate_modal_) {
+        helix::ui::modal_hide(print_gate_modal_);
+        print_gate_modal_ = nullptr;
+    }
+    run_gates_from(gate_resume_index_ + 1);
+}
+
+void PrintStartController::on_gate_cancel_static(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStartController] on_gate_cancel_static");
+    if (auto* self = static_cast<PrintStartController*>(lv_event_get_user_data(e))) {
+        self->on_gate_cancel();
     }
     LVGL_SAFE_EVENT_CB_END();
+}
+
+void PrintStartController::on_gate_cancel() {
+    if (print_gate_modal_) {
+        helix::ui::modal_hide(print_gate_modal_);
+        print_gate_modal_ = nullptr;
+    }
+    if (update_print_button_) {
+        update_print_button_();
+    }
+    if (on_print_cancelled_) {
+        on_print_cancelled_();
+    }
+    spdlog::debug("[PrintStartController] Print cancelled by user (gate: {})",
+                  gate_list_[gate_resume_index_].name);
 }
 
 // ============================================================================

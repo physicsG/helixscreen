@@ -135,6 +135,20 @@
           <bind_flag_if_eq subject="ams_device_ops_is_afc" flag="hidden" ref_value="0"/>
         </setting_toggle_row>
 
+        <!-- Retention across eject: keep the previously assigned spool details
+             so reloading the same spool after maintenance needs no re-selection
+             (default on). Turn off to start fresh whenever a lane empties.
+             Meaningful on systems whose firmware reports spool ids per lane
+             (AFC, Happy Hare); other systems clear on a detected spool swap
+             regardless of this toggle. -->
+        <setting_toggle_row name="row_ams_keep_spool_info_on_eject"
+                            label="Keep Spool Info on Eject" label_tag="Keep Spool Info on Eject" icon="filament"
+                            description="Remember lane spool details across an eject"
+                            description_tag="Remember lane spool details across an eject"
+                            subject="ams_keep_spool_info_on_eject" callback="on_ams_keep_spool_info_toggled">
+          <bind_flag_if_eq subject="ams_device_ops_reports_spool_ids" flag="hidden" ref_value="0"/>
+        </setting_toggle_row>
+
         <!-- Offer the bypass controls on a machine whose firmware reports none.
              Shown only while the firmware says no, so it stays available for the
              user to switch back off. Happy Hare defaults [mmu_machine] has_bypass

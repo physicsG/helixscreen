@@ -459,6 +459,17 @@ bool PanelWidgetConfig::is_enabled(const std::string& id) const {
     return false;
 }
 
+bool PanelWidgetConfig::is_placed(const std::string& id) const {
+    for (const auto& page : pages_) {
+        auto it = std::find_if(page.widgets.begin(), page.widgets.end(),
+                               [&id](const PanelWidgetEntry& e) { return e.id == id; });
+        if (it != page.widgets.end()) {
+            return it->enabled && it->has_grid_position();
+        }
+    }
+    return false;
+}
+
 nlohmann::json PanelWidgetConfig::get_widget_config(const std::string& id) const {
     for (const auto& page : pages_) {
         auto it = std::find_if(page.widgets.begin(), page.widgets.end(),

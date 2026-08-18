@@ -27,6 +27,10 @@ void set_platform_override(int override_value) {
     s_platform_override = override_value;
 }
 
+bool platform_host_power_supported() {
+    return !is_android_platform();
+}
+
 void log_platform_info() {
     struct utsname uts {};
     if (uname(&uts) == 0) {

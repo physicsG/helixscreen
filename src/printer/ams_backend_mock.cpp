@@ -303,6 +303,17 @@ AmsError AmsBackendMock::start() {
                 scenario_thread_running_ = false;
             });
             spdlog::info("[AMS Mock] Applied initial state scenario: bypass");
+        } else if (scenario == "unaccounted") {
+            // Filament at the toolhead with no lane accounting for it — drives
+            // the unaccounted_toolhead_filament print-start gate (hand-fed /
+            // removed-bypass-filament states).
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                system_info_.filament_loaded = true;
+                system_info_.current_slot = -1;
+                mock_toolhead_unaccounted_ = true;
+            }
+            spdlog::info("[AMS Mock] Applied initial state scenario: unaccounted");
         }
     }
 
@@ -317,6 +328,7 @@ void AmsBackendMock::stop() {
     }
 
     running_ = false;
+    mock_toolhead_unaccounted_ = false;
     // Note: Don't log here - this may be called during static destruction
     // when spdlog's logger has already been destroyed (causes SIGSEGV)
 }
@@ -369,6 +381,10 @@ AmsSystemInfo AmsBackendMock::get_system_info() const {
     // Copy unit-level metadata not managed by registry
     for (size_t u = 0; u < info.units.size() && u < system_info_.units.size(); ++u) {
         info.units[u].name = system_info_.units[u].name;
+        // display_name was missing here while AmsBackendAfc copied it, so every
+        // mock profile that set one (htlf, torture) fell back to the internal
+        // name in the UI.
+        info.units[u].display_name = system_info_.units[u].display_name;
         info.units[u].connected = system_info_.units[u].connected;
         info.units[u].has_hub_sensor = system_info_.units[u].has_hub_sensor;
         info.units[u].hub_sensor_triggered = system_info_.units[u].hub_sensor_triggered;
@@ -497,6 +513,14 @@ int AmsBackendMock::get_current_slot() const {
 bool AmsBackendMock::is_filament_loaded() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return system_info_.filament_loaded;
+}
+
+std::optional<bool> AmsBackendMock::toolhead_filament_unaccounted() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!mock_toolhead_unaccounted_) {
+        return std::nullopt;
+    }
+    return true;
 }
 
 PathTopology AmsBackendMock::get_topology() const {
@@ -1640,13 +1664,13 @@ void AmsBackendMock::set_afc_mode(bool enabled) {
             entry->info.global_index = i;
             entry->info.material = d.material;
             // No brand: AFC does not report a vendor. read_vendor() in
-            // ams_backend_afc.cpp looks for vendor_name/vendor/brand, but
-            // upstream AFC #808 has not shipped, so the payload never carries
-            // any of them and a real lane's brand stays empty unless the user
-            // sets an override. The vendor in sample_data is what the Spoolman
-            // identity cache supplies for the linked lanes, not what firmware
-            // reports -- seeding it onto the slot made mock mode render a brand
-            // real hardware never produces, which is what hid #1264.
+            // ams_backend_afc.cpp looks for vendor_name/spool_vendor/vendor/brand,
+            // but upstream AFC #808 has not shipped (#833 is the PR), so the
+            // payload never carries any of them and a real lane's brand stays
+            // empty unless the user sets an override. The vendor in sample_data is
+            // what the Spoolman identity cache supplies for the linked lanes, not
+            // what firmware reports -- seeding it onto the slot made mock mode
+            // render a brand real hardware never produces, which is what hid #1264.
             entry->info.color_rgb = d.color;
             entry->info.color_name = d.color_name;
             entry->info.status = (i == 0) ? SlotStatus::LOADED : d.status;
@@ -1770,6 +1794,7 @@ void AmsBackendMock::set_multi_unit_mode(bool enabled) {
     if (enabled) {
         // Disable conflicting modes
         tool_changer_mode_ = false;
+        torture_mode_ = false;
 
         // Configure as AFC with 2 units
         system_info_.type = AmsType::AFC;
@@ -1935,6 +1960,7 @@ void AmsBackendMock::set_mixed_topology_mode(bool enabled) {
         // Disable conflicting modes
         tool_changer_mode_ = false;
         multi_unit_mode_ = false;
+        torture_mode_ = false;
 
         // Configure as AFC system
         system_info_.type = AmsType::AFC;
@@ -2127,6 +2153,7 @@ void AmsBackendMock::set_vivid_mixed_mode(bool enabled) {
         tool_changer_mode_ = false;
         multi_unit_mode_ = false;
         mixed_topology_mode_ = false;
+        torture_mode_ = false;
 
         // Configure as AFC system
         system_info_.type = AmsType::AFC;
@@ -2391,6 +2418,7 @@ void AmsBackendMock::set_snapmaker_mode(bool enabled) {
     vivid_mixed_mode_ = false;
     ifs_mode_ = false;
     htlf_toolchanger_mode_ = false;
+    torture_mode_ = false;
 
     // 4 slots, PARALLEL topology (each lane is its own toolhead), no tool
     // mapping editing, no endless spool, no bypass — see AmsBackendSnapmaker.
@@ -2672,6 +2700,7 @@ void AmsBackendMock::set_htlf_toolchanger_mode(bool enabled) {
         multi_unit_mode_ = false;
         mixed_topology_mode_ = false;
         vivid_mixed_mode_ = false;
+        torture_mode_ = false;
 
         // Configure as AFC system
         system_info_.type = AmsType::AFC;
@@ -2813,6 +2842,200 @@ void AmsBackendMock::set_htlf_toolchanger_mode(bool enabled) {
 bool AmsBackendMock::is_htlf_toolchanger_mode() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return htlf_toolchanger_mode_;
+}
+
+namespace {
+
+/// One lane of the torture profile. `tool` is the AFC `map` alias (-1 = the lane
+/// is unmapped, which real rigs do have); `extruder` is the Klipper extruder the
+/// lane physically feeds, and is what collapses two units onto one nozzle.
+struct TortureLane {
+    const char* backend_name;
+    const char* material;
+    uint32_t color;
+    const char* color_name;
+    SlotStatus status;
+    int tool;
+    const char* extruder;
+    float remaining_g;
+};
+
+/// One unit of the torture profile, over a contiguous run of kTortureLanes.
+struct TortureUnit {
+    const char* name;
+    const char* display_name;
+    PathTopology topology;
+    bool has_hub_sensor;
+    bool hub_sensor_triggered;
+    int first_lane;
+    int lane_count;
+};
+
+// Lanes in on-screen unit order. Global slot index == index into this array.
+constexpr TortureLane kTortureLanes[] = {
+    // Box Turtle Turtle_1 -> e0 (lane2 deliberately unmapped)
+    {"lane1", "PLA", 0xD2C3C3, "Bone", SlotStatus::LOADED, 3, "e0", 612.0f},
+    {"lane2", "PLA", 0x0004FF, "Blue", SlotStatus::AVAILABLE, -1, "e0", 415.0f},
+    {"lane3", "PLA", 0x9000FF, "Violet", SlotStatus::AVAILABLE, 4, "e0", 780.0f},
+    {"lane4", "PLA", 0x0084FF, "Azure", SlotStatus::AVAILABLE, 5, "e0", 233.0f},
+    // Toolchanger Tools -> e1 / e2, direct (no hub)
+    {"e1", "PLA", 0x101010, "Black", SlotStatus::LOADED, 1, "e1", 500.0f},
+    {"e2", "PLA+", 0x2B2B2B, "Graphite", SlotStatus::LOADED, 2, "e2", 640.0f},
+    // ViViD Vivid_1 -> e3 (all empty, as on the captured rig)
+    {"lane5", "", 0x000000, "", SlotStatus::EMPTY, 6, "e3", 0.0f},
+    {"lane6", "", 0x000000, "", SlotStatus::EMPTY, 7, "e3", 0.0f},
+    {"lane7", "", 0x000000, "", SlotStatus::EMPTY, 8, "e3", 0.0f},
+    {"lane8", "", 0x000000, "", SlotStatus::EMPTY, 9, "e3", 0.0f},
+    // EMU EMU_1 -> e3 as well (lane9 unmapped, lane10 is the tooled lane)
+    {"lane9", "", 0x000000, "", SlotStatus::EMPTY, -1, "e3", 0.0f},
+    {"lane10", "PLA", 0xDD00FF, "Magenta", SlotStatus::LOADED, 11, "e3", 388.0f},
+    // Claymore HTLF_claymore_1 -> e0 as well
+    {"lane11", "", 0x000000, "", SlotStatus::EMPTY, 12, "e0", 0.0f},
+    {"lane12", "", 0x000000, "", SlotStatus::EMPTY, 13, "e0", 0.0f},
+    {"lane13", "", 0x000000, "", SlotStatus::EMPTY, 14, "e0", 0.0f},
+    {"lane14", "", 0x000000, "", SlotStatus::EMPTY, 15, "e0", 0.0f},
+};
+
+constexpr TortureUnit kTortureUnits[] = {
+    {"Box_Turtle Turtle_1", "Turtle 1", PathTopology::HUB, true, true, 0, 4},
+    {"Toolchanger Tools", "Tools", PathTopology::PARALLEL, false, false, 4, 2},
+    {"ViViD Vivid_1", "Vivid 1", PathTopology::HUB, true, false, 6, 4},
+    {"EMU EMU_1", "EMU 1", PathTopology::HUB, true, true, 10, 2},
+    {"Claymore HTLF_claymore_1", "HTLF Claymore 1", PathTopology::HUB, true, false, 12, 4},
+};
+
+constexpr int kTortureLaneCount = static_cast<int>(std::size(kTortureLanes));
+
+} // namespace
+
+void AmsBackendMock::set_torture_mode(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    torture_mode_ = enabled;
+
+    if (!enabled) {
+        afc_mode_ = false;
+        unit_topologies_.clear();
+        system_info_.type = AmsType::HAPPY_HARE;
+        system_info_.type_name = "Happy Hare (Mock)";
+        system_info_.version = "2.7.0-mock";
+        topology_ = PathTopology::LINEAR;
+        spdlog::info("[AmsBackendMock] Torture mode disabled");
+        return;
+    }
+
+    // Disable conflicting modes. afc_mode_ stays ON: this profile IS an AFC rig,
+    // and is_afc_system() reads that flag (see the header note).
+    afc_mode_ = true;
+    tool_changer_mode_ = false;
+    multi_unit_mode_ = false;
+    mixed_topology_mode_ = false;
+    vivid_mixed_mode_ = false;
+    ifs_mode_ = false;
+    htlf_toolchanger_mode_ = false;
+    snapmaker_mode_ = false;
+
+    system_info_.type = AmsType::AFC;
+    system_info_.type_name = "AFC (Mock Torture)";
+    system_info_.version = "1.2.4-mock";
+    system_info_.total_slots = kTortureLaneCount;
+
+    auto afc_caps = helix::printer::afc_default_capabilities();
+    system_info_.endless_spool_enabled = afc_caps.supports_endless_spool;
+    endless_spool_supported_ = afc_caps.supports_endless_spool;
+    endless_spool_editable_ = afc_caps.supports_endless_spool;
+    system_info_.supports_tool_mapping = afc_caps.supports_tool_mapping;
+    system_info_.supports_bypass = afc_caps.supports_bypass;
+    system_info_.supports_purge = afc_caps.supports_purge;
+    system_info_.tip_method = afc_caps.tip_method;
+    system_info_.has_hardware_bypass_sensor = false;
+    topology_ = PathTopology::HUB;
+
+    unit_topologies_.clear();
+    std::vector<std::pair<std::string, std::vector<std::string>>> registry_units;
+    for (const auto& u : kTortureUnits) {
+        unit_topologies_.push_back(u.topology);
+        std::vector<std::string> lane_names;
+        for (int i = 0; i < u.lane_count; ++i) {
+            lane_names.emplace_back(kTortureLanes[u.first_lane + i].backend_name);
+        }
+        registry_units.emplace_back(u.name, std::move(lane_names));
+    }
+
+    slots_.clear();
+    slots_.initialize_units(registry_units);
+
+    for (const auto& u : kTortureUnits) {
+        for (int s = 0; s < u.lane_count; ++s) {
+            const int gi = u.first_lane + s;
+            auto* entry = slots_.get_mut(gi);
+            if (!entry)
+                continue;
+            const auto& lane = kTortureLanes[gi];
+            entry->info.global_index = gi;
+            entry->info.slot_index = s;
+            entry->info.material = lane.material;
+            entry->info.color_rgb = lane.color;
+            entry->info.color_name = lane.color_name;
+            entry->info.status = lane.status;
+            entry->info.extruder_name = lane.extruder;
+            entry->info.total_weight_g = 1000.0f;
+            entry->info.remaining_weight_g = lane.remaining_g;
+            if (auto mat_info = filament::find_material(lane.material)) {
+                entry->info.nozzle_temp_min = mat_info->nozzle_min;
+                entry->info.nozzle_temp_max = mat_info->nozzle_max;
+                entry->info.bed_temp = mat_info->bed_temp;
+            }
+        }
+    }
+
+    // Forward map: tool number -> global slot. T0 and T10 are deliberately absent,
+    // matching a rig whose AFC aliases are neither dense nor unit-ordered.
+    int highest_tool = -1;
+    for (const auto& lane : kTortureLanes) {
+        highest_tool = std::max(highest_tool, lane.tool);
+    }
+    std::vector<int> tool_map(static_cast<size_t>(highest_tool + 1), -1);
+    for (int gi = 0; gi < kTortureLaneCount; ++gi) {
+        if (kTortureLanes[gi].tool >= 0) {
+            tool_map[static_cast<size_t>(kTortureLanes[gi].tool)] = gi;
+        }
+    }
+    slots_.set_tool_map(tool_map);
+
+    system_info_.units.clear();
+    for (int ui = 0; ui < static_cast<int>(std::size(kTortureUnits)); ++ui) {
+        const auto& t = kTortureUnits[ui];
+        AmsUnit u;
+        u.unit_index = ui;
+        u.name = t.name;
+        u.display_name = t.display_name;
+        u.slot_count = t.lane_count;
+        u.first_slot_global_index = t.first_lane;
+        u.connected = true;
+        u.firmware_version = "1.2.4-mock";
+        u.has_toolhead_sensor = true;
+        u.has_slot_sensors = true;
+        u.has_hub_sensor = t.has_hub_sensor;
+        u.hub_sensor_triggered = t.hub_sensor_triggered;
+        u.topology = t.topology;
+        // hub_tool_label stays -1: the shared-nozzle merge is meant to run off
+        // SlotInfo::extruder_name here, which is the path a real AFC rig takes.
+        system_info_.units.push_back(u);
+    }
+
+    // Turtle lane1 is the loaded lane, so the active path runs from the leftmost
+    // unit to a nozzle the rightmost unit also feeds - the crossing case.
+    system_info_.current_slot = 0;
+    system_info_.current_tool = 3;
+    system_info_.filament_loaded = true;
+    filament_segment_ = PathSegment::NOZZLE;
+
+    mock_device_sections_ = helix::printer::afc_default_sections();
+    mock_device_actions_ = helix::printer::afc_default_actions();
+
+    spdlog::info("[AmsBackendMock] Torture mode: 5 units / {} lanes / 4 extruders "
+                 "(Turtle+Claymore share e0, ViViD+EMU share e3)",
+                 kTortureLaneCount);
 }
 
 PathTopology AmsBackendMock::get_unit_topology(int unit_index) const {

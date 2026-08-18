@@ -10,6 +10,7 @@
 #include <alsa/asoundlib.h>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -79,6 +80,34 @@ class ALSASoundBackend : public SoundBackend {
     void set_render_source(std::function<void(float*, size_t, int)> fn) override;
     void clear_render_source() override;
 
+    /// Park the render thread instead of writing silence to the card.
+    ///
+    /// SoundSequencer already calls these when its queue goes idle, but the
+    /// base-class versions are no-ops, so on ALSA the render thread kept
+    /// feeding the device forever: at period_size frames per write that is a
+    /// wakeup every few milliseconds, permanently, with nothing playing. On a
+    /// printer host that shares a CPU with Klipper, idle wakeups are not free —
+    /// they are the same class of problem as idle memory.
+    ///
+    /// Every snd_pcm_* call stays on the render thread, which is what makes
+    /// suspend() safe to call from the sequencer while the render thread may
+    /// be inside snd_pcm_writei. Parking drains the device rather than
+    /// dropping it, so a sound's tail — still sitting in the hardware buffer
+    /// when the sequencer's clock says the sound is over — plays out instead
+    /// of being discarded.
+    ///
+    /// resume() is a synchronous handoff: it does not return until the render
+    /// thread has completed a full render pass (or the handoff times out /
+    /// the thread is gone). The sequencer starts its step clock the instant
+    /// resume() returns; when resume() was fire-and-forget, notes published
+    /// in the gap before the thread woke were overwritten un-rendered —
+    /// short sounds never played and longer ones lost their beginning
+    /// (v0.99.114 field regression, Raspberry Pi). This mirrors
+    /// SDLSoundBackend::resume(), which opens and unpauses the device on the
+    /// caller's thread for the same reason.
+    void suspend() override;
+    void resume() override;
+
   private:
     void render_loop();
     snd_pcm_sframes_t recover_xrun(snd_pcm_sframes_t err);
@@ -86,6 +115,19 @@ class ALSASoundBackend : public SoundBackend {
     snd_pcm_t* pcm_ = nullptr;
     std::thread render_thread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> suspended_{false};
+    std::mutex suspend_mutex_;
+    std::condition_variable suspend_cv_;
+
+    // Resume handoff: resume() bumps resume_seq_; the render thread acks the
+    // newest sequence at the bottom of each completed pass. Sequence numbers
+    // rather than a bool because a resume can arrive before the thread even
+    // noticed the suspend — then no wake is needed, and the next completed
+    // pass is the handoff either way.
+    std::atomic<uint32_t> resume_seq_{0};
+    std::atomic<uint32_t> resume_acked_{0};
+    std::mutex ack_mutex_;
+    std::condition_variable ack_cv_;
 
     static constexpr int MAX_VOICES = 4;
 

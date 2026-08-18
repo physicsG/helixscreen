@@ -57,10 +57,32 @@ The AD5X runs HelixScreen through the [ZMOD](https://github.com/ghzserg/zmod) fi
 - Display initialization (fbdev, touch via tslib env vars)
 - App lifecycle (init.d service script `S80guppyscreen`)
 - Update management via Moonraker update manager
+- Z-offset storage — see below
+
+### ZMOD z-offset storage
+
+ZMOD does **not** treat Klipper's live `gcode_move.homing_origin[2]` as the
+authoritative z-offset. Its `SET_GCODE_OFFSET` override writes every adjustment to
+the `gcode_offsets` save-variable, `END_PRINT` / `CANCEL_PRINT` reset the live
+offset to 0, and `START_PRINT` re-applies the stored value via `LOAD_GCODE_OFFSET`
+(gated on the `load_zoffset` save-variable, off by default).
+
+Consequences, all handled in `include/z_offset_persistence.h`:
+
+| Effect | Handling |
+|--------|----------|
+| Live offset reads 0.000 whenever idle | Display the stored value instead while idle; the live one is authoritative only mid-print |
+| Stored value lives in `save_variables.variables.gcode_offsets.z` (mm) | `save_variables` is subscribed for any printer exposing `SAVE_ZMOD_DATA`, independently of the IFS subscription |
+| Relative `SET_GCODE_OFFSET Z_ADJUST=` resolves against the zeroed live offset, and the override persists the result | Idle adjustments send an absolute `Z=` computed from the displayed base |
+| Reload at print start ships off | `SAVE_ZMOD_DATA LOAD_ZOFFSET=1` sent once per session, while idle |
+
+ZMOD's own docs describe the idle reading as "for reference only". Note also that
+the native-screen and screenless offsets are stored separately — `LOAD_ZOFFSET_NATIVE`
+copies one to the other, and HelixScreen does not call it.
 
 ### Moonraker Update Manager
 
-ZMOD configures Moonraker to check for HelixScreen updates. The `release_info.json` file tells Moonraker which release asset to download:
+ZMOD configures Moonraker to check for HelixScreen updates. The release_info.json file tells Moonraker which release asset to download:
 
 ```json
 {
@@ -127,7 +149,7 @@ prestonbrown/helixscreen#431, prestonbrown/helixscreen#303 for history.
 **User workarounds** (documented in `docs/user/TROUBLESHOOTING.md`):
 
 1. Settings → Display → Sleep → **Never** (`sleep_sec = 0`)
-2. Edit `helixconfig.json`: set `display.sleep_backlight_off = false` to
+2. Edit helixconfig.json: set `display.sleep_backlight_off = false` to
    keep the backlight on during sleep
 
 **Investigation TODO:**

@@ -9,7 +9,7 @@
 | Write/update user-facing docs | `user/CLAUDE.md` — style rules for end users |
 | Find XML widget docs | `devel/LVGL9_XML_GUIDE.md` |
 | Understand modal patterns | `devel/MODAL_SYSTEM.md` |
-| Check a feature's architecture | `devel/ARCHITECTURE.md` |
+| Check a feature's architecture | `devel/ARCHITECTURE.md` → the right chapter in `devel/architecture/` |
 | See what's planned/complete | `devel/ROADMAP.md` |
 | Update the doc index | `README.md` + this file + relevant `CLAUDE.md` |
 

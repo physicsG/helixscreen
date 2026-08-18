@@ -12,11 +12,13 @@
 #include "filament_consumption_tracker.h"
 #include "filament_mapper.h"
 #include "lvgl/lvgl.h"
+#include "moonraker_error.h"
 #include "subject_managed_panel.h"
 
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -62,10 +64,49 @@ class AmsState {
     /**
      * @brief Maximum number of AMS units supported for per-unit subjects
      *
-     * Per-unit subjects (temperature, humidity) are allocated statically.
-     * Systems with more units will only have subjects for the first MAX_UNITS.
+     * Per-unit subjects (temperature, humidity, environment indicator) are
+     * allocated statically, one set per unit, and registered under
+     * ams_unit_<i>_* / ams_env_ind_<i>_* names. Eight matches the widest rig the
+     * AMS system-path canvas draws, so every unit the path shows also has a
+     * badge to bind.
+     *
+     * A unit past the cap still gets a card; its environment indicator binds the
+     * always-off placeholders below instead of names nothing registered — see
+     * env_indicator_subject_names().
      */
-    static constexpr int MAX_UNITS = 4;
+    static constexpr int MAX_UNITS = 8;
+
+    /// Always-0 int subject bound by unit cards past MAX_UNITS. Keeps the
+    /// environment badge hidden rather than naming a subject that does not exist
+    /// (which the XML parser reports once per binding, seven times per card).
+    static constexpr const char* ENV_IND_OFF_FLAG_SUBJECT = "ams_env_ind_off_flag";
+
+    /// Always-empty string subject, same purpose as ENV_IND_OFF_FLAG_SUBJECT.
+    static constexpr const char* ENV_IND_OFF_TEXT_SUBJECT = "ams_env_ind_off_text";
+
+    /// Fully-expanded XML subject names for one unit card's environment indicator
+    /// (the seven type="subject" props of ams_unit_card / ams_environment_indicator).
+    struct EnvIndicatorSubjectNames {
+        std::string temp_text;
+        std::string humidity_text;
+        std::string humidity_status;
+        std::string humidity_visible;
+        std::string visible;
+        std::string drying_active;
+        std::string drying_text;
+    };
+
+    /**
+     * @brief Subject names a unit card binds its environment indicator to
+     * @param unit_index 0-based unit index; may exceed MAX_UNITS
+     * @return Names guaranteed to be registered once init_subjects() has run
+     *
+     * Units below the cap get their own ams_env_ind_<i>_* set. Anything at or
+     * past it has no per-unit subjects, so it gets the always-off placeholders:
+     * the card renders with its badge hidden, which beats both binding names
+     * that do not exist and showing unit 0's readings under another unit's name.
+     */
+    [[nodiscard]] static EnvIndicatorSubjectNames env_indicator_subject_names(int unit_index);
 
     /// @name Dryer Constants
     /// @{
@@ -207,6 +248,23 @@ class AmsState {
      * @return One AvailableSlot per slot across all backends (empty if none).
      */
     [[nodiscard]] std::vector<helix::AvailableSlot> collect_available_slots() const;
+
+    /**
+     * @brief Whether ANY backend is currently feeding from its bypass / external
+     *        spool instead of a slot.
+     *
+     * The companion to collect_available_slots(): bypass is deliberately not a
+     * slot, so a tool fed from it can never be satisfied by that vector. Callers
+     * that reason over slots must ask this before concluding a tool is unfed.
+     *
+     * Reads each backend's is_bypass_active() rather than testing
+     * AmsSystemInfo::current_slot == -2. Those agree in principle, but
+     * current_slot is written from many places during a status frame (the AFC
+     * backend alone has nine writes after the one that sets -2, including the
+     * deliberately unguarded mount-state derivation), whereas is_bypass_active()
+     * returns the firmware's own bypass report. Only the latter is stable.
+     */
+    [[nodiscard]] bool any_bypass_active() const;
 
     /**
      * @brief Check if AMS is available
@@ -497,6 +555,19 @@ class AmsState {
      */
     lv_subject_t* get_slot_count_subject() {
         return &ams_slot_count_;
+    }
+
+    /**
+     * @brief Get the "unit cards are width-starved" subject
+     *
+     * 1 when the overview's unit cards are too narrow to carry their full chrome,
+     * so the cards drop decoration to protect their content. Written by
+     * AmsOverviewPanel from the MEASURED card width (it depends on both the
+     * breakpoint and the unit count, so no token or breakpoint alone can express
+     * it); read declaratively by ams_unit_card.xml.
+     */
+    lv_subject_t* get_cards_compact_subject() {
+        return &ams_cards_compact_;
     }
 
     /**
@@ -1155,19 +1226,6 @@ class AmsState {
     void sync_current_loaded_from_backend(const AmsSystemInfo& primary_info);
 
     /**
-     * @brief Sync Spoolman active spool after a slot edit
-     *
-     * Called when the user edits a slot's spool assignment via the UI.
-     * If the edited slot is the currently loaded slot, sets the Spoolman
-     * active spool. This is needed because backends like AFC only sync
-     * active spool on physical load/unload, not UI-initiated reassignment.
-     *
-     * @param slot_index The slot that was edited
-     * @param spoolman_id The new Spoolman spool ID (0 = unlinked)
-     */
-    void sync_active_spool_after_edit(int slot_index, int spoolman_id);
-
-    /**
      * @brief Set action detail text directly (for UI-managed states)
      *
      * Used when UI is managing a process (like preheat) that the backend
@@ -1202,6 +1260,50 @@ class AmsState {
      * @brief Clear external spool info
      */
     void clear_external_spool_info();
+
+    /**
+     * @brief Commit a backend-slot spool edit through every backing store.
+     *
+     * Single authority for spool assignment changes on backend slots. Order:
+     * 1. S1: Spoolman server active spool — set when linking (id > 0), clear
+     *    (post 0) when unlinking a previously-linked slot. Ungated on
+     *    manages_active_spool() by design: matches the previous overlay
+     *    semantics (see spec § follow-ups for the SET-arm gating question).
+     * 2. S6: invalidate the old spool's identity cache when the link changed.
+     * 3. S3: backend->set_slot_info() (firmware SET_SPOOL_ID gcode rides inside).
+     * 4. S4+S7: sync_from_backend().
+     *
+     * @return the AmsError from set_slot_info so callers keep their error toasts.
+     */
+    AmsError commit_slot_edit(int slot_index, const SlotInfo& original, const SlotInfo& info);
+
+    /**
+     * @brief Commit an external-spool assignment through every backing store.
+     *
+     * Non-empty (spoolman_id > 0 OR material set) → S5 persist via
+     * set_external_spool_info; empty → S5 erase via clear_external_spool_info
+     * (an empty assigned=true record is the bug the FilamentPanel arm avoided).
+     * S1: set/clear the Spoolman server active spool to match.
+     * S6: invalidate the replaced link's identity cache entry on a link change
+     * (mirrors commit_slot_edit).
+     */
+    void commit_external_spool_edit(const SlotInfo& info);
+
+    /**
+     * @brief Server-first variant for callers that must gate the local store
+     * write on the server round-trip (SpoolmanPanel::set_active_spool).
+     *
+     * S6 runs up front. When info links a spool (spoolman_id > 0), S1's
+     * set_active_spool() is issued with the caller's completion: on server
+     * success the S5+S7 store subset runs and on_committed fires (both on the
+     * main thread); on server failure on_error fires (main thread) and no
+     * store is written. Manual entries and clears have no server identity to
+     * gate on — the clear arm fires fire-and-forget exactly like the sync
+     * commit, the store subset runs at once, and on_committed fires
+     * immediately.
+     */
+    void commit_external_spool_edit(const SlotInfo& info, std::function<void()> on_committed,
+                                    std::function<void(const MoonrakerError& err)> on_error);
 
     /**
      * @brief Set the current AMS action state directly
@@ -1368,6 +1470,16 @@ class AmsState {
     IMoonrakerAPI* api_ = nullptr;
     int last_synced_spoolman_id_ = 0; ///< Track to avoid duplicate set_active_spool calls
 
+    /// S5+S7 store subset shared by both commit_external_spool_edit arms:
+    /// persist non-empty records, erase empty ones (kills empty
+    /// assigned=true records).
+    void apply_external_spool_store(const SlotInfo& info);
+
+    /// S6 — drop the replaced link's identity-cache entry when the external
+    /// spool's Spoolman link changes (mirrors commit_slot_edit's original-vs-
+    /// edited guard).
+    void invalidate_stale_external_identity(const SlotInfo& info);
+
     // Subject manager for automatic cleanup
     SubjectManager subjects_;
     /// See get_subjects_lifetime(). Created with the object and REPLACED (never
@@ -1429,6 +1541,11 @@ class AmsState {
     /// usually made while PRINTING, one frame before the firmware's pause lands
     /// — "not paused" therefore cannot mean "disarm" on its own.
     bool runout_prev_paused_{false};
+    /// Previous any_bypass_active(), so sync_from_backend() can bump
+    /// slots_version on the edge. Bypass moves no slot, so nothing else in the
+    /// slot-delta scan notices it, and the pre-print filament check would keep
+    /// serving a stale result.
+    bool last_bypass_active_{false};
     /// prev_backend_runout_ has no meaning yet, so the first sample seeds it
     /// instead of counting as an edge — a flag that was already true when we
     /// connected (or when a backend was swapped in) describes no transition we
@@ -1438,6 +1555,7 @@ class AmsState {
     lv_subject_t external_spool_color_;
     lv_subject_t supports_bypass_;
     lv_subject_t ams_slot_count_;
+    lv_subject_t ams_cards_compact_;
     lv_subject_t slots_version_;
     lv_subject_t tool_map_version_;
     /// First-gate (port) filament-present flag for the ACTIVE tool (#991).
@@ -1610,6 +1728,12 @@ class AmsState {
     lv_subject_t env_ind_drying_active_[MAX_UNITS];
     lv_subject_t env_ind_drying_text_[MAX_UNITS];
     char env_ind_drying_text_buf_[MAX_UNITS][ENV_IND_DRYING_BUF_SIZE]{};
+
+    // Always-off placeholders for units past MAX_UNITS (see
+    // env_indicator_subject_names). Written once at init and never again.
+    lv_subject_t env_ind_off_flag_;
+    lv_subject_t env_ind_off_text_;
+    char env_ind_off_text_buf_[ENV_IND_TEXT_BUF_SIZE]{};
 
     // Detail-view env indicator mirror subjects (reflect detail_env_unit_)
     lv_subject_t env_ind_detail_temp_text_;

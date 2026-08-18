@@ -137,6 +137,31 @@ class GridEditMode {
     /// @return Zeroed metrics when there is no container or it has no extent.
     helix::CellMetrics current_metrics(lv_area_t* out_content = nullptr) const;
 
+    /// Edge grab band in px for a grid cell of @p cell_px on its shorter axis.
+    ///
+    /// A fraction of the cell rather than a fixed pixel count: the same 18px is
+    /// a large share of a cell on a 480x272 panel and a sliver of one on a
+    /// 1024x600 panel, so a constant makes the edge either impossible to miss
+    /// or impossible to hit depending on the screen. Clamped at both ends to
+    /// stay finger-sized.
+    ///
+    /// @return The fallback band when @p cell_px is not positive.
+    static int edge_hit_band_for_cell(float cell_px);
+
+    /// Edge grab band in px, derived from the live grid's cell size. Falls back
+    /// to a fixed band before a grid exists (cell_w/cell_h are 0 then).
+    int edge_hit_band() const;
+
+    /// Whether a press at @p origin counts as landing on @p area, allowing the
+    /// edge grab band of slop outside the bounds.
+    ///
+    /// Anchored at the press origin rather than the live pointer because a
+    /// resize that grows a widget drags *away* from it by design: by the time
+    /// the drag threshold is met the pointer is legitimately off-widget, and
+    /// testing it there rejects exactly the gestures that should have become
+    /// resizes. Where the finger first landed is what decides ownership.
+    bool press_owns_widget(lv_point_t origin, const lv_area_t& area) const;
+
     void create_dots_overlay();
     void destroy_dots_overlay();
     void create_selection_chrome(lv_obj_t* widget);

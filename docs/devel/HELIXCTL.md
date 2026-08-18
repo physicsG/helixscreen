@@ -243,7 +243,7 @@ live breadcrumb of the navigation stack, e.g. `controls / motion_panel_0 > `.
 |---------|---------|
 | `ping` | Health check — answers `pong` once the control server is accepting |
 | `status` | Panel, connection state, and printer status in one response |
-| `navigate <panel>` | Go to a base panel |
+| `navigate <panel>` | Go to a base panel, exactly as tapping its navbar button does — **pops any open overlay stack**, honours the connection/Klipper gating (a blocked panel is an error, not a silent no-op), and a second `navigate home` while already on Home resets the carousel |
 | `cd <container>` | Move the working directory — see below. **No UI side effect** |
 | `go_back`, `back` | Pop the current overlay |
 | `help`, `?` | Print the command list (same as `-h`/`--help`) |
@@ -597,8 +597,14 @@ reads the resolved value, so it shows which one is really in effect.
 
 `demo` covers screens that only appear on a real printer event or configured
 state, constructed with representative sample data and the real lifecycle:
-`preflight-check`, `runout-modal`, `lock-screen`, `print-status`, `print-tune`,
-`ams`, `camera`, `ams-error-toast`.
+`preflight-check`, `color-mismatch`, `runout-modal`, `lock-screen`,
+`print-status`, `print-tune`, `ams`, `camera`, `ams-error-toast`,
+`action-prompt-worst`, `action-prompt-many`.
+
+`action-prompt-many` raises a Klipper `action:prompt` carrying seven material
+presets, the case where the buttons cannot share one row and must wrap. Both
+`action-prompt-*` demos need a live `action:prompt_begin`, so no sequence of
+clicks reaches them in mock mode.
 
 `ams-error-toast` raises the two-line AMS error toast (message plus
 `AmsError::suggestion`) using the longest suggestion any backend produces. The
@@ -618,7 +624,9 @@ refusal — this is how the toast's layout gets checked on a 480x272 panel.
 `log` reads the same ring buffer the debug bundle's `log_tail` uses — capacity
 scales with the device's RAM and is overridable via `HELIX_LOG_RING_LINES`. It
 means a scripted run can read the app's own log without redirecting stdout to a
-file first.
+file first. The ring is installed by `init_early()`, so on a short-lived instance
+it still holds the Phase 2 config-load trail that runs before the full logger
+exists (`LOGGING.md` § "Ring-Buffer Sink Lifecycle").
 
 #### `reset` — a cheap alternative to rebooting between tests
 

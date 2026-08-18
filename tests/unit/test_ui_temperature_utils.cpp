@@ -482,6 +482,75 @@ TEST_CASE("Temperature Utils: format_temp_number - compact-wide rule", "[temp_ut
     }
 }
 
+// ============================================================================
+// displayed_deci() — the reading as it actually renders
+//
+// format_temp_number() drops the decimal at and above 100C, so the number on a
+// card is a ROUNDED value while the heating color and the status word beside it
+// used to be derived from a TRUNCATED one. displayed_deci() is the single place
+// that snaps a reading to the precision the UI shows, so all three agree.
+// ============================================================================
+
+TEST_CASE("Temperature Utils: displayed_deci snaps to the rendered precision",
+          "[temp_utils][format]") {
+    SECTION("At or above 100C the decimal is gone, so the value rounds") {
+        REQUIRE(displayed_deci(2196) == 2200); // 219.6 renders "220"
+        REQUIRE(displayed_deci(2229) == 2230); // 222.9 renders "223"
+        REQUIRE(displayed_deci(2204) == 2200); // 220.4 renders "220"
+    }
+
+    SECTION("Rounding matches printf %.0f: half to even") {
+        REQUIRE(displayed_deci(2105) == 2100); // 210.5 -> "210"
+        REQUIRE(displayed_deci(2115) == 2120); // 211.5 -> "212"
+    }
+
+    SECTION("Below 100C the decimal is still shown, so the reading is untouched") {
+        REQUIRE(displayed_deci(596) == 596); // 59.6 renders "59.6"
+        REQUIRE(displayed_deci(999) == 999); // 99.9 renders "99.9"
+        REQUIRE(displayed_deci(-105) == -105);
+    }
+
+    SECTION("Boundary: exactly 100C") {
+        REQUIRE(displayed_deci(1000) == 1000);
+        REQUIRE(displayed_deci(1004) == 1000); // 100.4 renders "100"
+    }
+}
+
+TEST_CASE("Temperature Utils: the status word never contradicts the number shown",
+          "[temp_utils][heater_display]") {
+    // 222.9 with a 220 target renders as "223". Classifying the truncated 222
+    // put a green "Ready" next to a card reading 223 / 220.
+    SECTION("Above the band: the rounded reading is what gets classified") {
+        auto result = heater_display(2229, 2200);
+        REQUIRE(result.temp == "223 / 220°C");
+        REQUIRE(result.status == "Cooling");
+    }
+
+    SECTION("Just under target: the number reads as the target and so does the state") {
+        auto result = heater_display(2196, 2200);
+        REQUIRE(result.temp == "220 / 220°C");
+        REQUIRE(result.status == "Ready");
+    }
+
+    // The invariant behind both cases: whenever the current and target render as
+    // the same number, the heater cannot claim to be moving toward it.
+    SECTION("A reading that displays as the target is never Heating or Cooling") {
+        constexpr int target_deci = 2200;
+        char cur_buf[16];
+        char tgt_buf[16];
+        format_temp_number(deci_to_degrees_f(target_deci), tgt_buf, sizeof(tgt_buf));
+        for (int deci = target_deci - 60; deci <= target_deci + 60; ++deci) {
+            format_temp_number(deci_to_degrees_f(deci), cur_buf, sizeof(cur_buf));
+            if (std::string(cur_buf) != std::string(tgt_buf)) {
+                continue;
+            }
+            INFO("current decidegrees " << deci << " renders as " << cur_buf);
+            auto result = heater_display(deci, target_deci);
+            REQUIRE(result.status == "Ready");
+        }
+    }
+}
+
 TEST_CASE("Temperature Utils: format_temperature_f - float formatting", "[temp_utils][format]") {
     char buf[16];
 

@@ -5,6 +5,7 @@
 
 #include "ui_ams_edit_overlay.h"
 #include "ui_color_picker.h"
+#include "ui_error_reporting.h"
 #include "ui_event_safety.h"
 #include "ui_spool_canvas.h"
 #include "ui_toast_manager.h"
@@ -315,11 +316,20 @@ void ActiveSpoolWidget::handle_clicked() {
             helix::ui::get_ams_edit_overlay().show_for_slot(
                 parent_screen_, current, slot, api_,
                 [current](const helix::ui::AmsEditOverlay::EditResult& result) {
-                    if (result.saved) {
-                        AmsBackend* be = AmsState::instance().get_backend();
-                        if (be) {
-                            be->set_slot_info(current, result.slot_info);
-                        }
+                    if (!result.saved) {
+                        return;
+                    }
+                    AmsBackend* be = AmsState::instance().get_backend();
+                    if (!be) {
+                        return;
+                    }
+                    // Capture the pre-edit slot BEFORE the commit — its unlink
+                    // arm (clear the server active spool) needs the old link.
+                    SlotInfo original = be->get_slot_info(current);
+                    AmsError err =
+                        AmsState::instance().commit_slot_edit(current, original, result.slot_info);
+                    if (!err.success()) {
+                        helix::ui::notify_ams_error(err);
                     }
                 });
             return;
@@ -342,11 +352,9 @@ void ActiveSpoolWidget::open_external_spool_edit() {
         parent_screen_, -2, initial_info, api_,
         [](const helix::ui::AmsEditOverlay::EditResult& result) {
             if (result.saved) {
-                if (result.slot_info.spoolman_id > 0 || !result.slot_info.material.empty()) {
-                    AmsState::instance().set_external_spool_info(result.slot_info);
-                } else {
-                    AmsState::instance().clear_external_spool_info();
-                }
+                // Owns S1 (server active-spool sync) + the S5 emptiness
+                // predicate + settings persist/erase.
+                AmsState::instance().commit_external_spool_edit(result.slot_info);
             }
         });
 }

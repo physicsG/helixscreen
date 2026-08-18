@@ -22,9 +22,9 @@ from .yaml_manager import (
 )
 
 # Trees that can reference a translation key. `assets` matters because
-# printer_database.json stores tags like pre_print_option.ai_detect.label as
-# data; `include` matters because headers hold label text the extractor's
-# src-only scan never saw.
+# printer_database.json stores tags (e.g. "AI detection") as data; `include`
+# matters because headers hold label text the extractor's src-only scan never
+# saw.
 REFERENCE_DIRS = ("src", "include", "ui_xml", "assets", "config", "tests", "lib/helix-xml")
 
 REFERENCE_SUFFIXES = {".c", ".cpp", ".h", ".hpp", ".inc", ".xml", ".json", ".yml", ".yaml"}
@@ -39,6 +39,11 @@ _XML_TEXT_RE = re.compile(r">([^<>\n]+)<")
 
 # Escapes that appear in C/JSON literals; keys are stored unescaped in YAML.
 _UNESCAPE = {r"\"": '"', r"\\": "\\", r"\t": "\t"}
+
+# A RUN of adjacent C string literals ("a" "b" "c"), separated only by
+# whitespace/comments-free spacing. Matches single literals too; the consumer
+# only keeps the joined form when it is longer than the first piece.
+_ADJACENT_LITERALS_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"(?:\s*"(?:[^"\\\n]|\\.)*")+')
 
 
 def _unescape(text: str) -> str:
@@ -97,6 +102,20 @@ def collect_referenced_strings(
             else:
                 for m in _C_LITERAL_RE.finditer(content):
                     found.add(_unescape(m.group(1)))
+                # C++ concatenates adjacent literals: "foo " "bar" is the
+                # single string "foo bar" at compile time. clang-format wraps
+                # long literals this way, so a long key's reference must be
+                # matched in joined form too (tour bodies in
+                # src/ui/tour/tour_steps.cpp). Adding joins only widens the
+                # candidate set — consistent with the recall-oriented design:
+                # a false reference leaves a stale entry, a missed one deletes
+                # a string users see.
+                if path.suffix in {".c", ".cpp", ".h", ".hpp", ".inc"}:
+                    for m in _ADJACENT_LITERALS_RE.finditer(content):
+                        pieces = _C_LITERAL_RE.findall(m.group(0))
+                        joined = "".join(pieces)
+                        if len(joined) > len(pieces[0]):
+                            found.add(_unescape(joined))
 
     return found
 

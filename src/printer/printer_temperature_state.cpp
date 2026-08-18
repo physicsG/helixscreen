@@ -12,6 +12,7 @@
 
 #include "ui_temperature_utils.h"
 
+#include "klipper_extruder_naming.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "state/subject_macros.h"
 #include "unit_conversions.h"
@@ -175,8 +176,7 @@ void PrinterTemperatureState::init_extruders(const std::vector<std::string>& hea
     std::vector<std::string> extruder_names;
     for (const auto& name : heaters) {
         // Accept "extruder" and "extruderN" (digit suffix), reject "extruder_stepper" etc.
-        if (name == "extruder" ||
-            (name.size() > 8 && name.rfind("extruder", 0) == 0 && std::isdigit(name[8]))) {
+        if (is_extruder_name(name)) {
             extruder_names.push_back(name);
         }
     }

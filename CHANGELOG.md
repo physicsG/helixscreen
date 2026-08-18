@@ -5,73 +5,292 @@ All notable changes to HelixScreen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.99.114] - 2026-08-16
 
-## [0.99.114] - 2026-08-14
+<!-- whatsnew
+The 1.0 release candidate. Highlights:
+
+- Fixes a lit-but-frozen screen on Centauri Carbon and AD5M
+- Idle printers no longer refuse jogs as "busy"
+- A Klipper shutdown is no longer displayed as Ready
+- CFS: checks filament really moved, plus fan and recovery fixes on K1
+- AFC: correct buffer health, tool numbers and spool names
+- Single-hotend printers stop reporting tools they do not have
+- Dialogs fit on small screens
+- New Hazard theme, and lower memory use throughout
+-->
 
 **This is the 1.0 release candidate.** It is the code intended to ship as 1.0.0, published as
 an ordinary 0.99.x update so that everyone gets it rather than only people who opted into a
 beta channel. If it holds up in the field, 1.0.0 follows with no further changes. If it does
 not, the fix ships as 0.99.115 and no bad 1.0.0 ever exists.
 
-The bulk of this release is a sweep through every issue still open against 1.0. Several turned
-out to be real defects that had gone unnoticed because the wrong thing was being measured: the
-Lifetime Print Stats tile was quietly reporting only your most recent 500 jobs, accelerometers
-were never discovered at all so Settings > Sensors was empty on every printer that has one, and
-two printers were missing the database entry that applies their preset, so a Centauri Carbon
-installed by any route other than the factory image got none of its tuned defaults.
+This started as a sweep through every issue still open against 1.0 and turned into the largest
+release the project has shipped. Two fixes stand out because both presented the same way, as
+"the printer stopped responding", with nothing in the log to explain it. Waking the display
+could park the UI thread on a lock and leave a lit screen ignoring every touch, in one case for
+36 minutes. And a Klipper shutdown could be overwritten by a stale snapshot replayed at the end
+of discovery, so the app showed Ready for two and a half minutes while the printer was down,
+re-enabled navigation and kept sending commands to a dead printer.
+
+Several other defects had gone unnoticed because the wrong thing was being measured: the
+Lifetime Print Stats tile quietly reported only your most recent 500 jobs, accelerometers were
+never discovered at all so Settings > Sensors was empty on every printer that has one, and two
+printers were missing the database entry that applies their preset.
+
+### Added
+
+- **A new theme, Hazard.** ANSI Z535 safety colours on powder-coated black: caution yellow,
+  orange for warning, red for danger, with sharp corners and brass seams. Dark-only.
+- HelixScreen now detects and reports a hung UI main loop, so a freeze leaves evidence behind
+  instead of looking like a dead process. Detection only, nothing is killed. The threshold
+  defaults to 60 seconds and is settable at runtime or with `HELIX_HANG_THRESHOLD_SEC`.
+- When updates cannot be installed, the notice is now a row you can tap. It explains how to
+  update from a terminal and shows a QR code to the documentation.
+- The Android app is documented in the README and the install guide: which of the three APKs to
+  take, why the `.aab` is not for users, sideloading, permissions, and the uninstall needed to
+  move to a future Play Store build.
+- `helix-screen ctl` can address unnamed widgets and set label text directly, which makes far
+  more of the interface reachable for scripted testing and screenshots.
 
 ### Fixed
+
+**Freezes and connection state**
+
+- **A lit screen that ignored every touch.** Waking the display forced a WebSocket reconnect on
+  the UI thread, and that reconnect waits for in-flight callbacks with no time bound, so one
+  undrained callback parked the main loop permanently. Seen on Centauri Carbon and AD5M and
+  confirmed on two wedged devices. The reconnect is now Android-only, where it is actually
+  needed, and the wait is bounded
+  ([#1245](https://github.com/prestonbrown/helixscreen/issues/1245)).
+- **A Klipper shutdown could be displayed as Ready.** Klippy state arrives from two unordered
+  sources, and the snapshot replayed at the end of discovery could put Ready back over a live
+  shutdown. That re-enabled the nav buttons, auto-dismissed the recovery dialog moments after it
+  correctly appeared, and let commands through to a dead printer. Live frames now win over
+  replayed ones. Relatedly, an unrecognised printer state no longer falls back to Ready.
+- **Jogs refused as "Printer is busy" on an idle printer.** Klipper reports the idle timeout as
+  Printing while any gcode runs at all, so housekeeping loops such as bed fan timers, air filter
+  timers and AFC's own prep made roughly 7% of jog attempts bounce. HelixScreen now waits for a
+  full second of continuous activity before it treats the printer as busy.
+- **The change-Moonraker-address prompt landed on top of the setup wizard.** On a fresh install
+  it appeared about a minute in, over the wizard's own Connection step, giving two competing
+  host-entry dialogs.
+
+**Creality CFS** ([#968](https://github.com/prestonbrown/helixscreen/issues/968), [#1278](https://github.com/prestonbrown/helixscreen/issues/1278))
+
+- **CFS operations now verify that filament actually moved.** A load or unload the firmware
+  reports as finished is checked against the toolhead sensor, and a mismatch raises a fault with
+  its own recovery action rather than being reported as success.
+- **The part-cooling fan no longer blows on the nozzle during every K1 load, cut and flush**, and
+  two runout messages that previously paused the print with no dialog at all now show one. Both
+  came from commands wrongly believed absent on K1; the K1 firmware image proves otherwise.
+- **CFS error recovery works on K1.** It was sending a resume command that firmware does not
+  register, so the box never resumed.
+- Filament changes no longer pass a parameter the firmware does not accept, so the purge runs at
+  your configured length instead of silently falling back to defaults.
+- The filament code catalog is cached rather than re-parsed on every box update, which was a
+  100 KB parse every time a spool moved.
+
+**AFC and BoxTurtle**
+
+- **Buffer health is attributed to the right unit and stays there.** On multi-unit rigs it landed
+  on unit 0 for every unit, then went blank for minutes until the firmware happened to push a
+  change. Found on a five-unit rig.
+- **A Snapmaker U1 with five units drew six toolheads for four extruders, all claiming T0.** AFC
+  publishes free-form config section names, and six places parsed them with a grammar that only
+  fits Klipper's own. They now resolve names the way Klipper does.
+- **Spool names and vendors resolve from AFC's lane data** using the key names AFC actually
+  publishes.
+- **Spoolman users are no longer told to upgrade AFC to get filament names.** Names already
+  resolve through Spoolman; multi-colour spools are the part that needs the newer AFC, and the
+  notice now says so.
+- **A spurious warning told users to add an `extruder_name` setting AFC refuses to start
+  without.** It fired because the config query lands just after the first status frames.
+- AFC lanes follow the firmware's own `current_map` rather than guessing the lowest tool number,
+  so multi-tool lanes drive the tool the firmware actually selected.
+- Spool assignments are no longer rewritten on weight noise. A lane reporting weight as a float
+  that drifts by hundredths caused 590 rewrites of the spool file, 590 database writes and 590
+  filament-panel rebuilds in a single session.
+- Config writes no longer trigger a full file-list reload. An AFC rig caused 113 complete
+  directory round trips in one session while the user sat on the print status screen.
+
+**Tool and nozzle counts**
+
+- **A single-hotend printer behind a 4-lane AMS no longer reports four tools.** The nozzle label,
+  the print-status tool badge, its chevron and the nozzle picker all counted lanes rather than
+  hotends, and the picker went on to offer nozzles the printer does not have.
+- **Preheating "All" on such a printer sent the same target four times** and the confirmation
+  claimed it had heated four tools.
+- **A 4-port AD5X no longer advertises a 16-tool machine.** It was reporting every addressable
+  tool number the firmware register can hold rather than the ones actually mapped.
+
+**AMS and filament**
+
+- **`PLA+`, `PA6-CF`, `PETG-CF` and every other punctuated material name were silently dropped**
+  while the save reported success. Our own filament database ships `PLA+`. Names containing a
+  space, such as `Silk PLA`, never worked either.
+- **A fifth AMS unit produced parser warnings and a permanently dark temperature and humidity
+  badge.** The unit limit is raised to eight, and the environment overlay stops showing unit 0's
+  humidity for every unit.
+- **Spools with no usable weight are drawn full rather than half full**, which had read as half
+  gone. Four places in the interface had drifted to different answers and now agree.
+- A crash when opening the AMS context menu, and a deadlock risk on Snapmaker hardware, are both
+  closed.
+
+**Screens, dialogs and widgets**
+
+- **On small displays a modal's button row could fall off the bottom of the card**, leaving a
+  dialog that could not be dismissed. Every breakpoint's limit is now measured from the real
+  modal on screen and re-verified from 480x272 up to 2560x1440
+  ([#1277](https://github.com/prestonbrown/helixscreen/issues/1277)).
+- **A home-screen widget that would not fit announced itself as "removed" on every launch**, and
+  a widget that was enabled but held no cell showed in the catalog as placed, greyed out and
+  impossible to select or remove.
+- **Widget content no longer clips or wraps one letter per line on larger displays.** The size
+  bands were a single set of pixel values calibrated for small screens.
+- Row 2 of Calibration & Tools no longer runs its labels together when it carries four
+  conditional buttons.
+- Toggling the printer switcher in the navbar takes effect immediately instead of waiting until
+  you leave the overlay.
+- A crash in grid edit mode when deleting a widget mid-resize is fixed.
+- The print status header no longer shows an empty action button during a print.
+- Page-scroll chevrons on the home screen stop landing on a widget's own content.
+- Several dialogs that could grow past the screen are capped and scroll properly: AMS loading
+  errors, the shutdown and recovery dialogs, and action prompts. The AFC fault diagram no longer
+  sits inside the scrolling text area.
+
+**Z-offset**
+
+- **The Z-Offset row showed 0.000 whenever an AD5M or AD5X was idle, and adjusting it while idle
+  could throw away your real offset.** ZMOD keeps the authoritative offset in its own storage and
+  clears Klipper's live one when a print ends, so an idle nudge was applied to a phantom zero and
+  that is what got saved. HelixScreen now reads the stored value, shows it while idle, and sends
+  an absolute adjustment when the live offset is not the real base.
+- **A printer whose offset sits past 2mm is no longer yanked down to 2.000 on the first tap** in
+  the tune overlay, which drove the nozzle into the print. The limit now applies to how far one
+  tuning session can travel, not to the offset itself
+  ([#1280](https://github.com/prestonbrown/helixscreen/issues/1280)).
+
+**Print history and status**
 
 - The Lifetime Print Stats tile now reports true lifetime totals from Moonraker instead of
   summing the most recent 500 jobs. If your totals disagreed with Mainsail, this was why
   ([#1272](https://github.com/prestonbrown/helixscreen/issues/1272)).
+- The idle "Reprint Last" tile no longer offers a file you deleted.
+- A prompt button whose macro fails now reports Klipper's own error message instead of closing
+  the dialog and leaving an empty screen.
+
+**Hardware, printers and presets**
+
 - Accelerometers are discovered again. Settings > Sensors listed nothing and showed a count of
   zero on every printer with an ADXL345 or LIS2DW
   ([#1262](https://github.com/prestonbrown/helixscreen/issues/1262)).
 - The Elegoo Centauri Carbon and Artillery M1 Pro now pick up their presets. Without the
   database link, neither printer received any of its preset settings unless it was installed
   from the factory image ([#1260](https://github.com/prestonbrown/helixscreen/issues/1260)).
-- Creality CFS filament changes on K1-family printers no longer pass a parameter the firmware
-  does not accept, so the purge runs on its configured length rather than silently falling back
-  to defaults. Confirmed against Creality's own CFS firmware
-  ([#968](https://github.com/prestonbrown/helixscreen/issues/968)).
-- Unlocking beta features, selecting the Dev update channel, then locking beta again no longer
-  leaves the app fetching from Dev with no way back to Stable.
-- A printer preset no longer applies its panel's display and touch settings to a different
-  machine's screen when HelixScreen is talking to that printer over the network.
+- **Touchscreens that report only multi-touch axes are calibrated correctly.** Every coordinate
+  past the screen width had been saturating at the edge
+  ([#1259](https://github.com/prestonbrown/helixscreen/issues/1259)).
+- **An AD5X slot with a type but no colour no longer aborts the Change Type dialog** with nothing
+  left to reopen, and the phase display stops inventing a 230C target the printer never had.
 - Screen rotation is now a setting in Display & Sound rather than something only reachable by
   editing config, and the rotation probe no longer misses every tap.
-- Several dialogs that could grow past the screen on small displays are capped and scroll
-  properly: AMS loading errors, the shutdown and recovery dialogs, and action prompts. The AFC
-  fault diagram no longer sits inside the scrolling text area.
-- The print status header no longer shows an empty action button during a print.
-- Page-scroll chevrons on the home screen stop landing on a widget's own content.
+- A nozzle sitting just above its target no longer shows as heating while calling itself Ready.
+  The temperature shown and the state described are now derived from the same value.
 - Large g-code files are handled correctly on 32-bit builds, and the DRM backend keeps its
   64-bit buffer offset there, fixing display init on 32-bit Pi images.
-- Translations resolve all C escape sequences in keys, not just hex ones, so a further batch of
-  text stops falling back to English.
+- A printer preset no longer applies its panel's display and touch settings to a different
+  machine's screen when HelixScreen is talking to that printer over the network.
 - A fresh install no longer loses its shipped platform preset when an earlier `printer_data`
   directory outlives the install.
-- AFC lanes follow the firmware's own `current_map` rather than guessing the lowest tool number,
-  so multi-tool lanes drive the tool the firmware actually selected.
 
-### Added
+**Spoolman setup**
 
-- `helix-screen ctl` can address unnamed widgets and set label text directly, which makes far
-  more of the interface reachable for scripted testing and screenshots.
+- **Spoolman setup no longer dead-ends on a stock Creality K2**, where Moonraker's config lives
+  outside the only writable file root.
+- **The AD5M's config is no longer rejected as unwritable** when it is in fact writable through a
+  linked path.
+- Setup no longer claims Moonraker reads its config from somewhere else after any config edit
+  since Moonraker last restarted, and a guessed config path must now match exactly before
+  anything is written to it.
+
+**Updates and installation**
+
+- **On a standalone-display install the entire Software Updates section vanished**, and the fix
+  could only reach users inside the update they were being kept from. HelixScreen now recognises
+  the second update route the installer supports, and checking for updates is separated from
+  installing them so a machine that cannot install can still tell you an update exists.
+- **The installer's own advice could not be followed.** Nine messages told users to repair an
+  install with a command that needs `bash`, absent on the BusyBox firmwares, and that would have
+  performed a fresh install rather than an update.
+- **Upgrading from the CLI failed with a permission error** even after the installer reported
+  sudo was available, because it asked whether it could write into a directory rather than
+  whether it could rename it.
+- **Unprivileged Raspberry Pi installs no longer land under a root-owned parent**, which left
+  only the destructive fallback path ([#970](https://github.com/prestonbrown/helixscreen/issues/970)).
+- **Three permanent PolKit warnings in Mainsail and Fluidd are gone on Centauri Carbon and K2
+  Plus**, and a Moonraker restart now works on firmware that uses neither systemd nor the init
+  script we knew about.
+- Unlocking beta features, selecting the Dev update channel, then locking beta again no longer
+  leaves the app fetching from Dev with no way back to Stable.
+
+**Sound**
+
+- **A printer with sounds turned off no longer holds the audio device open for the whole
+  session**, writing silence every period. On Android that also kept an `AudioTrack` open
+  ([#1253](https://github.com/prestonbrown/helixscreen/issues/1253)).
+- The PWM buzzer backend no longer probes for a beeper on boards that have none, and the AD5M
+  stops shipping 919 KB of music it cannot play. `M300` still works everywhere.
+
+**Android**
+
+- **The 1.0 release would have been refused as a downgrade on every existing Android install**
+  and rejected by the Play Store, because of how the version code was packed.
+
+**Translations**
+
+- **All nine languages are now fully translated**, up from 99.7% in the eight non-English ones.
+  The runtime CJK fonts are rebuilt too: eight characters the new Japanese and Chinese text needs
+  were in no font file, and a missing character draws as an empty box with no warning anywhere.
+- Translations resolve all C escape sequences in keys, not just hex ones, so a further batch of
+  text stops falling back to English.
+
+### Changed
+
+- **Memory use is down across the board**, which matters most on the Centauri Carbon and other
+  boards that swap at idle. About 1.2 MB of address space returned by capping allocator arenas,
+  1 MB off the CC1 binary by dropping mocks and asserts from shipped builds, 345 KB of fonts that
+  the per-platform tiers had never actually pruned, and 615 KB off the shipped layout files, of
+  which roughly 310 KB stays resident for the whole session. The print history, the filament
+  tables, the keypad and the tips database all stop holding memory they no longer need.
+- Debug bundles now include the startup logs. Everything config-related happened before the
+  logger was installed, so a bundle could show a "settings were corrupted" message with not one
+  matching line anywhere in it.
 
 ### Internal
 
-- The AddressSanitizer and ThreadSanitizer CI gates could not report failure. Both piped through
-  `tee` without `pipefail` and then printed a success banner unconditionally, so a run with real
-  sanitizer errors was reported green. Fixed, along with a genuine use-after-scope in a test
-  fixture that had been hiding behind it.
+- **The sanitizer CI gates were reporting green while failing.** A run with ten real
+  AddressSanitizer reports was reported as passing, because the output was piped without
+  `pipefail` and a success banner printed unconditionally. Fixed, along with the three standing
+  findings the masked gate had been swallowing.
+- **The XML formatter's `--check` claimed files were clean that it had never managed to read**,
+  and its errors were being sent to `/dev/null`. Three layouts had been unreadable to it.
+- Two use-after-frees closed (the AMS context menu's subjects outliving their storage, and a grid
+  resize animation keyed on the wrong object), a latent out-of-bounds write removed, and a
+  lock-order inversion between the Snapmaker backend and AMS state fixed.
+- **The Android release-signing gate was vacuous** and would have passed on an artifact whose
+  signature was never read. This is how v0.99.43 shipped a debug-signed bundle.
+- **The Play Store "What's New" text was being chopped mid-clause** on every release, and its
+  last two entries silently swapped. A release section can now carry an explicit block used
+  verbatim, with a hard error if it exceeds the limit.
+- Three Cloudflare Worker test suites had never run in CI. They do now, along with the analytics
+  dashboard build.
 - The `Build` workflow had been red for a day because the Moonraker plugin test dependency was
   never declared. Declared, with a gate so it cannot recur silently.
-- The ESP32 firmware build is green again after a missing link stub.
 - Emergency-stop overlay observers now carry a lifetime token, closing a use-after-free that
   reproduces deterministically when the guard is removed.
+- The install base is now estimated from CDN update polls rather than opt-in telemetry alone,
+  which puts the real fleet at roughly double what had been quoted.
 
 ## [0.99.113] - 2026-08-13
 
@@ -5159,6 +5378,7 @@ Initial tagged release. Foundation for all subsequent development.
 - Automated GitHub Actions release pipeline
 - One-liner installation script with platform auto-detection
 
+[0.99.114]: https://github.com/prestonbrown/helixscreen/compare/v0.99.113...v0.99.114
 [0.99.113]: https://github.com/prestonbrown/helixscreen/compare/v0.99.112...v0.99.113
 [0.99.112]: https://github.com/prestonbrown/helixscreen/compare/v0.99.111...v0.99.112
 [0.99.111]: https://github.com/prestonbrown/helixscreen/compare/v0.99.108...v0.99.111

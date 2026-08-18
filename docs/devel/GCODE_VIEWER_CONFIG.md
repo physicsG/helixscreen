@@ -39,7 +39,7 @@ The current diamond cross-section implementation uses separate vertices for each
 ### Configuration Location
 
 - **Template**: `config/settings.json.template`
-- **Runtime**: Config loaded from path specified at startup (typically `/tmp/settings.json` in development)
+- **Runtime**: Config loaded from path specified at startup (typically /tmp/settings.json in development)
 - **Code**: Setting is read during G-code viewer initialization
 
 ### Example

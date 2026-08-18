@@ -1792,24 +1792,15 @@ void AmsEditOverlay::commit_and_close() {
         api_ = get_moonraker_api();
     }
 
-    // Sync active spool with Moonraker on every save (idempotent POST; see
-    // Phase-1 notes). Skipped for the new-spool-on-save path (id still 0);
-    // that case re-syncs from the create callback in do_spoolman_save().
-    if (api_ && working_info_.spoolman_id > 0) {
-        sync_active_spool(api_, working_info_.spoolman_id);
-    } else if (api_ && original_info_.spoolman_id > 0 && working_info_.spoolman_id == 0) {
-        // Unassignment: propagate 0 so Moonraker clears its active spool.
-        sync_active_spool(api_, 0);
-    }
-
     // Switching the linked spool (A>0 -> B>0, or 0 -> B>0) is a pure RELINK, not
     // an edit of the linked spool's record. The newly linked spool already owns
     // its identity/weight in Spoolman, so there is nothing to confirm and nothing
     // to PATCH — prompting to "update the linked spool anyway" or repointing a
-    // spool here would corrupt the wrong record (task #16). The new active spool
-    // was already registered by sync_active_spool() above; commit the link
-    // locally and close. Unlink (working id == 0) is intentionally NOT treated as
-    // a relink — it falls through to the existing new-spool / local-close logic.
+    // spool here would corrupt the wrong record (task #16). The completion
+    // consumer's commit_slot_edit()/commit_external_spool_edit() call registers
+    // the new active spool server-side; commit the link locally and close.
+    // Unlink (working id == 0) is intentionally NOT treated as a relink — it
+    // falls through to the existing new-spool / local-close logic.
     const bool relinked_to_existing_spool =
         working_info_.spoolman_id > 0 && working_info_.spoolman_id != original_info_.spoolman_id;
     if (relinked_to_existing_spool) {
@@ -1875,10 +1866,12 @@ void AmsEditOverlay::do_spoolman_save(helix::SpoolmanSlotSaver::LinkIntent inten
                             if (result.new_vendor_id != 0) {
                                 working_info_.spoolman_vendor_id = result.new_vendor_id;
                             }
-                            // The early sync_active_spool() above was skipped because
-                            // spoolman_id was 0 on both sides (creation hadn't happened
-                            // yet). Notify Moonraker now so Mainsail/Fluidd show the
-                            // new spool as active and filament tracking starts.
+                            // Deliberate async exception to "the commit owns
+                            // the active-spool sync": a newly created spool's
+                            // id only exists HERE, after the completion
+                            // consumer already ran with id 0. Notify Moonraker
+                            // now so Mainsail/Fluidd show the new spool as
+                            // active and filament tracking starts.
                             if (result.created_new_spool && result.new_spool_id != 0 && api_) {
                                 sync_active_spool(api_, result.new_spool_id);
                             }

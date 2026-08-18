@@ -479,8 +479,11 @@ void setup_discovery_callbacks_esp(MoonrakerManager& manager) {
                 // update_from_status() + ToolState — exactly the path an
                 // inbound live notification takes. Same call the desktop
                 // handler makes (application.cpp:2593).
+                // Flagged as a cached snapshot: it was captured when the subscribe
+                // response landed, and live WebSocket frames have been flowing ever
+                // since, so it must not regress a liveness signal it predates.
                 if (c && status_snapshot->is_object() && !status_snapshot->empty()) {
-                    c->dispatch_status_update(*status_snapshot);
+                    c->dispatch_status_update(*status_snapshot, /*from_cached_snapshot=*/true);
                 }
 
                 spdlog::info("[app_boot] discovery applied: {} heaters, {} fans, {} sensors, "

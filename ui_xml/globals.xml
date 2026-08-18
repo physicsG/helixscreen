@@ -282,6 +282,66 @@
          Bound below the (header + divider + button row + 85% dialog cap)
          budget on each breakpoint, so the dialog never exceeds 85% screen
          and the OK/Cancel row stays on-screen even with long messages. -->
+    <!-- dialog_content_pinned_max: for modals that keep ONE extra block pinned
+         BELOW the scroll area (a diagram, a status row) instead of letting it
+         scroll. dialog_content_max budgets header + divider + button row only, so
+         such a modal overruns the 85% card cap and its button row falls off the
+         bottom. Each value reserves that block's height on top of the standard
+         chrome. Prefer moving the block inside the scroll container and using
+         dialog_content_max — this ladder is the escape hatch for cases where the
+         block must stay visible while the text scrolls.
+         Values are MEASURED, not derived: the modal was rendered at each
+         breakpoint and the card's clamp plus its button-row overhang gave the
+         true chrome height, so the cap is (85% cap - chrome) with ~8px spare.
+         Measured chrome / headroom per breakpoint:
+           micro  480x272  chrome 102  max 129
+           tiny   480x320  chrome 125  max 147
+           small  640x400  chrome 168  max 172
+           medium 800x480  chrome 193  max 215
+           large 1024x600  chrome 230  max 280
+           xxlarge 1280x1024 chrome 448 max 422
+         An earlier hand-derived ladder was wrong at five of seven breakpoints
+         (medium clipped by 33px, large by 72px), which is why these are
+         measurements rather than arithmetic. -->
+    <px name="dialog_content_pinned_max_micro" value="121"/>
+    <px name="dialog_content_pinned_max_tiny" value="139"/>
+    <px name="dialog_content_pinned_max_small" value="164"/>
+    <px name="dialog_content_pinned_max_medium" value="207"/>
+    <px name="dialog_content_pinned_max_large" value="272"/>
+    <px name="dialog_content_pinned_max_xlarge" value="330"/>
+    <px name="dialog_content_pinned_max_xxlarge" value="414"/>
+
+    <!-- dialog_content_tall_chrome_max: for modals whose card carries a SECOND
+          button row (with its divider) below the scroll area, on top of the
+          standard header + divider + one button row. dialog_content_max budgets
+          the standard chrome only, so such a modal overruns the 85% card cap and
+          its last button falls off the bottom — the shape klipper_recovery_dialog
+          first papered over by raising its card to 90%, which unsized the shared
+          ladder arithmetic (#1277). Porting that hack away is what this ladder
+          is for; do NOT raise a card above 85% to fit extra chrome.
+          Values are MEASURED, not derived — the recovery dialog was rendered at
+          each breakpoint with its scroll area pegged at the cap, and chrome was
+          read two independent ways (unclamped card minus scroll area; clamped
+          card plus button-row overhang minus scroll area), agreeing exactly:
+            micro   480x272   chrome  97  cap 231
+            tiny    480x320   chrome 118  cap 272
+            small   640x400   chrome 156  cap 340
+            medium  800x480   chrome 171  cap 408
+            large  1024x600   chrome 220  cap 510
+            xlarge 1200x900   chrome 255  cap 765
+            xxlarge 1280x1024 chrome 317  cap 870
+          so the cap is (85% cap - chrome) with ~8px spare, like pinned_max.
+          A modal with extra chrome taller than one button row (action_prompt's
+          diagram + wrapping rows + footer) is beyond any single ladder — size
+          it on device and mark it MODAL_CHROME_OK for the chrome-budget gate. -->
+    <px name="dialog_content_tall_chrome_max_micro" value="126"/>
+    <px name="dialog_content_tall_chrome_max_tiny" value="146"/>
+    <px name="dialog_content_tall_chrome_max_small" value="176"/>
+    <px name="dialog_content_tall_chrome_max_medium" value="229"/>
+    <px name="dialog_content_tall_chrome_max_large" value="282"/>
+    <px name="dialog_content_tall_chrome_max_xlarge" value="502"/>
+    <px name="dialog_content_tall_chrome_max_xxlarge" value="545"/>
+
     <px name="dialog_content_max_micro" value="140"/>
     <px name="dialog_content_max_tiny" value="200"/>
     <px name="dialog_content_max_small" value="260"/>

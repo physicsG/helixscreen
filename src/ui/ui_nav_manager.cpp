@@ -23,6 +23,7 @@
 #include "overlay_class.h"
 #include "page_scroll_auto_inject.h"
 #include "printer_state.h" // For KlippyState enum
+#include "settings_manager.h"
 #include "sound_manager.h"
 #include "static_subject_registry.h"
 #include "system/crash_handler.h"
@@ -39,6 +40,8 @@ using helix::ui::observe_int_sync;
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <utility>
+#include <vector>
 
 #if defined(HELIX_PLATFORM_ESP32)
 namespace {
@@ -960,41 +963,52 @@ void NavigationManager::nav_button_clicked_cb(lv_event_t* event) {
                   static_cast<int>(code), panel_id, static_cast<int>(mgr.active_panel_));
 
     if (code == LV_EVENT_CLICKED) {
-        // Already on this panel with no overlays: special handling per panel
-        if (panel_id == static_cast<int>(mgr.active_panel_) && !mgr.has_open_overlays()) {
-            if (panel_id == static_cast<int>(PanelId::Home)) {
-                // Tapping home while on home scrolls carousel to page 0
-                spdlog::debug("[NavigationManager] Already on Home - navigating to main page");
-                get_global_home_panel().go_to_main_page();
-            } else {
-                spdlog::debug("[NavigationManager] Skipping - already on panel {} with no overlays",
-                              panel_id);
-            }
-            return;
-        }
-
-        // Block navigation to connection-required panels when disconnected or klippy not ready
-        if (panel_requires_connection(static_cast<PanelId>(panel_id))) {
-            if (!mgr.is_printer_connected()) {
-                spdlog::info("[NavigationManager] Navigation to panel {} blocked - not connected",
-                             panel_id);
-                return;
-            }
-            if (!mgr.is_klippy_ready()) {
-                spdlog::info(
-                    "[NavigationManager] Navigation to panel {} blocked - klippy not ready",
-                    panel_id);
-                return;
-            }
-        }
-
-        // Queue for REFR_START - guarantees we never modify widgets during render phase
-        spdlog::trace("[NavigationManager] Queuing switch to panel {}", panel_id);
-        helix::ui::queue_update(
-            [panel_id]() { NavigationManager::instance().switch_to_panel_impl(panel_id); });
+        // Queued, not inline: this runs from an LVGL event during the render
+        // phase, where mutating the widget tree corrupts the draw.
+        mgr.request_panel(static_cast<PanelId>(panel_id), SwitchDispatch::Queued);
     }
 
     LVGL_SAFE_EVENT_CB_END();
+}
+
+NavigationManager::PanelRequest NavigationManager::request_panel(PanelId panel_id,
+                                                                 SwitchDispatch dispatch) {
+    const int id = static_cast<int>(panel_id);
+
+    // Already on this panel with no overlays: special handling per panel
+    if (panel_id == active_panel_ && !has_open_overlays()) {
+        if (panel_id == PanelId::Home) {
+            // Tapping home while on home scrolls carousel to page 0
+            spdlog::debug("[NavigationManager] Already on Home - navigating to main page");
+            get_global_home_panel().go_to_main_page();
+            return PanelRequest::HomeRetapped;
+        }
+        spdlog::debug("[NavigationManager] Skipping - already on panel {} with no overlays", id);
+        return PanelRequest::AlreadyActive;
+    }
+
+    // Block navigation to connection-required panels when disconnected or klippy not ready
+    if (panel_requires_connection(panel_id)) {
+        if (!is_printer_connected()) {
+            spdlog::info("[NavigationManager] Navigation to panel {} blocked - not connected", id);
+            return PanelRequest::BlockedDisconnected;
+        }
+        if (!is_klippy_ready()) {
+            spdlog::info("[NavigationManager] Navigation to panel {} blocked - klippy not ready",
+                         id);
+            return PanelRequest::BlockedKlippyNotReady;
+        }
+    }
+
+    if (dispatch == SwitchDispatch::Queued) {
+        // Queue for REFR_START - guarantees we never modify widgets during render phase
+        spdlog::trace("[NavigationManager] Queuing switch to panel {}", id);
+        helix::ui::queue_update([id]() { NavigationManager::instance().switch_to_panel_impl(id); });
+    } else {
+        spdlog::trace("[NavigationManager] Switching to panel {} inline", id);
+        switch_to_panel_impl(id);
+    }
+    return PanelRequest::Switched;
 }
 
 void NavigationManager::switch_to_panel_impl(int panel_id) {
@@ -1293,6 +1307,15 @@ void NavigationManager::wire_events(lv_obj_t* navbar) {
             },
             get_printer_state().get_subjects_lifetime());
     }
+
+    // The printer badge is the one navbar element a setting can add or remove
+    // while the user is looking at it, and its toggle lives inside an overlay —
+    // so the navbar the user sees is the backdrop's frozen snapshot, not the
+    // widget the binding just un-hid. Re-take the snapshot so the change lands
+    // immediately instead of waiting for the stack to pop.
+    printer_switcher_observer_ = observe_int_sync<NavigationManager>(
+        SettingsManager::instance().subject_show_printer_switcher(), this,
+        [](NavigationManager* mgr, int /* shown */) { mgr->refresh_overlay_backdrop(); });
 
     spdlog::trace(
         "[NavigationManager] Navigation button events wired (with connection/klippy gating)");
@@ -1686,6 +1709,79 @@ void NavigationManager::adopt_overlay_backdrop(lv_obj_t* screen) {
     // already covers: deleting the parent screen frees the backdrop with no
     // go_back(), and deinit_subjects() would then lv_obj_del() freed memory.
     ensure_delete_hook(overlay_backdrop_);
+}
+
+void NavigationManager::refresh_overlay_backdrop() {
+    if (shutting_down_ || !overlay_backdrop_ || !lv_obj_is_valid(overlay_backdrop_))
+        return;
+
+    lv_obj_t* screen = lv_obj_get_screen(overlay_backdrop_);
+    if (!screen || screen != lv_screen_active())
+        return;
+
+    lv_obj_t* outgoing = overlay_backdrop_;
+
+    // Everything the snapshot must not contain: the overlays it sits under, the
+    // outgoing backdrop itself, the printer-switch menu, anything else parked on
+    // the screen. Hide them all and restore the exact flags afterwards — the
+    // snapshot has to reproduce what the screen looked like at push time, not
+    // what it looks like now.
+    std::vector<std::pair<lv_obj_t*, bool>> saved;
+    uint32_t child_count = lv_obj_get_child_count(screen);
+    saved.reserve(child_count);
+    for (uint32_t i = 0; i < child_count; i++) {
+        lv_obj_t* child = lv_obj_get_child(screen, static_cast<int32_t>(i));
+        if (!child || child == app_layout_widget_)
+            continue;
+        saved.emplace_back(child, lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN));
+        lv_obj_add_flag(child, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // push_overlay(hide_previous) hid the base panel behind the backdrop. It has
+    // to be visible again for the snapshot or a narrower overlay (#1178) would
+    // expose dimmed emptiness where the panel used to show through.
+    lv_obj_t* base_panel = panel_stack_.empty() ? nullptr : panel_stack_.front();
+    bool base_was_hidden = false;
+    if (base_panel && lv_obj_is_valid(base_panel)) {
+        base_was_hidden = lv_obj_has_flag(base_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(base_panel, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        base_panel = nullptr;
+    }
+
+    lv_obj_t* fresh = helix::ui::create_darkened_backdrop(screen, 40);
+
+    if (base_panel && base_was_hidden)
+        lv_obj_add_flag(base_panel, LV_OBJ_FLAG_HIDDEN);
+    for (auto& [child, was_hidden] : saved) {
+        if (was_hidden)
+            lv_obj_add_flag(child, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_remove_flag(child, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (!fresh) {
+        spdlog::warn("[NavigationManager] Backdrop refresh failed — keeping stale snapshot");
+        return;
+    }
+
+    // Slot the replacement directly above the outgoing backdrop so every overlay
+    // stays above both. The outgoing one is opaque and identical everywhere the
+    // navbar did not change, so it covering `fresh` for the frame or two before
+    // the deferred delete lands is not visible.
+    lv_obj_move_to_index(fresh, static_cast<int32_t>(lv_obj_get_index(outgoing)) + 1);
+
+    lv_obj_add_event_cb(fresh, backdrop_click_event_cb, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(fresh, backdrop_click_event_cb, LV_EVENT_CLICKED, nullptr);
+    ensure_delete_hook(fresh);
+
+    // Reassign before the delete is queued: scrub_deleted_widget() clears
+    // overlay_backdrop_ only when the dying widget IS the current one, so the
+    // outgoing delete must find the pointer already moved on.
+    overlay_backdrop_ = fresh;
+    helix::ui::safe_delete_deferred(outgoing);
+
+    spdlog::debug("[NavigationManager] Overlay backdrop re-snapshotted");
 }
 
 void NavigationManager::ensure_delete_hook(lv_obj_t* widget) {

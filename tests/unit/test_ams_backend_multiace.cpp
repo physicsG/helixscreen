@@ -1134,7 +1134,7 @@ TEST_CASE_METHOD(HelixTestFixture, "the unload step names the ACE as the destina
 
     const auto unload = backend.get_operation_step_model(StepOperationType::UNLOAD);
     REQUIRE_FALSE(unload.steps.empty());
-    CHECK(unload.steps.back().label == std::string("Retract filament));
+    CHECK(unload.steps.back().label == std::string("Retract filament"));
     // A rename, not an extra step: the firmware drives the index (phase 3), so a
     // fifth step would sit Pending forever.
     CHECK(unload.steps.size() == 4);

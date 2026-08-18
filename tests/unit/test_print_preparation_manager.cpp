@@ -14,8 +14,9 @@ class PrintPreparationManagerTestAccess {
         return m.collect_macro_skip_params();
     }
     static std::vector<std::string>
-    get_pre_start_gcode_lines(const helix::ui::PrintPreparationManager& m) {
-        return m.collect_pre_start_gcode_lines();
+    get_pre_start_gcode_lines(const helix::ui::PrintPreparationManager& m,
+                              const std::string& filename = {}) {
+        return m.collect_pre_start_gcode_lines(filename);
     }
     static std::vector<gcode::OperationType>
     get_ops_to_disable(const helix::ui::PrintPreparationManager& m) {
@@ -70,6 +71,22 @@ using namespace helix::ui;
 // ============================================================================
 // Tests: Macro Analysis Formatting
 // ============================================================================
+
+namespace {
+/// The pre-start block carries a line per applicable PreStartGcode option, so a
+/// test about one option must not assert the whole vector's shape — the K2 Plus
+/// also emits its bed_mesh macro. Returns the single line containing `needle`.
+std::string line_containing(const std::vector<std::string>& lines, const std::string& needle) {
+    std::string found;
+    for (const auto& l : lines) {
+        if (l.find(needle) != std::string::npos) {
+            REQUIRE(found.empty()); // exactly one match expected
+            found = l;
+        }
+    }
+    return found;
+}
+} // namespace
 
 TEST_CASE("PrintPreparationManager: has_macro_analysis when no analysis available",
           "[print_preparation][macro]") {
@@ -854,20 +871,20 @@ TEST_CASE_METHOD(HelixTestFixture,
     SECTION("ai_detect ON emits SWITCH=1") {
         ai_detect_on = true;
         auto lines = PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager);
-        REQUIRE(lines == std::vector<std::string>{"LOAD_AI_RUN SWITCH=1"});
+        REQUIRE(line_containing(lines, "LOAD_AI_RUN") == "LOAD_AI_RUN SWITCH=1");
     }
 
     SECTION("ai_detect OFF still emits, with SWITCH=0") {
         ai_detect_on = false;
         auto lines = PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager);
-        REQUIRE(lines == std::vector<std::string>{"LOAD_AI_RUN SWITCH=0"});
+        REQUIRE(line_containing(lines, "LOAD_AI_RUN") == "LOAD_AI_RUN SWITCH=0");
     }
 
     SECTION("ai_detect skipped entirely when LOAD_AI_RUN macro is absent") {
         MacroParamCache::instance().clear();
         ai_detect_on = true;
         auto lines = PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager);
-        REQUIRE(lines.empty());
+        REQUIRE(line_containing(lines, "LOAD_AI_RUN").empty());
     }
 }
 
@@ -2726,8 +2743,7 @@ TEST_CASE_METHOD(
             return -1;
         });
         auto lines = PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager);
-        REQUIRE(lines.size() == 1);
-        REQUIRE(lines[0] == "LOAD_AI_RUN SWITCH=1");
+        REQUIRE(line_containing(lines, "LOAD_AI_RUN") == "LOAD_AI_RUN SWITCH=1");
     }
 
     SECTION("Provider says DISABLED -> SWITCH=0 emitted") {
@@ -2737,16 +2753,14 @@ TEST_CASE_METHOD(
             return -1;
         });
         auto lines = PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager);
-        REQUIRE(lines.size() == 1);
-        REQUIRE(lines[0] == "LOAD_AI_RUN SWITCH=0");
+        REQUIRE(line_containing(lines, "LOAD_AI_RUN") == "LOAD_AI_RUN SWITCH=0");
     }
 
     SECTION("No provider -> uses default_enabled (false) -> SWITCH=0") {
         // ai_detect default_enabled is false; with no UI binding it should still
         // emit SWITCH=0 because PreStartGcode emits regardless of state.
         auto lines = PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager);
-        REQUIRE(lines.size() == 1);
-        REQUIRE(lines[0] == "LOAD_AI_RUN SWITCH=0");
+        REQUIRE(line_containing(lines, "LOAD_AI_RUN") == "LOAD_AI_RUN SWITCH=0");
     }
 }
 
@@ -2837,14 +2851,17 @@ TEST_CASE_METHOD(HelixTestFixture,
     }
 }
 
-TEST_CASE_METHOD(
-    HelixTestFixture,
-    "PrintPreparationManager: K2 Plus DB-driven bed_mesh emits PREPARE=1 when disabled",
-    "[print_preparation][framework][k2_plus]") {
-    // T2: Full pipeline test — provider DISABLES K2 Plus's bed_mesh
-    // (MacroParam strategy with PREPARE=0/1). collect_macro_skip_params()
-    // should emit ("PREPARE", "1") via the LAYER 1 (DB) path, with no
-    // duplicate from macro analysis.
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: K2 bed_mesh runs the mesh macro only when enabled",
+                 "[print_preparation][framework][k2_plus]") {
+    // The K2's mesh lives in BED_MESH_CALIBRATE_START_PRINT, which START_PRINT
+    // never calls. The option used to map to a PREPARE param that the pipeline
+    // deliberately never sends (it is only a visibility sentinel), so the
+    // toggle homed and wiped the nozzle and never produced a mesh at all.
+    //
+    // The macro has no "off" form, so disabled must emit nothing rather than a
+    // zero — hence emit_when_disabled=false. GCODE_FILE keeps the sweep trimmed
+    // to the object.
     lv_init_safe();
     PrinterState& printer_state = get_printer_state();
     PrinterStateTestAccess::reset(printer_state);
@@ -2853,21 +2870,87 @@ TEST_CASE_METHOD(
 
     PrintPreparationManager manager;
     manager.set_dependencies(nullptr, &printer_state);
-    manager.set_option_state_provider([](const std::string& id) {
-        if (id == "bed_mesh")
-            return 0; // disabled -> emit skip param
-        return -1;
-    });
 
-    auto params = PrintPreparationManagerTestAccess::get_skip_params(manager);
-    bool found_prepare = false;
-    for (const auto& [k, v] : params) {
-        if (k == "PREPARE") {
-            REQUIRE(v == "1"); // skip_value for K2 Plus bed_mesh
-            found_prepare = true;
+    SECTION("enabled emits the adaptive mesh macro") {
+        manager.set_option_state_provider(
+            [](const std::string& id) { return id == "bed_mesh" ? 1 : -1; });
+        auto lines =
+            PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager, "part.gcode");
+        bool found = false;
+        for (const auto& l : lines) {
+            if (l.find("BED_MESH_CALIBRATE_START_PRINT") != std::string::npos) {
+                found = true;
+                REQUIRE(l.find("GCODE_FILE='part.gcode'") != std::string::npos);
+            }
+        }
+        REQUIRE(found);
+    }
+
+    SECTION("disabled emits nothing for bed_mesh") {
+        manager.set_option_state_provider(
+            [](const std::string& id) { return id == "bed_mesh" ? 0 : -1; });
+        auto lines =
+            PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager, "part.gcode");
+        for (const auto& l : lines) {
+            REQUIRE(l.find("BED_MESH_CALIBRATE_START_PRINT") == std::string::npos);
         }
     }
-    REQUIRE(found_prepare);
+
+    SECTION("no PREPARE skip param is emitted any more") {
+        manager.set_option_state_provider(
+            [](const std::string& id) { return id == "bed_mesh" ? 0 : -1; });
+        for (const auto& [k, v] : PrintPreparationManagerTestAccess::get_skip_params(manager)) {
+            REQUIRE(k != "PREPARE");
+        }
+    }
+
+    SECTION("job temps come from the file's own START_PRINT call") {
+        // The gcode file's START_PRINT line is the source of truth for temps
+        // (Moonraker metadata lies on multi-material files). The scanner
+        // extracts them into print_start; the pre-start renderer must use
+        // them when the scanned file is the file being printed.
+        gcode::ScanResult scan;
+        scan.print_start.found = true;
+        scan.print_start.macro_name = "START_PRINT";
+        scan.print_start.raw_line = "START_PRINT EXTRUDER_TEMP=260 BED_TEMP=105";
+        scan.print_start.extruder_temp = 260;
+        scan.print_start.bed_temp = 105;
+        manager.set_cached_scan_result(scan, "part.gcode");
+
+        manager.set_option_state_provider(
+            [](const std::string& id) { return id == "bed_mesh" ? 1 : -1; });
+        auto lines =
+            PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager, "part.gcode");
+        bool found = false;
+        for (const auto& l : lines) {
+            if (l.find("BED_MESH_CALIBRATE_START_PRINT") != std::string::npos) {
+                found = true;
+                REQUIRE(l.find("BED_TEMP=105") != std::string::npos);
+                REQUIRE(l.find("EXTRUDER_TEMP=260") != std::string::npos);
+            }
+        }
+        REQUIRE(found);
+    }
+
+    SECTION("temps render 0 when the scan cache is for a different file") {
+        gcode::ScanResult scan;
+        scan.print_start.found = true;
+        scan.print_start.bed_temp = 105;
+        scan.print_start.extruder_temp = 260;
+        manager.set_cached_scan_result(scan, "other.gcode");
+
+        manager.set_option_state_provider(
+            [](const std::string& id) { return id == "bed_mesh" ? 1 : -1; });
+        auto lines =
+            PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager, "part.gcode");
+        for (const auto& l : lines) {
+            if (l.find("BED_MESH_CALIBRATE_START_PRINT") != std::string::npos) {
+                // 0 lets the firmware macro keep its own default (>= 50 guard)
+                REQUIRE(l.find("BED_TEMP=0") != std::string::npos);
+                REQUIRE(l.find("EXTRUDER_TEMP=0") != std::string::npos);
+            }
+        }
+    }
 }
 
 TEST_CASE_METHOD(HelixTestFixture,

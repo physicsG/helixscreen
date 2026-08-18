@@ -234,8 +234,12 @@
       <!-- POWER SECTION -->
       <!-- ================================================================== -->
       <!-- Both rows open the same dialog the home-panel power widget uses,
-           which handles single-/dual-host scope and confirms the action. -->
+           which handles single-/dual-host scope and confirms the action.
+           Hidden whole (header + rows) on platforms without host power
+           controls (Android) — see platform_host_power_supported in
+           app_globals.cpp. -->
       <setting_group name="group_power">
+        <bind_flag_if_eq subject="platform_host_power_supported" flag="hidden" ref_value="0"/>
         <setting_group_header title="POWER" title_tag="POWER" icon="power" hide_icon="false"/>
         <!-- Shutdown / Reboot — both rows open the same dialog (which presents
            both actions plus, on dual-host, the printer/screen/both scope). -->

@@ -249,6 +249,22 @@ class ActionPromptStressFixture : public LVGLUITestFixture {
         helix::DisplaySettingsManager::instance().set_animations_enabled(false);
 
         modal_.set_gcode_callback([](const std::string&) { /* no-op */ });
+
+        // Settle the tree BEFORE any test takes its baseline. Every check here
+        // is a delta, so the starting sample has to come from a quiet tree.
+        // safe_delete_deferred_raw() reparents to lv_layer_top() and only then
+        // calls lv_obj_delete_async(), so an earlier test in the same process
+        // that returned with deletes still queued leaves that debris sitting on
+        // the top layer — inside the census. Our own process_lvgl() then drains
+        // it mid-run, and the post-run census lands BELOW the baseline, failing
+        // as if this modal had over-deleted. Catch2 shuffles test order, so
+        // which run trips it depends on the seed.
+        //
+        // Loop because a drained callback can queue more work.
+        for (int i = 0; i < 5; ++i) {
+            helix::ui::UpdateQueue::instance().drain();
+            process_lvgl(20);
+        }
     }
 
     ~ActionPromptStressFixture() override {

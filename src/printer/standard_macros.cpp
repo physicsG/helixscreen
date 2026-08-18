@@ -254,6 +254,7 @@ bool StandardMacros::execute(StandardMacroSlot slot, IMoonrakerAPI* api,
     }
 
     spdlog::info("[StandardMacros] Executing {} via {}", info.slot_name, macro_name);
+    // suppress_auto_toast is CallerIntent::silent — see rpc_error_policy.h.
     api->advanced().execute_macro(macro_name, params, std::move(on_success), std::move(on_error),
                                   timeout_ms, suppress_auto_toast);
     return true;

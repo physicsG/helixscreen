@@ -26,9 +26,6 @@
 #include "thumbnail_cache.h"
 #include "thumbnail_processor.h"
 
-#include <spdlog/sinks/null_sink.h>
-#include <spdlog/spdlog.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -61,13 +58,11 @@ static const std::string NO_THUMB = helix::ActivePrintMediaManager::no_thumbnail
 class ActivePrintMediaManagerTestFixture {
   public:
     ActivePrintMediaManagerTestFixture() {
-        // Suppress spdlog output during tests
-        if (!logger_initialized_) {
-            auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
-            auto null_logger = std::make_shared<spdlog::logger>("null", null_sink);
-            spdlog::set_default_logger(null_logger);
-            logger_initialized_ = true;
-        }
+        // Default spdlog output is suppressed process-wide by the
+        // IsolationListener at testRunStarting (single-threaded, before the
+        // HttpExecutor workers start) — swapping the default logger per test
+        // here raced those workers' logging (spdlog's default-logger read is
+        // unlocked).
 
         // Initialize LVGL (safe version avoids "already initialized" warnings)
         lv_init_safe();
@@ -118,9 +113,6 @@ class ActivePrintMediaManagerTestFixture {
             display_created_ = false;
         }
 
-        // Reset logger flag so next test/shard re-initializes
-        logger_initialized_ = false;
-
         // Reset after each test
         PrinterStateTestAccess::reset(state_);
     }
@@ -164,13 +156,11 @@ class ActivePrintMediaManagerTestFixture {
     static lv_display_t* display_;
     static bool display_created_;
     static bool queue_initialized;
-    static bool logger_initialized_;
 };
 
 lv_display_t* ActivePrintMediaManagerTestFixture::display_ = nullptr;
 bool ActivePrintMediaManagerTestFixture::display_created_ = false;
 bool ActivePrintMediaManagerTestFixture::queue_initialized = false;
-bool ActivePrintMediaManagerTestFixture::logger_initialized_ = false;
 
 // ============================================================================
 // Display Name Formatting Tests
@@ -885,12 +875,8 @@ class CapturingMoonrakerAPI : public MoonrakerAPI {
 class ActivePrintMediaAsyncFixture {
   public:
     ActivePrintMediaAsyncFixture() : mock_client_(MoonrakerClientMock::PrinterType::VORON_24) {
-        if (!logger_initialized_) {
-            auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
-            auto null_logger = std::make_shared<spdlog::logger>("null", null_sink);
-            spdlog::set_default_logger(null_logger);
-            logger_initialized_ = true;
-        }
+        // Default spdlog output is suppressed process-wide by the
+        // IsolationListener at testRunStarting — see the sync fixture above.
 
         lv_init_safe();
 
@@ -929,7 +915,6 @@ class ActivePrintMediaAsyncFixture {
             display_ = nullptr;
             display_created_ = false;
         }
-        logger_initialized_ = false;
         PrinterStateTestAccess::reset(state_);
     }
 
@@ -1038,13 +1023,11 @@ class ActivePrintMediaAsyncFixture {
     static lv_display_t* display_;
     static bool display_created_;
     static bool queue_initialized_;
-    static bool logger_initialized_;
 };
 
 lv_display_t* ActivePrintMediaAsyncFixture::display_ = nullptr;
 bool ActivePrintMediaAsyncFixture::display_created_ = false;
 bool ActivePrintMediaAsyncFixture::queue_initialized_ = false;
-bool ActivePrintMediaAsyncFixture::logger_initialized_ = false;
 
 } // namespace
 

@@ -27,6 +27,7 @@
 
 // Forward declaration
 class IMoonrakerAPI;
+class BeltTensionCalibratorTestAccess;
 
 namespace helix::calibration {
 
@@ -193,6 +194,8 @@ class BeltTensionCalibrator {
 
     /// Async callback safety guard
     helix::AsyncLifetimeGuard lifetime_;
+
+    friend class ::BeltTensionCalibratorTestAccess;
 };
 
 } // namespace helix::calibration

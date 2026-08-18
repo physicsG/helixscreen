@@ -1842,6 +1842,9 @@ Only use `make clean && make` when:
 
 ### Submodule Management
 
+**spdlog submodule:** uses the fmt-11.2.0 branch. Initialize with
+`git submodule update --init --recursive` on a fresh clone.
+
 **Never**:
 - Commit changes directly to submodules
 - Update submodule commits without testing
@@ -1856,6 +1859,6 @@ Only use `make clean && make` when:
 
 - **[README.md](../README.md)** - Project overview and quick start
 - **[DEVELOPMENT.md](DEVELOPMENT.md)** - Development environment, workflow, and contributing
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design and technical patterns
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - The 15-minute whole-app model + chapter-series routing
 - **[CLAUDE.md](../CLAUDE.md)** - Development context and AI assistant guidelines
 - **[patches/README.md](../../patches/README.md)** - Patch documentation

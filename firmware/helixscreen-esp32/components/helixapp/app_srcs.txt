@@ -149,6 +149,7 @@ src/printer/power_device_state.cpp
 src/printer/pre_print_option.cpp
 src/printer/preflight_validator.cpp
 src/printer/print_lifecycle_state.cpp
+src/printer/print_start_checks.cpp
 src/printer/printer_calibration_state.cpp
 src/printer/printer_capabilities_state.cpp
 src/printer/printer_composite_visibility_state.cpp
@@ -169,6 +170,7 @@ src/printer/printer_versions_state.cpp
 src/printer/sensor_state.cpp
 src/printer/slot_registry.cpp
 src/printer/snapmaker_resume.cpp
+src/printer/z_offset_persistence.cpp
 src/printer/plr_backend.cpp
 src/printer/plr_offer.cpp
 src/printer/standard_macros.cpp

@@ -55,38 +55,72 @@ Key safety rules:
 
 ## When the Updater Hides Itself
 
-`in_app_updates_suppressed()` (`app_globals.h`) gates `check_for_updates()`,
-`start_auto_check()` and `start_download()`, and drives `show_update_settings` — when it is
-true the About screen has no "Check for Updates" or "Install Update" row at all. It is the OR
-of two independent reasons, and telling them apart is the first thing to establish on any
-"my updates are disabled" report:
+**Looking and applying are gated separately**, by two predicates in `app_globals.h`. Which
+one fired is the first thing to establish on any "my updates are disabled" report:
+
+| Predicate | Definition | Gates |
+|-----------|------------|-------|
+| `update_checks_suppressed()` | `updates_externally_managed()` alone | `check_for_updates()`, `start_auto_check()`, and `show_update_settings` — false hides the whole update section |
+| `update_install_suppressed()` | `updates_externally_managed() \|\| !self_update_supported()` | `start_download()` and the "Install Update" row |
+
+The weaker check gate is deliberate. Checking is a manifest fetch that touches no files, so an
+install tree we cannot write is no reason to refuse to look, and knowing a newer version exists
+is the only thing that makes a suppressed install recoverable — the user can still be told to
+re-run the installer. The two shared one predicate through v0.99.96–v0.99.113, and that made a
+false negative in `self_update_supported()` a permanent lockout: the rows vanished wholesale, so
+nothing could tell the user an update existed, and the fix could only ship inside the update
+they were being kept from.
+
+The two underlying reasons, and the notice each raises:
 
 | Reason | Predicate | UI notice |
 |--------|-----------|-----------|
 | Firmware owns updates | `updates_externally_managed()` — the `HELIX_DISABLE_AUTO_UPDATES` env flag, nothing else | "Managed by your firmware" |
 | Self-update can't physically apply | `!self_update_supported()` | "Updates aren't available on this installation" |
 
-`self_update_supported()` exists because the install applies by renaming the install root
-(`mv <root> <root>.old; mv <new> <root>`), which mutates the **parent** directory's entries.
-So it is true when either:
+ESP32 stubs both predicates constant-true (`helixapp_platform_stubs.cpp`): OTA is the only
+update route there, so the settings UI hides its update affordances entirely.
 
-1. the parent of the install root is writable by the service user, **or**
-2. root is reachable — `geteuid() == 0`, or `sudo -n true` succeeds.
+`self_update_supported()` must recognise **every** route `install.sh` can take to apply an
+update, because suppression is a one-way door: the fix for a false negative can only ship
+inside an update the user is being prevented from installing. It is true when any of:
 
-The second term is not optional. The default Pi layout installs to `/opt/helixscreen` and runs
-the service as an unprivileged user, so the parent (`/opt`) is root-owned and term 1 is false
-on a machine that updates perfectly well: `install.sh` sets `SUDO="sudo"` in
-`check_permissions()` and escalates the privileged steps itself. Gating on writability alone
-hides the updater from the most common Raspberry Pi install there is.
+1. the **parent** of the install root is writable by the service user → `install.sh` takes the
+   atomic swap (`mv <root> <root>.old; mv <new> <root>`); rename mutates the parent's entries,
+   which is why the parent is what matters, **or**
+2. the **install root itself** is writable → `install.sh` takes the in-place path: delete the
+   root's contents (bar `config/`) and move the new ones in, entirely inside the root. It
+   selects this by itself whenever the parent is not writable, **or**
+3. root is reachable — `geteuid() == 0`, or `sudo -n true` succeeds.
 
-The sudo probe runs at most once per process, only when term 1 already failed, and is bounded
-at 2s so a network-backed sudoers lookup can't stall startup.
+Term 2 is what covers the standalone-display layout: no local Klipper or Moonraker, so
+`detect_pi_install_dir()` falls through every ecosystem check to the `/opt/helixscreen`
+fallback. `/opt` is root-owned, so term 1 is false — but the root itself is chowned to the
+service user by the unit's `ExecStartPre`, so the install updates fine.
+
+**Term 3 cannot rescue term 2's absence, despite what it looks like.** `config/helixscreen.service`
+sets `NoNewPrivileges=true`, which strips setuid on `execve`, so `sudo` fails from the app and
+from the `install.sh` it forks regardless of what sudoers says. Escalation only ever answers
+for installs that are already root (`geteuid() == 0` — every root-run embedded platform) or
+that run outside the shipped unit. `install.sh` knows this and has `_has_no_new_privs()`
+branches throughout; the in-place update path is one of them.
+
+The sudo probe runs at most once per process, only when terms 1 and 2 have both failed, and is
+bounded at 2s so a network-backed sudoers lookup can't stall startup.
 
 Debug bundles carry all of this under `update`: `install_parent_writable` (term 1),
-`self_update_supported` (the OR), `externally_managed`, and `suppressed`. A
-`false` / `true` pair for the first two is the ordinary sudo-escalating Pi; `false` / `false`
-is a genuinely read-only install. The `[UpdateChecker] ... suppressed (firmware-managed or
-install tree not writable)` log line does **not** distinguish them — use the bundle fields.
+`install_root_writable` (term 2), `self_update_supported` (the OR of all three),
+`externally_managed`, and `suppressed`. Read the first three together:
+
+| parent | root | supported | Meaning |
+|--------|------|-----------|---------|
+| true   | —    | true      | ordinary home-directory / ecosystem install, atomic swap |
+| false  | true | true      | `/opt` standalone-display install, in-place update |
+| false  | false| true      | running as root, or outside the shipped unit — sudo is carrying it |
+| false  | false| false     | genuinely stuck; the user must re-run the installer |
+
+The `[UpdateChecker] ... suppressed` log line names which branch fired, but the bundle fields
+are what separate the four shapes above.
 
 ---
 
@@ -96,9 +130,9 @@ Three channels are available. The channel is stored in config at `/update/channe
 
 | Channel | Enum | Config Value | Source | Description |
 |---------|------|-------------|--------|-------------|
-| **Stable** | `UpdateChannel::Stable` | `0` | R2 `stable/manifest.json`, fallback: GitHub `/releases/latest` | Production releases only. Default for all users. |
-| **Beta** | `UpdateChannel::Beta` | `1` | R2 `beta/manifest.json`, fallback: GitHub `/releases` array (first prerelease) | Includes pre-release tags (`v1.0.0-beta.1`, `v1.0.0-rc.1`). Falls back to latest stable if no prereleases exist. |
-| **Dev** | `UpdateChannel::Dev` | `2` | R2 `dev/manifest.json`, or explicit `/update/dev_url` | Cutting-edge builds. Supports custom manifest URLs for local development servers. |
+| **Stable** | `UpdateChannel::Stable` | `0` | R2 stable/manifest.json, fallback: GitHub `/releases/latest` | Production releases only. Default for all users. |
+| **Beta** | `UpdateChannel::Beta` | `1` | R2 beta/manifest.json, fallback: GitHub `/releases` array (first prerelease) | Includes pre-release tags (`v1.0.0-beta.1`, `v1.0.0-rc.1`). Falls back to latest stable if no prereleases exist. |
+| **Dev** | `UpdateChannel::Dev` | `2` | R2 dev/manifest.json, or explicit `/update/dev_url` | Cutting-edge builds. Supports custom manifest URLs for local development servers. |
 
 ### Channel Selection in UI
 
@@ -337,11 +371,11 @@ Idle (0) ──> Confirming (1) ──> Downloading (2) ──> Verifying (3) �
 
 The installer is found by searching these paths in order:
 1. Resolved from `/proc/self/exe` (strips `/bin/helix-screen` to find install root)
-2. `/opt/helixscreen/install.sh`
-3. `/root/printer_software/helixscreen/install.sh`
-4. `/usr/data/helixscreen/install.sh`
-5. `/home/biqu/helixscreen/install.sh`
-6. `/home/pi/helixscreen/install.sh`
+2. /opt/helixscreen/install.sh
+3. /root/printer_software/helixscreen/install.sh
+4. /usr/data/helixscreen/install.sh
+5. /home/biqu/helixscreen/install.sh
+6. /home/pi/helixscreen/install.sh
 7. `scripts/install.sh` (development fallback)
 
 ### Safe Execution
@@ -388,19 +422,19 @@ Key points:
 - `type: web` -- Moonraker downloads ZIP assets from GitHub releases (workaround for mainsail-crew/mainsail#2444 where `type: zip` always shows UP-TO-DATE)
 - `type: web` does **not** support `install_script`, `managed_services`, or `persistent_files` -- do not add these options (Moonraker will warn about unparsed config)
 - User config files live in `printer_data/config/helixscreen/` (outside the managed path), so they survive Moonraker's `shutil.rmtree` without needing `persistent_files`
-- `release_info.json` -- Written to the install directory so Moonraker can detect the installed version
-- A systemd path unit (`helixscreen-update.path`) watches `release_info.json` and restarts the service after Moonraker extracts an update
+- release_info.json -- Written to the install directory so Moonraker can detect the installed version
+- A systemd path unit (`helixscreen-update.path`) watches release_info.json and restarts the service after Moonraker extracts an update
 - As a self-healing fallback, `helixscreen.service` runs `refresh-service-units.sh` on every start to re-template systemd units and install missing watcher units
 
 #### Moonraker version requirement (helixscreen#993)
 
 **This stanza requires Moonraker >= v0.10.0 (or a git checkout newer than 2025-01-19).** The installer probes for the capability and skips writing the stanza when it isn't there — see `moonraker_asset_name_support()` in `scripts/lib/installer/moonraker.sh`, which inspects the installed Moonraker source (found via `find_moonraker_update_manager_dir()`) rather than parsing a version string, since `v0.9.3-73-gfab6c5c1`-style descriptions can't be ordered across branches. It returns three states: `supported` (net_deploy.py containing `asset_name`), `unsupported` (zip_deploy.py/web_deploy.py, or a net_deploy.py without it), and `undetermined` (no source found — preserves the previous behavior and warns, rather than guessing). On `unsupported` the installer also *removes* an already-written stanza.
 
-Asset selection lives in Moonraker's `NetDeploy._get_remote_version()` (`moonraker/components/update_manager/net_deploy.py`). It seeds `release_asset = assets[0]` and only overrides it when `release_info.json`'s `asset_name` **exactly** matches an asset name; a miss logs `Asset '<name>' not found` at INFO and downloads `assets[0]` anyway. Support for `asset_name` arrived in commit `530f1c2016` (2025-01-19), which also renamed `zip_deploy.py` to `net_deploy.py`; the first tag containing it is **v0.10.0** (2026-01-21). Every earlier version reads `assets[0]` unconditionally and never looks at `asset_name`.
+Asset selection lives in Moonraker's `NetDeploy._get_remote_version()` (moonraker/components/update_manager/net_deploy.py). It seeds `release_asset = assets[0]` and only overrides it when release_info.json's `asset_name` **exactly** matches an asset name; a miss logs `Asset '<name>' not found` at INFO and downloads `assets[0]` anyway. Support for `asset_name` arrived in commit `530f1c2016` (2025-01-19), which also renamed zip_deploy.py to net_deploy.py; the first tag containing it is **v0.10.0** (2026-01-21). Every earlier version reads `assets[0]` unconditionally and never looks at `asset_name`.
 
 That matters because the GitHub API returns release assets **sorted by name**, and `_extract_release()` runs `shutil.rmtree(self.path)` *before* opening the archive. On an unsupported Moonraker the in-UI update button therefore wipes the install directory and then fails with `zipfile.BadZipFile: File is not a zip file`. Release symbol assets are named `symbols-<platform>.sym.zst` specifically so they sort after the `helixscreen-*` artifacts and never land in `assets[0]` (see the guard in `.github/workflows/release.yml`).
 
-**Rollback is unsupported on every Moonraker version, including master.** `NetDeploy.rollback()` ignores `asset_name` entirely — it is still hardcoded to `result.get('assets', [{}])[0]`. The Mainsail/Fluidd rollback button will always fetch the alphabetically-first asset regardless of what `release_info.json` says, so it cannot be made to work from our side. Use HelixScreen's built-in updater or re-run the installer pinned to a version instead.
+**Rollback is unsupported on every Moonraker version, including master.** `NetDeploy.rollback()` ignores `asset_name` entirely — it is still hardcoded to `result.get('assets', [{}])[0]`. The Mainsail/Fluidd rollback button will always fetch the alphabetically-first asset regardless of what release_info.json says, so it cannot be made to work from our side. Use HelixScreen's built-in updater or re-run the installer pinned to a version instead.
 
 ### Service Allowlist
 
@@ -676,7 +710,7 @@ Run with:
 
 - Check that `[update_manager helixscreen]` exists in `moonraker.conf`
 - Check that `helixscreen` is listed in `moonraker.asvc`
-- Check that `release_info.json` exists in the install directory
+- Check that release_info.json exists in the install directory
 - Restart Moonraker after config changes
 
 ### Debug Logging

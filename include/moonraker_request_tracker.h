@@ -14,6 +14,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -62,12 +63,18 @@ class MoonrakerRequestTracker {
      * @param error_cb Error callback (optional)
      * @param timeout_ms Timeout override (0 = use default)
      * @param silent Suppress RPC_ERROR events
+     * @param intent Explicit caller intent, captured before any internal callback
+     *        wrapping. When omitted it is inferred from @p silent and the presence
+     *        of @p error_cb, which is what the ~130 direct callers below the gcode
+     *        APIs rely on: they carry no `!!` channel, so "supplied an error_cb"
+     *        is still a fair proxy for "will report this itself".
      * @return Request ID, or INVALID_REQUEST_ID on error
      */
     RequestId send(hv::WebSocketClient& ws, const std::string& method, const json& params,
                    std::function<void(const json&)> success_cb,
                    std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
-                   bool silent = false);
+                   bool silent = false,
+                   std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt);
 
     /**
      * @brief Send fire-and-forget JSON-RPC (no callbacks, no tracking)

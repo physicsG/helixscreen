@@ -60,7 +60,7 @@ translations:
   120 seconds: 120 秒
   15 seconds: 15 秒
   180°: 180°
-  180° Upside Down: ''
+  180° Upside Down: 180° 上下颠倒
   2 min: '2分钟'
   2 minutes: 2 分钟
   2. Place paper between nozzle and bed: 2. 将纸张放在喷嘴和热床之间
@@ -68,7 +68,7 @@ translations:
   20 minutes: 20分钟
   24 Hour: 24 小时
   270°: 270°
-  270° Clockwise: ''
+  270° Clockwise: 顺时针 270°
   2D Heatmap: 2D 热图
   2D Layers: 2D 图层
   3. Adjust screws, then re-probe to verify: 3. 调整螺丝，然后重新探测以验证
@@ -86,7 +86,7 @@ translations:
   5V: 5V
   60 seconds: 60 秒
   90°: 90°
-  90° Clockwise: ''
+  90° Clockwise: 顺时针 90°
   = Loosen: = 松开
   = Tighten: = 拧紧
   A: 辅
@@ -304,12 +304,15 @@ translations:
   Button taps and navigation sounds: 按钮点击和导航声音
   Buzz Servo: '轻动舵机'
   Bypass: 旁路
+  Bypass Is Active: ''
   Bypass Mode: 旁路模式
   Bypass controlled by hardware sensor: 旁路由硬件传感器控制
   Bypass controlled by sensor: 旁通由传感器控制
   Bypass disabled: 旁通已禁用
   Bypass enabled: 旁通已启用
   Bypass failed: 旁通失败
+  ? Bypass is active, but this print uses AMS lanes. The printer may refuse to load a lane while bypass filament is in the toolhead. Remove the filament and turn bypass off before printing. Start anyway?
+  : ''
   Bypass toggle failed: 旁通切换失败
   C: 腔
   CALIBRATION: 校准
@@ -946,6 +949,7 @@ translations:
   Filament: 耗材
   Filament Detected: 检测到耗材
   Filament Environment: 耗材环境
+  Filament In The Toolhead: ''
   Filament Mapping: 耗材映射
   Filament Runout: 耗材用尽
   Filament Sensor: 耗材传感器
@@ -958,6 +962,8 @@ translations:
   Filament diameter sensors for flow compensation: 耗材直径传感器用于流量补偿
   Filament is loose: 耗材松弛
   Filament is pulling tight: 耗材拉紧
+  ? Filament is still at the nozzle after unloading. The cut or retract may not have completed. Clear the toolhead before loading another spool.
+  : ''
   'Filament load failed: {}': '耗材加载失败: {}'
   Filament loaded: 耗材已加载
   Filament operation failed: 耗材操作失败
@@ -967,6 +973,7 @@ translations:
   : '耗材已用尽，且 CFS 未找到可切换的匹配料盘。请装入相同材料和颜色的料盘后恢复打印。'
   Filament ran out at the toolhead: '工具头处耗材已用尽'
   Filament ran out. Auto-refill is off, so the CFS will not switch spools on its own. Load filament, then resume.: '耗材已用尽。自动续料已关闭，CFS 不会自行更换料盘。请装入耗材后恢复打印。'
+  Filament ran out. The CFS knows which spools match, but those slots are empty. Load one of them, then resume.: ''
   Filament runout: 耗材用尽
   Filament runout and motion detection sensors: 耗材用尽和运动检测传感器
   Filament runout detection status: '耗材耗尽检测状态'
@@ -1209,6 +1216,8 @@ translations:
   Keep Navigation Bar: 保留导航栏
   Keep Printing: 继续打印
   Keep Required: 保持必需
+  Keep current: ''
+  Keep Spool Info on Eject: ''
   Keep the bypass spool visible when bypass is off: 旁路关闭时保持料盘可见
   Kick away: '拨除废料'
   Kinematics: 运动学
@@ -1552,9 +1561,11 @@ translations:
   No width sensor detected: '未检测到宽度传感器'
   None: 无
   None (disable): 无 (禁用)
-  Normal: ''
+  Normal: 正常
   Not Enough Filament: 耗材不足
   Not Now: 暂不
+  Not available here. Update from a terminal.: 此处不可用。请通过终端更新。
+  Not available on Android: ''
   Not calibrated: 未校准
   Not configured: 未配置
   Not connected: 未连接
@@ -1820,6 +1831,7 @@ translations:
   Printer name: 打印机名称
   Printer not ready: 打印机未就绪
   Printer ready: 打印机就绪
+  Printer type mismatch: ''
   'Printer:': '打印机:'
   'Printer: ': '打印机: '
   PrinterIdentify: 识别打印机
@@ -1895,6 +1907,7 @@ translations:
   Ramming Volume: '填充体积'
   Raspberry Pi: Raspberry Pi
   Raspberry Pi (32-bit): Raspberry Pi (32-bit)
+  Re-identify: ''
   Re-probe: 重新探测
   Re-read spool RFID tags and remaining length: '重新读取料盘 RFID 标签与剩余长度'
   Re-syncs Happy Hare's tracked state with the hardware.: 将 Happy Hare 跟踪的状态与硬件重新同步。
@@ -1910,6 +1923,7 @@ translations:
   Recalibrate or view detailed results anytime in Settings.: 可随时在设置中重新校准或查看详细结果。
   Recent Prints: 最近打印
   Recently Printed: 最近打印过的
+  Reconnect: ''
   Record Timelapse: 录制延时摄影
   Record timelapses of your prints: 录制打印延时摄影
   Recorded timelapses will appear here: 录制的延时摄影将显示在此处
@@ -1934,6 +1948,7 @@ translations:
   Remap Tool: 重映射工具
   Remap needs the HelixPrint plugin: 重新映射需要 HelixPrint 插件
   Remap…: 重新映射……
+  Remember lane spool details across an eject: ''
   Remove: 移除
   Remove PIN: 移除 PIN
   Remove Spoolman?: 移除 Spoolman？
@@ -2036,6 +2051,7 @@ translations:
   Run brush cleaning sequence: '运行刷子清洁流程'
   Run filament load/unload even when the nozzle is cold (for macros that heat the nozzle themselves): 即使喷嘴处于冷态也执行耗材加载/卸载（适用于自行加热喷嘴的宏）
   Run test sequence on all lanes: '在所有料仓运行测试流程'
+  Run the HelixScreen installer with --update from a terminal on this printer. Scan for the command for your platform.: 在本打印机的终端中运行 HelixScreen 安装程序并加上 --update。扫码获取适用于你的平台的命令。
   Run without parameter prompt: 运行时不提示参数
   Run {}?: 运行 {}？
   Running {}...: 正在运行 {}...
@@ -2100,7 +2116,7 @@ translations:
   Screen: '屏幕'
   Screen Blank: 屏幕熄灭
   Screen Dim: 屏幕变暗
-  Screen Rotation: ''
+  Screen Rotation: 屏幕旋转
   Screen dims to lower brightness after period of inactivity: 一段时间不活动后屏幕会降低亮度
   Screen lock and PIN settings: 屏幕锁定和 PIN 设置
   Screen reboot failed: 屏幕重启失败
@@ -2405,6 +2421,8 @@ translations:
   ? The animated screensaver has been turned off on this device to prevent it from
     interfering with prints. You can re-enable it in Settings > Display.
   : 为防止动画屏保干扰打印，已在此设备上将其关闭。您可以在设置 > 显示中重新启用。
+  ? The filament did not reach the nozzle. The CFS reported no error, but the toolhead sensor still sees no filament. Check that the spool is seated and the path is clear, then try again.
+  : ''
   The filament system reported an error: 耗材系统报告错误
   The heater will cycle on and off several times.: 加热器将多次开关循环。
   ? "The motor vibrates the belt while a strobe light flashes at the same frequency. When the belt appears to stand still (frozen), you have found the resonant frequency.\n\nUse the frequency buttons to sweep through values until the belt looks stationary, then lock the reading."
@@ -2420,6 +2438,7 @@ translations:
   The printer rejected the filament configuration. The print was not started.: 打印机拒绝了该耗材配置。打印未启动。
   The printer's firmware chooses the backup spool itself: 备用料盘由打印机固件自行选择
   The runout sensor indicates no filament is loaded. Start print anyway?: 断料传感器显示未装载耗材。仍要开始打印吗？
+  The toolhead has filament but no AMS lane reports it loaded. Pull it out manually before printing. Start anyway?: ''
   The toolhead sensor indicates filament is already loaded. Proceed with load anyway?: 工具头传感器显示耗材已装载。仍要继续装载吗？
   The toolhead sensor indicates no filament is present. Proceed with unload anyway?: 工具头传感器显示无耗材。仍要继续卸载吗？
   Theme: 主题
@@ -2451,6 +2470,8 @@ translations:
   : 此插件让 HelixScreen 控制打印启动选项，如热床网格和 QGL。安装后，使用下面的配置 PRINT_START 启用可选步骤。
   This print needs about %.0fg but the spool has about %.0fg remaining. Start anyway?: 本次打印需要约
     %.0fg，但料盘仅剩约 %.0fg。仍要开始吗？
+  ? This printer looks like a {} ({}% confidence), but it is set up as a {}. A wrong type applies incorrect pre-print options and presets.
+  : ''
   This tool probes each bed screw and tells you how much to adjust.: 此工具探测每个热床螺丝并告诉您需要调整多少。
   ? This will apply the Z-offset to your endstop and restart Klipper to save the configuration.
     The printer will briefly disconnect.
@@ -2544,7 +2565,7 @@ translations:
   Turn On LEDs: '打开 LED'
   Turn on LEDs when printer starts: 打印机启动时开启 LED
   Turn the extruder heater off after a load or unload finishes: 加载或卸载完成后关闭挤出机加热器
-  Turn the picture to match how the screen is mounted. Applies after restart.: ''
+  Turn the picture to match how the screen is mounted. Applies after restart.: 旋转画面以匹配屏幕的安装方向。重启后生效。
   Type: 类型
   Type to preview input field...: 输入以预览输入框...
   'Type:': '类型:'
@@ -2594,11 +2615,12 @@ translations:
   Update Channel: 更新通道
   Update Failed: 更新失败
   Update Success: 更新成功
+  Update from a Terminal: 通过终端更新
   Update installed!: 更新已安装！
   Update your security PIN: 更新您的安全 PIN
-  Updates aren't available on this installation.: 此安装版本无法使用更新。
   Updating Configuration...: 正在更新配置...
   Upgrade to AFC 1.2.0 or newer for filament names and multi-color spools.: 升级至 AFC 1.2.0 或更高版本，以使用耗材名称和多色料盘功能。
+  Upgrade to AFC 1.2.0 or newer for multi-color spools. It also adds filament names, which otherwise need Spoolman.: ''
   Upload: 上传
   Upload Debug Bundle: 上传调试捆绑包
   Upload Failed: 上传失败
@@ -2778,9 +2800,8 @@ translations:
   nozzle: 喷嘴
   of: 的
   'off': 关闭
-  pre_print_option.ai_detect.description: 监测打印异常（基于 K2 Plus 摄像头）
-  pre_print_option.ai_detect.label: AI 检测
-  pre_print_option.timelapse.label: 延时摄影
+  Monitor for print abnormalities (K2 Plus camera-based): 监测打印异常（基于 K2 Plus 摄像头）
+  AI detection: AI 检测
   prints: 打印次数
   remaining: 剩余
   remaining before clog detection triggers: 剩余即触发堵料检测
@@ -2790,22 +2811,20 @@ translations:
   steppers: 步进电机
   tall: 高
   tool(s): 工具
-  tour.step.advanced.body: 宏、G-code 控制台、校准工具（PID、输入整形、Z 偏移）、固件更新以及开发者实用工具。
-  tour.step.advanced.title: 高级
-  tour.step.controls.body: 移动打印头、归位轴、调平热床，并微调温度、风扇及其他运动设置。
-  tour.step.controls.title: 控制
-  tour.step.customize.body: 长按任意磁贴进入编辑模式 — 重新排列、调整大小、移除或添加小组件，并为您喜欢的布局添加额外页面。
-  tour.step.customize.title: 自定义主屏幕
-  tour.step.filament.body: 加载、卸载和更换料盘。一目了然地查看您的多耗材系统、将颜色映射到槽位，并监控耗材用尽传感器。
-  tour.step.filament.title: 耗材
-  tour.step.home_grid.body: 点击任意磁贴以打开其完整控制项或切换其状态。
-  tour.step.home_grid.title: 一览您的打印机
-  tour.step.print.body: 监控正在进行的打印 — 剩余时间、当前层和进度。点击可暂停、恢复或取消当前任务。
-  tour.step.print.title: 打印状态
-  tour.step.settings.body: 网络、显示、声音、打印机设置等。您可以随时从“帮助与关于”中重播此漫游。
-  tour.step.settings.title: 设置
-  tour.step.welcome.body: 让我们快速浏览一下，帮助您快速找到所需内容。
-  tour.step.welcome.title: 欢迎使用 HelixScreen
+  'Macros, G-code console, calibration tools (PID, input shaper, z-offset), firmware updates, and developer utilities.': 宏、G-code 控制台、校准工具（PID、输入整形、Z 偏移）、固件更新以及开发者实用工具。
+  Advanced: 高级
+  'Move the toolhead, home axes, level the bed, and fine-tune temperatures, fans, and other motion settings.': 移动打印头、归位轴、调平热床，并微调温度、风扇及其他运动设置。
+  Controls: 控制
+  'Long-press any tile to enter edit mode — rearrange, resize, remove, or add widgets, and add extra pages for your preferred layout.': 长按任意磁贴进入编辑模式 — 重新排列、调整大小、移除或添加小组件，并为您喜欢的布局添加额外页面。
+  Customize your home screen: 自定义主屏幕
+  'Load, unload, and swap spools. View your multi-filament system at a glance, map colors to slots, and monitor runout sensors.': 加载、卸载和更换料盘。一目了然地查看您的多耗材系统、将颜色映射到槽位，并监控耗材用尽传感器。
+  Tap any tile to open its full controls or toggle its state.: 点击任意磁贴以打开其完整控制项或切换其状态。
+  Your printer at a glance: 一览您的打印机
+  'Monitor prints in progress — time remaining, current layer, and progress. Tap to pause, resume, or cancel the active job.': 监控正在进行的打印 — 剩余时间、当前层和进度。点击可暂停、恢复或取消当前任务。
+  Print status: 打印状态
+  'Network, display, sound, printer setup, and more. You can replay this tour anytime from Help & About.': 网络、显示、声音、打印机设置等。您可以随时从“帮助与关于”中重播此漫游。
+  Let's take a quick tour so you can find things fast.: 让我们快速浏览一下，帮助您快速找到所需内容。
+  Welcome to HelixScreen: 欢迎使用 HelixScreen
   used: 已使用
   v%s available: v%s 可用
   v{} installed! Restarting...: 已安装 v{}！正在重启...

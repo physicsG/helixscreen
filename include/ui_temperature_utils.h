@@ -6,6 +6,7 @@
 #include "printer_temperature_state.h"
 #include "unit_conversions.h"
 
+#include <cmath>
 #include <cstddef>
 #include <string>
 
@@ -75,6 +76,33 @@ inline float deci_to_degrees_f(int deci) {
  */
 inline int degrees_to_deci(int degrees) {
     return helix::units::to_decidegrees(static_cast<double>(degrees));
+}
+
+/**
+ * @brief Snap a reading to the precision the UI actually renders it at.
+ *
+ * format_temp_number() prints one decimal below 100°C and whole degrees at or
+ * above it, so at 219.6°C the card reads "220" while the raw value is still
+ * 2196. Anything that classifies the reading — the heating color, the
+ * Off/Heating/Ready/Cooling status word, the heater icon tint — must classify
+ * THIS value, or the number and the word beside it can disagree: 222.9 against a
+ * 220 target renders "223 / 220" yet truncates to 222, which is inside the
+ * at-temp band and paints a green "Ready".
+ *
+ * The rounding matches printf's `%.0f` (half to even), so it is the same value
+ * the label prints rather than an approximation of it. Below 100°C the decimal
+ * is still on screen, so the reading is already exact and passes through.
+ *
+ * @param deci Temperature in decidegrees
+ * @return The same temperature in decidegrees, snapped to displayed precision
+ */
+inline int displayed_deci(int deci) {
+    // Mirrors format_temp_number()'s `temp >= 100.0f` switch; 1000 decidegrees
+    // is exactly 100.0°C, so the two thresholds cannot drift apart.
+    if (deci < 1000) {
+        return deci;
+    }
+    return static_cast<int>(std::nearbyint(deci / 10.0)) * 10;
 }
 
 // ============================================================================
@@ -242,6 +270,9 @@ char* format_temperature_range(int min_temp, int max_temp, char* buffer, size_t 
 
 /** Default tolerance for "at temperature" state detection (±degrees) */
 constexpr int DEFAULT_AT_TEMP_TOLERANCE = 2;
+
+/** The same tolerance for callers that classify in decidegrees. */
+constexpr int DEFAULT_AT_TEMP_TOLERANCE_DECI = DEFAULT_AT_TEMP_TOLERANCE * 10;
 
 /**
  * @brief Thermal state of a heater, shared by every consumer of the 4-state logic.

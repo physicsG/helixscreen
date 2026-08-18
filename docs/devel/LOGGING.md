@@ -175,7 +175,16 @@ These two streams do **not** overlap. spdlog never writes to the launcher file (
 
 ## spdlog Sinks & Auto-Detection
 
-`Application::init_logging()` builds a spdlog logger with one or more sinks. Implementation: `src/system/logging_init.cpp`.
+Logging is brought up in **two phases**, both implemented in `src/system/logging_init.cpp`:
+
+1. `helix::logging::init_early()`, called at the top of `Application::run()` before any
+   startup phase, so nothing can log into a void.
+2. `helix::logging::init(config)`, called from `Application::init_logging()` in **Phase 3**,
+   once CLI args (Phase 1) and `settings.json` (Phase 2) have been read. This builds the
+   full sink set for the resolved target.
+
+Everything below the "Target Resolution" heading describes phase 2. Phase 1 and the handoff
+between them are in "Ring-Buffer Sink Lifecycle".
 
 ### Target Resolution
 
@@ -212,6 +221,53 @@ A console/file line now looks like:
 ```
 [14:32:07.918] [debug] [140351827234560] [PrinterState] Initialized 6 fans (version 1)
 ```
+
+### Ring-Buffer Sink Lifecycle
+
+The in-memory ring (`MonotonicRingSink`, process-global `g_ring_sink`) is what the debug
+bundle's `log_tail` and `helix-screen ctl log` read. It is installed by **`init_early()`**,
+and `init()` **adopts that same instance** rather than constructing a new one.
+
+That ordering is the whole point. `Application::run()` does Phase 2 `init_config()` before
+Phase 3 `init_logging()`, so the entire config diagnostic trail - corrupt `settings.json`,
+restore-from-backup, parse failures, migration output - is emitted while only the early
+logger exists. With the ring created in `init()`, every one of those lines was already gone
+by the time a ring existed, and no bundle could ever show them. Bundle XGVDYEB5 is the case:
+a user-visible "settings were corrupted, restored from backup" toast, and not one line of
+the config trail anywhere in a 20,000-line `log_tail`.
+
+| | `init_early()` | `init(config)` |
+|---|---|---|
+| Console sink level | Pinned at WARN (`EARLY_CONSOLE_LEVEL`) | `config.level` |
+| Ring sink level | `debug`, or WARN when `HELIX_BUNDLE_LOG_DEBUG=0` | `debug`, or `config.level` when `HELIX_BUNDLE_LOG_DEBUG=0` |
+| Logger floor | The more verbose of the two above | Same rule |
+| Ring instance | Created | Adopted if one exists, else created |
+
+Three things fall out of this that are easy to get wrong:
+
+- **The early console sink must pin its level explicitly.** The logger floor now drops to
+  debug so the ring can capture it, and spdlog gates at the logger *before* any sink sees a
+  message - a sink's own default level is trace. Without the explicit pin the early console
+  would start echoing debug to stdout, which a daemonized launch redirects straight into the
+  journal or the log file. Stdout volume is unchanged from before the ring moved.
+- **`HELIX_BUNDLE_LOG_DEBUG=0` still works, with one wrinkle.** Before `init()` there is no
+  configured level to fall back to, so the early ring matches the console at WARN. That
+  leaves the early phase behaving exactly as it did when no early ring existed at all.
+- **Adoption is one-shot.** The flag is cleared on adoption, so a *later* `init()` rebuilds
+  the ring exactly as it always did. Production calls `init()` once
+  (`Application::init_logging`, `helix_watchdog`), but tests re-initialize the logger
+  constantly and rely on each `init()` handing them a clean buffer. The watchdog build has
+  no early phase at all, so `init()` creates the ring there.
+
+Adopting rather than replacing also keeps `set_runtime_level()`'s identity check against
+`g_ring_sink` valid, keeps `tail_ring_buffer()`'s `shared_ptr` copy pointing at live data
+across the handoff, and keeps the sink's clock-step detector's memory continuous.
+
+Capacity (`HELIX_LOG_RING_LINES`, else scaled from total RAM) is resolved in `init_early()`.
+That is safe this early: `resolve_ring_capacity()` reads only the env var and
+`/proc/meminfo`, neither of which needs Config. The cost is one extra
+`PlatformCapabilities::detect()` at startup, not extra memory - there is still exactly one
+ring.
 
 ### Console Sink (Stdout) — When It's Attached
 
@@ -369,8 +425,9 @@ On Klipper-based platforms (Pi, AD5M, K1, K2, Snapmaker U1, etc.), `setup_config
 
 ## Debug Bundles
 
-`src/system/log_collector.cpp` assembles a debug bundle on user request (Settings → About → Generate Debug Bundle, or the `helix_debug` Moonraker shell command). It captures:
+`DebugBundleCollector::collect()` (`src/system/debug_bundle_collector.cpp`) assembles a debug bundle on user request (Settings → About → Generate Debug Bundle, or the `helix_debug` Moonraker shell command), reading the on-disk log cascade through `src/system/log_collector.cpp`. It captures:
 
+- `log_tail` - the structured app log, read from the in-memory ring rather than from disk (`src/system/debug_bundle_collector.cpp`), so it is always the live process and always fresh. Because the ring is installed in `init_early()` it reaches back past Phase 2 config load; see "Ring-Buffer Sink Lifecycle". The companion `log_meta` field records the active sink target, the level the persistent sinks were configured at (which the ring may have been more verbose than), and whether the tail came from the live ring or the on-disk fallback
 - Last N lines from each candidate launcher-log path (`/var/log/helixscreen/launcher.log`, `${install_dir}/logs/launcher.log`, legacy `/tmp/helixscreen.log`, etc.)
 - Last N lines of syslog (`/var/log/messages`, `/var/log/syslog`)
 - systemd journal entries when available (`journalctl -u helixscreen`)

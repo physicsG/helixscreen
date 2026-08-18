@@ -56,6 +56,7 @@ bool MoonrakerAdvancedAPI::has_bed_mesh() const {
 // --- MoonrakerFileAPI (Task 2 bucket: libhv WebSocket/HTTP seam) — file list
 // and metadata RPCs plus HTTP-backed scans.
 void MoonrakerFileAPI::delete_file(const std::string&, SuccessCallback, ErrorCallback) {}
+void MoonrakerFileAPI::get_file_roots(FileRootsCallback, ErrorCallback) {}
 void MoonrakerFileAPI::list_files(const std::string&, const std::string&, bool, FileListCallback,
                                   ErrorCallback) {}
 void MoonrakerFileAPI::metascan_file(const std::string&, FileMetadataCallback, ErrorCallback,

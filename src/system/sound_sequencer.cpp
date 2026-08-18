@@ -68,6 +68,20 @@ void SoundSequencer::shutdown() {
 void SoundSequencer::sequencer_loop() {
     spdlog::debug("[SoundSequencer] sequencer loop started");
 
+    // Park the device before the first tick. The backend opened it during
+    // initialize(), but device_active_ starts false — and the idle branch below
+    // only suspends `if (device_active_)`, so nothing ever parked the device
+    // until a first sound had played and finished. A printer with sounds
+    // switched off never plays one, so the device stayed open for the whole
+    // process lifetime: ALSA's render thread writing silence every period, and
+    // on Android an AudioTrack held open, which is the PlayerBase::stop() spam
+    // #1253 closed. Suspending here makes the flag and the hardware agree from
+    // the start; the first resume() reopens on demand.
+    if (backend_) {
+        backend_->suspend();
+        device_active_ = false;
+    }
+
     auto last_tick = std::chrono::steady_clock::now();
     bool was_playing = false;
 

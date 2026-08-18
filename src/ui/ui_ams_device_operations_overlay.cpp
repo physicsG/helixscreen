@@ -64,6 +64,7 @@ AmsDeviceOperationsOverlay::~AmsDeviceOperationsOverlay() {
         lv_subject_deinit(&supports_auto_heat_subject_);
         lv_subject_deinit(&has_backend_subject_);
         lv_subject_deinit(&is_afc_subject_);
+        lv_subject_deinit(&reports_spool_ids_subject_);
         lv_subject_deinit(&is_qidi_subject_);
         lv_subject_deinit(&qidi_eject_distance_display_subject_);
         lv_subject_deinit(&qidi_eject_velocity_display_subject_);
@@ -117,6 +118,12 @@ void AmsDeviceOperationsOverlay::init_subjects() {
     lv_subject_init_int(&is_afc_subject_, 0);
     lv_xml_register_subject(nullptr, "ams_device_ops_is_afc", &is_afc_subject_);
 
+    // Keep-spool-info-on-eject row visibility. Gates on
+    // AmsBackend::firmware_reports_spool_ids() in update_from_backend().
+    lv_subject_init_int(&reports_spool_ids_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_device_ops_reports_spool_ids",
+                            &reports_spool_ids_subject_);
+
     // QIDI Box gating + eject distance/velocity value displays
     lv_subject_init_int(&is_qidi_subject_, 0);
     lv_xml_register_subject(nullptr, "ams_device_ops_is_qidi", &is_qidi_subject_);
@@ -152,6 +159,7 @@ void AmsDeviceOperationsOverlay::register_callbacks() {
                              on_afc_unload_after_print_toggled);
     lv_xml_register_event_cb(nullptr, "on_ams_always_show_bypass_spool_toggled",
                              on_always_show_bypass_spool_toggled);
+    lv_xml_register_event_cb(nullptr, "on_ams_keep_spool_info_toggled", on_keep_spool_info_toggled);
     lv_xml_register_event_cb(nullptr, "on_ams_force_bypass_controls_toggled",
                              on_force_bypass_controls_toggled);
     lv_xml_register_event_cb(nullptr, "on_ams_qidi_eject_distance_changed",
@@ -244,6 +252,7 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
         lv_subject_set_int(&hw_bypass_sensor_subject_, 0);
         lv_subject_set_int(&supports_auto_heat_subject_, 0);
         lv_subject_set_int(&is_afc_subject_, 0);
+        lv_subject_set_int(&reports_spool_ids_subject_, 0);
         lv_subject_set_int(&is_qidi_subject_, 0);
         lv_subject_set_int(&can_reset_endless_spool_subject_, 0);
         system_info_buf_[0] = '\0';
@@ -294,6 +303,11 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
 
     // AFC-only: the unload-after-print toggle applies only to AFC systems
     lv_subject_set_int(&is_afc_subject_, backend->is_afc_system() ? 1 : 0);
+
+    // Keep-spool-info-on-eject is only meaningful where the firmware reports
+    // spool ids per lane (AFC, Happy Hare); other systems clear on a detected
+    // spool swap regardless of the toggle, so the row stays hidden there.
+    lv_subject_set_int(&reports_spool_ids_subject_, backend->firmware_reports_spool_ids() ? 1 : 0);
 
     // The eject distance/velocity rows apply only to backends with configurable
     // eject params (QIDI Box). Sync the sliders + value displays from settings.
@@ -619,6 +633,22 @@ void AmsDeviceOperationsOverlay::on_always_show_bypass_spool_toggled(lv_event_t*
         spdlog::info("[AmsDeviceOperationsOverlay] Always-show-bypass-spool toggle: {}",
                      is_checked ? "enabled" : "disabled");
         SettingsManager::instance().set_ams_always_show_bypass_spool(is_checked);
+    }
+
+    LVGL_SAFE_EVENT_CB_END();
+}
+
+void AmsDeviceOperationsOverlay::on_keep_spool_info_toggled(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceOperationsOverlay] on_keep_spool_info_toggled");
+
+    auto* toggle = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    if (!toggle || !lv_obj_is_valid(toggle)) {
+        spdlog::warn("[AmsDeviceOperationsOverlay] Stale callback - toggle no longer valid");
+    } else {
+        bool is_checked = lv_obj_has_state(toggle, LV_STATE_CHECKED);
+        spdlog::info("[AmsDeviceOperationsOverlay] Keep-spool-info-on-eject toggle: {}",
+                     is_checked ? "enabled" : "disabled");
+        SettingsManager::instance().set_ams_keep_spool_info_on_eject(is_checked);
     }
 
     LVGL_SAFE_EVENT_CB_END();

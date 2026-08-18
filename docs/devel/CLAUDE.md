@@ -8,7 +8,8 @@ All developer documentation lives here. When working on features, look up the re
 |-----|-------------|
 | `DEVELOPMENT.md` | Build setup, dev environment, contributing |
 | `HELIXCTL.md` | Driving the UI / screenshots via `helix-screen ctl` (replaces the old `-p`/`--panel` flags). **Read the socket-isolation box first** — a bare `ctl` drives whichever instance started first and still reports success |
-| `ARCHITECTURE.md` | System design, component relationships, extended systems |
+| `ARCHITECTURE.md` | The 15-minute whole-app model (XML → Subjects → C++) + the routing table into the chapter series. Start here for "how does the app fit together" |
+| `architecture/` | The 15-chapter architecture guide — one subsystem per chapter, ~1 hour each. `architecture/README.md` is the "I want to work on..." index |
 | `THREADING.md` | **Single source of truth** for threading, async-callback, and object-lifetime rules. Read before any code that crosses a thread boundary, observes a subject, or destroys a widget |
 | `BUILD_SYSTEM.md` | Makefile internals, make target reference, cross-compilation, worktree workflow, ccache, patches |
 | `REVIEW_RUBRIC.md` | The quality bar for reviews: crash families, silent-failure traps, what not to flag, what the gates already cover |
@@ -54,6 +55,7 @@ All developer documentation lives here. When working on features, look up the re
 | `LABEL_PRINTER_SYSTEM.md` | Label printing: Brother QL, Phomemo, Niimbot, MakeID protocols; USB/TCP/Bluetooth transports |
 | `FILAMENT_MANAGEMENT.md` | AMS, AFC (Box Turtle), Happy Hare, ACE (Anycubic ACE Pro), AD5X IFS, CFS, Tool Changer, multi-backend, dryer architecture |
 | `QIDI_BOX_HEATER.md` | QIDI Box PTC heater RE reference: Klipper objects, G-code commands, firmware variants, HelixScreen integration |
+| `CREALITY_CFS_INTERNALS.md` | Creality K1-family CFS box-wrapper RE reference: `BOX_*` command semantics, <tn_data.json>, deferred-failure and resume traps, staged loading, serial timeouts. Read before changing anything the CFS backend emits on K1 |
 | `FILAMENT_SLOT_METADATA.md` | Internal notes on `FilamentSlotOverrideStore`: per-backend integration, hardware-event clearing, lifetime discipline, local cache, legacy migration. Pair with `../specs/filament_slots.md` for the public wire format. |
 | `MULTI_EXTRUDER_TEMPERATURE.md` | Multi-extruder temperature tracking, ExtruderInfo, dynamic subjects |
 | `TOOL_ABSTRACTION.md` | ToolState singleton, ToolInfo, tool-to-backend mapping, DetectState |
@@ -64,9 +66,10 @@ All developer documentation lives here. When working on features, look up the re
 | `PRINT_CONTROL_BUTTONS.md` | PrintControlButtons controller: owned subjects, pure view function, optimistic pending-action machine, 2x1 home widget, panel delegation |
 | `PRINT_START_PROFILES.md` | Print start phase detection, JSON profiles |
 | `PRINT_START_INTEGRATION.md` | User-facing macro setup for print start tracking |
+| `Z_OFFSET_PERSISTENCE.md` | Firmware that stores the z-offset outside `gcode_move` and zeroes the live one between prints (ZMOD on AD5M/AD5X): why the idle reading lies, the `persisted_z_offset` subjects, the relative-vs-absolute `SET_GCODE_OFFSET` rule, and the one-row recipe for adding a firmware |
 | `POWER_LOSS_RECOVERY.md` | Resume-after-power-loss: the passive Snapmaker backend vs the **active, side-effectful** Creality probe, capability detection via `print_stats.power_loss` presence, and the mandatory probe-before-resume safety invariant |
 | `UPDATE_SYSTEM.md` | Update channels (stable/beta/dev), R2 CDN, Moonraker updater |
-| `SOUND_SYSTEM.md` | Audio architecture, JSON themes, backends (SDL, PWM, M300). User guide: `../user/guide/settings.md#sound-settings` |
+| `SOUND_SYSTEM.md` | Audio architecture, JSON themes, backends (SDL, ALSA, PWM, M300). User guide: `../user/guide/settings.md#sound-settings` |
 | `LED_CONTROL.md` | LED control system: 5 backends, auto-state lighting, control/settings overlays, home panel widget |
 | `PRINTER_MANAGER.md` | Printer overlay, custom images, inline name editing |
 | `MULTI_PRINTER.md` | Multi-printer management: config v4, soft restart, printer switching |
@@ -98,6 +101,7 @@ All developer documentation lives here. When working on features, look up the re
 | Doc | When to read |
 |-----|-------------|
 | `MOONRAKER_ARCHITECTURE.md` | Moonraker API abstraction, WebSocket integration |
+| `RPC_ERROR_OWNERSHIP.md` | Who reports a failed JSON-RPC call: the caller's UI, the tracker's generic fallback, or `GcodeErrorRouter`'s `!!` broadcast. Read before adding an `on_error` to any gcode send |
 | `PLUGIN_DEVELOPMENT.md` | Plugin API, lifecycle, UI injection, threading, examples |
 | `TELEMETRY_ADMIN.md` | Telemetry pipeline, Analytics Engine, dashboard, scripts, secrets |
 
@@ -123,6 +127,6 @@ All developer documentation lives here. When working on features, look up the re
 | `LVGL9_XML_ATTRIBUTES_REFERENCE.md` | Complete XML attribute reference |
 | `LVGL9_XML_CHEATSHEET.html` | Quick XML cheatsheet (HTML) |
 | `LVGL_XML_SITUATION.md` | **Read before touching `lib/helix-xml/`** — fork origin (`a15dcbeb5`), MIT licensing position, why there is no upstream, the clean-room rule for anything LVGL Pro also has, and the upstream feature gap analysis |
-| `SLOT_COMPONENT_DESIGNS.md` | Slot component design patterns — **blocked**: helix-xml has no real slot system, only a name-lookup lookalike. Read the correction banner first |
+| `SLOT_COMPONENT_DESIGNS.md` | Two unbuilt XML-deduplication proposals (network state icons, capability-gated setting rows), what the other two designs turned into, and the **measured** limits of the `lv_xml_expr.c` evaluator: integer-only, so string formatting cannot move to XML formulas. Nothing here has shipped |
 | `FLAG_ICONS_SOURCE.md` | Flag icon asset sources |
 | `480x320_UI_AUDIT.md` | Small display UI audit |

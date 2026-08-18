@@ -289,6 +289,11 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
 
     [[nodiscard]] std::optional<helix::ErrorEvent> current_error() const override;
 
+    /// Pre-print unaccounted gate: the SWITCH pair only, never head_filament_
+    /// alone (motion-sensor false negatives, see the block comment above).
+    /// nullopt until the switch has ever published a reading.
+    [[nodiscard]] std::optional<bool> toolhead_filament_unaccounted() const override;
+
     /// Which auto-switchover plugin the live printer has, from the same two
     /// signals set_slot_info()/parse_save_variables() already trust: the
     /// detected variable prefix and the `gcode_macro _ifs_vars` existence latch.
@@ -751,7 +756,21 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
 
     std::string build_color_list_value() const;
     std::string build_type_list_value() const;
+    /// Shared shape logic for the `_IFS_VARS colors=` / `types=` payloads.
+    /// The two plugins index these arrays differently: bambufy keeps 4-entry
+    /// PORT-indexed lists, while lessWaste keeps TOOL_MAP_SIZE-entry
+    /// TOOL-indexed lists projected through tool_map_ (`variable_tools` — its
+    /// `_RUNOUT_HEAD` backup scan iterates tool slots, not ports, and a
+    /// port-indexed 4-entry payload truncates the arrays wholesale, #1247).
+    /// `colors` selects which per-port array supplies each entry.
+    std::string build_ifs_list_value(bool colors) const;
     std::string build_tool_map_value() const;
+    /// Push a correctly-shaped `colors=`/`types=` pair into `_IFS_VARS` after
+    /// parse_save_variables() observed a truncated lessWaste array (the
+    /// persisted damage from the #1247 bug — SAVE_VARIABLE keeps it across
+    /// reboots). Called from handle_status_update() with mutex_ released
+    /// because execute_gcode() blocks.
+    void dispatch_ifs_vars_repair();
     AmsError write_ifs_var(const std::string& key, const std::string& value);
     AmsError write_adventurer_json(int slot_index);
     // Direct filesystem write to the resolved AD5X-stock-ZMOD config path. Used
@@ -1117,6 +1136,23 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     // is read and displayed, nothing branches on it except the wording and the
     // longer runout confirm delay.
     std::optional<bool> ifs_backup_variable_;
+
+    // `variable_ifs_unlock_after_boot` from the same dict: lessWaste's own
+    // post-boot `IFS_F18` workaround for the IFS lane clamps sticking after a
+    // power cycle (the "stock screen glitch" its README names). Log-only
+    // visibility — the plugin runs its `_UNLOCK_IFS` delayed gcode itself when
+    // this is on, and HelixScreen must not send hardware motion unprompted.
+    // Recorded because "a plain reboot may itself change IFS behavior" is the
+    // confounder that muddied #1247's screen A/B test; a debug bundle should
+    // answer whether the plugin's unlock was armed (#1247).
+    std::optional<bool> ifs_unlock_after_boot_;
+
+    // Set by parse_save_variables() when a lessWaste `<prefix>_colors` or
+    // `_types` save_variables array arrives with fewer than TOOL_MAP_SIZE
+    // entries — the truncation signature of the #1247 mirror bug. Consumed
+    // (read + cleared) by handle_status_update() under the same lock hold,
+    // then dispatched after unlock. Guarded by mutex_.
+    bool ifs_vars_repair_staged_ = false;
 
     std::atomic<bool> reread_pending_{false};
 

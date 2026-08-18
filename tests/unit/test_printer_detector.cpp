@@ -4482,3 +4482,116 @@ TEST_CASE_METHOD(
 
     TearDown();
 }
+
+// ============================================================================
+// Type Mismatch Warning Decider
+// ============================================================================
+
+TEST_CASE("should_warn_type_mismatch table", "[detector][mismatch]") {
+    using PD = PrinterDetector;
+    const std::string none; // "" — flag never shown
+    const std::string ad5m = "FlashForge Adventurer 5M Pro";
+    const std::string trident = "Voron Trident";
+
+    SECTION("high-confidence different type warns") {
+        REQUIRE(PD::should_warn_type_mismatch(ad5m, trident, 85, none));
+    }
+    SECTION("boundary: 70 warns, 69 does not") {
+        REQUIRE(PD::should_warn_type_mismatch(ad5m, trident, 70, none));
+        REQUIRE_FALSE(PD::should_warn_type_mismatch(ad5m, trident, 69, none));
+    }
+    SECTION("same type never warns") {
+        REQUIRE_FALSE(PD::should_warn_type_mismatch(ad5m, ad5m, 95, none));
+    }
+    SECTION("deliberate picks and undetected saves are exempt") {
+        REQUIRE_FALSE(PD::should_warn_type_mismatch("Custom/Other", trident, 95, none));
+        REQUIRE_FALSE(PD::should_warn_type_mismatch("Unknown", trident, 95, none));
+        REQUIRE_FALSE(PD::should_warn_type_mismatch("", trident, 95, none));
+    }
+    SECTION("flag suppresses until the saved type changes") {
+        REQUIRE_FALSE(PD::should_warn_type_mismatch(ad5m, trident, 85, ad5m));
+        // User re-ran wizard and picked ANOTHER wrong type: re-arm once.
+        const std::string k1max = "Creality K1 Max (with CFS)";
+        REQUIRE(PD::should_warn_type_mismatch(k1max, trident, 85, ad5m));
+    }
+}
+
+// ============================================================================
+// LED Heuristic Exclusivity (#1284)
+// ============================================================================
+
+TEST_CASE_METHOD(
+    PrinterDetectorFixture,
+    "PrinterDetector: led_effect rig with chamber_light must not detect AD5M Pro at >=70",
+    "[printer][1284]") {
+    // A Voron-class rig running the klipper-led_effect mod. The mod's configs
+    // target an underlying 'neopixel chamber_light' strip — the most natural
+    // chamber-light name on custom builds — and 'chamber_light' contains the
+    // AD5M Pro DB pattern 'chamber_l'. That name is generic, so the LED alone
+    // must never carry detection to the >=70 high-confidence threshold (where
+    // the saved type is overridden / the mismatch warning fires).
+    PrinterHardwareData hardware{
+        .heaters = {"extruder", "heater_bed", "heater_generic chamber"},
+        .sensors = {"extruder", "heater_bed", "temperature_sensor chamber",
+                    "temperature_sensor raspberry_pi", "temperature_sensor mcu_temp"},
+        .fans = {"heater_fan hotend_fan", "fan", "fan_generic nevermore",
+                 "controller_fan controller_fan"},
+        .leds = {"neopixel chamber_light", "neopixel status_led", "led caselight",
+                 "output_pin Enclosure_LEDs"},
+        .hostname = "voron",
+        .printer_objects = {"quad_gantry_level", "neopixel chamber_light", "neopixel status_led",
+                            "led caselight", "led_effect breathing", "led_effect fire_comet",
+                            "led_effect rainbow", "led_effect static_white"},
+        .steppers = {"stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2",
+                     "stepper_z3"},
+        .kinematics = "corexy",
+        .mcu = "rp2040"};
+
+    auto result = PrinterDetector::detect(hardware);
+
+    // The unambiguous Voron hardware (QGL + 4x Z steppers) must win, not the
+    // LED-name substring match.
+    REQUIRE(result.type_name == "Voron 2.4");
+}
+
+TEST_CASE_METHOD(PrinterDetectorFixture,
+                 "PrinterDetector: chamber_light LED alone stays below high-confidence threshold",
+                 "[printer][1284]") {
+    // Minimal reproduction: the ONLY distinctive signal is an LED whose name
+    // contains 'chamber_l'. No FlashForge sensors, no FlashForge hostname.
+    PrinterHardwareData hardware{.heaters = {"extruder", "heater_bed"},
+                                 .sensors = {},
+                                 .fans = {"fan", "heater_fan hotend_fan"},
+                                 .leds = {"led chamber_light"},
+                                 .hostname = "mainsailos"};
+
+    auto result = PrinterDetector::detect(hardware);
+
+    // May still be suggested (corroborating signal), but never >=70 where it
+    // would override the saved type or arm the mismatch warning.
+    REQUIRE(result.confidence < 70);
+    REQUIRE_FALSE(PrinterDetector::should_warn_type_mismatch("Voron 2.4", result.type_name,
+                                                             result.confidence, ""));
+}
+
+TEST_CASE_METHOD(PrinterDetectorFixture,
+                 "PrinterDetector: genuine AD5M Pro shape still detects as AD5M Pro",
+                 "[printer][1284]") {
+    // Stock AD5M Pro fingerprint: chamber_light LED + tvoc/weight sensors +
+    // FlashForge hostname. The LED heuristic stays a useful corroborating
+    // signal (it breaks the Pro-vs-5M tie), and the sensor/hostname
+    // heuristics alone carry detection well past the high-confidence bar.
+    PrinterHardwareData hardware{
+        .heaters = {"extruder", "heater_bed"},
+        .sensors = {"tvocValue", "weightValue", "temperature_sensor chamber_temp"},
+        .fans = {"fan", "fan_generic exhaust_fan"},
+        .leds = {"led chamber_light"},
+        .hostname = "flashforge-ad5m-pro",
+        .kinematics = "corexy"};
+
+    auto result = PrinterDetector::detect(hardware);
+
+    REQUIRE(result.detected());
+    REQUIRE(result.type_name == "FlashForge Adventurer 5M Pro");
+    REQUIRE(result.confidence >= 90);
+}

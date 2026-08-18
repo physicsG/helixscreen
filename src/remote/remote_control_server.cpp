@@ -359,13 +359,44 @@ nlohmann::json RemoteControlServer::handle_navigate(const nlohmann::json& params
 
     std::string target = params["panel"];
 
-    // 1. Base panel -> switch to it.
+    // 1. Base panel -> take the same path a navbar tap takes.
+    //
+    // NOT set_active(), which deliberately preserves the overlay stack so the
+    // base panel can be swapped underneath an open overlay. Driving it that way
+    // left the overlay (and its opaque snapshot backdrop) covering the screen
+    // while reporting a successful navigation — every screenshot after it came
+    // back identical, which reads as broken rendering rather than "you are
+    // still inside an overlay". A finger on the navbar clears the stack; so
+    // does this now.
     auto panel_id = name_to_panel_id(target);
     if (panel_id) {
         return execute_on_ui_thread([panel_id]() -> nlohmann::json {
             wake_display();
-            NavigationManager::instance().set_active(*panel_id);
-            return {{"navigated_to", panel_id_to_name(*panel_id)}, {"kind", "panel"}};
+            using PanelRequest = NavigationManager::PanelRequest;
+            // Inline: this lambda already runs inside an UpdateQueue callback,
+            // which is the context switch_to_panel_impl() is written for. That
+            // keeps navigate synchronous — `current` right after it reports the
+            // new panel instead of racing a queued switch.
+            auto result = NavigationManager::instance().request_panel(
+                *panel_id, NavigationManager::SwitchDispatch::Inline);
+
+            // A declined request must not answer like a successful one. The
+            // gating is silent for a finger (the button simply does nothing),
+            // but a script that gets {"navigated_to": ...} back and then
+            // screenshots the panel it never reached has no way to tell.
+            if (result == PanelRequest::BlockedDisconnected) {
+                throw std::runtime_error("Navigation to '" + panel_id_to_name(*panel_id) +
+                                         "' blocked: printer not connected");
+            }
+            if (result == PanelRequest::BlockedKlippyNotReady) {
+                throw std::runtime_error("Navigation to '" + panel_id_to_name(*panel_id) +
+                                         "' blocked: Klipper not ready");
+            }
+
+            return {{"navigated_to", panel_id_to_name(*panel_id)},
+                    {"kind", "panel"},
+                    {"switched", result == PanelRequest::Switched},
+                    {"home_retapped", result == PanelRequest::HomeRetapped}};
         });
     }
 

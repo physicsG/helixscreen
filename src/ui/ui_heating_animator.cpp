@@ -106,12 +106,14 @@ void HeatingIconAnimator::update(int current_temp, int target_temp, helix::Chamb
     current_temp_ = current_temp;
     target_temp_ = target_temp;
 
-    // Same classifier the temperature label uses, in decidegrees. mode defaults
-    // to Heating, which classify_heat_state_with_mode() passes straight through
-    // to classify_heat_state() — a no-op for nozzle/bed. Only the chamber ever
+    // Same classifier the temperature label uses, in decidegrees, and against
+    // the same displayed_deci() reading — the icon sits beside the number, so it
+    // has to agree with what that number rounded to. mode defaults to Heating,
+    // which classify_heat_state_with_mode() passes straight through to
+    // classify_heat_state() — a no-op for nozzle/bed. Only the chamber ever
     // passes Off/Maintaining.
     State new_state = helix::ui::temperature::classify_heat_state_with_mode(
-        current_temp, target_temp, mode, TEMP_TOLERANCE);
+        helix::ui::temperature::displayed_deci(current_temp), target_temp, mode, TEMP_TOLERANCE);
 
     if (new_state != state_) {
         state_ = new_state;

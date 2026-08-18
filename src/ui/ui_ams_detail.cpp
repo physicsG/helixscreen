@@ -777,8 +777,14 @@ bool ams_dispatch_backend_action(AmsContextMenu::MenuAction action, int slot,
     }
 
     case MenuAction::CLEAR_SPOOL: {
-        // Clear spool assignment: reset material/color/spool data, keep slot status
-        SlotInfo cleared = backend->get_slot_info(slot);
+        // Clear spool assignment: reset material/color/spool data, keep slot status.
+        // Routed through AmsState::commit_slot_edit so the Spoolman server active
+        // spool and the identity cache are cleared too (bundle F2LNLQCC: clearing
+        // only the backend left spool 169 active server-side; restart re-asserted
+        // it into the UI). The PRE-WIPE info is passed as `original` — the commit's
+        // unlink arm keys off original.spoolman_id.
+        SlotInfo original = backend->get_slot_info(slot);
+        SlotInfo cleared = original;
         cleared.material.clear();
         cleared.color_rgb = AMS_DEFAULT_SLOT_COLOR;
         cleared.color_name.clear();
@@ -790,14 +796,13 @@ bool ams_dispatch_backend_action(AmsContextMenu::MenuAction action, int slot,
         cleared.clear_spoolman_link();
         cleared.remaining_weight_g = -1;
         cleared.total_weight_g = -1;
-        auto error = backend->set_slot_info(slot, cleared);
+        auto error = AmsState::instance().commit_slot_edit(slot, original, cleared);
         if (error.success()) {
 #if HELIX_HAS_CFS
             if (backend->get_type() == AmsType::CFS) {
                 static_cast<helix::printer::AmsBackendCfs*>(backend)->clear_box_slot_profile(slot);
             }
 #endif
-            AmsState::instance().sync_from_backend();
             // The badge's spool number, not slot + 1 — see
             // AmsBackend::spool_display_number().
             NOTIFY_INFO(lv_tr("Slot {} spool cleared"), backend->spool_display_number(slot));

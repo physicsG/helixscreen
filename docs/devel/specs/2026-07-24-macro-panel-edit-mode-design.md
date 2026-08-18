@@ -305,7 +305,7 @@ Real tests (must fail if the feature is removed; mutation-verify each):
 - `include/helix/xml/indexed_subject_pool.h` (+ `src/` impl if not header-only) — new helper.
 - `ui_xml/macro_panel.xml` — Save button props, `rows_container` + `<repeat>`.
 - `ui_xml/macro_card.xml` — subject-name props, checkbox child, edit-mode bindings.
-- New checkbox glyph/icon if needed — `codepoints.h` + `make regen-fonts`.
+- New checkbox glyph/icon if needed — `include/ui_icon_codepoints.h` + `make regen-fonts`.
 - `src/ui/ui_panel_macros.cpp`, `include/ui_panel_macros.h` — model, modes, pools,
   handlers; remove `create_macro_card`/`macro_entries_`/card-pointer identity and the
   dead `system_toggle_` / `show_system_macros_` path.

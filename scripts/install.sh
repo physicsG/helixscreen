@@ -126,6 +126,29 @@ file_sudo() {
     fi
 }
 
+# Get sudo prefix needed to RENAME or REMOVE a path (mv/rm/rmdir of the path
+# itself, not of something inside it).
+#
+# Always checks the PARENT, existing target or not. rename(2) and unlink(2)
+# mutate the parent directory's entries; the target's own mode has nothing to do
+# with it. So a user-owned directory inside a root-owned parent is writable and
+# still cannot be moved or deleted.
+#
+# That is not hypothetical, it is the /opt/helixscreen layout: helixscreen.service
+# chowns the install dir to the service user via ExecStartPre while /opt stays
+# root:root. file_sudo() answers "can I write INTO this", returns "" there, and the
+# swap runs bare:
+#
+#   mv: cannot move '/opt/helixscreen' to '/opt/helixscreen.old': Permission denied
+#
+# Use file_sudo() when writing a file into a directory; use this when the path is
+# the thing being moved or deleted.
+path_sudo() {
+    local dir
+    dir="$(dirname "$1")"
+    [ -w "$dir" ] && echo "" || echo "$SUDO"
+}
+
 # Resolve the directory holding the user's Klipper/Moonraker config files.
 #
 # Almost every Klipper install puts them in <klipper home>/printer_data/config,
@@ -1065,13 +1088,41 @@ detect_k1_firmware() {
     echo "stock_klipper"
 }
 
+# Locations a HelixScreen install may already occupy, for the existing-install
+# probe below. Mirrors HELIX_INSTALL_DIRS in uninstall.sh — same question, same
+# answer. Overridable so the bats suite can point it at a sandbox.
+: "${_HELIX_KNOWN_INSTALL_DIRS:=/opt/helixscreen /srv/helixscreen /usr/data/helixscreen /root/printer_software/helixscreen /user-resource/helixscreen /userdata/helixscreen}"
+
+# Print the directory of an install that is already on disk, or return 1.
+# Checks $KLIPPER_HOME/helixscreen first so an ecosystem install outranks a stale
+# tree in one of the fixed locations.
+#
+# bin/helix-screen is what makes a directory an install: uninstall leaves the
+# directory (and its config/) behind on several platforms, and treating that
+# husk as a live install would pin every future install to it.
+_detect_existing_install_dir() {
+    _eid_candidates=""
+    [ -n "${KLIPPER_HOME:-}" ] && _eid_candidates="${KLIPPER_HOME}/helixscreen"
+    _eid_candidates="${_eid_candidates} ${_HELIX_KNOWN_INSTALL_DIRS}"
+
+    for _eid_dir in $_eid_candidates; do
+        if [ -x "${_eid_dir}/bin/helix-screen" ]; then
+            printf '%s\n' "$_eid_dir"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Detect Pi install directory based on Klipper ecosystem presence
 # Cascade (first match wins):
 #   1. User explicitly set INSTALL_DIR → keep it
-#   2. ~/klipper or ~/moonraker exists → ~/helixscreen
-#   3. ~/printer_data exists → ~/helixscreen
-#   4. moonraker.service is active → ~/helixscreen
-#   5. Fallback → /opt/helixscreen
+#   2. An install already on disk → keep it where it is
+#   3. ~/klipper or ~/moonraker exists → ~/helixscreen
+#   4. ~/printer_data exists → ~/helixscreen
+#   5. moonraker.service is active → ~/helixscreen
+#   6. Non-root service user with a home they own → ~/helixscreen
+#   7. Fallback → /opt/helixscreen
 # Requires: KLIPPER_HOME to be set (by detect_klipper_user)
 # Sets: INSTALL_DIR
 detect_pi_install_dir() {
@@ -1085,27 +1136,38 @@ detect_pi_install_dir() {
         return 0
     fi
 
+    # 2. An install already on disk decides, whatever the cascade below would
+    #    have picked. Relocating it orphans the old tree and the config in it,
+    #    and the cascade's answer is not stable across releases — a box that
+    #    matched one branch on first install can match a different one later.
+    _existing_install_dir=$(_detect_existing_install_dir) || _existing_install_dir=""
+    if [ -n "$_existing_install_dir" ]; then
+        INSTALL_DIR="$_existing_install_dir"
+        log_info "Install directory (existing install): $INSTALL_DIR"
+        return 0
+    fi
+
     # Need KLIPPER_HOME for ecosystem detection
     if [ -z "$KLIPPER_HOME" ]; then
         INSTALL_DIR="/opt/helixscreen"
         return 0
     fi
 
-    # 2. Klipper or Moonraker source directories
+    # 3. Klipper or Moonraker source directories
     if [ -d "$KLIPPER_HOME/klipper" ] || [ -d "$KLIPPER_HOME/moonraker" ]; then
         INSTALL_DIR="$KLIPPER_HOME/helixscreen"
         log_info "Install directory (klipper ecosystem): $INSTALL_DIR"
         return 0
     fi
 
-    # 3. printer_data directory (Klipper config structure)
+    # 4. printer_data directory (Klipper config structure)
     if [ -d "$KLIPPER_HOME/printer_data" ]; then
         INSTALL_DIR="$KLIPPER_HOME/helixscreen"
         log_info "Install directory (printer_data): $INSTALL_DIR"
         return 0
     fi
 
-    # 4. Moonraker service running (ecosystem present but maybe different layout)
+    # 5. Moonraker service running (ecosystem present but maybe different layout)
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl is-active --quiet moonraker.service 2>/dev/null || \
            systemctl is-active --quiet moonraker 2>/dev/null; then
@@ -1115,7 +1177,29 @@ detect_pi_install_dir() {
         fi
     fi
 
-    # 5. Fallback: no ecosystem detected
+    # 6. No ecosystem, but a real non-root service user with a home they own.
+    #    Prefer it over /opt, because an update applies by RENAMING the install
+    #    root ("mv <root> <root>.old; mv <new> <root>") and rename mutates the
+    #    parent's directory entries — so the parent is what has to be writable by
+    #    the service user. /opt is root-owned, which leaves only install.sh's
+    #    in-place fallback: delete the root's contents, then move the new ones in.
+    #    That path works and is not going away, but it deletes before it moves, so
+    #    a failure part-way leaves a half-installed tree (#970). A home-owned
+    #    parent keeps the atomic route available.
+    #
+    #    This is the standalone-display shape: a Pi driving a panel with Klipper
+    #    and Moonraker on another box, so every ecosystem check above misses.
+    #    Escalation is not an answer here — the unit sets NoNewPrivileges=true, so
+    #    sudo cannot run from the app or from the install.sh it forks.
+    if [ "${KLIPPER_USER:-root}" != "root" ] && [ -d "$KLIPPER_HOME" ] && \
+       [ "$(stat -c '%U' "$KLIPPER_HOME" 2>/dev/null)" = "$KLIPPER_USER" ]; then
+        INSTALL_DIR="$KLIPPER_HOME/helixscreen"
+        log_info "Install directory (service user home, no ecosystem): $INSTALL_DIR"
+        return 0
+    fi
+
+    # 7. Fallback: no ecosystem, and no home we can rename inside (root installs,
+    #    where /opt is writable anyway).
     INSTALL_DIR="/opt/helixscreen"
     return 0
 }
@@ -1557,7 +1641,7 @@ setup_config_symlink() {
         log_info "Migrating from old config symlink layout..."
         local old_target
         old_target=$(readlink "$pd_helix" 2>/dev/null || echo "")
-        $(file_sudo "$pd_helix") rm -f "$pd_helix"
+        $(path_sudo "$pd_helix") rm -f "$pd_helix"
         log_info "Removed old directory symlink (was: $old_target)"
     fi
 
@@ -1912,11 +1996,11 @@ install_permission_rules() {
     if _has_no_new_privs; then
         if command -v nmcli >/dev/null 2>&1 && ! _polkit_rule_exists; then
             log_warn "NetworkManager polkit rule is MISSING — Wi-Fi will not work as non-root."
-            log_warn "Fix by re-running the installer:  curl -fsSL https://releases.helixscreen.org/install.sh | bash"
+            log_warn "Fix by re-running the installer:  curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update"
         elif _permission_rules_need_repair "$helix_user"; then
             log_warn "Permission rules need repair (pkla/polkit file has un-substituted template)."
             log_warn "Wi-Fi may not work. Fix with:  sudo sed -i 's|@@HELIX_USER@@|${helix_user}|g' /etc/polkit-1/localauthority/50-local.d/helixscreen-network.pkla"
-            log_warn "Or re-run the installer:  curl -fsSL https://releases.helixscreen.org/install.sh | bash"
+            log_warn "Or re-run the installer:  curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update"
         else
             log_info "Skipping permission rules (NoNewPrivileges; already installed)"
         fi
@@ -5217,7 +5301,7 @@ extract_release() {
                 log_error "Cannot write to ${INSTALL_DIR} (read-only under ProtectSystem)."
                 log_error "The systemd service file needs updating to allow self-updates."
                 log_error "Fix: re-run the installer once with:"
-                log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | bash"
+                log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update"
                 rm -rf "$extract_dir"
                 exit 1
             fi
@@ -5257,7 +5341,7 @@ extract_release() {
 
                 if [ "$_inplace_failed" = true ]; then
                     log_error "In-place update failed. Install may be in a broken state."
-                    log_error "Fix: re-run the installer: curl -fsSL https://releases.helixscreen.org/install.sh | bash"
+                    log_error "Fix: re-run the installer: curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update"
                     rm -rf "$extract_dir"
                     exit 1
                 fi
@@ -5349,7 +5433,7 @@ extract_release() {
                 log_info "Install partition tight (${install_free_mb}MB free, need ~${new_install_mb}MB); staging rollback backup off-partition at ${HELIX_OFFSITE_ROLLBACK_DIR}"
 
                 # Cross-fs move (copy to roomy + delete) frees the install fs.
-                if ! $(file_sudo "${INSTALL_DIR}") mv "${INSTALL_DIR}" "$INSTALL_BACKUP"; then
+                if ! $(path_sudo "${INSTALL_DIR}") mv "${INSTALL_DIR}" "$INSTALL_BACKUP"; then
                     log_error "Failed to relocate existing installation off-partition."
                     rm -rf "$extract_dir"
                     exit 1
@@ -5376,7 +5460,7 @@ extract_release() {
             fi
 
             # Atomic swap: move old install to backup
-            if ! $(file_sudo "${INSTALL_DIR}") mv "${INSTALL_DIR}" "$INSTALL_BACKUP"; then
+            if ! $(path_sudo "${INSTALL_DIR}") mv "${INSTALL_DIR}" "$INSTALL_BACKUP"; then
                 log_error "Failed to backup existing installation."
                 rm -rf "$extract_dir"
                 exit 1
@@ -5391,9 +5475,19 @@ extract_release() {
         # ROLLBACK: restore old installation
         if [ -d "${INSTALL_BACKUP:-}" ]; then
             log_warn "Rolling back to previous installation..."
-            # Remove partial new install that may block the rollback mv
-            [ -d "${INSTALL_DIR}" ] && $SUDO rm -rf "${INSTALL_DIR}"
-            if $SUDO mv "$INSTALL_BACKUP" "${INSTALL_DIR}"; then
+            # Remove partial new install that may block the rollback mv.
+            # Unescalated first, then escalate — the same two-attempt idiom the
+            # stale-backup removals above use. A forced $SUDO is not the safe
+            # choice here: under NoNewPrivileges (self-update) sudo cannot run at
+            # all, so escalating first turns a rollback that would have worked on
+            # a user-owned parent into a failed one, and a failed rollback leaves
+            # the box with no install.
+            if [ -d "${INSTALL_DIR}" ]; then
+                $(path_sudo "${INSTALL_DIR}") rm -rf "${INSTALL_DIR}" 2>/dev/null || \
+                    $SUDO rm -rf "${INSTALL_DIR}" 2>/dev/null || true
+            fi
+            if $(path_sudo "$INSTALL_BACKUP") mv "$INSTALL_BACKUP" "${INSTALL_DIR}" 2>/dev/null || \
+               $SUDO mv "$INSTALL_BACKUP" "${INSTALL_DIR}"; then
                 log_warn "Rollback complete. Previous installation restored."
                 # Off-partition rollback: the cross-fs mv leaves an empty
                 # helixscreen-rollback/ dir behind. Remove it, but ONLY when its
@@ -5737,7 +5831,7 @@ install_procd_shim_k2() {
         log_error "K2 procd shim source missing: $shim_src"
         log_error "The release package may be incomplete."
         log_error "Recovery: re-run the installer to download a fresh copy:"
-        log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | bash"
+        log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update"
         return 1
     fi
 
@@ -5792,7 +5886,7 @@ install_service_snapmaker_u1() {
         log_error "Snapmaker U1 autostart script not found at ${INSTALL_DIR}/scripts/snapmaker-u1-setup-autostart.sh"
         log_error "The release package may be incomplete."
         log_error "Recovery: re-run the installer to download a fresh copy:"
-        log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | bash"
+        log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update"
         exit 1
     fi
 }
@@ -5820,7 +5914,7 @@ install_service_systemd() {
         log_error "Service file not found: $service_src"
         log_error "The release package may be incomplete."
         log_error "Recovery: re-run the installer to download a fresh copy:"
-        log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | bash"
+        log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update"
         exit 1
     fi
 
@@ -5994,7 +6088,7 @@ install_service_sysv() {
         log_error "Init script not found: $init_src"
         log_error "The release package may be incomplete."
         log_error "Recovery: re-run the installer to download a fresh copy:"
-        log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | bash"
+        log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update"
         exit 1
     fi
 
@@ -6048,7 +6142,7 @@ start_service_snapmaker_u1() {
         log_error "Init script not found or not executable: $init_src"
         log_error "The release package may be incomplete."
         log_error "Recovery: re-run the installer to download a fresh copy:"
-        log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | bash"
+        log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update"
         exit 1
     fi
 
@@ -6667,15 +6761,49 @@ migrate_to_web_type() {
 # Path to os-release; overridable so tests can point at a fixture.
 : "${OS_RELEASE_FILE:=/etc/os-release}"
 
-# Detect buildroot-based firmware (K1/K2/Snapmaker U1 etc.).
-# Buildroot has no apt/PackageKit, so Moonraker's System Update Provider can't
-# initialize and emits a harmless "Unable to initialize System Update Provider
-# for distribution: buildroot" warning the moment any [update_manager] section
-# exists. We detect the exact condition that produces the warning rather than
-# hardcoding a platform list. Mirrors platform.sh's buildroot check.
+# Detect buildroot-based firmware (K1/AD5M/Snapmaker U1 etc.).
+# Mirrors platform.sh's buildroot check.
 # Returns: 0 if buildroot, 1 otherwise
 is_buildroot_distro() {
     [ -f "$OS_RELEASE_FILE" ] && grep -q "buildroot" "$OS_RELEASE_FILE" 2>/dev/null
+}
+
+# Commands that mean the OS has a package manager Moonraker could actually use.
+# Overridable so the BATS suite can simulate firmware without one.
+: "${OS_PACKAGE_MANAGER_CMDS:=apt-get apt}"
+
+# Returns: 0 if some usable OS package manager is on PATH, 1 otherwise.
+has_os_package_manager() {
+    local cmd
+    for cmd in $OS_PACKAGE_MANAGER_CMDS; do
+        command -v "$cmd" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+# True when Moonraker's System Update Provider cannot work on this OS.
+#
+# Moonraker's PackageDeploy tries PackageKit over DBus first, then falls back to
+# the apt CLI and nothing else (system_deploy.py _get_fallback_provider:
+# "Currently only the API Fallback provider is available"). On firmware with
+# neither, the moment ANY [update_manager] section exists Moonraker emits four
+# permanent warnings into Mainsail/Fluidd — three "Unable to find DBus PolKit
+# Interface" (one per PackageKit permission check) plus "Unable to initialize
+# System Update Provider for distribution" — and logs a traceback on every
+# refresh. Since we are the ones adding that section, we are the ones who put
+# the warnings there.
+#
+# The absence of a package manager IS the condition, so probe for that rather
+# than for a distro name. The name check alone missed two shipped platforms:
+#   CC1  (COSMOS/Yocto) — no /etc/os-release at all, so any grep on it fails
+#   K2+  (OpenWrt)      — ID="openwrt", nothing matching "buildroot"
+# is_buildroot_distro stays as a first term so the platforms this already
+# covered keep behaving identically.
+# Returns: 0 if the provider is unusable here, 1 if it should be left enabled.
+system_updates_unavailable() {
+    is_buildroot_distro && return 0
+    has_os_package_manager || return 0
+    return 1
 }
 
 # Check if moonraker.conf has a bare top-level [update_manager] section
@@ -6703,11 +6831,12 @@ bare_update_manager_has_enable_key() {
 }
 
 # Ensure "enable_system_updates: False" exists under a top-level
-# [update_manager] section, but only on buildroot firmware. This silences the
-# "Unable to initialize System Update Provider for distribution: buildroot"
-# warning in Mainsail/Fluidd without affecting our [update_manager helixscreen]
-# one-click updater. On non-buildroot distros (Pi/x86) the warning never fires
-# and OS updates actually work, so we leave them enabled.
+# [update_manager] section, but only where the OS package manager is missing.
+# This silences the "Unable to initialize System Update Provider" and "Unable to
+# find DBus PolKit Interface" warnings in Mainsail/Fluidd without affecting our
+# [update_manager helixscreen] one-click updater. On a distro with a working
+# package manager (Pi/x86) the warnings never fire and OS updates actually work,
+# so we leave them enabled. See system_updates_unavailable().
 #
 # Merge semantics (never blindly append — a duplicate bare section is a fatal
 # Moonraker config error):
@@ -6720,7 +6849,7 @@ bare_update_manager_has_enable_key() {
 disable_system_updates_on_buildroot() {
     local conf="$1"
 
-    is_buildroot_distro || return 0
+    system_updates_unavailable || return 0
     [ -f "$conf" ] || return 0
 
     # Already fully configured — nothing to do (keeps idempotency cheap and
@@ -6735,7 +6864,7 @@ disable_system_updates_on_buildroot() {
 
     if has_bare_update_manager_section "$conf"; then
         # Merge: insert the key on the line right after the bare section header.
-        log_info "Adding enable_system_updates: False to existing [update_manager] (buildroot)"
+        log_info "Adding enable_system_updates: False to existing [update_manager] (no OS package manager)"
         $fs awk '
             { print }
             !done && /^[[:space:]]*\[update_manager\][[:space:]]*$/ {
@@ -6745,10 +6874,10 @@ disable_system_updates_on_buildroot() {
         ' "$conf" > "${conf}.tmp" && $fs mv "${conf}.tmp" "$conf"
     elif has_update_manager_section "$conf"; then
         # Insert a fresh bare section immediately before our helixscreen block.
-        log_info "Adding [update_manager] enable_system_updates: False (buildroot)"
+        log_info "Adding [update_manager] enable_system_updates: False (no OS package manager)"
         $fs awk '
             !done && /^\[update_manager helixscreen\]/ {
-                print "# Disable OS package updates on buildroot firmware (no apt/PackageKit)."
+                print "# Disable OS package updates: this firmware has no apt/PackageKit."
                 print "# Silences Moonraker'\''s \"Unable to initialize System Update Provider\" warning."
                 print "[update_manager]"
                 print "enable_system_updates: False"
@@ -6759,17 +6888,17 @@ disable_system_updates_on_buildroot() {
         ' "$conf" > "${conf}.tmp" && $fs mv "${conf}.tmp" "$conf"
     else
         # No helixscreen block yet — append a bare section at EOF.
-        log_info "Adding [update_manager] enable_system_updates: False (buildroot)"
+        log_info "Adding [update_manager] enable_system_updates: False (no OS package manager)"
         {
             printf '\n'
-            printf '# Disable OS package updates on buildroot firmware (no apt/PackageKit).\n'
+            printf '# Disable OS package updates: this firmware has no apt/PackageKit.\n'
             printf '# Silences Moonraker'\''s "Unable to initialize System Update Provider" warning.\n'
             printf '[update_manager]\n'
             printf 'enable_system_updates: False\n'
         } | $fs tee -a "$conf" >/dev/null
     fi
 
-    log_success "Disabled OS package updates in $conf (buildroot)"
+    log_success "Disabled OS package updates in $conf (no OS package manager)"
 }
 
 # Remove unsupported options from the helixscreen update_manager section.
@@ -6916,18 +7045,43 @@ remove_moonraker_asvc() {
     log_success "Removed helixscreen from Moonraker service allowlist"
 }
 
-# Restart Moonraker to pick up configuration changes
+# Restart Moonraker to pick up configuration changes.
+#
+# The init script name varies by firmware, and knowing only systemd plus the K1's
+# S56moonraker_service meant this fell off the end silently on everything else.
+# On a CC1 that made the moonraker.conf edit take effect at the user's next
+# reboot instead of at install time, which reads as "an update spontaneously
+# changed my printer" (verified: the CC1 has no systemctl, no
+# S56moonraker_service, and its script is /etc/init.d/moonraker).
+#
+# HELIX_INITD_DIR is the same seam camera.sh uses, so the BATS suite can point
+# this at a temp dir rather than needing a writable /etc/init.d.
+# Always returns 0 — a failed restart must never abort an install.
 restart_moonraker() {
+    local initd script
+
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet moonraker 2>/dev/null; then
         log_info "Restarting Moonraker to apply configuration..."
         $SUDO systemctl restart moonraker || true
-    elif [ -x "/etc/init.d/S56moonraker_service" ]; then
-        # K1/Simple AF uses SysV init
-        log_info "Restarting Moonraker to apply configuration..."
-        if ! $SUDO /etc/init.d/S56moonraker_service restart 2>/dev/null; then
-            log_warn "Could not restart Moonraker - you may need to restart it manually"
-        fi
+        return 0
     fi
+
+    # SysV/procd firmware. S56moonraker_service is Creality K1/Simple AF; a plain
+    # "moonraker" covers COSMOS (CC1) and the rest.
+    initd="${HELIX_INITD_DIR:-/etc/init.d}"
+    for script in "${initd}/S56moonraker_service" "${initd}/moonraker" \
+                  "/etc/init.d/S56moonraker_service" "/etc/init.d/moonraker"; do
+        if [ -x "$script" ] || [ -f "$script" ]; then
+            log_info "Restarting Moonraker to apply configuration..."
+            if ! $SUDO "$script" restart 2>/dev/null; then
+                log_warn "Could not restart Moonraker - you may need to restart it manually"
+            fi
+            return 0
+        fi
+    done
+
+    log_warn "Could not find a way to restart Moonraker - restart it manually for the configuration change to take effect."
+    return 0
 }
 
 # Configure Moonraker update_manager
@@ -7026,7 +7180,7 @@ configure_moonraker_updates() {
     # (type: zip shows perpetual UP-TO-DATE in Mainsail — see mainsail-crew/mainsail#2444)
     if has_old_git_repo_section "$conf" || has_old_zip_section "$conf"; then
         migrate_to_web_type "$conf"
-        # On buildroot firmware, silence the System Update Provider warning.
+        # Where the OS has no package manager, silence the provider warnings.
         disable_system_updates_on_buildroot "$conf"
         ensure_moonraker_asvc "$conf"
         restart_moonraker
@@ -7038,7 +7192,7 @@ configure_moonraker_updates() {
         # Remove options not supported by type: web (persistent_files,
         # managed_services, install_script) that cause Moonraker warnings.
         cleanup_unsupported_options "$conf"
-        # On buildroot firmware, silence the System Update Provider warning.
+        # Where the OS has no package manager, silence the provider warnings.
         disable_system_updates_on_buildroot "$conf"
         # Still ensure asvc is correct even if section already exists
         ensure_moonraker_asvc "$conf"
@@ -7046,7 +7200,7 @@ configure_moonraker_updates() {
     fi
 
     add_update_manager_section "$conf"
-    # On buildroot firmware, silence the System Update Provider warning.
+    # Where the OS has no package manager, silence the provider warnings.
     disable_system_updates_on_buildroot "$conf"
     ensure_moonraker_asvc "$conf"
     restart_moonraker
@@ -7763,8 +7917,8 @@ PYEOF
         else
             log_warn "Webcam backup missing or python unavailable — only removed our entry"
         fi
-        $(file_sudo "$backup") rm -f "$backup" 2>/dev/null || true
-        $(file_sudo "$marker") rm -f "$marker" 2>/dev/null || true
+        $(path_sudo "$backup") rm -f "$backup" 2>/dev/null || true
+        $(path_sudo "$marker") rm -f "$marker" 2>/dev/null || true
     fi
 
     # (c) Re-enable the K2-Camera-main [webcam Default] entry we commented out, if
@@ -7787,7 +7941,7 @@ PYEOF
             rm -f "$tmp"
         done < "$k2cam_marker"
         [ "$restored" = true ] && _restart_moonraker
-        $(file_sudo "$k2cam_marker") rm -f "$k2cam_marker" 2>/dev/null || true
+        $(path_sudo "$k2cam_marker") rm -f "$k2cam_marker" 2>/dev/null || true
     fi
 
     log_success "K2 ustreamer camera removed (stock WebRTC re-enabled on reboot)"
@@ -8212,7 +8366,7 @@ undo_klipper_includes() {
             cfg)
                 if [ -f "$rest" ]; then
                     log_info "Removing Klipper snippet: $rest"
-                    $(file_sudo "$rest") rm -f "$rest" 2>/dev/null || true
+                    $(path_sudo "$rest") rm -f "$rest" 2>/dev/null || true
                 fi
                 ;;
             include)
@@ -8268,7 +8422,7 @@ undo_seeded_settings() {
     done < "$state_file"
 
     # Remove only the marker; settings.json is left untouched on purpose.
-    $(file_sudo "$state_file") rm -f "$state_file" 2>/dev/null || true
+    $(path_sudo "$state_file") rm -f "$state_file" 2>/dev/null || true
 }
 
 # Uninstall HelixScreen
@@ -8573,7 +8727,7 @@ uninstall() {
 
     # Clean up macOS resource fork files (created by scp from Mac)
     for pattern in /opt/._helixscreen /root/._helixscreen; do
-        $(file_sudo "$pattern") rm -f "$pattern" 2>/dev/null || true
+        $(path_sudo "$pattern") rm -f "$pattern" 2>/dev/null || true
     done
 
     # Remove config symlinks (preserves user files in printer_data)

@@ -55,13 +55,22 @@ class IMoonrakerAPI {
         std::function<void(const std::vector<helix::SensorInfo>&, const nlohmann::json&)>;
 
     // ========== G-code execute_gcode timeout constants ==========
-    // Default is 30s (in MoonrakerClient). These are for long-running commands.
+    // Default (timeout_ms = 0) is MoonrakerRequestTracker's 60s. These are for
+    // long-running commands.
     static constexpr uint32_t HOMING_TIMEOUT_MS = 300000;        // 5 min — G28 on large printers
     static constexpr uint32_t AMS_OPERATION_TIMEOUT_MS = 300000; // 5 min — MMU/AFC/tool change ops
     static constexpr uint32_t EXTRUSION_TIMEOUT_MS =
         120000; // 2 min — filament purge/load at slow feedrate
     static constexpr uint32_t MACRO_TIMEOUT_MS =
         300000; // 5 min — user macros can do anything (homing, leveling, filament ops)
+    /// 20 min — a pre-print macro chain that the print start must WAIT for.
+    /// Creality's BED_MESH_CALIBRATE_START_PRINT homes, wipes, heats the bed to
+    /// print temp and then runs a full adaptive mesh; measured at ~10 min on a
+    /// warm K2 Plus, and a cold ASA soak to 105C pushes it past MACRO_TIMEOUT_MS.
+    /// If even this ceiling expires while the printer still reports busy,
+    /// PrintPreparationManager waits for the busy->idle edge instead of failing;
+    /// only a printer that never goes idle aborts the start.
+    static constexpr uint32_t PRE_START_MACRO_TIMEOUT_MS = 1200000;
 
     /// Moonraker's default API port. When the HTTP base points here we assume a
     /// "direct to Moonraker" connection, where the webcam is served by a separate
@@ -173,8 +182,12 @@ class IMoonrakerAPI {
     // ========================================================================
 
     /// @brief Set target temperature for a heater
+    /// @param caller_surfaces_errors Whether @p on_error actually shows the user
+    ///        something. Forwarded to execute_gcode() — see its contract and
+    ///        include/rpc_error_policy.h. Pass false when the callback only logs.
     virtual void set_temperature(const std::string& heater, double temperature,
-                                 SuccessCallback on_success, ErrorCallback on_error) = 0;
+                                 SuccessCallback on_success, ErrorCallback on_error,
+                                 bool caller_surfaces_errors = true) = 0;
 
     /// @brief Set fan speed (0-100)
     virtual void set_fan_speed(const std::string& fan, double speed, SuccessCallback on_success,
@@ -183,9 +196,13 @@ class IMoonrakerAPI {
     /// @brief Set LED color/brightness
     /// @param on_queued Optional "queued behind a blocking op" disposition — see
     ///        execute_gcode() on MoonrakerAPI for the full contract.
+    /// @param caller_surfaces_errors Whether @p on_error actually shows the user
+    ///        something. Forwarded to execute_gcode() — see its contract and
+    ///        include/rpc_error_policy.h. Pass false when the callback only logs.
     virtual void set_led(const std::string& led, double red, double green, double blue,
                          double white, SuccessCallback on_success, ErrorCallback on_error,
-                         SuccessCallback on_queued = nullptr) = 0;
+                         SuccessCallback on_queued = nullptr,
+                         bool caller_surfaces_errors = true) = 0;
 
     // ========================================================================
     // System Control
@@ -195,12 +212,29 @@ class IMoonrakerAPI {
     /// @param on_queued Optional third disposition, fired when a discretionary
     ///        command was accepted to run behind a blocking op and its RPC
     ///        response was dropped. Runs SYNCHRONOUSLY on the calling thread.
+    /// @param caller_surfaces_errors Whether @p on_error actually shows the user
+    ///        something. Pass false when it only logs — a spdlog line is not a
+    ///        report, and claiming otherwise silences Klipper's `!!` broadcast,
+    ///        the surface that would have explained the failure.
     virtual void execute_gcode(const std::string& gcode, SuccessCallback on_success,
                                ErrorCallback on_error, uint32_t timeout_ms = 0, bool silent = false,
-                               SuccessCallback on_queued = nullptr) = 0;
+                               SuccessCallback on_queued = nullptr,
+                               bool caller_surfaces_errors = true) = 0;
 
     /// @brief Check if a string is safe to use as a G-code parameter
     static bool is_safe_gcode_param(const std::string& str);
+
+    /// @brief Check if a filament material name is safe as a G-code parameter value.
+    ///
+    /// Deliberately wider than is_safe_gcode_param(): material names legitimately carry
+    /// `+`, `-`, `.` and spaces (`PLA+`, `PA6-CF`, `Silk PLA`), and rejecting those made
+    /// spool saves silently drop the material. Pair with gcode_param_value().
+    static bool is_safe_material_param(const std::string& str);
+
+    /// @brief Render a validated value for interpolation into a G-code command,
+    ///        quoting it when it contains whitespace so Klipper's argument tokenizer
+    ///        keeps it as one parameter. Values without whitespace pass through unchanged.
+    static std::string gcode_param_value(const std::string& value);
 
     /// @brief Exclude an object from the current print
     virtual void exclude_object(const std::string& object_name, SuccessCallback on_success,

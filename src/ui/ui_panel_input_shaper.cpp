@@ -284,6 +284,10 @@ void InputShaperPanel::init_subjects() {
     UI_MANAGED_SUBJECT_INT(is_x_num_shapers_, 0, "is_x_num_shapers", subjects_);
     UI_MANAGED_SUBJECT_INT(is_y_num_shapers_, 0, "is_y_num_shapers", subjects_);
 
+    // Number of chart chips per axis (controls chip visibility via bind_flag_if_le)
+    UI_MANAGED_SUBJECT_INT(is_x_num_chips_, 0, "is_x_num_chips", subjects_);
+    UI_MANAGED_SUBJECT_INT(is_y_num_chips_, 0, "is_y_num_chips", subjects_);
+
     UI_MANAGED_SUBJECT_STRING(is_result_x_shaper_, is_result_x_shaper_buf_, "",
                               "is_result_x_shaper", subjects_);
     UI_MANAGED_SUBJECT_STRING(is_result_x_explanation_, is_result_x_explanation_buf_, "",
@@ -733,23 +737,31 @@ void InputShaperPanel::start_calibration(char axis) {
         axis,
         lifetime_.bg_cb(
             "InputShaperPanel::calibration_progress",
-            [this, cal_tok](int percent) {
+            [this, cal_tok](int percent, ShaperCalibrationPhase phase) {
                 if (cal_tok.expired()) {
                     spdlog::debug("[InputShaper] Discarding stale progress callback");
                     return;
                 }
                 lv_subject_set_int(&is_measuring_progress_, percent);
                 lv_subject_set_int(&is_measuring_has_progress_, 1);
-                if (percent < 55) {
+                // The phase comes from the collector — the percentage cannot be
+                // used to infer it, because a sweep whose range we guessed short
+                // would sit at its ceiling and look like analysis had started.
+                switch (phase) {
+                case ShaperCalibrationPhase::Sweeping: {
                     const std::string step =
                         fmt::format(lv_tr("Measuring vibrations... {}%"), percent);
                     snprintf(is_measuring_step_label_buf_, sizeof(is_measuring_step_label_buf_),
                              "%s", step.c_str());
-                } else if (percent < 100) {
+                    break;
+                }
+                case ShaperCalibrationPhase::Analyzing: {
                     const std::string step = fmt::format(lv_tr("Analyzing data... {}%"), percent);
                     snprintf(is_measuring_step_label_buf_, sizeof(is_measuring_step_label_buf_),
                              "%s", step.c_str());
-                } else {
+                    break;
+                }
+                case ShaperCalibrationPhase::Complete:
                     if (calibrate_all_mode_ && current_axis_ == 'X') {
                         snprintf(is_measuring_step_label_buf_, sizeof(is_measuring_step_label_buf_),
                                  "%s", lv_tr("X axis done, starting Y..."));
@@ -757,6 +769,7 @@ void InputShaperPanel::start_calibration(char axis) {
                         snprintf(is_measuring_step_label_buf_, sizeof(is_measuring_step_label_buf_),
                                  "%s", lv_tr("Complete"));
                     }
+                    break;
                 }
                 lv_subject_copy_string(&is_measuring_step_label_, is_measuring_step_label_buf_);
             }),
@@ -1346,10 +1359,12 @@ void InputShaperPanel::populate_chart(char axis, const InputShaperResult& result
     auto& chart_data = (axis == 'X') ? x_chart_ : y_chart_;
     auto& chips = (axis == 'X') ? x_chips_ : y_chips_;
     auto& has_freq_data = (axis == 'X') ? is_x_has_freq_data_ : is_y_has_freq_data_;
+    auto& num_chips = (axis == 'X') ? is_x_num_chips_ : is_y_num_chips_;
 
     // Check if freq data available
     if (result.freq_response.empty() || !chart_data.chart) {
         lv_subject_set_int(&has_freq_data, 0);
+        lv_subject_set_int(&num_chips, 0);
         return;
     }
 
@@ -1374,6 +1389,7 @@ void InputShaperPanel::populate_chart(char axis, const InputShaperResult& result
         spdlog::warn(
             "[InputShaper] {} axis: freq_response non-empty but produced no amplitude data", axis);
         lv_subject_set_int(&has_freq_data, 0);
+        lv_subject_set_int(&num_chips, 0);
         return;
     }
 
@@ -1433,6 +1449,11 @@ void InputShaperPanel::populate_chart(char axis, const InputShaperResult& result
         lv_subject_set_int(&chips[i].active, 0);
     }
 
+    // Hide the chips with no curve behind them (the XML has a fixed MAX_SHAPERS
+    // of them, and empty outlines read as broken)
+    lv_subject_set_int(&num_chips,
+                       static_cast<int>(std::min(chart_data.shaper_curves.size(), MAX_SHAPERS)));
+
     // Update legend to reflect initially selected shaper
     update_legend(axis);
 
@@ -1444,8 +1465,10 @@ void InputShaperPanel::clear_chart(char axis) {
     auto& chart_data = (axis == 'X') ? x_chart_ : y_chart_;
     auto& chips = (axis == 'X') ? x_chips_ : y_chips_;
     auto& has_freq_data = (axis == 'X') ? is_x_has_freq_data_ : is_y_has_freq_data_;
+    auto& num_chips = (axis == 'X') ? is_x_num_chips_ : is_y_num_chips_;
 
     lv_subject_set_int(&has_freq_data, 0);
+    lv_subject_set_int(&num_chips, 0);
 
     if (chart_data.chart) {
         ui_frequency_response_chart_clear(chart_data.chart);

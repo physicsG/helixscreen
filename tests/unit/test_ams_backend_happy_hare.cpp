@@ -41,6 +41,18 @@ class AmsBackendHappyHareTestHelper : public AmsBackendHappyHare {
         handle_status_update(notification);
     }
 
+    /// Seed a user override directly (no persist round-trip), as the AFC
+    /// override tests do. Callers hold no lock; this takes mutex_.
+    void set_gate_override(int slot_index, const helix::ams::FilamentSlotOverride& o) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        overrides_[slot_index] = o;
+    }
+
+    [[nodiscard]] bool has_gate_override(int slot_index) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return overrides_.count(slot_index) > 0;
+    }
+
     void clear_slot_override(int slot_index) {
         AmsBackendHappyHare::clear_slot_override(slot_index);
     }
@@ -1046,6 +1058,29 @@ TEST_CASE("Happy Hare gate_spool_id partial array only updates provided slots",
     REQUIRE(helper.get_slot_info(1).spoolman_id == 8);
     REQUIRE(helper.get_slot_info(2).spoolman_id == 0);
     REQUIRE(helper.get_slot_info(3).spoolman_id == 0);
+}
+
+// --- #1281 step 7: external re-bind ---
+
+TEST_CASE("Happy Hare external re-bind clears our override (#1281 step 7)",
+          "[ams][happy_hare][override-merge]") {
+    // merge_override()'s rule matrix pins the pure function; this pins the
+    // wiring on the live gate_spool_id path. Another writer (Mainsail, an HH
+    // macro) re-binds gate 0 to a different spool — firmware truth must win
+    // and our whole override record must drop, never setting-gated.
+    AmsBackendHappyHareTestHelper helper;
+    helper.initialize_test_gates(2);
+
+    helix::ams::FilamentSlotOverride o;
+    o.spoolman_id = 42;
+    o.brand = "Polymaker";
+    helper.set_gate_override(0, o);
+
+    helper.feed_mmu_gate_spool_ids({169, 0});
+
+    CHECK(helper.get_slot_info(0).spoolman_id == 169); // firmware truth paints
+    CHECK(helper.get_slot_info(0).brand.empty());      // our stale brand no longer shadows
+    CHECK_FALSE(helper.has_gate_override(0));          // record dropped
 }
 
 // --- Phase 3: Dissimilar multi-unit ---
