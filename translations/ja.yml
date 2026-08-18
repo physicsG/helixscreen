@@ -207,6 +207,10 @@ translations:
   Auto-Detect: 自動検出
   Auto-Heat on Load: 装填時に自動加熱
   Auto-detect: 自動検出
+  Auto-dry: ''
+  Auto-dry off: ''
+  Auto-dry on: ''
+  Auto-dry unchanged: ''
   Auto-install only works on local Moonraker: 自動インストールはローカルの Moonraker でのみ動作します
   Auto-lock: 自動ロック
   Auto-poll for weight updates: 重量更新の自動ポーリング
@@ -572,6 +576,7 @@ translations:
   Could not save filament: フィラメントを保存できませんでした
   Could not start Bluetooth discovery: Bluetooth の検出を開始できませんでした
   Could not update filaments: フィラメントを更新できませんでした
+  Could not update slot: ''
   Could not verify Spoolman status. Moonraker may still be restarting.: Spoolman のステータスを確認できませんでした。Moonraker
     がまだ再起動中の可能性があります。
   Couldn't update Spoolman — saved locally: Spoolman を更新できませんでした — ローカルに保存しました
@@ -697,6 +702,7 @@ translations:
   Downloading...: ダウンロード中...
   Downloading... {:.1f}/{:.1f} MB: ダウンロード中... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: タッチごとに波紋を描画 — ズレの診断に役立ちます
+  Dries above %d%%, stops below %d%%: ''
   Drive Cal: ドライブキャリブレーション
   Drop shadow strength (0 = disabled): 影の強さ (0 = 無効)
   Drying: 乾燥中
@@ -949,6 +955,7 @@ translations:
   Feed filament directly to extruder: フィラメントをエクストルーダーに直接供給
   Feed filament from current slot: '現在のスロットからフィラメントを送る'
   Feeding filament forward: フィラメントを前方に送り出し中
+  Fetch filament: ''
   Filament: フィラメント
   Filament Detected: フィラメント検出
   Filament Environment: フィラメント環境
@@ -1006,6 +1013,7 @@ translations:
   Flying Toasters: フライングトースター
   Follow active tool: アクティブツールに追従
   Follow graph screen: グラフ画面に追従
+  Follows unit %d: ''
   Forget: 登録解除
   Forget Network?: ネットワークを登録解除しますか？
   Forget network '{}'? You will need the password to reconnect.: ネットワーク '{}' を登録解除しますか？再接続にはパスワードが必要です。
@@ -1623,6 +1631,7 @@ translations:
   Open G-code command console: 'Gコードコマンドコンソールを開く'
   Open LED color and brightness controls: 'LEDの色と明るさの操作を開く'
   Open Source Licenses: オープンソースライセンス
+  Open in ACE: ''
   Operation already in progress: 操作がすでに進行中です
   Operations: 操作
   Optimize Your Printing: 印刷を最適化
@@ -2525,6 +2534,7 @@ translations:
   Toolhead: 'ツールヘッド'
   Toolhead LED: 'ツールヘッドLED'
   Toolhead Style: ツールヘッドスタイル
+  Toolhead command failed: ''
   Toolhead jam: ツールヘッドの詰まり
   Toolhead, G-code, limits, and materials: ツールヘッド、Gコード、制限、材料
   Tools Used: 使用したツール

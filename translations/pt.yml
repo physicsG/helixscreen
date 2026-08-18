@@ -232,6 +232,10 @@ translations:
   Auto-Detect: Auto-Detectar
   Auto-Heat on Load: Aquecer Automaticamente ao Carregar
   Auto-detect: Auto-detectar
+  Auto-dry: ''
+  Auto-dry off: ''
+  Auto-dry on: ''
+  Auto-dry unchanged: ''
   Auto-install only works on local Moonraker: A instalação automática só funciona
     no Moonraker local
   Auto-lock: Bloqueio automático
@@ -649,6 +653,7 @@ translations:
   Could not save filament: Não foi possível salvar o filamento
   Could not start Bluetooth discovery: Não foi possível iniciar a descoberta Bluetooth
   Could not update filaments: Não foi possível atualizar os filamentos
+  Could not update slot: ''
   Could not verify Spoolman status. Moonraker may still be restarting.: Não foi possível
     verificar o status do Spoolman. O Moonraker pode ainda estar reiniciando.
   Couldn't update Spoolman — saved locally: Não foi possível atualizar o Spoolman
@@ -776,6 +781,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Baixando... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: Desenha uma onda em cada toque
     — ajuda a diagnosticar deslocamentos
+  Dries above %d%%, stops below %d%%: ''
   Drive Cal: Cal de Drive
   Drop shadow strength (0 = disabled): Intensidade da sombra (0 = desabilitado)
   Drying: Secando
@@ -1043,6 +1049,7 @@ translations:
   Feed filament directly to extruder: Alimentar filamento diretamente ao extrusor
   Feed filament from current slot: 'Alimentar filamento a partir do slot atual'
   Feeding filament forward: Avançando filamento
+  Fetch filament: ''
   Filament: Filamento
   Filament Detected: Filamento Detectado
   Filament Environment: Ambiente do filamento
@@ -1105,6 +1112,7 @@ translations:
   Flying Toasters: Torradeiras Voadoras
   Follow active tool: Seguir ferramenta ativa
   Follow graph screen: Acompanhar tela do gráfico
+  Follows unit %d: ''
   Forget: Esquecer
   Forget Network?: Esquecer Rede?
   Forget network '{}'? You will need the password to reconnect.: Esquecer a rede '{}'? Você precisará da senha para reconectar.
@@ -1778,6 +1786,7 @@ translations:
   Open G-code command console: 'Abrir o console de comandos G-code'
   Open LED color and brightness controls: 'Abrir os controles de cor e brilho do LED'
   Open Source Licenses: Licenças de código aberto
+  Open in ACE: ''
   Operation already in progress: Operação já em andamento
   Operations: Operações
   Optimize Your Printing: Otimize Sua Impressão
@@ -2794,6 +2803,7 @@ translations:
   Toolhead: 'Cabeçote'
   Toolhead LED: 'LED do cabeçote'
   Toolhead Style: Estilo do Cabeçote
+  Toolhead command failed: ''
   Toolhead jam: Atolamento do cabeçote
   Toolhead, G-code, limits, and materials: Cabeçote, G-code, limites e materiais
   Tools Used: Ferramentas Usadas

@@ -202,6 +202,10 @@
   <translation tag="Auto-Detect" es="Auto-Detectar"/>
   <translation tag="Auto-Heat on Load" es="Calentar Automáticamente al Cargar"/>
   <translation tag="Auto-detect" es="Auto-detectar"/>
+  <translation tag="Auto-dry"/>
+  <translation tag="Auto-dry off"/>
+  <translation tag="Auto-dry on"/>
+  <translation tag="Auto-dry unchanged"/>
   <translation tag="Auto-install only works on local Moonraker" es="La instalación automática solo funciona con Moonraker local"/>
   <translation tag="Auto-lock" es="Bloqueo automático"/>
   <translation tag="Auto-poll for weight updates" es="Consultar peso automáticamente"/>
@@ -558,6 +562,7 @@
   <translation tag="Could not save filament" es="No se pudo guardar el filamento"/>
   <translation tag="Could not start Bluetooth discovery" es="No se pudo iniciar el descubrimiento Bluetooth"/>
   <translation tag="Could not update filaments" es="No se pudieron actualizar los filamentos"/>
+  <translation tag="Could not update slot"/>
   <translation tag="Could not verify Spoolman status. Moonraker may still be restarting." es="No se pudo verificar el estado de Spoolman. Moonraker puede estar reiniciándose."/>
   <translation tag="Couldn&apos;t update Spoolman — saved locally" es="No se pudo actualizar Spoolman — guardado localmente"/>
   <translation tag="Cover open" es="Tapa abierta"/>
@@ -678,6 +683,7 @@
   <translation tag="Downloading..." es="Descargando..."/>
   <translation tag="Downloading... {:.1f}/{:.1f} MB" es="Descargando... {:.1f}/{:.1f} MB"/>
   <translation tag="Draw a ripple at each touch — helps diagnose offsets" es="Dibuja una onda en cada toque — ayuda a diagnosticar desfases"/>
+  <translation tag="Dries above %d%%, stops below %d%%"/>
   <translation tag="Drive Cal" es="Cal Transmisión"/>
   <translation tag="Drop shadow strength (0 = disabled)" es="Intensidad de sombra (0 = desactivada)"/>
   <translation tag="Drying" es="Secando"/>
@@ -925,6 +931,7 @@
   <translation tag="Feed filament directly to extruder" es="Alimentar filamento directamente al extrusor"/>
   <translation tag="Feed filament from current slot" es="Alimentar filamento desde la ranura actual"/>
   <translation tag="Feeding filament forward" es="Avanzando filamento"/>
+  <translation tag="Fetch filament"/>
   <translation tag="Filament" es="Filamento"/>
   <translation tag="Filament Detected" es="Filamento Detectado"/>
   <translation tag="Filament Environment" es="Entorno del filamento"/>
@@ -981,6 +988,7 @@
   <translation tag="Flying Toasters" es="Flying Toasters"/>
   <translation tag="Follow active tool" es="Seguir herramienta activa"/>
   <translation tag="Follow graph screen" es="Seguir pantalla del gráfico"/>
+  <translation tag="Follows unit %d"/>
   <translation tag="Forget" es="Olvidar"/>
   <translation tag="Forget Network?" es="¿Olvidar red?"/>
   <translation tag="Forget network &apos;{}&apos;? You will need the password to reconnect." es="¿Olvidar la red &apos;{}&apos;? Necesitará la contraseña para reconectar."/>
@@ -1571,6 +1579,7 @@
   <translation tag="Open G-code command console" es="Abrir la consola de comandos G-code"/>
   <translation tag="Open LED color and brightness controls" es="Abrir los controles de color y brillo LED"/>
   <translation tag="Open Source Licenses" es="Licencias de código abierto"/>
+  <translation tag="Open in ACE"/>
   <translation tag="Operation already in progress" es="Operación ya en curso"/>
   <translation tag="Operations" es="Operaciones"/>
   <translation tag="Optimize Your Printing" es="Optimice su Impresión"/>
@@ -2424,6 +2433,7 @@
   <translation tag="Toolhead" es="Cabezal"/>
   <translation tag="Toolhead LED" es="LED del cabezal"/>
   <translation tag="Toolhead Style" es="Estilo de Cabezal"/>
+  <translation tag="Toolhead command failed"/>
   <translation tag="Toolhead jam" es="Atasco del cabezal"/>
   <translation tag="Toolhead, G-code, limits, and materials" es="Cabezal, G-code, límites y materiales"/>
   <translation tag="Tools Used" es="Herramientas usadas"/>

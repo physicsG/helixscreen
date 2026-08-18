@@ -202,6 +202,10 @@
   <translation tag="Auto-Detect" ja="自動検出"/>
   <translation tag="Auto-Heat on Load" ja="装填時に自動加熱"/>
   <translation tag="Auto-detect" ja="自動検出"/>
+  <translation tag="Auto-dry"/>
+  <translation tag="Auto-dry off"/>
+  <translation tag="Auto-dry on"/>
+  <translation tag="Auto-dry unchanged"/>
   <translation tag="Auto-install only works on local Moonraker" ja="自動インストールはローカルの Moonraker でのみ動作します"/>
   <translation tag="Auto-lock" ja="自動ロック"/>
   <translation tag="Auto-poll for weight updates" ja="重量更新の自動ポーリング"/>
@@ -558,6 +562,7 @@
   <translation tag="Could not save filament" ja="フィラメントを保存できませんでした"/>
   <translation tag="Could not start Bluetooth discovery" ja="Bluetooth の検出を開始できませんでした"/>
   <translation tag="Could not update filaments" ja="フィラメントを更新できませんでした"/>
+  <translation tag="Could not update slot"/>
   <translation tag="Could not verify Spoolman status. Moonraker may still be restarting." ja="Spoolman のステータスを確認できませんでした。Moonraker がまだ再起動中の可能性があります。"/>
   <translation tag="Couldn&apos;t update Spoolman — saved locally" ja="Spoolman を更新できませんでした — ローカルに保存しました"/>
   <translation tag="Cover open" ja="カバーが開いています"/>
@@ -678,6 +683,7 @@
   <translation tag="Downloading..." ja="ダウンロード中..."/>
   <translation tag="Downloading... {:.1f}/{:.1f} MB" ja="ダウンロード中... {:.1f}/{:.1f} MB"/>
   <translation tag="Draw a ripple at each touch — helps diagnose offsets" ja="タッチごとに波紋を描画 — ズレの診断に役立ちます"/>
+  <translation tag="Dries above %d%%, stops below %d%%"/>
   <translation tag="Drive Cal" ja="ドライブキャリブレーション"/>
   <translation tag="Drop shadow strength (0 = disabled)" ja="影の強さ (0 = 無効)"/>
   <translation tag="Drying" ja="乾燥中"/>
@@ -925,6 +931,7 @@
   <translation tag="Feed filament directly to extruder" ja="フィラメントをエクストルーダーに直接供給"/>
   <translation tag="Feed filament from current slot" ja="現在のスロットからフィラメントを送る"/>
   <translation tag="Feeding filament forward" ja="フィラメントを前方に送り出し中"/>
+  <translation tag="Fetch filament"/>
   <translation tag="Filament" ja="フィラメント"/>
   <translation tag="Filament Detected" ja="フィラメント検出"/>
   <translation tag="Filament Environment" ja="フィラメント環境"/>
@@ -981,6 +988,7 @@
   <translation tag="Flying Toasters" ja="フライングトースター"/>
   <translation tag="Follow active tool" ja="アクティブツールに追従"/>
   <translation tag="Follow graph screen" ja="グラフ画面に追従"/>
+  <translation tag="Follows unit %d"/>
   <translation tag="Forget" ja="登録解除"/>
   <translation tag="Forget Network?" ja="ネットワークを登録解除しますか？"/>
   <translation tag="Forget network &apos;{}&apos;? You will need the password to reconnect." ja="ネットワーク &apos;{}&apos; を登録解除しますか？再接続にはパスワードが必要です。"/>
@@ -1571,6 +1579,7 @@
   <translation tag="Open G-code command console" ja="Gコードコマンドコンソールを開く"/>
   <translation tag="Open LED color and brightness controls" ja="LEDの色と明るさの操作を開く"/>
   <translation tag="Open Source Licenses" ja="オープンソースライセンス"/>
+  <translation tag="Open in ACE"/>
   <translation tag="Operation already in progress" ja="操作がすでに進行中です"/>
   <translation tag="Operations" ja="操作"/>
   <translation tag="Optimize Your Printing" ja="印刷を最適化"/>
@@ -2424,6 +2433,7 @@
   <translation tag="Toolhead" ja="ツールヘッド"/>
   <translation tag="Toolhead LED" ja="ツールヘッドLED"/>
   <translation tag="Toolhead Style" ja="ツールヘッドスタイル"/>
+  <translation tag="Toolhead command failed"/>
   <translation tag="Toolhead jam" ja="ツールヘッドの詰まり"/>
   <translation tag="Toolhead, G-code, limits, and materials" ja="ツールヘッド、Gコード、制限、材料"/>
   <translation tag="Tools Used" ja="使用したツール"/>

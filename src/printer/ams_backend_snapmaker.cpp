@@ -83,14 +83,18 @@ constexpr std::array<std::string_view, 8> KNOWN_SUB_TYPES = {
 //                   LOAD/UNLOAD/ERROR/IDLE status). LOADING covers preload/load/
 //                   manual feed; UNLOADING covers unload; ERROR covers *_fail;
 //                   IDLE covers none/inited/wait_insert/test and every *_finish.
-//  - phase:         step-bar step index into get_operation_step_model(op).
-//                   Per-direction (a state is unambiguously load/unload/manual by
-//                   prefix, so indices never collide across directions):
-//                     LOAD/manual/preload model (5 steps):
-//                       0=Home 1=Select 2=Heat 3=Feed 4=Purge
-//                     UNLOAD model (4 steps):
+//  - phase:         phase id matched against OperationStep::phase_id in
+//                   get_operation_step_model(op). Two DISJOINT spaces, one per
+//                   direction (a state is unambiguously load/unload/manual by
+//                   prefix), so one bar can carry both halves of a swap:
+//                     LOAD/manual/preload (LOAD_PHASE_BASE + n):
+//                       10=Home 11=Select 12=Heat 13=Feed 14=Purge
+//                     UNLOAD (UNLOAD_PHASE_BASE + n):
 //                       0=Home 1=Select 2=Heat 3=Retract
 //                   -1 = "no active step" (idle / *_finish / *_fail).
+//                   These are ids, NOT positions: the sidebar resolves them
+//                   through the model, so a phase the current model does not
+//                   declare holds the bar instead of jumping it somewhere wrong.
 //  - is_terminal:   a *_finish that ENDS the operation (resolves action → IDLE).
 //                   preload_finish is terminal-for-latch but does NOT end the op
 //                   (the nozzle may still be heating on a re-unload); the parse
@@ -121,6 +125,17 @@ struct ChannelStateInfo {
         constexpr auto UNLOAD = AmsAction::UNLOADING;
         constexpr auto IDLE = AmsAction::IDLE;
         constexpr auto ERR = AmsAction::ERROR;
+        // Phase ids, per direction. Spelled out rather than written as bare
+        // 0..4 twice so the two spaces cannot silently re-converge.
+        constexpr int U0 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 0; // Home
+        constexpr int U1 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 1; // Select
+        constexpr int U2 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 2; // Heat
+        constexpr int U3 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3; // Retract
+        constexpr int L0 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 0;   // Home
+        constexpr int L1 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 1;   // Select
+        constexpr int L2 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 2;   // Heat
+        constexpr int L3 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 3;   // Feed
+        constexpr int L4 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 4;   // Purge
         // {action, phase, is_terminal, is_fail, sets_loaded, clears_loaded, ignore}
         // --- idle / init ---
         add("none", {IDLE, -1, false, false, false, false, false});
@@ -128,41 +143,41 @@ struct ChannelStateInfo {
         add("wait_insert", {IDLE, -1, false, false, false, /*clear=*/true, false});
         add("test", {IDLE, -1, false, false, false, false, /*ignore=*/true});
         // --- preload (stage insert -> gear, NOT to nozzle) ---
-        add("preload_prepare", {LOAD, 0, false, false, false, false, false});
-        add("preload_feeding", {LOAD, 3, false, false, false, false, false});
+        add("preload_prepare", {LOAD, L0, false, false, false, false, false});
+        add("preload_feeding", {LOAD, L3, false, false, false, false, false});
         add("preload_finish", {IDLE, -1, /*terminal=*/true, false, false, /*clear=*/true, false});
         add("preload_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
         // --- load (feed to nozzle) ---
-        add("load_prepare", {LOAD, 0, false, false, false, false, false});
-        add("load_homing", {LOAD, 0, false, false, false, false, false});
-        add("load_picking", {LOAD, 1, false, false, false, false, false});
-        add("load_heating", {LOAD, 2, false, false, false, false, false});
-        add("load_feeding", {LOAD, 3, false, false, false, false, false});
-        add("load_extruding", {LOAD, 3, false, false, false, false, false});
-        add("load_flushing", {LOAD, 4, false, false, false, false, false});
+        add("load_prepare", {LOAD, L0, false, false, false, false, false});
+        add("load_homing", {LOAD, L0, false, false, false, false, false});
+        add("load_picking", {LOAD, L1, false, false, false, false, false});
+        add("load_heating", {LOAD, L2, false, false, false, false, false});
+        add("load_feeding", {LOAD, L3, false, false, false, false, false});
+        add("load_extruding", {LOAD, L3, false, false, false, false, false});
+        add("load_flushing", {LOAD, L4, false, false, false, false, false});
         add("load_finish", {IDLE, -1, /*terminal=*/true, false, /*set=*/true, false, false});
         add("load_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
         // --- unload (retract from nozzle) ---
-        add("unload_prepare", {UNLOAD, 0, false, false, false, false, false});
-        add("unload_homing", {UNLOAD, 0, false, false, false, false, false});
-        add("unload_picking", {UNLOAD, 1, false, false, false, false, false});
-        add("unload_heating", {UNLOAD, 2, false, false, false, false, false});
-        add("unload_heat_finish", {UNLOAD, 2, false, false, false, false, false});
-        add("unload_doing", {UNLOAD, 3, false, false, false, false, false});
+        add("unload_prepare", {UNLOAD, U0, false, false, false, false, false});
+        add("unload_homing", {UNLOAD, U0, false, false, false, false, false});
+        add("unload_picking", {UNLOAD, U1, false, false, false, false, false});
+        add("unload_heating", {UNLOAD, U2, false, false, false, false, false});
+        add("unload_heat_finish", {UNLOAD, U2, false, false, false, false, false});
+        add("unload_doing", {UNLOAD, U3, false, false, false, false, false});
         add("unload_finish", {IDLE, -1, /*terminal=*/true, false, false, /*clear=*/true, false});
         add("unload_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
         // --- manual feed (MANUAL_FEEDING) ---
-        add("manual_sta_prepare", {LOAD, 0, false, false, false, false, false});
-        add("manual_sta_homing", {LOAD, 0, false, false, false, false, false});
-        add("manual_sta_picking", {LOAD, 1, false, false, false, false, false});
-        add("manual_sta_prepare_finish", {LOAD, 1, false, false, false, false, false});
+        add("manual_sta_prepare", {LOAD, L0, false, false, false, false, false});
+        add("manual_sta_homing", {LOAD, L0, false, false, false, false, false});
+        add("manual_sta_picking", {LOAD, L1, false, false, false, false, false});
+        add("manual_sta_prepare_finish", {LOAD, L1, false, false, false, false, false});
         add("manual_sta_prepare_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
-        add("manual_sta_heating", {LOAD, 2, false, false, false, false, false});
-        add("manual_sta_extruding", {LOAD, 3, false, false, false, false, false});
-        add("manual_sta_extrude_finish", {LOAD, 3, false, false, false, false, false});
+        add("manual_sta_heating", {LOAD, L2, false, false, false, false, false});
+        add("manual_sta_extruding", {LOAD, L3, false, false, false, false, false});
+        add("manual_sta_extrude_finish", {LOAD, L3, false, false, false, false, false});
         add("manual_sta_extrude_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
-        add("manual_sta_flushing", {LOAD, 4, false, false, false, false, false});
-        add("manual_sta_flush_finish", {LOAD, 4, false, false, false, false, false});
+        add("manual_sta_flushing", {LOAD, L4, false, false, false, false, false});
+        add("manual_sta_flush_finish", {LOAD, L4, false, false, false, false, false});
         add("manual_sta_flush_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
         // manual_sta_finish is a completed manual EXTRUDE, not a load — it ends
         // the op (IDLE) but does NOT set the loaded latch.
@@ -204,17 +219,21 @@ struct ChannelStateInfo {
     if (info.action == AmsAction::LOADING || info.action == AmsAction::UNLOADING) {
         // Mirrors the per-direction step models: load/manual/preload reach Feed(3)
         // then Purge(4); unload has no Purge step so its Move phase is Retract(3).
+        // The base is what keeps an unrecognised state in ITS OWN direction's
+        // phase space, the same as every state in the table above.
+        const int base = is_unload ? AmsBackendSnapmaker::UNLOAD_PHASE_BASE
+                                   : AmsBackendSnapmaker::LOAD_PHASE_BASE;
         if (ends_with("_homing") || ends_with("_prepare"))
-            info.phase = 0;
+            info.phase = base + 0;
         else if (ends_with("_picking"))
-            info.phase = 1;
+            info.phase = base + 1;
         else if (ends_with("_heating"))
-            info.phase = 2;
+            info.phase = base + 2;
         else if (ends_with("_flushing") && !is_unload)
-            info.phase = 4;
+            info.phase = base + 4;
         else if (ends_with("_doing") || ends_with("_feeding") || ends_with("_extruding") ||
                  ends_with("_flushing"))
-            info.phase = 3;
+            info.phase = base + 3;
     }
     spdlog::debug("[AmsBackendSnapmaker] unrecognized channel_state '{}' -> fallback action={} "
                   "phase={}",
@@ -328,15 +347,13 @@ SlotInfo AmsBackendSnapmaker::get_slot_info(int slot_index) const {
 
 AmsBackend::OperationStepModel
 AmsBackendSnapmaker::get_operation_step_model(StepOperationType op) const {
-    // Per-direction firmware step sequence. Each step's phase_id is the index the
-    // classifier (classify_channel_state) emits into system_info_.operation_phase,
-    // which the sidebar consumes directly as the current step index via the
-    // ams_operation_phase subject. Load and unload use different-length step lists;
-    // that is safe because only one backend + one operation is live at a time, so
-    // Snapmaker owns the whole index space (classify_channel_state maps load/manual/
-    // preload states into the LOAD indices and unload states into the UNLOAD ones).
+    // Per-direction firmware step sequence. Each step's phase_id is the id the
+    // classifier (classify_channel_state) emits into system_info_.operation_phase;
+    // the sidebar RESOLVES it through this model rather than using it as a
+    // position, so the two directions can carry disjoint id spaces (see
+    // LOAD_PHASE_BASE) and a foreign id holds the bar instead of moving it.
     //
-    //   LOAD  (5 steps): Home 0 -> Select 1 -> Heat 2 (live) -> Feed 3 -> Purge 4
+    //   LOAD  (5 steps): Home 10 -> Select 11 -> Heat 12 (live) -> Feed 13 -> Purge 14
     //     load_prepare/homing -> Home; load_picking -> Select; load_heating -> Heat;
     //     load_feeding/extruding -> Feed; load_flushing -> Purge.
     //     (preload and the manual_sta_* family reuse this load-direction model.)
@@ -344,18 +361,23 @@ AmsBackendSnapmaker::get_operation_step_model(StepOperationType op) const {
     //     unload_prepare/homing -> Home; unload_picking -> Select;
     //     unload_heating/heat_finish -> Heat; unload_doing -> Retract.
     //
-    // The Heat step (phase 2) shows a live nozzle temperature. All labels are
-    // wrapped in lv_tr() so they are translated and picked up by the string tooling.
+    // A plain U1 has no swap of its own -- every lane is PARALLEL and feeds its
+    // own nozzle -- so LOAD_SWAP is the load model here. AmsBackendMultiAce
+    // overrides that arm, where an ACE bay genuinely swaps.
+    //
+    // The Heat step shows a live nozzle temperature. All labels are wrapped in
+    // lv_tr() so they are translated and picked up by the string tooling.
     const bool unload = (op == StepOperationType::UNLOAD);
+    const int base = unload ? UNLOAD_PHASE_BASE : LOAD_PHASE_BASE;
     OperationStepModel model;
-    model.steps.push_back({lv_tr("Home"), 0, false, false});
-    model.steps.push_back({lv_tr("Select"), 1, false, false});
-    model.steps.push_back({lv_tr("Heat nozzle"), 2, false, /*live_temp=*/true});
+    model.steps.push_back({lv_tr("Home"), base + 0, false, false});
+    model.steps.push_back({lv_tr("Select"), base + 1, false, false});
+    model.steps.push_back({lv_tr("Heat nozzle"), base + 2, false, /*live_temp=*/true});
     if (unload) {
-        model.steps.push_back({lv_tr("Retract"), 3, false, false});
+        model.steps.push_back({lv_tr("Retract"), base + 3, false, false});
     } else {
-        model.steps.push_back({lv_tr("Feed filament"), 3, false, false});
-        model.steps.push_back({lv_tr("Purge"), 4, false, false});
+        model.steps.push_back({lv_tr("Feed filament"), base + 3, false, false});
+        model.steps.push_back({lv_tr("Purge"), base + 4, false, false});
     }
     return model;
 }
@@ -1313,6 +1335,22 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
             }
         }
 
+        // Frame-scoped election for the step-bar phase, applied once after every
+        // channel has been read.
+        //
+        // It used to be assigned inside the loop, so the LAST channel carrying a
+        // channel_state won. That is right only because status frames are
+        // normally DELTAS naming just the channel that moved. On a full query --
+        // the initial objects/query, and every reconnect -- all four channels are
+        // present, and the idle ones that follow the operating head in the loop
+        // overwrote its phase with -1, blanking the step bar mid-operation.
+        //
+        // One head operates at a time, so "the first channel reporting an ACTIVE
+        // phase wins, and -1 survives only when no channel reported one" is the
+        // whole rule.
+        int frame_phase = -1;
+        bool frame_phase_seen = false;
+
         // Parse filament_feed left/right — top-level Klipper objects (not nested in
         // filament_detect) Each contains per-extruder state: filament_detected, channel_state,
         // channel_error
@@ -1378,17 +1416,17 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                         auto error = helix::json_util::safe_string(ch, "channel_error", "ok");
                         const ChannelStateInfo info = classify_channel_state(state);
 
-                        // Mirror the granular firmware sub-phase into the system
-                        // info so the sidebar step bar can show the real
+                        // Mirror the granular firmware sub-phase into the frame's
+                        // election so the sidebar step bar can show the real
                         // Home/Select/Heat/Move sequence. -1 for any non-active
-                        // state (idle, *_finish, *_fail, preload_finish). Updated
+                        // state (idle, *_finish, *_fail, preload_finish). Recorded
                         // only when the firmware actually reports a channel_state,
                         // so an incremental status omitting it doesn't clear the
                         // phase spuriously.
                         if (!state.empty()) {
-                            if (system_info_.operation_phase != info.phase) {
-                                system_info_.operation_phase = info.phase;
-                                changed = true;
+                            frame_phase_seen = true;
+                            if (info.phase >= 0 && frame_phase < 0) {
+                                frame_phase = info.phase;
                             }
                         }
 
@@ -1560,6 +1598,11 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                     }
                 }
             }
+        }
+
+        if (frame_phase_seen && system_info_.operation_phase != frame_phase) {
+            system_info_.operation_phase = frame_phase;
+            changed = true;
         }
 
         // Parse print_task_config — authoritative filament info from Snapmaker's task manager

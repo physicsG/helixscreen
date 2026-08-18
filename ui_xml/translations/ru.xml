@@ -202,6 +202,10 @@
   <translation tag="Auto-Detect" ru="Автоопределение"/>
   <translation tag="Auto-Heat on Load" ru="Автонагрев при загрузке"/>
   <translation tag="Auto-detect" ru="Автоопределение"/>
+  <translation tag="Auto-dry"/>
+  <translation tag="Auto-dry off"/>
+  <translation tag="Auto-dry on"/>
+  <translation tag="Auto-dry unchanged"/>
   <translation tag="Auto-install only works on local Moonraker" ru="Автоустановка работает только с локальным Moonraker"/>
   <translation tag="Auto-lock" ru="Автоблокировка"/>
   <translation tag="Auto-poll for weight updates" ru="Автоопрос обновлений веса"/>
@@ -558,6 +562,7 @@
   <translation tag="Could not save filament" ru="Не удалось сохранить филамент"/>
   <translation tag="Could not start Bluetooth discovery" ru="Не удалось запустить поиск Bluetooth"/>
   <translation tag="Could not update filaments" ru="Не удалось обновить филаменты"/>
+  <translation tag="Could not update slot"/>
   <translation tag="Could not verify Spoolman status. Moonraker may still be restarting." ru="Не удалось проверить статус Spoolman. Moonraker может ещё перезапускаться."/>
   <translation tag="Couldn&apos;t update Spoolman — saved locally" ru="Не удалось обновить Spoolman — сохранено локально"/>
   <translation tag="Cover open" ru="Крышка открыта"/>
@@ -678,6 +683,7 @@
   <translation tag="Downloading..." ru="Загрузка..."/>
   <translation tag="Downloading... {:.1f}/{:.1f} MB" ru="Загрузка... {:.1f}/{:.1f} МБ"/>
   <translation tag="Draw a ripple at each touch — helps diagnose offsets" ru="Рисовать круг при каждом касании — помогает диагностировать смещения"/>
+  <translation tag="Dries above %d%%, stops below %d%%"/>
   <translation tag="Drive Cal" ru="Кал. привода"/>
   <translation tag="Drop shadow strength (0 = disabled)" ru="Интенсивность тени (0 = отключено)"/>
   <translation tag="Drying" ru="Сушка"/>
@@ -925,6 +931,7 @@
   <translation tag="Feed filament directly to extruder" ru="Подать филамент напрямую в экструдер"/>
   <translation tag="Feed filament from current slot" ru="Подать филамент из текущего слота"/>
   <translation tag="Feeding filament forward" ru="Подача филамента вперёд"/>
+  <translation tag="Fetch filament"/>
   <translation tag="Filament" ru="Филамент"/>
   <translation tag="Filament Detected" ru="Филамент обнаружен"/>
   <translation tag="Filament Environment" ru="Среда хранения филамента"/>
@@ -981,6 +988,7 @@
   <translation tag="Flying Toasters" ru="Летающие тостеры"/>
   <translation tag="Follow active tool" ru="Следовать активному инструменту"/>
   <translation tag="Follow graph screen" ru="Следовать экрану графика"/>
+  <translation tag="Follows unit %d"/>
   <translation tag="Forget" ru="Забыть"/>
   <translation tag="Forget Network?" ru="Забыть сеть?"/>
   <translation tag="Forget network &apos;{}&apos;? You will need the password to reconnect." ru="Забыть сеть «{}»? Для повторного подключения потребуется пароль."/>
@@ -1571,6 +1579,7 @@
   <translation tag="Open G-code command console" ru="Открыть консоль команд G-code"/>
   <translation tag="Open LED color and brightness controls" ru="Открыть управление цветом и яркостью LED"/>
   <translation tag="Open Source Licenses" ru="Лицензии с открытым кодом"/>
+  <translation tag="Open in ACE"/>
   <translation tag="Operation already in progress" ru="Операция уже выполняется"/>
   <translation tag="Operations" ru="Операции"/>
   <translation tag="Optimize Your Printing" ru="Оптимизируйте вашу печать"/>
@@ -2424,6 +2433,7 @@
   <translation tag="Toolhead" ru="Печатающая головка"/>
   <translation tag="Toolhead LED" ru="LED печатающей головки"/>
   <translation tag="Toolhead Style" ru="Стиль печатающей головки"/>
+  <translation tag="Toolhead command failed"/>
   <translation tag="Toolhead jam" ru="Замятие в печатающей головке"/>
   <translation tag="Toolhead, G-code, limits, and materials" ru="Печатающая головка, G-code, лимиты и материалы"/>
   <translation tag="Tools Used" ru="Использовано инструментов"/>

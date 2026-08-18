@@ -773,17 +773,45 @@ void AmsOperationSidebar::recreate_step_progress_for_operation(StepOperationType
     }
 }
 
-void AmsOperationSidebar::apply_backend_step_index(int index) {
+int AmsOperationSidebar::step_index_for_phase(int phase) const {
+    // A model whose steps declare no phase ids (every phase_id == -1) is the
+    // narration-built kind, where the subject already carries a POSITION. Those
+    // keep the identity mapping they have always had.
+    bool has_ids = false;
+    for (size_t i = 0; i < current_step_model_.steps.size(); ++i) {
+        if (current_step_model_.steps[i].phase_id < 0) {
+            continue;
+        }
+        has_ids = true;
+        if (current_step_model_.steps[i].phase_id == phase) {
+            return static_cast<int>(i);
+        }
+    }
+    if (!has_ids) {
+        return phase;
+    }
+    // A declared-id model that does not claim this phase: the operation is in a
+    // phase this bar does not represent. Hold. That is what lets one bar carry
+    // both halves of a swap -- the load half's Home/Select/Heat ids belong to no
+    // step of the swap model, and holding on "Fetch filament" is right where
+    // jumping to whatever sat at that array index was the original bug.
+    return -1;
+}
+
+void AmsOperationSidebar::apply_backend_step_index(int phase) {
     if (!active_ || !step_progress_) {
         return;
     }
-    // index -1 = no active step (firmware idle / narration cleared). The action
+    // phase -1 = no active step (firmware idle / narration cleared). The action
     // observer's show/hide logic handles container visibility at end-of-op; hold
     // the bar here so a transient -1 between steps doesn't flicker the highlight.
+    const int index = step_index_for_phase(phase);
     if (index < 0 || index >= current_step_count_) {
+        spdlog::debug("[AmsSidebar] Backend phase {} not in this bar (op_type={}) — holding",
+                      phase, static_cast<int>(current_operation_type_));
         return;
     }
-    spdlog::debug("[AmsSidebar] Backend step index {} (op_type={})", index,
+    spdlog::debug("[AmsSidebar] Backend phase {} -> step {} (op_type={})", phase, index,
                   static_cast<int>(current_operation_type_));
     ui_step_progress_set_current(step_progress_, index);
 
@@ -1364,13 +1392,14 @@ void AmsOperationSidebar::handle_load_with_preheat(int slot_index) {
         return;
     }
 
-    // Determine operation type BEFORE calling the backend. plan.ams_call carries
+    // Determine operation type BEFORE calling the backend. plan.is_swap carries
     // the load-vs-swap answer (needs_unload_before_load, centralized so the UI
     // and backend agree — K1 CFS reports a preloaded cassette slot with an empty
     // nozzle and a SWAP there would cut nothing and stall at the cut step,
-    // #968).
-    start_operation(plan.ams_call == helix::ui::AmsCall::Load ? StepOperationType::LOAD_FRESH
-                                                              : StepOperationType::LOAD_SWAP,
+    // #968). Reading it off plan.ams_call instead was right only while "needs an
+    // unload" and "dispatched as a tool change" agreed; a multiACE ACE bay is
+    // the case where they do not.
+    start_operation(plan.is_swap ? StepOperationType::LOAD_SWAP : StepOperationType::LOAD_FRESH,
                     slot_index);
 
     // If backend handles heating automatically, just call load directly
@@ -1529,6 +1558,20 @@ void AmsOperationSidebar::dispatch_backend_load(const helix::ui::FilamentOpPlan&
         spdlog::warn("[AmsSidebar] Backend vanished before load dispatch (slot {})", slot_index);
         return;
     }
+
+    // Re-arm ownership at the moment the command actually goes out.
+    //
+    // start_operation() armed it optimistically, and on the preheat path a long
+    // wait sits between the two: start_operation() writes HEATING itself, the
+    // backend's still-IDLE truth lands on top, and OperationOwnership reads
+    // "running, then not running" as "finished" -- so by dispatch time our own
+    // operation looked foreign. detect_step_operation() then re-derived the bar
+    // from scratch and a LOAD_SWAP became LOAD_FRESH the instant the backend
+    // reported LOADING, replacing the swap bar mid-operation.
+    //
+    // Dispatch is the honest start: nothing has been confirmed yet, so
+    // progress_seen resets to false and the next running action is ours.
+    ownership_.on_start();
 
     AmsError error;
     switch (plan.ams_call) {
