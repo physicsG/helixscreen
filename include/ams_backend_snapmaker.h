@@ -95,6 +95,21 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     [[nodiscard]] AmsSystemInfo get_system_info() const override;
     [[nodiscard]] SlotInfo get_slot_info(int slot_index) const override;
 
+    /// Phase-id space for the UNLOAD direction: 0=Home 1=Select 2=Heat 3=Retract.
+    static constexpr int UNLOAD_PHASE_BASE = 0;
+    /// Phase-id space for the LOAD direction (load / preload / manual_sta):
+    /// 10=Home 11=Select 12=Heat 13=Feed 14=Purge.
+    ///
+    /// Disjoint from the unload space ON PURPOSE. The two used to share 0..4,
+    /// justified by "only one operation is live at a time" -- true for a plain
+    /// load or a plain unload, and false for a SWAP, which runs both directions
+    /// inside one user-initiated operation. An unload phase then indexed
+    /// whatever bar happened to be on screen: on a multiACE bay swap,
+    /// `unload_doing` (3) highlighted the load model's "Feed filament" for the
+    /// length of the retract. Separate spaces make an index unambiguous, so one
+    /// bar can carry both halves and a mismatched phase is *recognisably*
+    /// foreign rather than silently plausible.
+    static constexpr int LOAD_PHASE_BASE = 10;
     // Operation step bar. The U1 firmware reports a granular channel_state that
     // classify_channel_state maps to a per-direction step index published via the
     // ams_operation_phase subject, so the step model and its driving index live in

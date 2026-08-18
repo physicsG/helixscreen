@@ -236,6 +236,10 @@ translations:
   Auto-Detect: Auto-Erkennung
   Auto-Heat on Load: Automatisches Heizen beim Laden
   Auto-detect: Auto-Erkennung
+  Auto-dry: ''
+  Auto-dry off: ''
+  Auto-dry on: ''
+  Auto-dry unchanged: ''
   Auto-install only works on local Moonraker: Auto-Installation funktioniert nur bei
     lokalem Moonraker
   Auto-lock: Auto-Sperre
@@ -655,6 +659,7 @@ translations:
   Could not start Bluetooth discovery: Bluetooth-Erkennung konnte nicht gestartet
     werden
   Could not update filaments: Filamente konnten nicht aktualisiert werden
+  Could not update slot: ''
   Could not verify Spoolman status. Moonraker may still be restarting.: Spoolman-Status
     konnte nicht überprüft werden. Moonraker startet möglicherweise noch neu.
   Couldn't update Spoolman — saved locally: Spoolman konnte nicht aktualisiert werden
@@ -783,6 +788,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Wird heruntergeladen... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: Bei jeder Berührung einen
     Effekt zeichnen — hilft beim Diagnostizieren von Versätzen
+  Dries above %d%%, stops below %d%%: ''
   Drive Cal: Antriebs-Kal.
   Drop shadow strength (0 = disabled): Schattenstärke (0 = deaktiviert)
   Drying: Trocknen
@@ -1122,6 +1128,7 @@ translations:
   Flying Toasters: Flying Toasters
   Follow active tool: Aktivem Werkzeug folgen
   Follow graph screen: Diagrammbildschirm folgen
+  Follows unit %d: ''
   Forget: Vergessen
   Forget Network?: Netzwerk vergessen?
   Forget network '{}'? You will need the password to reconnect.: Netzwerk '{}' vergessen? Sie benötigen das Passwort zum erneuten Verbinden.
@@ -1795,6 +1802,7 @@ translations:
   Open G-code command console: 'G-Code-Befehlskonsole öffnen'
   Open LED color and brightness controls: 'LED-Farb- und Helligkeitssteuerung öffnen'
   Open Source Licenses: Open-Source-Lizenzen
+  Open in ACE: ''
   Operation already in progress: Vorgang läuft bereits
   Operations: Operationen
   Optimize Your Printing: Optimieren Sie Ihren Druck
@@ -2814,6 +2822,7 @@ translations:
   Toolhead: 'Werkzeugkopf'
   Toolhead LED: 'Werkzeugkopf-LED'
   Toolhead Style: Toolhead-Stil
+  Toolhead command failed: ''
   Toolhead jam: Werkzeugkopf-Stau
   Toolhead, G-code, limits, and materials: Druckkopf, G-Code, Grenzen und Materialien
   Tools Used: Verwendete Werkzeuge

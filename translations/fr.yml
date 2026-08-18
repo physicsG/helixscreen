@@ -237,6 +237,10 @@ translations:
   Auto-Detect: Auto-détection
   Auto-Heat on Load: Préchauffage auto au chargement
   Auto-detect: Auto-détection
+  Auto-dry: ''
+  Auto-dry off: ''
+  Auto-dry on: ''
+  Auto-dry unchanged: ''
   Auto-install only works on local Moonraker: Linstallation automatique ne fonctionne
     que sur Moonraker local
   Auto-lock: Verrouillage auto
@@ -657,6 +661,7 @@ translations:
   Could not save filament: 'Impossible d''enregistrer le filament'
   Could not start Bluetooth discovery: Impossible de démarrer la découverte Bluetooth
   Could not update filaments: Impossible de mettre à jour les filaments
+  Could not update slot: ''
   Could not verify Spoolman status. Moonraker may still be restarting.: Impossible
     de vérifier l'état de Spoolman. Moonraker est peut-être encore en cours de redémarrage.
   Couldn't update Spoolman — saved locally: Impossible de mettre à jour Spoolman —
@@ -787,6 +792,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Téléchargement... {:.1f}/{:.1f} Mo
   Draw a ripple at each touch — helps diagnose offsets: Dessine une ondulation à chaque
     contact — aide à diagnostiquer les décalages
+  Dries above %d%%, stops below %d%%: ''
   Drive Cal: Cal entraîn.
   Drop shadow strength (0 = disabled): Intensité de l'ombre portée (0 = désactivé)
   Drying: Séchage
@@ -1127,6 +1133,7 @@ translations:
   Flying Toasters: Flying Toasters
   Follow active tool: Suivre l'outil actif
   Follow graph screen: Suivre l'écran du graphique
+  Follows unit %d: ''
   Forget: Oublier
   Forget Network?: Oublier le réseau ?
   Forget network '{}'? You will need the password to reconnect.: Oublier le réseau '{}' ? Vous aurez besoin du mot de passe pour vous reconnecter.
@@ -1803,6 +1810,7 @@ translations:
   Open G-code command console: 'Ouvrir la console de commandes G-code'
   Open LED color and brightness controls: 'Ouvrir les commandes de couleur et de luminosité LED'
   Open Source Licenses: Licences open source
+  Open in ACE: ''
   Operation already in progress: Opération déjà en cours
   Operations: Opérations
   Optimize Your Printing: Optimisez votre impression
@@ -2842,6 +2850,7 @@ translations:
   Toolhead: 'Tête d''outil'
   Toolhead LED: 'LED de la tête d''outil'
   Toolhead Style: Style de tête d'outil
+  Toolhead command failed: ''
   Toolhead jam: Bourrage de la tête d'outil
   Toolhead, G-code, limits, and materials: Tête d'outil, G-code, limites et matériaux
   Tools Used: Outils utilisés

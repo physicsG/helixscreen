@@ -231,6 +231,10 @@ translations:
   Auto-Detect: Rilevamento auto
   Auto-Heat on Load: Riscaldamento automatico al caricamento
   Auto-detect: Rilevamento auto
+  Auto-dry: ''
+  Auto-dry off: ''
+  Auto-dry on: ''
+  Auto-dry unchanged: ''
   Auto-install only works on local Moonraker: L'installazione automatica funziona
     solo su Moonraker locale
   Auto-lock: Blocco automatico
@@ -645,6 +649,7 @@ translations:
   Could not save filament: Impossibile salvare il filamento
   Could not start Bluetooth discovery: Impossibile avviare la ricerca Bluetooth
   Could not update filaments: Impossibile aggiornare i filamenti
+  Could not update slot: ''
   Could not verify Spoolman status. Moonraker may still be restarting.: Impossibile
     verificare lo stato di Spoolman. Moonraker potrebbe essere ancora in riavvio.
   Couldn't update Spoolman — saved locally: Impossibile aggiornare Spoolman — salvato
@@ -774,6 +779,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Download in corso... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: Disegna un'onda a ogni tocco
     — aiuta a diagnosticare gli scostamenti
+  Dries above %d%%, stops below %d%%: ''
   Drive Cal: Cal. drive
   Drop shadow strength (0 = disabled): Intensità ombra (0 = disabilitata)
   Drying: Essiccazione
@@ -1108,6 +1114,7 @@ translations:
   Flying Toasters: Tostapane volanti
   Follow active tool: Segui strumento attivo
   Follow graph screen: Segui schermata grafico
+  Follows unit %d: ''
   Forget: Dimentica
   Forget Network?: Dimenticare la rete?
   Forget network '{}'? You will need the password to reconnect.: Dimenticare la rete '{}'? Servirà la password per riconnetterti.
@@ -1784,6 +1791,7 @@ translations:
   Open G-code command console: 'Apri la console dei comandi G-code'
   Open LED color and brightness controls: 'Apri i controlli di colore e luminosità LED'
   Open Source Licenses: Licenze open source
+  Open in ACE: ''
   Operation already in progress: Operazione già in corso
   Operations: Operazioni
   Optimize Your Printing: Ottimizza la tua stampa
@@ -2806,6 +2814,7 @@ translations:
   Toolhead: 'Testina'
   Toolhead LED: 'LED della testina'
   Toolhead Style: Stile testina
+  Toolhead command failed: ''
   Toolhead jam: Inceppamento testina
   Toolhead, G-code, limits, and materials: Testina, G-code, limiti e materiali
   Tools Used: Utensili usati

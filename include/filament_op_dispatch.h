@@ -45,6 +45,18 @@ struct FilamentOpPlan {
     FilamentRefusal refusal = FilamentRefusal::None;
     AmsCall ams_call = AmsCall::None;
     int ams_arg = -1; ///< Slot index, or tool number when ams_call == ChangeTool
+    /// The operation includes retracting what is already at the toolhead, so the
+    /// UI should show a SWAP rather than a fresh load.
+    ///
+    /// Separate from `ams_call` because they answer different questions. The
+    /// sidebar used to derive the display from the dispatch — `ams_call == Load`
+    /// meant fresh, anything else meant swap — which holds only while "needs an
+    /// unload first" and "is dispatched as a tool change" agree. On a multiACE
+    /// ACE bay they do not: `change_tool_completes_load()` is false there (`T3`
+    /// mounts the head and feeds nothing), so the plan is a plain Load, while the
+    /// backend still emits `ACE_UNLOAD_HEAD` before `ACE_LOAD_HEAD`. Every swap
+    /// onto an ACE-fed head therefore rendered a fresh-load bar.
+    bool is_swap = false;
 };
 
 /**
@@ -126,15 +138,17 @@ struct BackendCaps {
         // HEAD=h ACE=a SLOT=s` feeds it), fall through to the plain load below
         // and let the backend emit the whole sequence -- the same answer QIDI
         // already relies on.
-        if (caps.needs_unload_before_load && caps.change_tool_completes_load &&
-            sys.current_slot != target_slot) {
+        // Whether an unload is part of this operation — asked once, and NOT
+        // conflated with which command carries it (see FilamentOpPlan::is_swap).
+        const bool swap = caps.needs_unload_before_load && sys.current_slot != target_slot;
+        if (swap && caps.change_tool_completes_load) {
             const SlotInfo* slot_info = sys.get_slot_global(target_slot);
             if (slot_info && slot_info->mapped_tool >= 0) {
                 return {FilamentTier::AmsBackend, FilamentRefusal::None, AmsCall::ChangeTool,
-                        slot_info->mapped_tool};
+                        slot_info->mapped_tool, swap};
             }
         }
-        return {FilamentTier::AmsBackend, FilamentRefusal::None, AmsCall::Load, target_slot};
+        return {FilamentTier::AmsBackend, FilamentRefusal::None, AmsCall::Load, target_slot, swap};
     }
 
     if (macro_available) {
