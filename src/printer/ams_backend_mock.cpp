@@ -2629,8 +2629,6 @@ AmsBackendMock::get_operation_step_model(StepOperationType op) const {
         model.steps.push_back(
             {lv_tr("Retract filament"), AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3, false, false});
         model.steps.push_back(
-            {lv_tr("Fetch filament"), AmsBackendSnapmaker::ACE_FETCH_PHASE, false, false});
-        model.steps.push_back(
             {lv_tr("Feed filament"), AmsBackendSnapmaker::LOAD_PHASE_BASE + 3, false, false});
         model.steps.push_back(
             {lv_tr("Purge"), AmsBackendSnapmaker::LOAD_PHASE_BASE + 4, false, false});
@@ -2958,7 +2956,6 @@ bool AmsBackendMock::run_multiace_swap_prologue(InterruptibleSleep interruptible
         {AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 1, AmsAction::UNLOADING, "Selecting toolhead"},
         {AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 2, AmsAction::HEATING, "Heating nozzle"},
         {AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3, AmsAction::UNLOADING, "Retracting filament"},
-        {AmsBackendSnapmaker::ACE_FETCH_PHASE, AmsAction::LOADING, "Fetching filament"},
     };
     for (const auto& p : prologue) {
         if (shutdown_requested_ || cancel_requested_) {
@@ -2966,20 +2963,11 @@ bool AmsBackendMock::run_multiace_swap_prologue(InterruptibleSleep interruptible
         }
         set_action(p.action, p.detail);
         set_operation_phase(p.id);
-        // The ACE-side fetch is the window where the U1 reports nothing, so it
-        // is the one that reads as a hang without the busy label. Mirror what
-        // AmsBackendMultiAce::apply_swap_phase_locked() publishes.
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            system_info_.operation_indeterminate = (p.id == AmsBackendSnapmaker::ACE_FETCH_PHASE);
-        }
         emit_event(EVENT_STATE_CHANGED);
         if (!interruptible_sleep(step_ms)) {
             return false;
         }
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    system_info_.operation_indeterminate = false;
     return true;
 }
 

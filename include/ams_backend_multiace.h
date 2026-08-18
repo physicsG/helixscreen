@@ -284,6 +284,10 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// consulted the wrong head's source kind and mislabelled the bar.
     int op_target_head_ = -1;
 
+    /// Has the firmware confirmed the in-flight swap is actually running?
+    /// Guards the latch against the pre-start lag; see apply_swap_phase_locked().
+    bool swap_progress_seen_ = false;
+
     /// The head a UI-initiated swap is running on, or -1.
     ///
     /// Set by do_load_filament() when it emits the pre-unload, cleared when the
@@ -293,16 +297,15 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// apply_swap_phase_locked() fills the ACE-side gap after it.
     int swap_in_flight_head_ = -1;
 
-    /// Post-process the phase the U1 half just published, for a swap in flight.
-    /// Caller must hold mutex_.
+    /// Retire the swap latch once the swap it guards is over. Caller must hold
+    /// mutex_; runs after AmsBackendSnapmaker::handle_status_update(), whose
+    /// channel_state parse is the input.
     ///
-    /// Runs after AmsBackendSnapmaker::handle_status_update() because the U1's
-    /// channel_state is the input: the ACE-side fetch is BY DEFINITION the gap
-    /// between "the old filament is back in the ACE" (the unload half ends) and
-    /// "the new filament reaches the U1's gear" (the load half's first phase).
-    /// Deriving it from the U1's own states rather than from `ace.swap_phase`
-    /// keeps it on signals whose meaning is known -- no value of swap_phase
-    /// other than "idle" has ever been observed.
+    /// The latch exists so preload_finish cannot resolve the operation at the
+    /// boundary BETWEEN the two halves; this is the other end of it. It does not
+    /// synthesize a phase: the gap between the halves measured ~4s of `inited`
+    /// on a live U1, not the long blind window the design assumed, so the bar
+    /// holds on the retract step across it instead of gaining a row nobody sees.
     void apply_swap_phase_locked(bool& changed);
 
     /// Parse the `ace` object. Caller must hold mutex_.
@@ -351,6 +354,10 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     std::string ace_swap_phase_ = "idle";
     /// `ace.status`, system-wide. "ready" is the known idle value.
     std::string ace_status_ = "ready";
+    /// `last_swap_result.ts`, or < 0 before the first frame carrying one. The
+    /// block PERSISTS across sessions, so only a change of timestamp is an
+    /// event; the first value seen is history and is recorded, not surfaced.
+    double last_swap_ts_ = -1.0;
 
     std::array<HeadSource, NUM_TOOLS> head_kind_{
         {HeadSource::UNKNOWN, HeadSource::UNKNOWN, HeadSource::UNKNOWN, HeadSource::UNKNOWN}};

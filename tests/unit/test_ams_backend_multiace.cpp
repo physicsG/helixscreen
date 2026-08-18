@@ -1466,22 +1466,21 @@ TEST_CASE_METHOD(HelixTestFixture, "the swap step model carries both halves in o
     REQUIRE(backend.load_filament(5).success()); // names head 3 as the target
 
     const auto model = backend.get_operation_step_model(StepOperationType::LOAD_SWAP);
-    REQUIRE(model.steps.size() == 7);
+    REQUIRE(model.steps.size() == 6);
     CHECK(model.steps[0].label == "Home");
     CHECK(model.steps[1].label == "Select");
     CHECK(model.steps[2].label == "Heat nozzle");
     CHECK(model.steps[3].label == "Retract filament");
-    CHECK(model.steps[4].label == "Fetch filament");
-    CHECK(model.steps[5].label == "Feed filament");
-    CHECK(model.steps[6].label == "Purge");
+    CHECK(model.steps[4].label == "Feed filament");
+    CHECK(model.steps[5].label == "Purge");
 
-    // The ids are the point: steps 1-4 are driven by the UNLOAD half, 6-7 by the
-    // LOAD half, and the ACE-side fetch by a phase no channel_state emits.
+    // The ids are the point: steps 1-4 are driven by the UNLOAD half and 5-6 by
+    // the LOAD half, in one bar. Nothing covers the gap between them -- measured
+    // at ~4s on a live U1, too short to earn a row.
     CHECK(model.steps[0].phase_id == AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 0);
     CHECK(model.steps[3].phase_id == AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3);
-    CHECK(model.steps[4].phase_id == AmsBackendSnapmaker::ACE_FETCH_PHASE);
-    CHECK(model.steps[5].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 3);
-    CHECK(model.steps[6].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 4);
+    CHECK(model.steps[4].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 3);
+    CHECK(model.steps[5].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 4);
     CHECK(model.steps[2].live_temp);
 
     // No two steps claim the same id — without that the bar cannot tell the
@@ -1526,17 +1525,13 @@ TEST_CASE_METHOD(LVGLTestFixture, "preload_finish is a boundary mid-swap, not an
 
     // The boundary. Resolving to IDLE here hid the step bar, brought the action
     // buttons back and armed a post-op cooldown -- mid-swap, with the new spool
-    // not yet fed.
+    // not yet fed. The bar holds on the retract step across the gap.
     backend.handle_status_update(feed_frame(3, "preload_finish"));
     CHECK(backend.get_current_action() != AmsAction::IDLE);
-    // ...and the gap it opens is the ACE-side fetch, which the U1 cannot see.
-    CHECK(backend.get_system_info().operation_phase == AmsBackendSnapmaker::ACE_FETCH_PHASE);
-    CHECK(backend.get_system_info().operation_indeterminate);
 
-    // The load half takes over: the latch disarms and the busy label clears.
+    // The load half takes over and the latch disarms.
     backend.handle_status_update(feed_frame(3, "load_feeding"));
     CHECK(backend.get_system_info().operation_phase == AmsBackendSnapmaker::LOAD_PHASE_BASE + 3);
-    CHECK_FALSE(backend.get_system_info().operation_indeterminate);
 
     backend.handle_status_update(feed_frame(3, "load_finish"));
     CHECK(backend.get_current_action() == AmsAction::IDLE);

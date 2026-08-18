@@ -110,11 +110,6 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// bar can carry both halves and a mismatched phase is *recognisably*
     /// foreign rather than silently plausible.
     static constexpr int LOAD_PHASE_BASE = 10;
-    /// Synthetic phase for "the ACE is moving filament and the U1 sees nothing".
-    /// Not a channel_state -- multiACE synthesizes it between the two halves of a
-    /// swap; declared here so the one phase-id space stays in one place.
-    static constexpr int ACE_FETCH_PHASE = 20;
-
     // Operation step bar. The U1 firmware reports a granular channel_state that
     // classify_channel_state maps to a per-direction step index published via the
     // ams_operation_phase subject, so the step model and its driving index live in

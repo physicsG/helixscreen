@@ -793,7 +793,7 @@ int AmsOperationSidebar::step_index_for_phase(int phase) const {
     // A declared-id model that does not claim this phase: the operation is in a
     // phase this bar does not represent. Hold. That is what lets one bar carry
     // both halves of a swap -- the load half's Home/Select/Heat ids belong to no
-    // step of the swap model, and holding on "Fetch filament" is right where
+    // step of the swap model, and holding on the retract step is right where
     // jumping to whatever sat at that array index was the original bug.
     return -1;
 }

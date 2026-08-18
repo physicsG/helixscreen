@@ -285,19 +285,35 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
     ace_swap_phase_ = helix::json_util::safe_string(ace, "swap_phase", ace_swap_phase_);
     ace_status_ = helix::json_util::safe_string(ace, "status", ace_status_);
 
-    // `last_swap_result` is null while nothing has failed. A non-null, non-"ok"
-    // value is multiACE reporting a swap that did not complete -- surface it the
-    // same way a channel_error is surfaced, since the U1's own channel_state has
-    // nothing to say about a failure on the ACE's side of the gear.
-    if (ace.contains("last_swap_result") && ace["last_swap_result"].is_string()) {
-        const auto result = ace["last_swap_result"].get<std::string>();
-        if (!result.empty() && result != "ok" && result != "success") {
-            spdlog::warn("{} last_swap_result='{}'", backend_log_tag(), result);
-            if (system_info_.operation_detail != result) {
+    // `last_swap_result` is an OBJECT, not a string:
+    //   {"head":3, "ace":0, "slot":1, "status":"ok", "ts":6163.707908022}
+    // (null before the first swap of a session). Read off a live U1 -- it was
+    // written as a string first, and `is_string()` meant the whole branch was
+    // simply dead on hardware rather than wrong, which is the harder kind to
+    // notice.
+    //
+    // It is the LAST result and it PERSISTS, so the value alone says nothing
+    // about now: surfacing a non-ok status on sight would pop an error for a
+    // swap that failed before the UI even started. `ts` is what makes it an
+    // event -- record it on the first frame, and only a CHANGE is news.
+    const auto& lsr = ace.contains("last_swap_result") ? ace["last_swap_result"] : nlohmann::json();
+    if (lsr.is_object()) {
+        const double ts = helix::json_util::safe_double(lsr, "ts", 0.0);
+        const auto status = helix::json_util::safe_string(lsr, "status", "ok");
+        const bool first_seen = last_swap_ts_ < 0.0;
+        if (ts != last_swap_ts_) {
+            last_swap_ts_ = ts;
+            const bool failed = !status.empty() && status != "ok" && status != "success";
+            if (failed && !first_seen) {
+                const int head = helix::json_util::safe_int(lsr, "head", -1);
+                spdlog::warn("{} swap on head {} reported '{}'", backend_log_tag(), head, status);
                 system_info_.action = AmsAction::ERROR;
-                system_info_.operation_detail = result;
+                system_info_.operation_detail = status;
                 swap_in_flight_head_ = -1;
                 changed = true;
+            } else if (failed) {
+                spdlog::debug("{} last_swap_result='{}' predates this session — not surfacing",
+                              backend_log_tag(), status);
             }
         }
     }
@@ -1036,9 +1052,16 @@ AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
     // from steps 2-3, so they pass straight through, and an id this model does
     // not declare holds the bar rather than moving it backwards.
     //
-    // Labels carry no product name, per 99dbe2774 ("Remove specific ACE
-    // naming"): "Fetch filament" is the counterpart to the "Retract filament"
-    // that commit settled on, and both read correctly whatever feeds the head.
+    // There is NO step for the ACE-side fetch, and that is a hardware finding
+    // rather than an omission. The design assumed a long blind window between
+    // the halves -- the ACE spooling the new bay down to the U1's gear with
+    // nothing on channel_state. Measured on a live U1 (firmware 20260722) it is
+    // a ~4 second blip of `inited` in a ~100 second operation, because the bay
+    // is already staged at its gate. A permanent row that is complete before it
+    // is read is worse than no row: the bar simply holds on "Retract filament"
+    // across it, which is honest.
+    //
+    // Labels carry no product name, per 99dbe2774 ("Remove specific ACE naming").
     if (op == StepOperationType::LOAD_SWAP && ace_fed) {
         OperationStepModel model;
         model.steps.push_back({lv_tr("Home"), UNLOAD_PHASE_BASE + 0, false, false});
@@ -1046,7 +1069,6 @@ AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
         model.steps.push_back(
             {lv_tr("Heat nozzle"), UNLOAD_PHASE_BASE + 2, false, /*live_temp=*/true});
         model.steps.push_back({lv_tr("Retract filament"), UNLOAD_PHASE_BASE + 3, false, false});
-        model.steps.push_back({lv_tr("Fetch filament"), ACE_FETCH_PHASE, false, false});
         model.steps.push_back({lv_tr("Feed filament"), LOAD_PHASE_BASE + 3, false, false});
         model.steps.push_back({lv_tr("Purge"), LOAD_PHASE_BASE + 4, false, false});
         return model;
@@ -1061,55 +1083,39 @@ AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
 }
 
 void AmsBackendMultiAce::apply_swap_phase_locked(bool& changed) {
+    (void)changed;
     // Nothing to do unless a swap this backend dispatched is in flight.
     if (swap_in_flight_head_ < 0) {
         return;
     }
 
-    // The load half has begun (any LOAD_PHASE_BASE id) or the whole operation
-    // has ended: the swap is over as far as this latch is concerned. Disarming
-    // on the load half rather than on load_finish keeps preload_finish's normal
-    // meaning available again the moment it can no longer be the boundary.
+    // The pre-start lag has to be survived before an idle action can mean
+    // "over". do_load_filament() arms the latch when the gcode goes out, and the
+    // firmware has not picked it up yet -- the next frame still reports IDLE. A
+    // bare `action == IDLE` disarm therefore fired on the very first frame after
+    // dispatch, every time, which is the same trap OperationOwnership documents
+    // on the UI side. Only a running action makes a later idle one mean the end.
+    const bool running = system_info_.action == AmsAction::LOADING ||
+                         system_info_.action == AmsAction::UNLOADING ||
+                         system_info_.action == AmsAction::HEATING;
+    if (running) {
+        swap_progress_seen_ = true;
+    }
+
+    // The load half has begun, or the operation has ended: the swap is over as
+    // far as this latch is concerned. Disarming on the load half rather than on
+    // load_finish gives preload_finish its normal meaning back the moment it can
+    // no longer be the boundary between the two halves.
     const int phase = system_info_.operation_phase;
-    const bool load_half_started = phase >= LOAD_PHASE_BASE && phase < ACE_FETCH_PHASE;
+    const bool load_half_started = phase >= LOAD_PHASE_BASE;
     const bool operation_over =
-        system_info_.action == AmsAction::IDLE || system_info_.action == AmsAction::ERROR;
+        swap_progress_seen_ && (system_info_.action == AmsAction::IDLE ||
+                                system_info_.action == AmsAction::ERROR);
     if (load_half_started || operation_over) {
         spdlog::debug("{} swap on head {} done (phase={} action={})", backend_log_tag(),
                       swap_in_flight_head_, phase, ams_action_to_string(system_info_.action));
         swap_in_flight_head_ = -1;
-        if (system_info_.operation_indeterminate) {
-            system_info_.operation_indeterminate = false;
-            changed = true;
-        }
-        return;
-    }
-
-    // Still in the unload half: leave its phases alone, they drive steps 1-4.
-    if (phase >= UNLOAD_PHASE_BASE && phase < LOAD_PHASE_BASE) {
-        return;
-    }
-
-    // Neither half owns the phase, and the operation has not ended: this is the
-    // ACE-side fetch. The U1 has stopped reporting (its channel_state sits at
-    // preload_finish, which classifies to -1) and the ACE is spooling the new
-    // bay down to the gear. Synthesize the step that covers it.
-    if (system_info_.operation_phase != ACE_FETCH_PHASE) {
-        system_info_.operation_phase = ACE_FETCH_PHASE;
-        changed = true;
-    }
-    // The live nozzle temperature is the only number on the bar during this, and
-    // it is frozen for the whole fetch -- which reads as a hang. The
-    // indeterminate flag swaps it for a busy label, the same treatment AD5X gives
-    // its own blind window. ace_swap_in_progress_ is corroboration when multiACE
-    // supplies it, never a requirement: it is unknown whether that flag tracks
-    // ACE_LOAD_HEAD or only ACE_SWAP_HEAD.
-    if (!system_info_.operation_indeterminate) {
-        spdlog::info("{} head {} in ACE-side fetch (ace.status='{}' swap_in_progress={})",
-                     backend_log_tag(), swap_in_flight_head_, ace_status_,
-                     ace_swap_in_progress_);
-        system_info_.operation_indeterminate = true;
-        changed = true;
+        swap_progress_seen_ = false;
     }
 }
 
