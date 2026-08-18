@@ -172,6 +172,8 @@ std::string WizardAmsIdentifyStep::get_ams_type_name() const {
         return "Creality CFS";
     case AmsType::SNAPMAKER:
         return "Snapmaker SnapSwap";
+    case AmsType::MULTIACE:
+        return "Snapmaker U1 + multiACE"; // i18n: do not translate - product names
     case AmsType::QIDI_BOX:
         return "QIDI Box"; // i18n: do not translate - product name
     default:

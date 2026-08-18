@@ -63,6 +63,9 @@ struct BackendCaps {
     /// direct-fed lane and a hub-routed one get different answers.
     bool needs_unload_before_load = false;
     bool is_tool_changer = false; ///< get_type() == AmsType::TOOL_CHANGER
+    /// AmsBackend::change_tool_completes_load() — answered for the SAME slot the
+    /// plan targets, because one backend can answer differently per lane.
+    bool change_tool_completes_load = true;
 };
 
 /**
@@ -118,7 +121,13 @@ struct BackendCaps {
         // one command per user action and lets the firmware refuse (#1229). An
         // unasked-for eject is the harm that rule exists to prevent, and it is
         // exactly what the old arm did.
-        if (caps.needs_unload_before_load && sys.current_slot != target_slot) {
+        // ...and only where that tool change IS the load. Where it is merely the
+        // first half (a multiACE ACE bay: `T3` mounts the head, `ACE_LOAD_HEAD
+        // HEAD=h ACE=a SLOT=s` feeds it), fall through to the plain load below
+        // and let the backend emit the whole sequence -- the same answer QIDI
+        // already relies on.
+        if (caps.needs_unload_before_load && caps.change_tool_completes_load &&
+            sys.current_slot != target_slot) {
             const SlotInfo* slot_info = sys.get_slot_global(target_slot);
             if (slot_info && slot_info->mapped_tool >= 0) {
                 return {FilamentTier::AmsBackend, FilamentRefusal::None, AmsCall::ChangeTool,

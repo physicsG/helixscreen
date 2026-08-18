@@ -269,6 +269,14 @@ struct MergeOptions {
     int suppress_rebind_firmware_old_id = 0;
     /// The just-written id (see suppress_rebind_firmware_old_id). 0 = none.
     int suppress_rebind_firmware_new_id = 0;
+    /// True on backends whose firmware NAMES the filament in each slot
+    /// (AmsBackend::has_firmware_filament_identity) — the U1 states
+    /// filament_type per head in print_task_config. There the override may only
+    /// replace a material firmware actually named when the user explicitly
+    /// locked one; otherwise firmware wins, because it is the truth about what
+    /// is physically loaded. Everywhere else the override is the only source of
+    /// a material and takes the field unconditionally, as before.
+    bool firmware_states_material = false;
 };
 
 struct MergeResult {

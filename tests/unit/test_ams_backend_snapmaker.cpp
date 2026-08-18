@@ -7,6 +7,7 @@
 #include "ams_backend_snapmaker.h"
 #include "ams_state.h"
 #include "ams_step_operation.h"
+#include "ams_subscription_backend.h"
 #include "ams_types.h"
 #include "app_globals.h"
 #include "filament_slot_override.h"
@@ -544,6 +545,88 @@ TEST_CASE_METHOD(
         CHECK(backend.can_unload_from_toolhead(1));
         CHECK(backend.can_unload_from_toolhead(3));
     }
+}
+
+// Mounting a head does not load it. The U1 parks four heads and picks one up,
+// so an EMPTY head on the carriage is an ordinary state — and it used to render
+// as a full spool with a lit badge, identical to a head holding filament,
+// because the election promoted the active tool's slot to LOADED from carriage
+// state alone. filament_exist is the presence answer and it must win. (Fixed in
+// 70ce3345b against live hardware, which added no test — this is that test.)
+TEST_CASE_METHOD(SnapmakerFixture, "Snapmaker a mounted but empty toolhead is not loaded",
+                 "[ams][snapmaker][unload]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    // T0 on the carriage, nothing in any channel.
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"toolhead", json{{"extruder", "extruder"}}},
+                      {"print_task_config",
+                       json{{"filament_exist", json::array({false, false, false, false})}}}});
+
+    CHECK(backend.get_slot_info(0).status == SlotStatus::EMPTY);
+    CHECK_FALSE(backend.get_system_info().filament_loaded);
+    CHECK_FALSE(backend.slot_has_filament_at_toolhead(0));
+    // Nothing to retract, so no Unload is offered.
+    CHECK_FALSE(backend.can_unload_from_toolhead(0));
+    // Mounted is still reported — it is a different question from loaded.
+    CHECK(backend.get_system_info().mounted_tool == 0);
+}
+
+// The mounted slot's LOADED status and filament_loaded are recomputed on EVERY
+// frame, not only on a tool change. Both used to be written solely by the
+// election, which fires on `active != current_tool`: a load that completed while
+// the tool stayed put — the normal case, since you mount a head and then feed it
+// — left the slot reading AVAILABLE and the sidebar saying nothing was loaded,
+// for as long as the tool remained mounted.
+TEST_CASE_METHOD(SnapmakerFixture,
+                 "Snapmaker mounted slot tracks a load that completes without a tool change",
+                 "[ams][snapmaker][channel_state]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    // Mount T0 with an empty channel: nothing is loaded yet.
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"toolhead", json{{"extruder", "extruder"}}},
+                      {"print_task_config",
+                       json{{"filament_exist", json::array({false, false, false, false})}}}});
+    REQUIRE(backend.get_slot_info(0).status == SlotStatus::EMPTY);
+
+    // Filament arrives and reaches the toolhead — no tool change anywhere.
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"print_task_config",
+                       json{{"filament_exist", json::array({true, false, false, false})}}}});
+    SnapmakerTestAccess::handle_status(backend, make_feed_status(0, "load_finish"));
+
+    CHECK(backend.get_slot_info(0).status == SlotStatus::LOADED);
+    CHECK(backend.get_system_info().filament_loaded);
+    CHECK(backend.can_unload_from_toolhead(0));
+}
+
+// A runout on the mounted tool must break the path to the nozzle without
+// withdrawing Unload — the two answers differ, and after a runout the user needs
+// Unload most. The runout clear used to live in its own block ahead of the
+// per-frame recompute, which then put filament_loaded straight back on the
+// strength of the loaded latch.
+TEST_CASE_METHOD(SnapmakerFixture,
+                 "Snapmaker runout on the mounted tool clears filament_loaded but keeps unload",
+                 "[ams][snapmaker][runout]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"toolhead", json{{"extruder", "extruder"}}},
+                      {"print_task_config",
+                       json{{"filament_exist", json::array({true, false, false, false})}}}});
+    SnapmakerTestAccess::handle_status(backend, make_feed_status(0, "load_finish"));
+    REQUIRE(backend.get_system_info().filament_loaded);
+
+    // The active lane's motion sensor drops mid-extrusion.
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"filament_motion_sensor e0_filament", json{{"filament_detected", false}}}});
+
+    CHECK_FALSE(backend.get_system_info().filament_loaded);
+    CHECK(backend.get_filament_segment() != PathSegment::NOZZLE);
+    // The latch — and therefore Unload — is untouched by the motion sensor.
+    CHECK(SnapmakerTestAccess::loaded_at_toolhead(backend, 0));
+    CHECK(backend.can_unload_from_toolhead(0));
 }
 
 // channel_error scoping — the firmware reports channel_error="no_filament" for
@@ -1344,6 +1427,12 @@ TEST_CASE_METHOD(SnapmakerFixture,
     ovr.color_rgb = 0xFF5500;
     ovr.color_set = true;
     ovr.material = "PLA";
+    // Material only outranks firmware when the user actually chose one. Every
+    // override that reaches this code in production carries the flag — both load
+    // paths set it and set_slot_info() stamps it — so a hand-seeded record has
+    // to say so too. Without it firmware wins, which is what stops a spool bind
+    // from pinning a material against the printer's own report.
+    ovr.user_locked_material = true;
     SnapmakerTestAccess::seed_override(backend, 0, ovr);
 
     // Firmware pushes a different color (blue) and a different material.
@@ -2147,4 +2236,121 @@ TEST_CASE_METHOD(SnapmakerFixture,
     REQUIRE(callback_fired);
     REQUIRE_FALSE(captured.success());
     REQUIRE(captured.result == AmsResult::COMMAND_FAILED);
+}
+
+// ============================================================================
+// Override vs firmware material
+//
+// print_task_config.filament_type is the printer's own word on what is loaded
+// at each head. An override may correct it, but only when the user actually
+// chose a material — and binding a Spoolman spool is not that choice.
+// ============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "Snapmaker: firmware material beats an unlocked override",
+                 "[ams][snapmaker][overrides]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.material = "PETG";
+    ovr.user_locked_material = false; // never a deliberate material choice
+    SnapmakerTestAccess::seed_override(backend, 1, ovr);
+
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"print_task_config",
+                       {{"filament_type", json::array({"PLA", "PLA", "NONE", "NONE"})}}}});
+
+    // The head reported PLA and displayed PETG indefinitely before this — the
+    // override replayed over firmware on every parse.
+    CHECK(backend.get_slot_info(1).material == "PLA");
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "Snapmaker: a locked override still corrects firmware",
+                 "[ams][snapmaker][overrides]") {
+    // The user-correction path has to survive the fix above.
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    helix::ams::FilamentSlotOverride ovr;
+    ovr.material = "PETG";
+    ovr.user_locked_material = true;
+    SnapmakerTestAccess::seed_override(backend, 1, ovr);
+
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"print_task_config",
+                       {{"filament_type", json::array({"PLA", "PLA", "NONE", "NONE"})}}}});
+
+    CHECK(backend.get_slot_info(1).material == "PETG");
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "Snapmaker: binding a spool does not lock a material",
+                 "[ams][snapmaker][overrides]") {
+    // apply_spool_to_slot() puts the spool's material into SlotInfo, so locking
+    // on "material is non-empty" made every spool link a permanent override.
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    SnapmakerTestAccess::handle_status(
+        backend, json{{"print_task_config",
+                       {{"filament_type", json::array({"PLA", "PLA", "NONE", "NONE"})}}}});
+
+    SECTION("a spool whose material agrees with firmware locks nothing") {
+        SlotInfo info = backend.get_slot_info(1);
+        info.spoolman_id = 15;
+        info.spool_name = "SIlver";
+        info.material = "PLA"; // same as firmware
+        backend.set_slot_info(1, info, /*persist=*/true);
+
+        auto stored = SnapmakerTestAccess::get_override(backend, 1);
+        REQUIRE(stored.has_value());
+        CHECK_FALSE(stored->user_locked_material);
+    }
+
+    SECTION("a material that disagrees is a real choice and locks") {
+        SlotInfo info = backend.get_slot_info(1);
+        info.material = "ASA";
+        backend.set_slot_info(1, info, /*persist=*/true);
+
+        auto stored = SnapmakerTestAccess::get_override(backend, 1);
+        REQUIRE(stored.has_value());
+        CHECK(stored->user_locked_material);
+    }
+}
+
+// =============================================================================
+// Which backends can emit a G28 for a filament op
+//
+// The "home printer first?" prompt is raised by the UI before it starts a
+// preheat, and it used to be gated on printer state alone -- on the U1 that
+// asked consent for a G28 that never comes, and declining cancelled the load.
+// The answer has to come from the backend, and each class's answer must follow
+// from what its dispatch actually does.
+// =============================================================================
+
+TEST_CASE("Snapmaker filament ops never emit a G28", "[ams][snapmaker][homing]") {
+    AmsBackendSnapmaker backend(nullptr, nullptr);
+
+    // do_load_filament() sends AUTO_FEEDING ... LOAD=1 straight to firmware.
+    // It never reaches ensure_homed_then(), so nothing here can home.
+    CHECK_FALSE(backend.filament_ops_may_home());
+
+    // Not the same question as the firmware burying its own home -- the U1's
+    // FEED_AUTO moves filament, not the toolhead, so this stays false too and
+    // the two flags are not just aliases of each other.
+    CHECK_FALSE(backend.filament_ops_self_home());
+}
+
+TEST_CASE("A backend that routes through ensure_homed_then says so", "[ams][snapmaker][homing]") {
+    // The default has to come from the layer that owns the homing machinery,
+    // not from each backend remembering to opt in. AmsSubscriptionBackend is
+    // where ensure_homed_then() lives, so its subclasses answer true unless
+    // they dispatch around it -- proven here through a subclass that does not
+    // override, so the inherited answer is what is under test.
+    class PlainSubscriptionBackend : public AmsBackendSnapmaker {
+      public:
+        PlainSubscriptionBackend() : AmsBackendSnapmaker(nullptr, nullptr) {}
+        // Undo Snapmaker's override to expose AmsSubscriptionBackend's answer.
+        [[nodiscard]] bool filament_ops_may_home() const override {
+            return AmsSubscriptionBackend::filament_ops_may_home();
+        }
+    };
+    PlainSubscriptionBackend backend;
+    CHECK(backend.filament_ops_may_home());
 }

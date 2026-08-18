@@ -34,10 +34,13 @@ class AmsContextMenuTestAccess {
                                                   supports_force_eject, slot_empty);
     }
 
+    // source_external defaults to false — the ordinary slot that holds its own
+    // spool, which is what every case below except the ACE-fed ones is about.
     static bool decide_can_load(bool system_busy, bool toolhead_unload,
-                                std::optional<bool> slot_has_filament, bool print_active) {
+                                std::optional<bool> slot_has_filament, bool print_active,
+                                bool source_external = false) {
         return AmsContextMenu::decide_can_load(system_busy, toolhead_unload, slot_has_filament,
-                                               print_active);
+                                               print_active, source_external);
     }
 
     static bool decide_unload_enabled(bool system_busy, UnloadMode mode, bool print_active,
@@ -52,10 +55,13 @@ class AmsContextMenuTestAccess {
     }
 
     using BackupEligibleFn = AmsContextMenu::BackupEligibleFn;
+    using SlotDisplayNumberFn = AmsContextMenu::SlotDisplayNumberFn;
 
     static std::string build_backup_options_for(int total_slots, int item_index,
-                                                const BackupEligibleFn& eligible) {
-        return AmsContextMenu::build_backup_options_for(total_slots, item_index, eligible);
+                                                const BackupEligibleFn& eligible,
+                                                const SlotDisplayNumberFn& display_number = {}) {
+        return AmsContextMenu::build_backup_options_for(total_slots, item_index, eligible,
+                                                        display_number);
     }
 
     static bool decide_backup_refused(int item_index, int backup_slot,
@@ -413,6 +419,48 @@ TEST_CASE("AmsContextMenu::decide_unload_enabled blocks only the toolhead unload
     }
 }
 
+// ============================================================================
+// A position fed from another unit has no Load of its own
+//
+// An ACE-fed U1 head is loaded with `ACE_LOAD_HEAD HEAD=n ACE=a SLOT=s`, which
+// names a specific bay — so the choice belongs to the bay's menu, not the
+// head's. Unload needs no bay (`ACE_UNLOAD_HEAD HEAD=n`) and stays available,
+// which is the asymmetry these cases pin.
+// ============================================================================
+
+TEST_CASE("AmsContextMenu::decide_can_load withdraws Load for a slot fed from another unit",
+          "[ams][context_menu][source_external]") {
+    SECTION("otherwise-loadable slot loses Load when it is externally fed") {
+        // Idle, not seated, filament available: Load would be offered on any
+        // ordinary slot.
+        REQUIRE(AmsContextMenuTestAccess::decide_can_load(false, false, true, false,
+                                                          /*source_external=*/false));
+        CHECK_FALSE(AmsContextMenuTestAccess::decide_can_load(false, false, true, false,
+                                                              /*source_external=*/true));
+    }
+
+    SECTION("it is a property of the position, not a transient state") {
+        // Every combination stays false — this is "no such action here", not
+        // "not right now", so no amount of idling re-enables it.
+        for (bool busy : {false, true}) {
+            for (bool seated : {false, true}) {
+                for (bool printing : {false, true}) {
+                    INFO("busy=" << busy << " seated=" << seated << " printing=" << printing);
+                    CHECK_FALSE(AmsContextMenuTestAccess::decide_can_load(busy, seated, true,
+                                                                          printing,
+                                                                          /*external=*/true));
+                }
+            }
+        }
+    }
+
+    SECTION("an ordinary slot is untouched") {
+        // The default-argument path every other case in this file exercises.
+        CHECK(AmsContextMenuTestAccess::decide_can_load(false, false, true, false));
+        CHECK_FALSE(AmsContextMenuTestAccess::decide_can_load(true, false, true, false));
+    }
+}
+
 // =============================================================================
 // Backup eligibility now flows through the BACKEND virtual
 //
@@ -655,4 +703,38 @@ TEST_CASE("The option list is built from the live backend virtual, not a local r
     }
 
     backend.stop();
+}
+
+// =============================================================================
+// The backup list labels slots with the number their badge shows
+//
+// slot+1 is only right when every slot owns its identity. On multiACE an
+// ACE-fed U1 head and the ACE bay behind it share one spool number, so the
+// U1's four heads and one ACE span 1..7 rather than 1..8 — and a list offering
+// "Slot 8" names nothing the user can point at.
+// =============================================================================
+
+TEST_CASE("Backup options use the badge's spool number, not slot + 1",
+          "[ams][context_menu][endless_spool][multiace]") {
+    using Access = AmsContextMenuTestAccess;
+    const auto allow_all = [](int, int) { return true; };
+
+    SECTION("the injected number is what appears in the list") {
+        // The multiACE shape: head 3 is fed by ACE bay 0, so both read 4 and the
+        // numbering continues 5, 6, 7 instead of running to 8.
+        const std::vector<int> shown = {1, 2, 3, 4, 4, 5, 6, 7};
+        const auto display = [&shown](int slot) { return shown[static_cast<size_t>(slot)]; };
+
+        const auto opts = Access::build_backup_options_for(8, 0, allow_all, display);
+        CHECK(opts.find("Slot 7") != std::string::npos);
+        CHECK(opts.find("Slot 8") == std::string::npos); // the whole point
+    }
+
+    SECTION("no injected rule falls back to slot + 1") {
+        // Every other backend numbers its slots exactly this way, and the
+        // default argument is what keeps their lists byte-identical.
+        const auto opts = Access::build_backup_options_for(4, 0, allow_all);
+        CHECK(opts.find("Slot 4") != std::string::npos);
+        CHECK(opts.find("Slot 5") == std::string::npos);
+    }
 }

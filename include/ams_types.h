@@ -48,7 +48,12 @@ enum class AmsType {
     AD5X_IFS = 5,     ///< FlashForge AD5X IFS (Intelligent Filament Switching)
     CFS = 6,          ///< Creality Filament System (K2 series, RS-485)
     SNAPMAKER = 7,    ///< Snapmaker U1 SnapSwap toolchanger
-    QIDI_BOX = 8 ///< QIDI Box filament changer (PLUS4, Q2, MAX4 — hub AMS, 4 slots chainable to 16)
+    QIDI_BOX = 8, ///< QIDI Box filament changer (PLUS4, Q2, MAX4 — hub AMS, 4 slots chainable to 16)
+    /// multiACE (decay71/multiACE): 1-4 Anycubic ACE Pro / ACE 2 units bolted onto a
+    /// Snapmaker U1's four toolheads. Registers a Klipper object literally named `ace`,
+    /// which is ALSO the community Anycubic driver's name — see PrinterDiscovery for how
+    /// the two are told apart. Superset of SNAPMAKER: the U1's own heads plus the ACE units.
+    MULTIACE = 9
 };
 
 /**
@@ -74,6 +79,8 @@ inline const char* ams_type_to_string(AmsType type) {
         return "Snapmaker";
     case AmsType::QIDI_BOX:
         return "QIDI Box"; // i18n: do not translate - product name
+    case AmsType::MULTIACE:
+        return "multiACE"; // i18n: do not translate - product name
     default:
         return "None";
     }
@@ -129,7 +136,11 @@ inline AmsType ams_type_from_string(std::string_view str) {
  * @return true if this is a physical tool changer
  */
 inline bool is_tool_changer(AmsType type) {
-    return type == AmsType::TOOL_CHANGER || type == AmsType::SNAPMAKER;
+    // MULTIACE is a Snapmaker U1 with ACE units bolted on — still four physical
+    // toolheads, so every tool-changer behaviour applies exactly as it does to
+    // SNAPMAKER.
+    return type == AmsType::TOOL_CHANGER || type == AmsType::SNAPMAKER ||
+           type == AmsType::MULTIACE;
 }
 
 /**
@@ -145,7 +156,7 @@ inline bool is_tool_changer(AmsType type) {
 inline bool is_filament_system(AmsType type) {
     return type == AmsType::HAPPY_HARE || type == AmsType::AFC || type == AmsType::ACE ||
            type == AmsType::AD5X_IFS || type == AmsType::CFS || type == AmsType::SNAPMAKER ||
-           type == AmsType::QIDI_BOX;
+           type == AmsType::QIDI_BOX || type == AmsType::MULTIACE;
 }
 
 /**
@@ -1514,6 +1525,40 @@ struct DryerInfo {
         if (target_temp_c <= 0)
             return false;
         return std::abs(current_temp_c - target_temp_c) <= tolerance_c;
+    }
+};
+
+/**
+ * @brief Humidity-controlled ("auto") drying — the standing rule, not the run
+ *
+ * A dryer that arms itself off a humidity reading instead of being started by
+ * hand. Deliberately separate from DryerInfo: that one describes the cycle
+ * currently running (target, remaining, progress), this one describes the rule
+ * that starts a cycle. Both are live at once while the rule has the heater on,
+ * which is what `running` distinguishes from a manual Start.
+ *
+ * A unit with no humidity sensor of its own cannot evaluate a threshold, so it
+ * FOLLOWS another unit's cycle instead. Such a unit stays unarmable until a
+ * master is picked — which is why can_enable() is not simply `supported`.
+ */
+struct AutoDryInfo {
+    bool supported = false; ///< Does this unit expose humidity-controlled drying?
+    bool enabled = false;   ///< Is the rule armed?
+    bool running = false;   ///< Is the cycle running right now this rule's doing?
+
+    // Thresholds. Only meaningful on a unit that measures its own humidity.
+    float rh_start_pct = 0.0f; ///< Arm the dryer at or above this %RH
+    float rh_end_pct = 0.0f;   ///< Stop it below this %RH (always < rh_start_pct)
+    int temp_c = 0;            ///< Temperature the rule dries at
+
+    // Follower units only.
+    bool follows_master = false; ///< No humidity sensor — mirrors another unit
+    int master_unit = -1;        ///< AMS unit index it follows (-1 = none picked)
+    int add_time_min = 0;        ///< Minutes it keeps running past the master
+
+    /// A follower with no master picked cannot be armed — firmware refuses it.
+    [[nodiscard]] bool can_enable() const {
+        return supported && (!follows_master || master_unit >= 0);
     }
 };
 

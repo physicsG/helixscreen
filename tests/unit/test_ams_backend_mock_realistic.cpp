@@ -563,3 +563,13 @@ TEST_CASE("Mock backend does not track weight locally", "[ams][mock][spoolman]")
     auto backend = std::make_unique<AmsBackendMock>(4);
     REQUIRE(backend->tracks_weight_locally() == false);
 }
+
+TEST_CASE("The mock reports no homing, matching what it dispatches", "[ams][mock][homing]") {
+    // AmsBackendMock derives from AmsBackend directly, so ensure_homed_then()
+    // is not even reachable from it. The base default is what makes that the
+    // honest answer without the mock having to declare anything -- and it is
+    // why --real-ams exists to reach the confirmation path instead (see
+    // FILAMENT_MANAGEMENT.md § mock backends).
+    AmsBackendMock backend(4);
+    CHECK_FALSE(backend.filament_ops_may_home());
+}

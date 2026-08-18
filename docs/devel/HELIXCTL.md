@@ -728,7 +728,7 @@ frame doesn't change again a moment later. It combines three things:
   `unfreeze`. `freeze` is a transient test-mode toggle; a `--remote` dev
   instance killed or crashed between the two would otherwise leave a real
   user's config with animations permanently disabled — automated tests never
-  see this because `--test` uses `settings-test.json`. The handler instead
+  see this because `--test` uses `config/settings-test.json`. The handler instead
   reads and writes `DisplaySettingsManager::subject_animations_enabled()`
   directly (an accessor already public and already used by several widgets to
   observe this setting), and remembers the real pre-freeze value so `unfreeze`

@@ -63,7 +63,7 @@ One `freeze` command combining:
   transient test-mode action; persisting it means a `--remote` dev instance that is killed or
   crashes between `freeze` and `unfreeze` leaves the user's real config with animations
   permanently disabled. Set the subject directly, or add a non-persisting setter for this
-  case. Automated tests are insulated by the `settings-test.json` split, which is exactly why
+  case. Automated tests are insulated by the `config/settings-test.json` split, which is exactly why
   this would not have surfaced in testing.
 - Pausing periodic timers individually, **with a skip list** (see below); the codebase has 85
   `lv_timer_create` sites driving repaints.

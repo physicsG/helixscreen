@@ -247,3 +247,39 @@ void ui_system_path_canvas_refresh(lv_obj_t* obj);
 #ifdef __cplusplus
 }
 #endif
+
+/**
+ * @brief Set callback for taps on the toolhead row
+ *
+ * The overview draws one nozzle per physical head; tapping one is the same
+ * question the detail canvas's nozzle answers ("mount, park, load or unload
+ * this head"), so it opens the same menu. The reported index is the VIRTUAL
+ * tool number shown on the badge, not the physical column — with cross-unit
+ * head sharing those differ.
+ *
+ * Leaving this unset keeps the canvas passive.
+ *
+ * @param obj The system_path_canvas widget
+ * @param cb Callback (tool_index, user_data), or nullptr to clear
+ * @param user_data Passed through to the callback
+ */
+void ui_system_path_canvas_set_toolhead_callback(lv_obj_t* obj,
+                                                 void (*cb)(int tool_index, void* user_data),
+                                                 void* user_data);
+
+/**
+ * @brief Restrict which of a unit's tools it draws a supply line to
+ *
+ * Bit @c t corresponds to physical tool <tt>first_tool + t</tt>. A cleared bit
+ * means the unit owns that nozzle but does not supply its filament — a
+ * toolchanger head fed by an MMU — so no line is drawn from this unit to it.
+ * Until a mask is set for a unit every tool is drawn, which is what every
+ * single-source system wants. A SET mask of 0 is a real answer — the unit
+ * feeds none of its nozzles (a U1 with every head ACE-fed) — and draws no
+ * supply lines; 0 used to double as "unset" and drew all of them.
+ *
+ * @param obj The system_path_canvas widget
+ * @param unit_index Unit whose mask to set
+ * @param mask Bitmask of tools this unit actually feeds
+ */
+void ui_system_path_canvas_set_unit_tool_mask(lv_obj_t* obj, int unit_index, uint32_t mask);

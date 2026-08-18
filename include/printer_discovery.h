@@ -311,12 +311,31 @@ class PrinterDiscovery {
             else if (name == "ace" || name == "filament_hub" ||
                      name.rfind("ace_instance", 0) == 0) {
                 ace_object_names_.push_back(name);
-                if (!has_mmu_) {
+                // `filament_hub` and `ace_instance_N` are unambiguously Anycubic, so
+                // they claim the type here as before. The bare name `ace` is NOT:
+                // decay71/multiACE registers its own Klipper object under exactly
+                // that name on a Snapmaker U1, and its schema is unrelated
+                // (aces[].slots[] rather than a top-level slots[]). Claiming it as
+                // Anycubic points AmsBackendAce at a payload it cannot read, and it
+                // then falls through to a /server/ace/* REST bridge multiACE does
+                // not serve — an empty panel plus a "bridge not found" warning.
+                // Defer the bare-`ace` decision to finalize_ams_detection(), which
+                // can see the whole object list at once.
+                if (name == "ace") {
+                    has_bare_ace_object_ = true;
+                } else if (!has_mmu_) {
                     has_mmu_ = true;
                     mmu_type_ = AmsType::ACE;
                     spdlog::info(
                         "[PrinterDiscovery] Detected ACE (Anycubic ACE Pro) via '{}' object", name);
                 }
+            }
+            // multiACE ships these two extras alongside its `ace` object and the
+            // Anycubic stacks have no equivalent, so either one is a positive
+            // multiACE marker. Both are always installed by multiACE's own
+            // installer ("always shipped so opting in is a config-only step").
+            else if (name == "ace_bg_swap" || name == "ace_tipform") {
+                has_multiace_markers_ = true;
             }
             // MMU encoder discovery (Happy Hare)
             else if (name.rfind("mmu_encoder ", 0) == 0) {
@@ -535,6 +554,37 @@ class PrinterDiscovery {
         // Collect all detected AMS systems
         detected_ams_systems_.clear();
 
+        // Resolve the ambiguous bare `ace` object now that the whole object list
+        // has been seen. Two stacks register that exact name:
+        //
+        //   Anycubic community drivers (ValgACE/BunnyACE/DuckACE) — a real ACE hub
+        //   decay71/multiACE                                      — 1-4 ACE units on a Snapmaker U1
+        //
+        // Either multiACE marker (`ace_bg_swap` / `ace_tipform`), or the U1's own
+        // firmware signature (`filament_detect`, which no Anycubic printer has),
+        // identifies it as multiACE. Until AmsBackendMultiAce exists, fall through
+        // rather than claim it: the U1's native Snapmaker backend reads the same
+        // four heads correctly from print_task_config, whereas AmsBackendAce reads
+        // a schema multiACE does not publish and ends up with nothing at all.
+        if (has_bare_ace_object_ && !has_mmu_) {
+            if (has_multiace_markers_ || has_snapmaker_) {
+                // AmsBackendMultiAce derives from the Snapmaker backend, so the
+                // U1's four heads keep every bit of their native handling and
+                // the ACE units are added alongside as units 1..N. Claiming the
+                // type here is what routes `ace` into that backend at all; until
+                // it existed the only safe answer was to fall through.
+                has_mmu_ = true;
+                mmu_type_ = AmsType::MULTIACE;
+                spdlog::info("[PrinterDiscovery] Detected multiACE (markers={}, snapmaker={}) — "
+                             "U1 heads plus ACE units",
+                             has_multiace_markers_, has_snapmaker_);
+            } else {
+                has_mmu_ = true;
+                mmu_type_ = AmsType::ACE;
+                spdlog::info("[PrinterDiscovery] Detected ACE (Anycubic ACE Pro) via 'ace' object");
+            }
+        }
+
         // Register the filament management backend. When a real MMU (AFC, Happy
         // Hare, etc.) is present, it always wins — even on Snapmaker U1 hardware
         // that also reports filament_detect. The Snapmaker backend is a basic
@@ -554,6 +604,14 @@ class PrinterDiscovery {
             } else if (mmu_type_ == AmsType::QIDI_BOX) {
                 // i18n: do not translate - product name
                 detected_ams_systems_.push_back({AmsType::QIDI_BOX, "QIDI Box"});
+            } else if (mmu_type_ == AmsType::MULTIACE) {
+                // multiACE claims has_mmu_, which means the has_snapmaker_
+                // fallback below is skipped — so this arm is not optional. Its
+                // absence registered NO system at all and left AmsState with no
+                // backend, i.e. an empty multi-filament panel on a U1 that had
+                // been working a moment earlier.
+                // i18n: do not translate - product name
+                detected_ams_systems_.push_back({AmsType::MULTIACE, "multiACE"});
             }
         } else if (has_snapmaker_) {
             // Native Snapmaker filament system (no aftermarket MMU)
@@ -1429,6 +1487,11 @@ class PrinterDiscovery {
     bool has_speaker_ = false;
     bool has_fan_feedback_ = false;
     bool is_kalico_ = false;
+    /// Set when a Klipper object named exactly `ace` was seen. Ambiguous on its
+    /// own — resolved in finalize_ams_detection() using has_multiace_markers_.
+    bool has_bare_ace_object_ = false;
+    /// Set by `ace_bg_swap` / `ace_tipform`, which only multiACE registers.
+    bool has_multiace_markers_ = false;
     AmsType mmu_type_ = AmsType::NONE;
     std::vector<DetectedAmsSystem> detected_ams_systems_;
 

@@ -166,3 +166,7 @@ docs/superpowers/
 
 # Local crash artifacts (preserved across compactions for ASAN investigation)
 .crash-files/
+
+# Per-machine AMS slot overrides, written at runtime when the app runs with the
+# repo as its config dir (no HELIX_CONFIG_DIR). Machine state, not a default.
+config/filament_slot_overrides.json

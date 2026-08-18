@@ -245,7 +245,7 @@ TEST_CASE("AFC shared extruders: merging needs no configfile",
     CHECK(labels.prefix == 'T');
 }
 
-TEST_CASE("AFC shared extruders: configfile extruder_name gives toolheads E<n> identity",
+TEST_CASE("AFC shared extruders: configfile extruder_name gives toolheads T<n> identity",
           "[ams][afc][toolchanger][topology][shared_extruder]") {
     auto fixture = load_fixture("afc_u1_shared_extruders.json");
     const auto& status = fixture["status"];
@@ -260,7 +260,11 @@ TEST_CASE("AFC shared extruders: configfile extruder_name gives toolheads E<n> i
 
     REQUIRE(layout.total_physical_tools == 4);
 
-    // Every nozzle knows which Klipper extruder it is, so badges are E0..E3.
+    // Every nozzle knows which Klipper extruder it is, so the badge NUMBERS come
+    // from the extruder names — T0..T3. The letter is 'T' on both paths since
+    // 60b5d722e: it labels a toolhead, and only the number's SOURCE differs
+    // between the identity and legacy paths (#1229). That distinction is what
+    // the number assertions below pin.
     REQUIRE(ams_draw::layout_has_extruder_identity(layout));
 
     std::set<std::string> resolved(layout.physical_to_extruder_name.begin(),
@@ -268,7 +272,7 @@ TEST_CASE("AFC shared extruders: configfile extruder_name gives toolheads E<n> i
     CHECK(resolved == std::set<std::string>{"extruder", "extruder1", "extruder2", "extruder3"});
 
     const auto labels = ams_draw::compute_tool_badge_labels(layout, info, -1, -1);
-    CHECK(labels.prefix == 'E');
+    CHECK(labels.prefix == 'T');
     std::vector<int> numbers = labels.numbers;
     std::sort(numbers.begin(), numbers.end());
     CHECK(numbers == std::vector<int>{0, 1, 2, 3});

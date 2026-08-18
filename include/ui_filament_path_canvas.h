@@ -184,6 +184,22 @@ void ui_filament_path_canvas_set_slot_callback(lv_obj_t* obj, filament_path_slot
                                                void* user_data);
 
 /**
+ * @brief Set callback for taps on a toolhead (PARALLEL topology only)
+ *
+ * The nozzle and the spool above it ask different questions on a toolchanger —
+ * "mount or park this head" versus "what filament is in this lane" — and the
+ * canvas already hit-tests them as separate regions. Registering this splits
+ * them; without it both regions continue to report to the slot callback, which
+ * is what every non-toolchanger panel wants.
+ *
+ * @param obj The filament_path_canvas widget
+ * @param cb Callback function (slot_index, user_data)
+ * @param user_data User data passed to callback
+ */
+void ui_filament_path_canvas_set_toolhead_callback(lv_obj_t* obj, filament_path_slot_cb_t cb,
+                                                   void* user_data);
+
+/**
  * @brief Start segment transition animation
  *
  * Animates the filament tip moving from one segment to another.
@@ -482,3 +498,12 @@ namespace helix::ui {
 bool hub_box_hit(lv_point_t p, int32_t cx, int32_t cy, int32_t w, int32_t h, int32_t margin);
 } // namespace helix::ui
 #endif
+
+/**
+ * @brief Tell the canvas which physical tool is on the carriage (-1 = none)
+ *
+ * Only meaningful on a toolchanger. A unit-scoped HUB view draws a single
+ * toolhead and cannot otherwise say whether that head is the mounted one, which
+ * on a toolchanger is most of what the view is for.
+ */
+void ui_filament_path_canvas_set_mounted_tool(lv_obj_t* obj, int tool_index);

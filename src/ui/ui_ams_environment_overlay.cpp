@@ -102,6 +102,8 @@ void AmsEnvironmentOverlay::init_subjects() {
                                subjects_);
         UI_MANAGED_SUBJECT_STRING(title_text_subject_, title_text_buf_, "",
                                   "ams_env_overlay_title_text", subjects_);
+        UI_MANAGED_SUBJECT_INT(humidity_visible_subject_, 0,
+                               "ams_env_overlay_humidity_visible", subjects_);
         UI_MANAGED_SUBJECT_INT(dryer_visible_subject_, 0, "ams_env_overlay_dryer_visible",
                                subjects_);
         UI_MANAGED_SUBJECT_INT(no_dryer_visible_subject_, 0, "ams_env_overlay_no_dryer_visible",
@@ -129,11 +131,17 @@ void AmsEnvironmentOverlay::init_subjects() {
                                   subjects_);
         UI_MANAGED_SUBJECT_STRING(preset_text_subject_, preset_text_buf_, "",
                                   "ams_env_overlay_preset_text", subjects_);
+        UI_MANAGED_SUBJECT_INT(auto_dry_visible_subject_, 0, "ams_env_overlay_auto_dry_visible",
+                               subjects_);
+        UI_MANAGED_SUBJECT_INT(auto_dry_on_subject_, 0, "ams_env_overlay_auto_dry_on", subjects_);
+        UI_MANAGED_SUBJECT_STRING(auto_dry_text_subject_, auto_dry_text_buf_, "",
+                                  "ams_env_overlay_auto_dry_text", subjects_);
     });
 }
 
 void AmsEnvironmentOverlay::register_callbacks() {
     lv_xml_register_event_cb(nullptr, "on_ams_env_start_stop_clicked", on_start_stop_clicked);
+    lv_xml_register_event_cb(nullptr, "on_ams_env_auto_dry_toggled", on_auto_dry_toggled);
     spdlog::debug("[{}] Callbacks registered", get_name());
 }
 
@@ -394,6 +402,11 @@ void AmsEnvironmentOverlay::update_from_backend() {
         snprintf(humidity_text_buf_, sizeof(humidity_text_buf_), "--");
     }
     lv_subject_copy_string(&humidity_text_subject_, humidity_text_buf_);
+    // Owned by the overlay, not read off unit 0's indicator: this overlay shows
+    // whichever unit was opened, and an ACE reports humidity while the U1 it is
+    // bolted to does not. Binding to unit 0's flag hid the ACE's 35% RH behind
+    // the SnapSwap's lack of a sensor.
+    lv_subject_set_int(&humidity_visible_subject_, (has_env && humidity_pct > 0) ? 1 : 0);
 
     // Humidity readout + Material Comfort strip, for THIS unit. Matches the
     // badge's own rule (AmsState env_ind_humidity_visible): a reading exists
@@ -403,6 +416,33 @@ void AmsEnvironmentOverlay::update_from_backend() {
     // Dryer visibility
     lv_subject_set_int(&dryer_visible_subject_, dryer.supported ? 1 : 0);
     lv_subject_set_int(&no_dryer_visible_subject_, dryer.supported ? 0 : 1);
+
+    // Humidity-controlled drying. Hidden outright unless the unit both offers it
+    // and can actually be armed — a follower with no master picked would show a
+    // switch that every tap bounces back off.
+    const AutoDryInfo auto_dry = backend->get_auto_dry_info(unit_index_);
+    const bool show_auto_dry = auto_dry.supported && auto_dry.can_enable();
+    lv_subject_set_int(&auto_dry_visible_subject_, show_auto_dry ? 1 : 0);
+    lv_subject_set_int(&auto_dry_on_subject_, auto_dry.enabled ? 1 : 0);
+    if (show_auto_dry) {
+        // The thresholds are not editable here, so state them: a bare switch
+        // gives no clue what humidity it acts on. Follower units measure
+        // nothing, so for them the rule is the master's cycle, not a number.
+        // One format string per sentence, never concatenated fragments —
+        // word order is not English's to decide.
+        if (auto_dry.follows_master) {
+            snprintf(auto_dry_text_buf_, sizeof(auto_dry_text_buf_), lv_tr("Follows unit %d"),
+                     auto_dry.master_unit + 1);
+        } else {
+            snprintf(auto_dry_text_buf_, sizeof(auto_dry_text_buf_),
+                     lv_tr("Dries above %d%%, stops below %d%%"),
+                     static_cast<int>(std::lround(auto_dry.rh_start_pct)),
+                     static_cast<int>(std::lround(auto_dry.rh_end_pct)));
+        }
+    } else {
+        auto_dry_text_buf_[0] = '\0';
+    }
+    lv_subject_copy_string(&auto_dry_text_subject_, auto_dry_text_buf_);
 
     // Drying active state
     lv_subject_set_int(&drying_active_subject_, dryer.active ? 1 : 0);
@@ -666,6 +706,39 @@ void AmsEnvironmentOverlay::auto_select_preset() {
 // ============================================================================
 // STATIC CALLBACKS
 // ============================================================================
+
+void AmsEnvironmentOverlay::on_auto_dry_toggled(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[AmsEnvironmentOverlay] on_auto_dry_toggled");
+
+    lv_obj_t* sw = lv_event_get_target_obj(e);
+    if (!sw) {
+        return;
+    }
+    const bool want_on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+
+    auto& overlay = get_ams_environment_overlay();
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        NOTIFY_WARNING("{}", lv_tr("No Multi-Filament System connected"));
+        return;
+    }
+
+    const AmsError result = backend->set_auto_dry_enabled(want_on, overlay.unit_index_);
+    if (result.success()) {
+        // The switch is bound to the subject, so the printer's own next frame is
+        // what confirms it. Moving the subject here as well keeps the switch from
+        // sitting visibly wrong for the round trip.
+        lv_subject_set_int(&overlay.auto_dry_on_subject_, want_on ? 1 : 0);
+        NOTIFY_INFO("{}", want_on ? lv_tr("Auto-dry on") : lv_tr("Auto-dry off"));
+    } else {
+        // Put the switch back: the rule did not change, so the UI must not claim
+        // it did until a frame says otherwise.
+        lv_subject_set_int(&overlay.auto_dry_on_subject_, want_on ? 0 : 1);
+        helix::ui::notify_ams_error(result, lv_tr("Auto-dry unchanged"));
+    }
+
+    LVGL_SAFE_EVENT_CB_END();
+}
 
 void AmsEnvironmentOverlay::on_start_stop_clicked(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[AmsEnvironmentOverlay] on_start_stop_clicked");

@@ -15,6 +15,7 @@
 #include "filament_database.h"
 #include "filament_op_slot_resolver.h"
 #include "printer_state.h"
+#include "static_subject_registry.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -23,75 +24,59 @@ namespace helix::ui {
 
 // Static member initialization
 bool AmsContextMenu::callbacks_registered_ = false;
-bool AmsContextMenu::subjects_initialized_ = false;
-lv_subject_t AmsContextMenu::slot_is_loaded_subject_;
-lv_subject_t AmsContextMenu::slot_can_load_subject_;
+lv_subject_t AmsContextMenu::s_slot_is_loaded_subject_;
+lv_subject_t AmsContextMenu::s_slot_can_load_subject_;
+lv_subject_t AmsContextMenu::s_slot_source_external_subject_;
+bool AmsContextMenu::s_subjects_initialized_ = false;
 
 // ============================================================================
 // Construction / Destruction
 // ============================================================================
 
-void AmsContextMenu::init_subjects() {
-    if (subjects_initialized_)
-        return;
-
-    lv_subject_init_int(&slot_is_loaded_subject_, 0);
-    lv_subject_init_int(&slot_can_load_subject_, 1);
-
-    lv_xml_register_subject(nullptr, "ams_slot_is_loaded", &slot_is_loaded_subject_);
-    lv_xml_register_subject(nullptr, "ams_slot_can_load", &slot_can_load_subject_);
-
-    subjects_initialized_ = true;
-}
 
 AmsContextMenu::AmsContextMenu() {
     init_subjects();
     spdlog::debug("[AmsContextMenu] Constructed");
 }
 
-AmsContextMenu::~AmsContextMenu() {
-    // Subjects are static and stay registered for the process lifetime — see the
-    // header. Deiniting them here is what left the XML registry resolving
-    // "ams_slot_can_load" to dead storage once any one of the three owners went
-    // away, whether or not another was still using the name.
-    spdlog::trace("[AmsContextMenu] Destroyed");
-}
-
-AmsContextMenu::AmsContextMenu(AmsContextMenu&& other) noexcept
-    : ContextMenu(std::move(other)), action_callback_(std::move(other.action_callback_)),
-      backend_(other.backend_), total_slots_(other.total_slots_),
-      tool_dropdown_(other.tool_dropdown_), backup_dropdown_(other.backup_dropdown_),
-      pending_is_loaded_(other.pending_is_loaded_) {
-    // Nothing to transfer for the subjects: they are static and shared. Copying
-    // the lv_subject_t values here was never sound anyway — observers hold the
-    // address they were registered against, so a by-value move left every one of
-    // them pointing at the moved-from object.
-    other.backend_ = nullptr;
-    other.total_slots_ = 0;
-    other.tool_dropdown_ = nullptr;
-    other.backup_dropdown_ = nullptr;
-}
-
-AmsContextMenu& AmsContextMenu::operator=(AmsContextMenu&& other) noexcept {
-    if (this != &other) {
-        // Let base class handle its state, including the active-menu registry
-        ContextMenu::operator=(std::move(other));
-
-        action_callback_ = std::move(other.action_callback_);
-        backend_ = other.backend_;
-        total_slots_ = other.total_slots_;
-        tool_dropdown_ = other.tool_dropdown_;
-        backup_dropdown_ = other.backup_dropdown_;
-        pending_is_loaded_ = other.pending_is_loaded_;
-
-        // Subjects are static and shared — nothing to transfer. See the move ctor.
-
-        other.backend_ = nullptr;
-        other.total_slots_ = 0;
-        other.tool_dropdown_ = nullptr;
-        other.backup_dropdown_ = nullptr;
+void AmsContextMenu::init_subjects() {
+    if (s_subjects_initialized_ || !lv_is_initialized()) {
+        return;
     }
-    return *this;
+    // Subjects for button enabled states -- one set for every instance; see the
+    // header for why.
+    lv_subject_init_int(&s_slot_is_loaded_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_slot_is_loaded", &s_slot_is_loaded_subject_);
+
+    lv_subject_init_int(&s_slot_can_load_subject_, 1);
+    lv_xml_register_subject(nullptr, "ams_slot_can_load", &s_slot_can_load_subject_);
+
+    lv_subject_init_int(&s_slot_source_external_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_slot_source_external", &s_slot_source_external_subject_);
+
+    s_subjects_initialized_ = true;
+    // Torn down with every other static subject: after the panels (and so every
+    // card bound to these) are gone, before lv_deinit().
+    StaticSubjectRegistry::instance().register_deinit("AmsContextMenu", deinit_subjects);
+}
+
+void AmsContextMenu::deinit_subjects() {
+    if (!s_subjects_initialized_) {
+        return;
+    }
+    lv_subject_deinit(&s_slot_is_loaded_subject_);
+    lv_subject_deinit(&s_slot_can_load_subject_);
+    lv_subject_deinit(&s_slot_source_external_subject_);
+    s_subjects_initialized_ = false;
+}
+
+AmsContextMenu::~AmsContextMenu() {
+    // The subjects are the class's, not this instance's, and outlive it; the
+    // base destructor takes the widget tree down. Deiniting them HERE is what
+    // left the XML registry resolving "ams_slot_can_load" to dead storage once
+    // any one of the three owners went away, whether or not another was still
+    // using the name — StaticSubjectRegistry retires them at shutdown instead.
+    spdlog::trace("[AmsContextMenu] Destroyed");
 }
 
 // ============================================================================
@@ -104,8 +89,10 @@ void AmsContextMenu::set_action_callback(ActionCallback callback) {
 
 bool AmsContextMenu::show_near_widget(lv_obj_t* parent, int slot_index, lv_obj_t* near_widget,
                                       bool is_loaded, AmsBackend* backend) {
-    // Register callbacks once (idempotent)
+    // Register callbacks and the class's subjects once (both idempotent; the
+    // subjects again here in case this was constructed before LVGL was up).
     register_callbacks();
+    init_subjects();
 
     // Store AMS-specific state BEFORE base class calls on_created
     backend_ = backend;
@@ -128,8 +115,9 @@ bool AmsContextMenu::show_near_widget(lv_obj_t* parent, int slot_index, lv_obj_t
 }
 
 bool AmsContextMenu::show_for_external_spool(lv_obj_t* parent, lv_obj_t* anchor_widget) {
-    // Register callbacks once (idempotent)
+    // Register callbacks and the class's subjects once (both idempotent)
     register_callbacks();
+    init_subjects();
 
     // Configure for external spool mode (no backend operations)
     backend_ = nullptr;
@@ -152,8 +140,30 @@ bool AmsContextMenu::show_for_external_spool(lv_obj_t* parent, lv_obj_t* anchor_
 // ContextMenu override
 // ============================================================================
 
+void AmsContextMenu::handle_open_source() {
+    spdlog::info("[AmsContextMenu] Open source unit {} for slot {}", source_owner_unit_,
+                 get_item_index());
+    dispatch_ams_action(MenuAction::OPEN_SOURCE_UNIT);
+}
+
 void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     int slot_index = get_item_index();
+
+    // Does another unit own this slot's filament identity? On multiACE an
+    // ACE-fed U1 head's material/colour/spool are the ACE's to state, and
+    // editing them here would write print_task_config only for the ACE to
+    // overwrite it on its next report. The edit actions bind to this subject and
+    // hide themselves; "Open in <unit>" binds to its inverse. Load and Unload
+    // are untouched — they act on the head, which is still the U1's job.
+    source_owner_unit_ = -1;
+    if (!external_spool_mode_ && backend_) {
+        if (auto owner = backend_->slot_identity_owner_unit(slot_index)) {
+            source_owner_unit_ = *owner;
+        }
+    }
+    lv_subject_set_int(&s_slot_source_external_subject_, source_owner_unit_ >= 0 ? 1 : 0);
+    spdlog::debug("[AmsContextMenu] slot {} identity owner unit = {} (backend={})", slot_index,
+                  source_owner_unit_, backend_ ? "yes" : "null");
 
     // External spool mode: hide backend-related buttons, show only EDIT/CLEAR
     if (external_spool_mode_) {
@@ -166,8 +176,8 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
             lv_obj_add_flag(btn_unload, LV_OBJ_FLAG_HIDDEN);
 
         // Disable subject-driven states so hidden buttons stay hidden
-        lv_subject_set_int(&slot_is_loaded_subject_, 0);
-        lv_subject_set_int(&slot_can_load_subject_, 0);
+        lv_subject_set_int(&s_slot_is_loaded_subject_, 0);
+        lv_subject_set_int(&s_slot_can_load_subject_, 0);
 
         // Set header to "External Spool"
         lv_obj_t* slot_header = lv_obj_find_by_name(menu_obj, "slot_header");
@@ -283,7 +293,7 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     const bool unload_enabled =
         decide_unload_enabled(system_busy, unload_mode_, print_blocks_op,
                               backend_ && backend_->cold_lane_ops_refused_during_print());
-    lv_subject_set_int(&slot_is_loaded_subject_, unload_enabled ? 1 : 0);
+    lv_subject_set_int(&s_slot_is_loaded_subject_, unload_enabled ? 1 : 0);
 
     lv_obj_t* btn_unload = lv_obj_find_by_name(menu_obj, "btn_unload");
     if (btn_unload) {
@@ -325,9 +335,9 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // enabled. For non-AD5X backends slot_unloads_to_toolhead() returns the hint
     // unchanged, so !toolhead_unload == !is_loaded and behavior is unaffected.
     // Disable Load if: system busy, slot empty, OR filament is already at the head.
-    bool can_load =
-        decide_can_load(system_busy, toolhead_unload, slot_has_filament, print_blocks_op);
-    lv_subject_set_int(&slot_can_load_subject_, can_load ? 1 : 0);
+    bool can_load = decide_can_load(system_busy, toolhead_unload, slot_has_filament,
+                                    print_blocks_op, source_owner_unit_ >= 0);
+    lv_subject_set_int(&s_slot_can_load_subject_, can_load ? 1 : 0);
     if (!can_load) {
         spdlog::debug("[AmsContextMenu] Load disabled for slot {}: busy={}, loaded={} "
                       "(live={}), has_filament={}, print_blocks_op={}",
@@ -363,7 +373,12 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // disappeared the moment a spool went in — exactly when stale metadata does
     // damage, since that is when it gets printed with and when an edit aims a
     // Spoolman write at the previous spool.
-    if (backend_) {
+    // `source_external` gates all three spool-identity actions below. They are
+    // shown imperatively from here, so the XML bind_flag that hides the rest
+    // cannot reach them — a clear_flag after the binding simply wins. Naming the
+    // condition once keeps the three in step.
+    const bool source_external = source_owner_unit_ >= 0;
+    if (backend_ && !source_external) {
         SlotInfo slot_info = backend_->get_slot_info(slot_index);
         lv_obj_t* btn_clear = lv_obj_find_by_name(menu_obj, "btn_clear_spool");
         if (btn_clear && should_show_clear_spool(slot_info)) {
@@ -371,11 +386,34 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
         }
     }
 
-    // Update the slot header text (1-based for user display)
+    // Update the slot header text. Uses the SPOOL number the slot's badge shows,
+    // not slot_index + 1 — those diverge once one slot views another's spool, and
+    // a menu headed "Slot 5" opened from a badge reading "4" names nothing the
+    // user can see. A single number rather than the badge's range: the menu acts
+    // on this one slot.
+    //
+    // A position fed from ANOTHER unit is headed with that unit instead. It has
+    // no slot number of its own — its badge is a range ("4-7"), because in head
+    // mode every bay of the bound ACE feeds it — so "Slot 4" named a spool
+    // position that does not exist. The unit's own display name ("ACE 2 Pro",
+    // or "ACE 2" when several are attached) is the thing the user can point at.
     lv_obj_t* slot_header = lv_obj_find_by_name(menu_obj, "slot_header");
     if (slot_header) {
-        char header_text[32];
-        snprintf(header_text, sizeof(header_text), lv_tr("Slot %d"), slot_index + 1);
+        char header_text[48];
+        std::string owner_name;
+        if (backend_ && source_owner_unit_ >= 0) {
+            const AmsSystemInfo info = backend_->get_system_info();
+            if (source_owner_unit_ < static_cast<int>(info.units.size())) {
+                owner_name = info.units[static_cast<size_t>(source_owner_unit_)].display_name;
+            }
+        }
+        if (!owner_name.empty()) {
+            snprintf(header_text, sizeof(header_text), "%s", owner_name.c_str());
+        } else {
+            const int shown =
+                backend_ ? backend_->spool_display_number(slot_index) : slot_index + 1;
+            snprintf(header_text, sizeof(header_text), lv_tr("Slot %d"), shown);
+        }
         lv_label_set_text(slot_header, header_text);
     }
 
@@ -383,11 +421,11 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     auto* spoolman_subj = lv_xml_get_subject(nullptr, "printer_has_spoolman");
     bool has_spoolman = spoolman_subj && lv_subject_get_int(spoolman_subj) == 1;
     lv_obj_t* btn_spoolman = lv_obj_find_by_name(menu_obj, "btn_spoolman");
-    if (btn_spoolman && has_spoolman) {
+    if (btn_spoolman && has_spoolman && !source_external) {
         lv_obj_clear_flag(btn_spoolman, LV_OBJ_FLAG_HIDDEN);
     }
     lv_obj_t* btn_scan_qr = lv_obj_find_by_name(menu_obj, "btn_scan_qr");
-    if (btn_scan_qr && has_spoolman) {
+    if (btn_scan_qr && has_spoolman && !source_external) {
 #if !defined(HELIX_PLATFORM_ESP32)
         // No camera on the v1 Core+AMS cut — keep Scan QR hidden (default).
         lv_obj_clear_flag(btn_scan_qr, LV_OBJ_FLAG_HIDDEN);
@@ -500,7 +538,14 @@ AmsContextMenu::decide_unload_mode(bool toolhead_unload, bool can_recover, bool 
 }
 
 bool AmsContextMenu::decide_can_load(bool system_busy, bool toolhead_unload,
-                                     std::optional<bool> slot_has_filament, bool print_blocks_op) {
+                                     std::optional<bool> slot_has_filament, bool print_blocks_op,
+                                     bool source_external) {
+    // Checked before the shared gating, not folded into it: this is not a
+    // "cannot right now" like busy or mid-print, it is "this position has no
+    // such action". See the header.
+    if (source_external) {
+        return false;
+    }
     helix::ui::OpButtonState state;
     state.system_busy = system_busy;
     state.print_blocks_op = print_blocks_op;
@@ -561,6 +606,7 @@ void AmsContextMenu::register_callbacks() {
         {"ams_context_edit_cb", on_edit_cb},
         {"ams_context_clear_spool_cb", on_clear_spool_cb},
         {"ams_context_spoolman_cb", on_spoolman_cb},
+        {"ams_context_open_source_cb", on_open_source_cb},
         {"ams_context_scan_qr_cb", on_scan_qr_cb},
         {"ams_context_tool_changed_cb", on_tool_changed_cb},
         {"ams_context_backup_changed_cb", on_backup_changed_cb},
@@ -621,6 +667,13 @@ void AmsContextMenu::on_clear_spool_cb(lv_event_t* /*e*/) {
     auto* self = get_active_instance();
     if (self) {
         self->handle_clear_spool();
+    }
+}
+
+void AmsContextMenu::on_open_source_cb(lv_event_t* /*e*/) {
+    auto* self = get_active_instance();
+    if (self) {
+        self->handle_open_source();
     }
 }
 
@@ -897,12 +950,22 @@ AmsContextMenu::BackupEligibleFn AmsContextMenu::backend_eligible_fn() const {
     };
 }
 
+AmsContextMenu::SlotDisplayNumberFn AmsContextMenu::backend_display_number_fn() const {
+    AmsBackend* backend = backend_;
+    if (backend == nullptr) {
+        return [](int slot) { return slot + 1; };
+    }
+    return [backend](int slot) { return backend->spool_display_number(slot); };
+}
+
 std::string AmsContextMenu::build_backup_options() const {
-    return build_backup_options_for(total_slots_, get_item_index(), backend_eligible_fn());
+    return build_backup_options_for(total_slots_, get_item_index(), backend_eligible_fn(),
+                                    backend_display_number_fn());
 }
 
 std::string AmsContextMenu::build_backup_options_for(int total_slots, int item_index,
-                                                     const BackupEligibleFn& eligible) {
+                                                     const BackupEligibleFn& eligible,
+                                                     const SlotDisplayNumberFn& display_number) {
     std::string options = lv_tr("None");
 
     // Add slot options Slot 1, Slot 2... based on total slots.
@@ -911,7 +974,10 @@ std::string AmsContextMenu::build_backup_options_for(int total_slots, int item_i
         if (i == item_index) {
             continue;
         }
-        options += "\n" + fmt::format(lv_tr("Slot {}"), i + 1);
+        // The same number the badge shows — a list offering "Slot 8" when no
+        // badge reads 8 names nothing the user can point at.
+        const int shown = display_number ? display_number(i) : i + 1;
+        options += "\n" + fmt::format(lv_tr("Slot {}"), shown);
         // The base virtual is the old are_materials_compatible() rule, with an
         // unknown material on either side counting as eligible, so nothing is
         // tagged that was not tagged before on AFC / Happy Hare / CFS.

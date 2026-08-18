@@ -283,6 +283,14 @@ TEST_CASE_METHOD(PausedGateFixture, "Snapmaker refuses toolhead-motion filament 
     SECTION("select_slot — on the U1 a slot select IS a physical tool change") {
         expect_refused(backend->select_slot(1));
     }
+
+    SECTION("park_toolhead — PARK_EXTRUDER docks the carriage mid-print") {
+        // Park is NOT a filament op, so it never passes through run_filament_op()
+        // and gets none of that gating for free. It moves the carriage, so it
+        // carries its own copy of the refusal; without it the toolhead menu's
+        // Park button would dock the head in the middle of a running job.
+        expect_refused(backend->park_toolhead());
+    }
 }
 
 TEST_CASE_METHOD(PausedGateFixture, "Snapmaker still allows filament ops while PAUSED",
@@ -475,4 +483,57 @@ TEST_CASE_METHOD(PausedGateFixture, "AFC is the backend whose cold lane ops the 
 #if HELIX_HAS_IFS
     CHECK_FALSE(make<AmsBackendAd5xIfs>()->cold_lane_ops_refused_during_print());
 #endif
+}
+
+// ============================================================================
+// Parking is gated like every other toolhead-motion op
+//
+// park_toolhead() used to be a plain virtual whose only enforcement was a
+// @warning telling each implementer to hand-write check_preconditions(true) --
+// the exact opt-in shape this NVI set exists to abolish, and which had already
+// shipped one backend with no gate at all (180a71c7d). It also bypassed the
+// single-op-in-flight claim. It is now final on AmsSubscriptionBackend and
+// routes through run_filament_op(), so a backend writes only do_park_toolhead()
+// and cannot forget either.
+// ============================================================================
+
+TEST_CASE_METHOD(PausedGateFixture, "A park is refused while a print owns the toolhead",
+                 "[ams][safety][paused][park]") {
+    auto backend = make<AmsBackendSnapmaker>();
+
+    SECTION("PRINTING refuses, and dispatches nothing") {
+        set_print_state(helix::PrintJobState::PRINTING);
+        const AmsError err = backend->park_toolhead();
+        CHECK_FALSE(err.success());
+        // Not just the return value: a refusal that still sent the gcode would
+        // dock the head anyway and report failure.
+        CHECK(backend->dispatched.empty());
+    }
+
+    SECTION("PAUSED is allowed -- parking is a legitimate manual intervention") {
+        // Snapmaker's filament_ops_self_home() is false, so a paused job does
+        // not block. This is the same rule the load/unload ops follow (#991).
+        set_print_state(helix::PrintJobState::PAUSED);
+        CHECK(backend->park_toolhead().success());
+        REQUIRE(backend->dispatched.size() == 1);
+        CHECK(backend->dispatched[0] == "PARK_EXTRUDER");
+    }
+
+    SECTION("idle parks") {
+        set_print_state(helix::PrintJobState::STANDBY);
+        CHECK(backend->park_toolhead().success());
+        REQUIRE(backend->dispatched.size() == 1);
+        CHECK(backend->dispatched[0] == "PARK_EXTRUDER");
+    }
+}
+
+TEST_CASE_METHOD(PausedGateFixture, "A backend that cannot park refuses without an override",
+                 "[ams][safety][park]") {
+    // do_park_toolhead()'s default refuses, so supports_toolhead_park() == false
+    // backends need no override and cannot accidentally dispatch one.
+    auto backend = make<AmsBackendAfc>();
+    set_print_state(helix::PrintJobState::STANDBY);
+    CHECK_FALSE(backend->supports_toolhead_park());
+    CHECK_FALSE(backend->park_toolhead().success());
+    CHECK(backend->dispatched.empty());
 }

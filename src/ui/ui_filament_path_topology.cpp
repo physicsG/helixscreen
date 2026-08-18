@@ -81,7 +81,23 @@ SlotRenderStates compute_slot_render_states(const FilamentPathData* data) {
 
         // Active slot overrides with current load/unload state when present.
         s.is_mounted = (i == data->active_slot);
-        if (s.is_mounted && data->filament_segment > 0) {
+
+        // The aggregate (filament_segment / filament_color) is a SERIAL-topology
+        // idea: one shared route to one nozzle, so "what is in the system" and
+        // "what is in the active slot" are the same sentence. On PARALLEL they
+        // are not — each tool owns its own path, and the backend answers per
+        // slot via get_slot_filament_segment(). Letting the aggregate write
+        // has_filament there invents filament on an empty mounted tool: the
+        // Snapmaker U1's get_filament_segment() never returns NONE (it floors at
+        // SPOOL), so the mounted tool always tripped this branch and drew a full
+        // lane in the aggregate colour — white, on a machine whose empty slots
+        // report filament_color_rgba "FFFFFFFF". T0 looked as loaded as T3.
+        //
+        // So on PARALLEL the aggregate may REFINE a slot that genuinely has
+        // filament (it carries the live segment mid-load) but may never create
+        // one. Other topologies keep the original behaviour.
+        const bool parallel = data->topology == static_cast<int>(PathTopology::PARALLEL);
+        if (s.is_mounted && data->filament_segment > 0 && (!parallel || s.has_filament)) {
             s.has_filament = true;
             s.color = lv_color_hex(data->filament_color);
             s.segment = static_cast<PathSegment>(data->filament_segment);
@@ -1213,8 +1229,34 @@ void draw_nozzle_section(const RenderCtx& ctx, LinearHubFrame& f) {
     // Flow particles, heat glow, and segment-transition tip live in the
     // animation DRAW_POST pass (see draw_animation_linear_hub) — not here.
 
-    // Extruder/print head icon
-    draw_toolhead(ctx.layer, f.center_x, f.nozzle_y, noz_color, data->theme.extruder_scale);
+    // Extruder/print head icon. On a toolchanger this single nozzle IS a
+    // specific head, so say whether it is the one on the carriage — dimmed and
+    // badge-less otherwise, matching what the PARALLEL renderer does per column.
+    // mounted_tool < 0 means "not a toolchanger, or nothing mounted": draw solid
+    // and unlabelled, which is every other system's existing look.
+    int unit_tool = -1;
+    for (int i = 0; i < data->slot_count; ++i) {
+        if (data->mapped_tool[i] >= 0) {
+            unit_tool = data->mapped_tool[i];
+            break;
+        }
+    }
+    const bool toolchanger_view = (data->mounted_tool >= 0 || unit_tool >= 0);
+    const bool is_mounted = (unit_tool >= 0 && unit_tool == data->mounted_tool);
+    const lv_opa_t noz_opa = (!toolchanger_view || is_mounted) ? LV_OPA_COVER : LV_OPA_40;
+
+    draw_toolhead(ctx.layer, f.center_x, f.nozzle_y, noz_color, data->theme.extruder_scale,
+                  noz_opa);
+
+    if (toolchanger_view && unit_tool >= 0 && data->theme.label_font) {
+        char tool_label[16];
+        format_tool_badge_label(data, 0, unit_tool, tool_label, sizeof(tool_label));
+        const lv_color_t text = is_mounted ? data->theme.color_success : data->theme.color_text;
+        // Beside the nozzle, not beneath it: nozzle_y sits at 82% of the canvas
+        // in this topology, so a badge below would be clipped off the bottom.
+        draw_tool_badge(ctx, f.center_x + data->theme.extruder_scale * 3, f.nozzle_y, tool_label,
+                        text, noz_opa);
+    }
 }
 
 // LINEAR/HUB renderer: one frame computation, then the phases in physical

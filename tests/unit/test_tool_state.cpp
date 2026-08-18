@@ -11,6 +11,9 @@
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "ams_backend_mock.h"
+#include "ams_backend_multiace.h"
+#include "ams_backend_snapmaker.h"
+#include "ams_backend_toolchanger.h"
 #include "ams_state.h"
 #include "printer_discovery.h"
 #include "tool_state.h"
@@ -1473,6 +1476,96 @@ TEST_CASE_METHOD(ToolStateFixture,
 }
 
 TEST_CASE_METHOD(ToolStateFixture,
+                 "ToolState: reverse-sync leaves a slot the printer says is EMPTY alone",
+                 "[tool][tool-state][spool][ams]") {
+    // ToolState persists to Moonraker's DB, so an assignment that outlives the
+    // filament comes back on every restart. The forward sync already refuses to
+    // let an empty slot claim a tool's spool; without the same rule here it
+    // simply returned the other way — on the U1 that put material and colour on
+    // two SnapSwap heads whose print_task_config.filament_exist read false.
+    lv_init_safe();
+
+    auto& ts = ToolState::instance();
+    ts.deinit_subjects();
+    ts.init_subjects(false);
+
+    PrinterDiscovery hw;
+    nlohmann::json objects = nlohmann::json::array(
+        {"toolchanger", "tool T0", "tool T1", "extruder", "extruder1", "heater_bed", "gcode_move"});
+    hw.parse_objects(objects);
+    ts.init_tools(hw);
+    REQUIRE(ts.tool_count() == 2);
+
+    auto mock = std::make_unique<AmsBackendMock>(2);
+    mock->set_tool_changer_mode(true);
+    mock->set_operation_delay(0);
+    auto* mock_ptr = mock.get();
+
+    // Slot 0 is positively EMPTY; slot 1 is UNKNOWN — the state a tool changer's
+    // slots start in, and the one that must STILL accept an assignment, since
+    // for those backends ToolState is the source of truth.
+    for (int i = 0; i < 2; ++i) {
+        SlotInfo s = mock_ptr->get_slot_info(i);
+        s.spoolman_id = 0;
+        s.spool_name.clear();
+        mock_ptr->set_slot_info(i, s, false);
+        // Status is firmware-derived, so set_slot_info() ignores it outright —
+        // this is the staging API for it.
+        mock_ptr->force_slot_status(i, (i == 0) ? SlotStatus::EMPTY : SlotStatus::UNKNOWN);
+    }
+    REQUIRE(mock_ptr->get_slot_info(0).status == SlotStatus::EMPTY);
+    REQUIRE(mock_ptr->get_slot_info(1).status == SlotStatus::UNKNOWN);
+
+    auto& ams = AmsState::instance();
+    ams.deinit_subjects();
+    ams.init_subjects(false);
+    ams.set_backend(std::move(mock));
+    REQUIRE(ams.get_backend() != nullptr);
+
+    ts.assign_spool(0, 42, "Ghost PLA", 750.0f, 1000.0f);
+    ts.assign_spool(1, 43, "Real PETG", 500.0f, 1000.0f);
+
+    ams.sync_from_backend();
+
+    // The EMPTY slot keeps nothing — no spool, and so nothing for Spoolman to
+    // resolve a material and colour from.
+    CHECK(mock_ptr->get_slot_info(0).spoolman_id == 0);
+    CHECK(mock_ptr->get_slot_info(0).spool_name.empty());
+
+    // UNKNOWN is not a claim of emptiness, so that one still populates.
+    CHECK(mock_ptr->get_slot_info(1).spoolman_id == 43);
+    CHECK(mock_ptr->get_slot_info(1).spool_name == "Real PETG");
+
+    ams.set_backend(nullptr);
+    ams.deinit_subjects();
+    ts.deinit_subjects();
+}
+
+TEST_CASE("AmsBackend: firmware spool persistence and filament identity are separate questions",
+          "[ams][backend][spool-persistence]") {
+    // Conflating them is the bug this pair exists to stop. The Snapmaker U1
+    // publishes filament_type/filament_vendor per head in print_task_config
+    // while storing no Spoolman id at all — so it answers false to one and true
+    // to the other. Reverse-syncing ToolState over it renamed the filament under
+    // the printer: a head reporting PLA displayed PETG, resolved from a spool
+    // that was physically in an ACE bay, and it returned on every restart
+    // because ToolState persists to Moonraker's DB.
+    AmsBackendSnapmaker snap(nullptr, nullptr);
+    CHECK_FALSE(snap.has_firmware_spool_persistence());
+    CHECK(snap.has_firmware_filament_identity());
+
+    // multiACE inherits it — its ACE bays are described by the ACE's own table.
+    AmsBackendMultiAce multi(nullptr, nullptr);
+    CHECK(multi.has_firmware_filament_identity());
+
+    // A tool changer knows neither, which is precisely why the reverse sync
+    // exists for it.
+    AmsBackendToolChanger tc(nullptr, nullptr);
+    CHECK_FALSE(tc.has_firmware_spool_persistence());
+    CHECK_FALSE(tc.has_firmware_filament_identity());
+}
+
+TEST_CASE_METHOD(ToolStateFixture,
                  "ToolState: sync_from_backend does not overwrite existing tool assignment",
                  "[tool][tool-state][spool][ams]") {
     lv_init_safe();
@@ -1584,5 +1677,150 @@ TEST_CASE_METHOD(ToolStateFixture, "ToolState: saving through a symlink preserve
     CHECK_FALSE(std::filesystem::exists(link_path.string() + ".tmp"));
     CHECK_FALSE(std::filesystem::exists(real_file.string() + ".tmp"));
 
+    ts.deinit_subjects();
+}
+
+// ============================================================================
+// Forward sync attribution when several slots feed ONE tool
+// ============================================================================
+
+namespace {
+/// Exposes handle_status_update so a frame can be fed in directly.
+class SyncMultiAce : public AmsBackendMultiAce {
+  public:
+    SyncMultiAce() : AmsBackendMultiAce(nullptr, nullptr) {}
+    using AmsBackendMultiAce::handle_status_update;
+};
+
+/// One ACE bound to head 3 with three bays holding spools. `seated` is the bay
+/// currently loaded at the head, or -1 for an empty head.
+nlohmann::json ace_frame_with_seat(int seated) {
+    nlohmann::json head_source = {{"0", nullptr}, {"1", nullptr}, {"2", nullptr}, {"3", nullptr}};
+    if (seated >= 0) {
+        head_source["3"] = nlohmann::json{{"ace_index", 0}, {"slot", seated}};
+    }
+    return nlohmann::json{
+        {"ace",
+         {{"mode", "head"},
+          {"device_count", 1},
+          {"head_ace", {{"0", 0}, {"1", 1}, {"2", 2}, {"3", 0}}},
+          {"head_feeder", {{"0", true}, {"1", true}, {"2", true}, {"3", false}}},
+          {"head_manual", {{"0", false}, {"1", false}, {"2", false}, {"3", false}}},
+          {"head_source", head_source},
+          // Bays 0, 1 and 3 all hold filament — the case presence cannot resolve.
+          {"aces", nlohmann::json::array(
+                       {nlohmann::json{{"idx", 0},
+                                       {"connected", true},
+                                       {"protocol", "v2"},
+                                       {"gate_status", nlohmann::json::array({1, 1, 0, 1})}}})},
+          {"spool_binding", {{"0_0", "15"}, {"0_1", "10"}, {"0_3", "16"}}},
+          {"spools",
+           {{"15",
+             nlohmann::json{
+                 {"id", "15"}, {"material", "PETG"}, {"label", "SIlver"}, {"spoolman_id", "15"}}},
+            {"10",
+             nlohmann::json{
+                 {"id", "10"}, {"material", "PETG"}, {"label", "Gray"}, {"spoolman_id", "10"}}},
+            {"16", nlohmann::json{{"id", "16"},
+                                  {"material", "PETG"},
+                                  {"label", "Orange"},
+                                  {"spoolman_id", "17"}}}}}}}};
+}
+} // namespace
+
+TEST_CASE_METHOD(ToolStateFixture, "ToolState: the SEATED bay claims a tool several bays map to",
+                 "[tool][tool-state][spool][ams][multiace]") {
+    // In head mode every bay of the bound ACE maps to the one head it feeds, so
+    // assign_spool() — keyed by tool — was called once per occupied bay and the
+    // highest-numbered one won by loop order alone. On the live rig that wrote
+    // bay 3's "Orange" against tool 3 while a different bay was loaded, and
+    // ToolState persists to Moonraker's DB, so it outlived restarts.
+    lv_init_safe();
+
+    auto& ts = ToolState::instance();
+    ts.deinit_subjects();
+    ts.init_subjects(false);
+
+    PrinterDiscovery hw;
+    hw.parse_objects(nlohmann::json::array({"toolchanger", "tool T0", "tool T1", "tool T2",
+                                            "tool T3", "extruder", "extruder1", "extruder2",
+                                            "extruder3", "heater_bed", "gcode_move"}));
+    ts.init_tools(hw);
+
+    auto& ams = AmsState::instance();
+    ams.deinit_subjects();
+    ams.init_subjects(false);
+
+    SECTION("bay 1 seated: tool 3 gets bay 1's spool, not the last bay's") {
+        auto backend = std::make_unique<SyncMultiAce>();
+        auto* raw = backend.get();
+        raw->handle_status_update(ace_frame_with_seat(1));
+        ams.set_backend(std::move(backend));
+        ams.sync_from_backend();
+
+        const auto& tools = ts.tools();
+        REQUIRE(tools.size() > 3);
+        // Bay 1 is spool 10 "Gray". Bay 3 ("Orange", spoolman_id 17) is the one
+        // the old loop-order behaviour picked, so it is the assertion that fails
+        // if this regresses.
+        CHECK(tools[3].spoolman_id == 10);
+        CHECK(tools[3].spool_name == "Gray");
+    }
+
+    SECTION("nothing seated: the tool is cleared, not given an arbitrary bay") {
+        auto backend = std::make_unique<SyncMultiAce>();
+        auto* raw = backend.get();
+        raw->handle_status_update(ace_frame_with_seat(1));
+        ams.set_backend(std::move(backend));
+        ams.sync_from_backend();
+        REQUIRE(ts.tools()[3].spoolman_id == 10);
+
+        // The filament leaves the head; the bays still hold their spools.
+        raw->handle_status_update(ace_frame_with_seat(-1));
+        ams.sync_from_backend();
+        CHECK(ts.tools()[3].spoolman_id == 0);
+    }
+
+    SECTION("the per-slot path obeys the same rule: an unseated bay's edit does not claim") {
+        // The incremental update_slot() path had its own shorter copy of the
+        // guard that stopped at presence. Editing the Spoolman spool on an
+        // occupied but UNSEATED bay fires EVENT_SLOT_CHANGED for that bay, and
+        // the copy let it overwrite the seated bay's attribution -- which
+        // ToolState then persisted, and which the next full sync could not
+        // undo. Bay 1 (global slot 5) is seated; bay 3 (global slot 7) holds
+        // "Orange" and is not.
+        auto backend = std::make_unique<SyncMultiAce>();
+        auto* raw = backend.get();
+        raw->handle_status_update(ace_frame_with_seat(1));
+        ams.set_backend(std::move(backend));
+        ams.sync_from_backend();
+        REQUIRE(ts.tools()[3].spoolman_id == 10);
+
+        // What the edit overlay does: rewrite the bay's SlotInfo, then the
+        // targeted slot sync the backend's event asks for.
+        SlotInfo edited = raw->get_slot_info(7);
+        REQUIRE(edited.mapped_tool == 3);
+        REQUIRE(edited.is_present());
+        edited.spoolman_id = 99;
+        edited.spool_name = "Edited Orange";
+        REQUIRE(raw->set_slot_info(7, edited, /*persist=*/false).success());
+        ams.update_slot(7);
+
+        // Tool 3 still belongs to the seated bay.
+        CHECK(ts.tools()[3].spoolman_id == 10);
+        CHECK(ts.tools()[3].spool_name == "Gray");
+
+        // ...and the SEATED bay's edit does go through the same path.
+        SlotInfo seated = raw->get_slot_info(5);
+        seated.spoolman_id = 42;
+        seated.spool_name = "Edited Gray";
+        REQUIRE(raw->set_slot_info(5, seated, /*persist=*/false).success());
+        ams.update_slot(5);
+        CHECK(ts.tools()[3].spoolman_id == 42);
+        CHECK(ts.tools()[3].spool_name == "Edited Gray");
+    }
+
+    ams.set_backend(nullptr);
+    ams.deinit_subjects();
     ts.deinit_subjects();
 }

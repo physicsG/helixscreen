@@ -115,6 +115,12 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     }
 
   public:
+    /// See AmsBackend::filament_ops_may_home(). The ACE dispatches its own
+    /// `ACE_*` macros directly rather than through ensure_homed_then(), so
+    /// HelixScreen never emits a G28 for one of its filament ops.
+    [[nodiscard]] bool filament_ops_may_home() const override {
+        return false;
+    }
     // ========================================================================
     // Recovery Operations
     // ========================================================================

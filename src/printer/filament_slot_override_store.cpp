@@ -1826,8 +1826,13 @@ MergeResult merge_override(SlotInfo& slot, const FilamentSlotOverride& o,
         slot.color_rgb = o.color_rgb;
     if (!o.color_name.empty())
         slot.color_name = o.color_name;
-    if (!o.material.empty())
+    // Material is the one §5 field firmware may also state; see
+    // MergeOptions::firmware_states_material for why it is not a plain
+    // override-wins.
+    if (!o.material.empty() &&
+        (!options.firmware_states_material || slot.material.empty() || o.user_locked_material)) {
         slot.material = o.material;
+    }
     if (!o.catalog_id.empty())
         slot.catalog_id = o.catalog_id;
     if (!o.product_name.empty())

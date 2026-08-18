@@ -140,6 +140,7 @@ bool backend_owns_runout_surface(AmsType type) {
     case AmsType::QIDI_BOX:
     case AmsType::TOOL_CHANGER:
     case AmsType::SNAPMAKER:
+    case AmsType::MULTIACE: // inherits Snapmaker's handling; no classify_error()
     case AmsType::NONE:
         return false;
     }

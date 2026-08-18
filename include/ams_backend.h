@@ -679,6 +679,62 @@ class AmsBackend {
     }
 
     /**
+     * @brief Can a filament op dispatched by this backend emit a G28 that
+     *        HelixScreen itself sends?
+     *
+     * The inverse question to filament_ops_self_home(), and a different one:
+     * that flag is about a home buried inside FIRMWARE where we cannot see it,
+     * this one is about the home WE send, in
+     * AmsSubscriptionBackend::ensure_homed_then().
+     *
+     * Exists so a UI surface can decide whether to ask "home printer first?"
+     * before it starts a preheat. The prompt is worth moving that early only
+     * when the op it precedes can actually home; asking on a backend that never
+     * emits G28 requests consent for something that will not happen, and a
+     * decline cancels the load outright (Snapmaker U1: do_load_filament()
+     * dispatches `AUTO_FEEDING ... LOAD=1` straight to firmware, which feeds
+     * without moving the toolhead at all).
+     *
+     * False here because a plain AmsBackend has no ensure_homed_then() to route
+     * through — the machinery lives on AmsSubscriptionBackend, which answers
+     * true, and the two subclasses that bypass it answer false again. Every
+     * answer is therefore derivable from what that class's dispatch actually
+     * does, rather than being a fact to remember.
+     *
+     * This does NOT gate the G28 itself. ensure_homed_then() still decides that
+     * from toolhead.homed_axes, and still asks its own confirmation — a backend
+     * that answers false simply never reaches it.
+     */
+    [[nodiscard]] virtual bool filament_ops_may_home() const {
+        return false;
+    }
+
+    /**
+     * @brief Does changing to slot @p slot_index's mapped tool COMPLETE its load?
+     *
+     * plan_load()'s swap arm turns "load slot N" into `change_tool(N's mapped
+     * tool)` and stops there, on the strength of that being the whole operation:
+     * ACE's change_tool() is literally `return load_filament(...)`, AFC's is
+     * `CHANGE_TOOL LANE={n}`, QIDI's load prepends its own unload. Nothing
+     * chains a second command, so a backend where the tool change is only HALF
+     * the job silently performs half.
+     *
+     * multiACE is that backend. Its ACE bays report mapped_tool = the head they
+     * feed, so tapping Load on a bay planned `T3` -- which mounts head 3, moves
+     * the carriage, and feeds nothing. The bay still has to be named:
+     * `ACE_LOAD_HEAD HEAD=h ACE=a SLOT=s`.
+     *
+     * Per-slot rather than per-backend because one backend can be both: on
+     * multiACE the U1's own heads keep their filament at the head, so a tool
+     * change really is the whole load there, while a bay four slots later is
+     * not. Default true -- the behaviour every backend had before this existed.
+     */
+    [[nodiscard]] virtual bool change_tool_completes_load(int slot_index) const {
+        (void)slot_index;
+        return true;
+    }
+
+    /**
      * @brief Record that the user has already agreed to a pre-operation home for
      *        the NEXT dispatch, so ensure_homed_then() does not ask a second
      *        time.
@@ -1149,6 +1205,236 @@ class AmsBackend {
     }
 
     /**
+     * @brief Which unit owns this slot's filament IDENTITY, when not this one.
+     *
+     * On multiACE a U1 head is fed from an ACE bay, so the head's material,
+     * colour and Spoolman link are the ACE's to state. Editing them on the head
+     * would write `print_task_config` and be overwritten the moment the ACE
+     * reports its inventory again — two sources of truth for one spool. The
+     * slot menu uses this to drop its edit actions and offer a route to the
+     * owning unit instead.
+     *
+     * Identity only. Loading and unloading still act on the head and stay
+     * available; this says who describes the filament, not who moves it.
+     *
+     * @param slot_index Global slot index.
+     * @return Owning unit index, or nullopt when the slot describes itself
+     *         (every backend except multiACE, always).
+     */
+    [[nodiscard]] virtual std::optional<int> slot_identity_owner_unit(int slot_index) const {
+        (void)slot_index;
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Global indices of the slots that hold a spool of their OWN, in order.
+     *
+     * A slot fed from another unit is not a spool position — it is a view of one.
+     * On multiACE, the U1's ACE-fed head and the ACE bay behind it are a single
+     * physical spool, so counting both double-counts it: a 4-head U1 with one
+     * 4-bay ACE has 7 spool positions, not 8.
+     *
+     * This is what user-facing COUNTS and per-spool rows should iterate.
+     * `total_slots` remains the indexing bound and is unchanged — every slot
+     * here is still addressable, still loadable, still unloadable.
+     *
+     * Derived from slot_identity_owner_unit(), so a backend that answers that
+     * question needs nothing further.
+     */
+    [[nodiscard]] std::vector<int> owned_spool_slots() const {
+        return owned_spool_slots(get_system_info());
+    }
+
+    /// Overload for callers that already hold the system info.
+    ///
+    /// get_system_info() returns BY VALUE under the backend mutex — every unit,
+    /// every SlotInfo, every std::string in them. These helpers are called per
+    /// slot and per frame, so re-fetching it inside each one was the dominant
+    /// cost of drawing a badge. Callers with `info` in hand should pass it.
+    [[nodiscard]] std::vector<int> owned_spool_slots(const AmsSystemInfo& info) const {
+        std::vector<int> out;
+        out.reserve(static_cast<size_t>(info.total_slots));
+        for (int i = 0; i < info.total_slots; ++i) {
+            if (!slot_identity_owner_unit(i).has_value()) {
+                out.push_back(i);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * @brief Which slot holds the spool that @p slot_index is showing.
+     *
+     * The companion to slot_identity_owner_unit(): that says WHICH UNIT
+     * describes the filament, this says which slot of it. An ACE-fed head and
+     * the ACE bay behind it are one spool, so the head resolves to the bay.
+     *
+     * @param slot_index Global slot index.
+     * @return Global index of the owning slot, or nullopt when the slot holds
+     *         its own spool (every backend except multiACE, always).
+     */
+    [[nodiscard]] virtual std::optional<int> slot_identity_owner_slot(int slot_index) const {
+        (void)slot_index;
+        return std::nullopt;
+    }
+
+    /**
+     * @brief The 1-based number a slot should be LABELLED with.
+     *
+     * Not the same as the global index, and deliberately so. Global indices are
+     * the addressing key and must stay dense over every addressable slot; the
+     * label counts SPOOLS. On a U1 with one ACE those disagree: the U1's four
+     * heads take global 0-3, so the ACE's bays start at global 4 and used to be
+     * labelled 5-8 — eight numbers for seven spools, because the ACE-fed head
+     * and the bay feeding it are the same spool counted twice.
+     *
+     * A slot that only views another slot's spool resolves to it, so the head
+     * and its bay share one number instead of consuming two.
+     *
+     * Backends whose slots all own their spools are unaffected: owned_spool_slots()
+     * is then every slot in order, and this returns slot_index + 1 exactly.
+     */
+    [[nodiscard]] int spool_display_number(int slot_index) const {
+        return spool_number_in(owned_spool_slots(), slot_index);
+    }
+
+    /// Overload for callers that already hold the system info — see
+    /// owned_spool_slots(const AmsSystemInfo&).
+    [[nodiscard]] int spool_display_number(int slot_index, const AmsSystemInfo& info) const {
+        return spool_number_in(owned_spool_slots(info), slot_index);
+    }
+
+    /// The badge number for @p slot_index given a PRE-BUILT owned-slot list.
+    ///
+    /// Split out so spool_display_label() can build that list once instead of
+    /// once per candidate slot — it used to call spool_display_number() inside
+    /// its loop, and each call deep-copied the whole AmsSystemInfo and took the
+    /// backend mutex once per slot.
+    [[nodiscard]] int spool_number_in(const std::vector<int>& owned, int slot_index) const {
+        const int target = slot_identity_owner_slot(slot_index).value_or(slot_index);
+        for (size_t i = 0; i < owned.size(); ++i) {
+            if (owned[i] == target) {
+                return static_cast<int>(i) + 1;
+            }
+        }
+        // Not a spool position and nothing owns it — fall back to the raw index
+        // rather than showing nothing.
+        return slot_index + 1;
+    }
+
+    /**
+     * @brief What a slot's badge should READ — a number, or a range.
+     *
+     * A slot holding its own spool is simply its number ("3").
+     *
+     * A slot that only views another unit's spools is not one spool but a
+     * position any of them can reach, so it reads as the range ("4-7"). On a U1
+     * in head mode all four ACE bays feed the one ACE-fed head; naming only the
+     * seated bay would be a number that changes under the user every time the
+     * ACE swaps, and would hide the other three entirely. In multi mode exactly
+     * one bay feeds each head, so the range collapses back to a single number
+     * with no special-casing.
+     *
+     * Unchanged for backends whose slots all own their spools.
+     */
+    [[nodiscard]] std::string spool_display_label(int slot_index) const {
+        // ONE system fetch and ONE owned-slot build for the whole function. This
+        // used to fetch per call and again per loop iteration — roughly five deep
+        // copies of AmsSystemInfo and fifty mutex acquisitions to render one badge.
+        const AmsSystemInfo info = get_system_info();
+        const std::vector<int> owned = owned_spool_slots(info);
+
+        const auto owner_unit = slot_identity_owner_unit(slot_index);
+        if (!owner_unit.has_value()) {
+            return std::to_string(spool_number_in(owned, slot_index));
+        }
+        if (*owner_unit < 0 || *owner_unit >= static_cast<int>(info.units.size())) {
+            return std::to_string(spool_number_in(owned, slot_index));
+        }
+        // Which of the owner's slots can feed this position: the ones mapped to
+        // the same tool.
+        const int tool = get_slot_info(slot_index).mapped_tool;
+        const auto& unit = info.units[static_cast<size_t>(*owner_unit)];
+        int lo = -1;
+        int hi = -1;
+        for (int s = 0; s < static_cast<int>(unit.slots.size()); ++s) {
+            if (unit.slots[static_cast<size_t>(s)].mapped_tool != tool) {
+                continue;
+            }
+            const int n = spool_number_in(owned, unit.first_slot_global_index + s);
+            if (lo < 0 || n < lo) {
+                lo = n;
+            }
+            if (hi < 0 || n > hi) {
+                hi = n;
+            }
+        }
+        if (lo < 0) {
+            // Owned by a unit that maps none of its slots here — say what we can.
+            return std::to_string(spool_number_in(owned, slot_index));
+        }
+        if (lo == hi) {
+            return std::to_string(lo);
+        }
+        return std::to_string(lo) + "-" + std::to_string(hi);
+    }
+
+    /**
+     * @brief How many slots on @p unit_index hold a spool of their own.
+     * @see owned_spool_slots()
+     */
+    [[nodiscard]] int unit_spool_slot_count(int unit_index) const {
+        return unit_spool_slot_count(unit_index, get_system_info());
+    }
+
+    /// Overload for callers that already hold the system info — the overview
+    /// builds one card per unit and had been re-fetching for each.
+    [[nodiscard]] int unit_spool_slot_count(int unit_index, const AmsSystemInfo& info) const {
+        if (unit_index < 0 || unit_index >= static_cast<int>(info.units.size())) {
+            return 0;
+        }
+        const auto& unit = info.units[unit_index];
+        int n = 0;
+        for (int s = 0; s < unit.slot_count; ++s) {
+            if (!slot_identity_owner_unit(unit.first_slot_global_index + s).has_value()) {
+                ++n;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * @brief Whether the backend can dock the mounted toolhead without unloading.
+     * @return true if park_toolhead() is implemented (toolchangers only).
+     */
+    [[nodiscard]] virtual bool supports_toolhead_park() const {
+        return false;
+    }
+
+    /**
+     * @brief Return the mounted toolhead to its dock, leaving filament alone.
+     *
+     * Parking is a carriage operation, not a filament one: on a toolchanger a
+     * head is routinely docked with filament still threaded to its nozzle, and
+     * the next pick-up finds it exactly as it was. So this must NOT unload —
+     * the two are separate actions with separate menu entries.
+     *
+     * Only meaningful while a head is actually mounted; with an empty carriage
+     * there is nothing to dock. Callers gate on MountState/mounted_tool.
+     *
+     * Gated like every other toolhead-motion op: AmsSubscriptionBackend makes
+     * this `final` and routes it through run_filament_op(), so an implementer
+     * writes only the protected do_park_toolhead() hook and cannot forget the
+     * print refusal or the single-op-in-flight claim. It used to be a plain
+     * virtual carrying a warning to hand-write check_preconditions(true).
+     *
+     * @return AmsError indicating success or failure.
+     */
+    virtual AmsError park_toolhead() {
+        return AmsErrorHelper::not_supported("Toolhead park");
+    }
+
+    /**
      * @brief Whether the backend can position the selector at a gate without loading.
      * @return true if select_gate() is implemented (selector-based systems only).
      */
@@ -1514,6 +1800,41 @@ class AmsBackend {
      */
     [[nodiscard]] virtual std::vector<DryingPreset> get_drying_presets() const {
         return get_default_drying_presets();
+    }
+
+    /**
+     * @brief Get humidity-controlled ("auto") drying state for a unit
+     *
+     * A dryer is not necessarily an auto-dryer: this is a separate capability
+     * from get_dryer_info() and a backend may support one without the other.
+     * Check AutoDryInfo::supported before showing any auto-dry UI.
+     *
+     * @param unit AMS unit index (0-based)
+     * @return AutoDryInfo struct (supported=false if the unit has no auto-dry)
+     */
+    [[nodiscard]] virtual AutoDryInfo get_auto_dry_info(int unit = 0) const {
+        (void)unit;
+        return AutoDryInfo{};
+    }
+
+    /**
+     * @brief Arm or disarm humidity-controlled drying
+     *
+     * Arming does not start a cycle — it hands the dryer to the humidity rule,
+     * which starts one when the reading crosses AutoDryInfo::rh_start_pct.
+     * Backends are expected to persist the setting across reboots.
+     *
+     * Refuse rather than send when AutoDryInfo::can_enable() is false; a
+     * follower with no master is a state the firmware rejects anyway.
+     *
+     * @param enabled true to arm the rule, false to disarm it
+     * @param unit AMS unit index (0-based)
+     * @return AmsError with SUCCESS result on success, or error with reason
+     */
+    virtual AmsError set_auto_dry_enabled(bool enabled, int unit = 0) {
+        (void)enabled;
+        (void)unit;
+        return AmsErrorHelper::not_supported("Auto-dry");
     }
 
     // ========================================================================
@@ -2090,6 +2411,25 @@ class AmsBackend {
     ///@}
 
   public:
+    /**
+     * @brief Whether firmware states what filament is in each slot
+     *
+     * A DIFFERENT question from has_firmware_spool_persistence(), and conflating
+     * the two is a real bug: the Snapmaker U1 publishes filament_type and
+     * filament_vendor per head in `print_task_config` while keeping no Spoolman
+     * id at all, so it answers false there and true here.
+     *
+     * When true, ToolState's persisted assignments must not be pushed back onto
+     * slots — the firmware already knows, and a cached assignment that disagrees
+     * is stale by definition. Without this, a head the printer reported as PLA
+     * displayed PETG, resolved from a spool that was physically in an ACE bay.
+     *
+     * @return true if slot material/vendor come from firmware
+     */
+    [[nodiscard]] virtual bool has_firmware_filament_identity() const {
+        return false;
+    }
+
     /**
      * @brief Whether this backend unloads the toolhead automatically after a print
      *

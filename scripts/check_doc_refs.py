@@ -38,6 +38,7 @@
 
 import argparse
 import os
+import subprocess
 import re
 import sys
 
@@ -46,6 +47,14 @@ SKIP_DIRS = {'.git', '.worktrees', 'build', 'node_modules', '.venv', 'venv'}
 # Paths that are intentionally absent from a clean checkout.
 EXEMPT_SUBSTRINGS = (
     'superpowers/',        # docs/superpowers/ specs are gitignored, local-only
+    # libhv BUILD PRODUCTS, cited bare by the build and ESP32 docs. libhv tracks
+    # 375 files and not one of them is under include/ — its .gitignore ignores
+    # that whole tree, because its public headers are assembled at build time.
+    # `hv/requests.h`, `hv/hlog.h` and `dns_resolv.c` therefore exist on a
+    # machine that has built once and in no fresh checkout, so the gate cannot
+    # verify them anywhere it runs.
+    'hv/',
+    'dns_resolv.c',
 )
 
 # Tokens that are obviously placeholders rather than real paths.
@@ -116,6 +125,60 @@ def repo_files():
     return out
 
 
+def gitignored(paths):
+    """Which of @p paths git deliberately keeps out of the tree.
+
+    A reference to a generated file (compile_commands.json,
+    build/generated/helix_git_hash.h, the config/settings*.json a first run
+    writes) is a CORRECT path that simply cannot exist in a clean checkout. It
+    resolves on a developer machine that has built once and never in CI, so
+    asserting its absence is a broken link asserts the wrong thing -- and did:
+    four of these failed every CI run while passing every local one.
+
+    Batched through one `git check-ignore --stdin` rather than a call per path;
+    it exits 1 when nothing matches, which is not an error here.
+    """
+    if not paths:
+        return set()
+    def ask(cwd, candidates):
+        if not candidates:
+            return set()
+        try:
+            proc = subprocess.run(['git', 'check-ignore', '--stdin'],
+                                  input='\n'.join(sorted(candidates)), capture_output=True,
+                                  text=True, timeout=30, cwd=cwd or None)
+        except (OSError, subprocess.SubprocessError):
+            return set()  # no git, or it misbehaved: enforce strictly, as before
+        return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+    hits = ask(None, paths)
+
+    # Then each populated submodule, against its OWN rules. A submodule's build
+    # products are ignored by ITS .gitignore, which the superproject's git knows
+    # nothing about — libhv gitignores its entire generated `include/` tree, so
+    # every `lib/libhv/include/hv/*.h` the docs cite exists only after a build
+    # and never in a CI checkout. Asking the superproject alone marked all of
+    # them stale.
+    for sub in submodule_paths():
+        if not os.path.isdir(sub):
+            continue
+        inside = {p[len(sub) + 1:]: p for p in paths
+                  if p.startswith(sub + '/') and p not in hits}
+        if not inside:
+            continue
+        for rel in ask(sub, set(inside)):
+            hits.add(inside[rel])
+    return hits
+
+
+def submodule_paths():
+    """Declared submodule paths, whether or not they are populated."""
+    if not os.path.isfile('.gitmodules'):
+        return []
+    return [m.group(1) for m in
+            re.finditer(r'^\s*path\s*=\s*(.+?)\s*$', open('.gitmodules').read(), re.M)]
+
+
 def uninitialized_submodules():
     """Submodule paths that are declared but not checked out.
 
@@ -128,10 +191,31 @@ def uninitialized_submodules():
     missing = []
     if not os.path.isfile('.gitmodules'):
         return missing
+
+    # `git submodule status` is the authority: it prefixes an uninitialized
+    # entry with '-'. The emptiness test below cannot see a PARTIAL checkout,
+    # and that is the state CI actually lands in — a submodule init that fails
+    # and retries leaves the directory non-empty (a .git file, a few objects)
+    # while the referenced sources are absent. The gate then read those refs as
+    # stale and failed, which is exactly what it happened to do for the four
+    # lib/libhv citations.
+    try:
+        proc = subprocess.run(['git', 'submodule', 'status'],
+                              capture_output=True, text=True, timeout=60)
+        if proc.returncode == 0 and proc.stdout.strip():
+            for line in proc.stdout.splitlines():
+                if line.startswith('-'):
+                    parts = line[1:].split()
+                    if len(parts) >= 2:
+                        missing.append(parts[1])
+            return missing
+    except (OSError, subprocess.SubprocessError):
+        pass  # fall through to the on-disk heuristic
+
     for m in re.finditer(r'^\s*path\s*=\s*(.+?)\s*$', open('.gitmodules').read(), re.M):
-        p = m.group(1)
-        if not os.path.isdir(p) or not os.listdir(p):
-            missing.append(p)
+        sub = m.group(1)
+        if not os.path.isdir(sub) or not os.listdir(sub):
+            missing.append(sub)
     return missing
 
 
@@ -292,34 +376,87 @@ def main():
     if do_refs:
         problems = check_refs(targets, repo_files(), devel=devel)
         link_problems = check_links(targets)
-        skipped = uninitialized_submodules()
-        if (problems or link_problems) and skipped:
-            # Cannot distinguish "stale reference" from "lives in a submodule that is not
-            # checked out", so do not fail the build on a guess. Developer pre-commit runs
-            # have submodules populated and enforce strictly.
-            print('⚠️  Doc references unverifiable — submodule(s) not checked out: %s'
-                  % ', '.join(skipped))
-            for target, line, ref in problems + link_problems:
-                print('   %s:%d: `%s`' % (target, line, ref))
-            print('   Run locally with submodules populated to check these strictly.')
-        else:
-            if problems:
-                print('❌ Doc references that do not resolve:')
-                for target, line, ref in problems:
-                    print('   %s:%d: `%s`' % (target, line, ref))
-                print('   Fix the path, or use a <placeholder> if it is illustrative.')
-                exit_code = 1
-            else:
-                print('✅ Doc references: all resolve (%d files scanned)' % len(targets))
-            if link_problems:
-                print('❌ Doc links that do not resolve:')
-                for target, line, ref in link_problems:
-                    print('   %s:%d: `%s`' % (target, line, ref))
-                print('   Fix the target, or use a full URL if it is not in-tree.')
-                exit_code = 1
-            else:
-                print('✅ Doc links: all resolve (%d files scanned)' % len(targets))
 
+        # Split the findings into "cannot be checked here" and "genuinely broken"
+        # instead of suppressing the whole gate when either applies.
+        #
+        # It used to be all-or-nothing: ANY uninitialized submodule downgraded
+        # EVERY finding to a warning. That made the gate fail in two opposite
+        # ways at once. In the job that does populate submodules it enforced
+        # strictly and flagged 18 paths that were all either generated or inside
+        # lib/libhv -- none of them stale. In the job that does not, it went
+        # warn-only and returned 0, so the meta-tests asserting a dead path exits
+        # 1 failed. Attributing each finding fixes both: a reference into an
+        # unpopulated submodule, or to a path git deliberately ignores, is
+        # unverifiable here; anything else is a real break and still fails.
+        unpopulated = set(uninitialized_submodules())
+        subs = submodule_paths()
+
+        def _ref_path(ref):
+            return ref.split(':', 1)[0]
+
+        candidates = {_ref_path(r) for _, _, r in problems + link_problems}
+        ignored = gitignored(candidates)
+
+        def unverifiable(ref):
+            path = _ref_path(ref)
+            if path in ignored:
+                return True
+            # Inside a submodule that is not checked out here. Matched on the
+            # declared submodule path, and also on a bare suffix reference
+            # (`dns_resolv.c`), which is how the docs cite files inside one.
+            for sub in subs:
+                if sub in unpopulated and (path.startswith(sub + '/') or path == sub):
+                    return True
+            if unpopulated:
+                for sub in unpopulated:
+                    base = os.path.basename(sub)
+                    if path.startswith(base + '/'):
+                        return True
+            return False
+
+        # Repo-wide scanning with submodules missing keeps the old lenient
+        # behaviour for anything left over: the docs cite submodule interiors by
+        # bare name (`lv_sdl_window.c`, `dns_resolv.c`), which cannot be
+        # attributed to a submodule by path shape, and failing a developer's
+        # `make check` because they have not run `git submodule update` is the
+        # noise the escape hatch was added to prevent.
+        #
+        # Explicit --devel PATHS stay STRICT regardless. That is the mode the
+        # meta-tests use, and "check exactly these files" has to mean it — the
+        # blanket downgrade is precisely why a dead path returned 0 in the BATS
+        # job and the gate's own tests failed.
+        explicit = bool(args.devel_paths)
+        lenient = bool(unpopulated) and not explicit
+
+        def _skip(problem):
+            return unverifiable(problem[2]) or lenient
+
+        unverified = [p for p in problems + link_problems if _skip(p)]
+        problems = [p for p in problems if not _skip(p)]
+        link_problems = [p for p in link_problems if not _skip(p)]
+
+        if unverified:
+            print('⚠️  Doc references not verifiable in this checkout '
+                  '(generated, or inside an uninitialized submodule):')
+            for target, line, ref in unverified:
+                print('   %s:%d: `%s`' % (target, line, ref))
+        if problems:
+            print('❌ Doc references that do not resolve:')
+            for target, line, ref in problems:
+                print('   %s:%d: `%s`' % (target, line, ref))
+            print('   Fix the path, or use a <placeholder> if it is illustrative.')
+            exit_code = 1
+        else:
+            print('✅ Doc references: all resolve (%d files scanned)' % len(targets))
+        if link_problems:
+            print('❌ Doc links that do not resolve:')
+            for target, line, ref in link_problems:
+                print('   %s:%d: `%s`' % (target, line, ref))
+            print('   Fix the target, or use a full URL if it is not in-tree.')
+            exit_code = 1
+        else:
+            print('✅ Doc links: all resolve (%d files scanned)' % len(targets))
     if do_index:
         unindexed, present = check_index()
         if unindexed:

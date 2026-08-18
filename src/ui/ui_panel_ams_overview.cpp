@@ -52,17 +52,13 @@ using namespace helix;
 // Layout Constants
 // ============================================================================
 
-/// Minimum bar width for mini slot bars (prevents invisible bars)
-static constexpr int32_t MINI_BAR_MIN_WIDTH_PX = 6;
-
-/// Maximum bar width for mini slot bars
-static constexpr int32_t MINI_BAR_MAX_WIDTH_PX = 14;
-
-/// Height of each mini slot bar (decorative, no need for responsive scaling)
-static constexpr int32_t MINI_BAR_HEIGHT_PX = 40;
-
-/// Border radius for bar corners
-static constexpr int32_t MINI_BAR_RADIUS_PX = 4;
+// The MINI_BAR_* geometry moved to ams_drawing_utils.h: the AMS slot draws the
+// same bars for a position fed from another unit, and two private copies of the
+// same four numbers is exactly how those two surfaces would drift apart.
+using ams_draw::MINI_BAR_HEIGHT_PX;
+using ams_draw::MINI_BAR_MAX_WIDTH_PX;
+using ams_draw::MINI_BAR_MIN_WIDTH_PX;
+using ams_draw::MINI_BAR_RADIUS_PX;
 
 /// Zoom animation duration (ms) for detail view transitions
 static constexpr uint32_t DETAIL_ZOOM_DURATION_MS = 200;
@@ -223,6 +219,13 @@ void AmsOverviewPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
             lv_obj_set_size(system_path_, LV_PCT(100), LV_PCT(100));
             spdlog::debug("[{}] Created system path canvas", get_name());
 
+            // Tapping a nozzle here asks the same question the detail canvas's
+            // nozzle does, so it opens the same menu. The overview is where you
+            // land whenever there is more than one unit, which on a multiACE
+            // rig is always.
+            ui_system_path_canvas_set_toolhead_callback(
+                system_path_, &AmsOverviewPanel::on_toolhead_clicked, this);
+
             bypass_widgets_ = helix::ui::bypass_spool_create(
                 system_path_area_, &AmsOverviewPanel::on_bypass_spool_clicked, this);
             // SIZE_CHANGED only — listening to DRAW events would invalidate
@@ -279,10 +282,14 @@ void AmsOverviewPanel::on_activate() {
 void AmsOverviewPanel::on_deactivate() {
     spdlog::debug("[{}] Deactivated", get_name());
 
-    // Reset to overview mode so next open starts at the cards view
-    if (detail_unit_index_ >= 0) {
-        show_overview();
-    }
+    // Deliberately does NOT reset to the cards view. on_deactivate() fires both
+    // when the user leaves AMS *and* when something is merely pushed on top of
+    // it — the slot editor, a modal — and resetting here made the second case
+    // lose the open unit, so closing the editor returned to the cards rather
+    // than to the ACE or SnapSwap detail it was opened from. The "start at the
+    // cards" reset belongs to opening the panel, and lives in
+    // navigate_to_ams_panel(); on_activate() restores detail_unit_index_ when a
+    // cover is dismissed.
 }
 
 // ============================================================================
@@ -318,7 +325,7 @@ void AmsOverviewPanel::refresh_units() {
         // DISPLAY order (see create_unit_cards), so each card names its own unit.
         for (auto& uc : unit_cards_) {
             if (uc.unit_index >= 0 && uc.unit_index < new_unit_count)
-                update_unit_card(uc, info.units[uc.unit_index]);
+                update_unit_card(uc, info.units[uc.unit_index], info);
         }
     }
 
@@ -440,7 +447,7 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
             lv_label_set_text(uc.name_label, uc.display_name.c_str());
         }
 
-        set_slot_count_label(uc.slot_count_label, unit.slot_count);
+        set_owned_slot_count_label(uc, unit, info);
 
         // Create the mini bars for this unit (dynamic — slot count varies)
         create_mini_bars(uc, unit);
@@ -464,7 +471,22 @@ void AmsOverviewPanel::create_unit_cards(const AmsSystemInfo& info) {
                   static_cast<int>(unit_cards_.size()), info.supports_bypass);
 }
 
-void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit) {
+void AmsOverviewPanel::set_owned_slot_count_label(UnitCard& card, const AmsUnit& unit,
+                                                  const AmsSystemInfo& info) {
+    // Not unit.slot_count: a slot fed from another unit is a view of that
+    // unit's spool, not one of this unit's, and counting it here double-counts
+    // one physical spool across two cards. On multiACE the U1 card reads 3,
+    // because its fourth head shows the ACE's spool. The overload that takes
+    // `info` -- every caller here already holds it -- rather than the one that
+    // re-fetches the whole system per card.
+    auto* backend = AmsState::instance().get_backend();
+    set_slot_count_label(card.slot_count_label,
+                         backend ? backend->unit_spool_slot_count(card.unit_index, info)
+                                 : unit.slot_count);
+}
+
+void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit,
+                                        const AmsSystemInfo& info) {
     if (!card.card) {
         return;
     }
@@ -489,8 +511,8 @@ void AmsOverviewPanel::update_unit_card(UnitCard& card, const AmsUnit& unit) {
         create_mini_bars(card, unit);
     }
 
-    // Update slot count
-    set_slot_count_label(card.slot_count_label, unit.slot_count);
+    // Update slot count — the spools this unit OWNS, not the slots it has.
+    set_owned_slot_count_label(card, unit, info);
 
     // Update error badge visibility and color
     if (card.error_badge) {
@@ -505,7 +527,19 @@ void AmsOverviewPanel::create_mini_bars(UnitCard& card, const AmsUnit& unit) {
         return;
     }
 
-    int slot_count = static_cast<int>(unit.slots.size());
+    // One bar per spool this unit OWNS — the card's count says the same thing, and
+    // a fourth bar beside "3 slots" reads as a bug. A slot fed from another unit
+    // shows that unit's spool, so it belongs on that unit's card, not this one.
+    auto* bars_backend = AmsState::instance().get_backend();
+    std::vector<int> owned_local;
+    for (int s = 0; s < static_cast<int>(unit.slots.size()); ++s) {
+        const int global_idx = unit.first_slot_global_index + s;
+        if (!bars_backend || !bars_backend->slot_identity_owner_unit(global_idx).has_value()) {
+            owned_local.push_back(s);
+        }
+    }
+
+    int slot_count = static_cast<int>(owned_local.size());
     if (slot_count <= 0) {
         return;
     }
@@ -520,7 +554,8 @@ void AmsOverviewPanel::create_mini_bars(UnitCard& card, const AmsUnit& unit) {
     int32_t bar_width = ams_draw::calc_bar_width(container_width, slot_count, gap,
                                                  MINI_BAR_MIN_WIDTH_PX, MINI_BAR_MAX_WIDTH_PX);
 
-    for (int s = 0; s < slot_count; ++s) {
+    for (int bar = 0; bar < slot_count; ++bar) {
+        const int s = owned_local[static_cast<size_t>(bar)];
         const SlotInfo& slot = unit.slots[s];
         int global_idx = unit.first_slot_global_index + s;
         bool is_loaded = slot_is_active_loaded(global_idx);
@@ -720,6 +755,14 @@ void AmsOverviewPanel::refresh_system_path(const AmsSystemInfo& info, int curren
             const auto& utl = tool_layout.units[i];
             ui_system_path_canvas_set_unit_tools(system_path_, i, utl.tool_count,
                                                  utl.first_physical_tool);
+
+            // Which of those tools does this unit actually FEED. A toolchanger
+            // head fed by an MMU belongs to the U1 but is supplied by the ACE,
+            // and drawing a line from both units to one nozzle says two things
+            // feed it. The layout answers this from the same walk that placed
+            // the nozzles (UnitToolLayout::feeds_mask); this panel only forwards
+            // it. A mask of 0 is a real answer here -- every head fed elsewhere.
+            ui_system_path_canvas_set_unit_tool_mask(system_path_, i, utl.feeds_mask);
         }
     }
 
@@ -877,6 +920,21 @@ void AmsOverviewPanel::show_unit_detail(int unit_index) {
         lv_obj_get_coords(card_it->card, &card_coords);
     }
 
+    // Drilling from one unit's detail straight into another's ("Open in <unit>")
+    // is entered while already in detail mode, and Back from it belongs at the
+    // unit we came from rather than at the cards. Entering from the cards clears
+    // the target, so Back there stays the cards. RE-ENTERING the unit already
+    // shown -- on_activate()'s refresh after a cover (the slot editor, a modal)
+    // is dismissed -- is neither: it changes nothing about how the user got
+    // here, so the target it found is the target it keeps. Recomputing it there
+    // reset it to the cards, and Back from an ACE opened via "Open in ACE" then
+    // skipped the U1 detail the moment any editor had been opened and closed.
+    if (detail_unit_index_ < 0) {
+        detail_return_unit_ = -1; // from the cards
+    } else if (detail_unit_index_ != unit_index) {
+        detail_return_unit_ = detail_unit_index_; // drilled from another unit
+    }
+
     detail_unit_index_ = unit_index;
     const AmsUnit& unit = info.units[unit_index];
 
@@ -942,6 +1000,21 @@ void AmsOverviewPanel::show_unit_detail(int unit_index) {
     }
 }
 
+void AmsOverviewPanel::leave_unit_detail() {
+    // Take the target before show_unit_detail() recomputes it: re-entering the
+    // previous unit is itself a detail->detail move, which would otherwise set a
+    // return target pointing back at the unit we are leaving and trap Back
+    // between the two.
+    const int back_to = detail_return_unit_;
+    detail_return_unit_ = -1;
+    if (back_to >= 0) {
+        show_unit_detail(back_to);
+        detail_return_unit_ = -1;
+        return;
+    }
+    show_overview();
+}
+
 void AmsOverviewPanel::show_overview() {
     if (!panel_ || !detail_container_ || !cards_row_)
         return;
@@ -957,6 +1030,8 @@ void AmsOverviewPanel::show_overview() {
     spdlog::info("[{}] Returning to overview mode", get_name());
 
     detail_unit_index_ = -1;
+    // The cards are the top of this panel; nothing is left to go back to.
+    detail_return_unit_ = -1;
 
     // Restore header to overview mode: show title, hide detail elements
     lv_obj_t* title = lv_obj_find_by_name(panel_, "header_title");
@@ -1096,8 +1171,21 @@ void AmsOverviewPanel::setup_detail_path_canvas(const AmsUnit& unit, const AmsSy
         }
     }
 
+    // hub_only stops the drawing at this unit's hub, which is right when the
+    // downstream is shared and this view cannot say whose nozzle it reaches. A
+    // unit whose lanes all feed ONE known head can say exactly that, so let it
+    // draw the rest: an ACE bound to a U1 head then shows bays -> combiner ->
+    // that head, which is the whole point of opening it.
+    bool single_known_head = !unit.slots.empty();
+    const int head = unit.slots.empty() ? -1 : unit.slots.front().mapped_tool;
+    for (const auto& s : unit.slots) {
+        if (s.mapped_tool < 0 || s.mapped_tool != head) {
+            single_known_head = false;
+            break;
+        }
+    }
     ams_detail_setup_path_canvas(detail_path_canvas_, detail_widgets_.slot_grid, unit_index,
-                                 true /* hub_only */);
+                                 /*hub_only=*/!single_known_head);
 }
 
 // ============================================================================
@@ -1179,7 +1267,7 @@ static void ensure_overview_registered() {
         LV_UNUSED(e);
         AmsOverviewPanel* panel = g_overview_panel_instance.load();
         if (panel && panel->is_in_detail_mode()) {
-            panel->show_overview();
+            panel->leave_unit_detail();
         } else {
             NavigationManager::instance().go_back();
         }
@@ -1400,6 +1488,18 @@ void AmsOverviewPanel::show_detail_context_menu(int slot_index, lv_obj_t* near_w
             show_edit_modal(slot, /*open_on_picker=*/true);
             break;
 
+        case helix::ui::AmsContextMenu::MenuAction::OPEN_SOURCE_UNIT: {
+            // The slot's spool is described by another unit — go there, which is
+            // the whole point of offering this instead of a dead edit button.
+            AmsBackend* b = AmsState::instance().get_backend();
+            if (b) {
+                if (auto owner = b->slot_identity_owner_unit(slot)) {
+                    show_unit_detail(*owner);
+                }
+            }
+            break;
+        }
+
         case helix::ui::AmsContextMenu::MenuAction::SCAN_QR: {
 #if HELIX_HAS_CAMERA
             spdlog::info("[AmsOverview] SCAN_QR action for slot {}", slot);
@@ -1447,6 +1547,18 @@ void AmsOverviewPanel::show_detail_context_menu(int slot_index, lv_obj_t* near_w
 // ============================================================================
 // Bypass Spool Interaction
 // ============================================================================
+
+void AmsOverviewPanel::on_toolhead_clicked(int tool_index, void* user_data) {
+    auto* self = static_cast<AmsOverviewPanel*>(user_data);
+    if (!self) {
+        return;
+    }
+    // The canvas hands back the tool number off the badge; the helper (shared
+    // with AmsPanel) range-checks it, reads the touch point, builds the menu on
+    // first use and wires the shared dispatch.
+    helix::ui::show_toolhead_menu_at_touch(self->toolhead_menu_, self->parent_screen_,
+                                           self->system_path_, tool_index);
+}
 
 void AmsOverviewPanel::on_bypass_spool_clicked(lv_event_t* e) {
     if (auto* self = static_cast<AmsOverviewPanel*>(lv_event_get_user_data(e))) {
@@ -1569,7 +1681,9 @@ void AmsOverviewPanel::show_edit_modal(int slot_index, bool open_on_picker) {
                         helix::ui::notify_ams_error(err);
                         return;
                     }
-                    NOTIFY_INFO(lv_tr("Slot {} updated"), result.slot_index + 1);
+                    // The badge's spool number — see spool_display_number().
+                    NOTIFY_INFO(lv_tr("Slot {} updated"),
+                                backend->spool_display_number(result.slot_index));
                 }
             }
         },
@@ -1600,6 +1714,12 @@ void navigate_to_ams_panel() {
             // persistent map), so a cached panel re-opened after a navbar tap
             // loses its lifecycle registration. Idempotent (keyed by widget).
             NavigationManager::instance().register_overlay_instance(panel, &overview);
+            // Opening the AMS panel afresh starts at the cards. This used to be
+            // done from on_deactivate(), which cannot tell "the user navigated
+            // away" from "an overlay covered me for a moment" — so pushing the
+            // slot editor threw away which unit was open, and closing it landed
+            // back on the cards instead of the unit you were editing.
+            overview.show_overview();
             NavigationManager::instance().push_overlay(panel);
         }
     } else {

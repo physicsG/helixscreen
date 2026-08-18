@@ -409,6 +409,62 @@ SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const Ams
         utl.min_virtual_tool = min_tool;
         utl.hub_tool_label = unit.hub_tool_label;
 
+        // Cross-unit head sharing. A unit whose lanes all feed heads that an
+        // EARLIER unit already owns is a *source* for those heads, not a new set
+        // of heads — so it must reuse their physical nozzles instead of
+        // allocating its own. multiACE is the case that forced this: the ACE
+        // unit's bays all map to the U1 head it is bound to, and without this
+        // the overview drew five nozzles on a four-head machine, labelling T3
+        // twice. (The HUB branch below already shares by hub_tool_label; this is
+        // the same idea keyed on mapped_tool, which every unit populates.)
+        //
+        // Guarded three ways, because widening it would redraw existing
+        // multi-unit rigs: every one of this unit's mapped tools must already be
+        // claimed (a unit that adds even one new head allocates normally), the
+        // reused nozzles must form a contiguous ascending run (UnitToolLayout
+        // can only express first+count), and units with no mapped_tool at all
+        // fall through untouched. Two Box Turtles on disjoint tool ranges — the
+        // shape the existing tests pin — match none of this and are unaffected.
+        if (min_tool >= 0) {
+            std::vector<int> phys;
+            bool all_claimed = true;
+            for (const auto& slot : unit.slots) {
+                if (slot.mapped_tool < 0) {
+                    continue;
+                }
+                auto it = result.virtual_to_physical.find(slot.mapped_tool);
+                if (it == result.virtual_to_physical.end()) {
+                    all_claimed = false;
+                    break;
+                }
+                phys.push_back(it->second);
+            }
+            if (all_claimed && !phys.empty()) {
+                std::sort(phys.begin(), phys.end());
+                phys.erase(std::unique(phys.begin(), phys.end()), phys.end());
+                bool contiguous = true;
+                for (size_t k = 1; k < phys.size(); ++k) {
+                    if (phys[k] != phys[k - 1] + 1) {
+                        contiguous = false;
+                        break;
+                    }
+                }
+                if (contiguous) {
+                    utl.first_physical_tool = phys.front();
+                    utl.tool_count = static_cast<int>(phys.size());
+                    for (const auto& slot : unit.slots) {
+                        if (slot.mapped_tool < 0) {
+                            continue; // operator[] would insert a bogus -1 key
+                        }
+                        record_extruder(result.virtual_to_physical[slot.mapped_tool],
+                                        slot.extruder_name);
+                    }
+                    result.units.push_back(utl);
+                    continue;
+                }
+            }
+        }
+
         if (topo == PathTopology::MIXED) {
             // MIXED: direct lanes each get their own nozzle position,
             // hub lanes share one nozzle position regardless of mapped_tool.
@@ -608,6 +664,42 @@ SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const Ams
 
     result.total_physical_tools = total_physical;
 
+    // Which of its nozzles each unit actually FEEDS. Decided after every unit is
+    // placed, because a unit's slots resolve to physical nozzles through the
+    // finished virtual_to_physical map. One backend query per slot: a slot
+    // whose identity is owned by another unit (an ACE-fed U1 head) clears the
+    // bit for the nozzle it maps to. Without a backend nothing is owned
+    // elsewhere and every bit stays set.
+    for (size_t i = 0; i < result.units.size() && i < info.units.size(); ++i) {
+        auto& utl = result.units[i];
+        uint32_t mask = 0;
+        for (int t = 0; t < utl.tool_count && t < 32; ++t) {
+            mask |= (1u << t);
+        }
+        if (backend) {
+            const auto& unit = info.units[i];
+            for (size_t sl = 0; sl < unit.slots.size(); ++sl) {
+                const auto& slot = unit.slots[sl];
+                if (slot.mapped_tool < 0) {
+                    continue;
+                }
+                auto it = result.virtual_to_physical.find(slot.mapped_tool);
+                if (it == result.virtual_to_physical.end()) {
+                    continue;
+                }
+                const int t = it->second - utl.first_physical_tool;
+                if (t < 0 || t >= utl.tool_count || t >= 32) {
+                    continue;
+                }
+                if (backend->slot_identity_owner_unit(unit.first_slot_global_index +
+                                                      static_cast<int>(sl))) {
+                    mask &= ~(1u << t);
+                }
+            }
+        }
+        utl.feeds_mask = mask;
+    }
+
     // Build physical→virtual label map
     result.physical_to_virtual_label.resize(total_physical, -1);
     for (const auto& utl : result.units) {
@@ -663,7 +755,11 @@ ToolBadgeLabels compute_tool_badge_labels(const SystemToolLayout& layout, const 
     ToolBadgeLabels out;
 
     if (layout_has_extruder_identity(layout)) {
-        out.prefix = 'E';
+        // 'T', not 'E': this labels a TOOLHEAD, which is what every other
+        // surface calls it. The extruder name is still what supplies the NUMBER
+        // — that is the part of #1229 that mattered, since a virtual lane alias
+        // can disagree with the physical toolhead and an extruder name cannot.
+        out.prefix = 'T';
         out.numbers.reserve(layout.physical_to_extruder_name.size());
         for (const auto& name : layout.physical_to_extruder_name) {
             out.numbers.push_back(*helix::tool_number_for_extruder(name));
