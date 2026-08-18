@@ -12,9 +12,12 @@
 #include "ams_backend_multiace.h"
 #include "ams_backend_snapmaker.h"
 #include "ams_types.h"
+#include "filament_op_dispatch.h"
+#include "ui_update_queue.h"
 
 #include <algorithm>
 #include <fstream>
+#include <set>
 
 #include "../catch_amalgamated.hpp"
 
@@ -1135,10 +1138,10 @@ TEST_CASE_METHOD(HelixTestFixture, "the unload step names the ACE as the destina
     const auto unload = backend.get_operation_step_model(StepOperationType::UNLOAD);
     REQUIRE_FALSE(unload.steps.empty());
     CHECK(unload.steps.back().label == std::string("Retract filament"));
-    // A rename, not an extra step: the firmware drives the index (phase 3), so a
-    // fifth step would sit Pending forever.
+    // A rename, not an extra step: the firmware drives the index (unload phase
+    // 3), so a fifth step would sit Pending forever.
     CHECK(unload.steps.size() == 4);
-    CHECK(unload.steps.back().phase_id == 3);
+    CHECK(unload.steps.back().phase_id == AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3);
 
     // The load direction is untouched.
     const auto load = backend.get_operation_step_model(StepOperationType::LOAD_FRESH);
@@ -1387,4 +1390,192 @@ TEST_CASE_METHOD(LVGLTestFixture, "multiACE re-fetches overrides that moved whil
         helix::ui::UpdateQueue::instance().drain();
         CHECK(backend.downloads.size() == 2);
     }
+}
+
+// =============================================================================
+// A bay swap is ONE operation with two halves
+//
+// Loading a bay onto a head that already holds a different one emits
+// ACE_UNLOAD_HEAD then ACE_LOAD_HEAD. Everything below pins some part of "the
+// UI must see that as a swap": the planner's answer, the bar it builds, the
+// phase ids that drive it, and the boundary that used to end the operation
+// halfway through.
+//
+// The live fixture has head 3 ACE-fed and seated on ACE 0 slot 0 (global slot
+// 4), so global slot 5 is a different bay on the same head -- a swap -- and
+// global slot 4 is the seated one -- not a swap.
+// =============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "multiACE answers the swap question per bay",
+                 "[ams][multiace][swap]") {
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    const AmsSystemInfo info = backend.get_system_info();
+
+    // A different bay on a seated head has to retract that head first.
+    CHECK(backend.needs_unload_before_load(info, 5));
+    CHECK(backend.needs_unload_before_load(info, 6));
+    CHECK(backend.needs_unload_before_load(info, 7));
+    // The bay already seated there does not — ACE_LOAD_HEAD would re-feed it.
+    CHECK_FALSE(backend.needs_unload_before_load(info, 4));
+    // A head is not a bay: the inherited PARALLEL answer stands, and it is what
+    // keeps the U1's own four heads off the swap path entirely.
+    for (int head = 0; head < 4; ++head) {
+        INFO("head " << head);
+        CHECK_FALSE(backend.needs_unload_before_load(info, head));
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "a bay swap plans as a swap and dispatches both halves",
+                 "[ams][multiace][swap]") {
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    AmsSystemInfo info = backend.get_system_info();
+
+    helix::ui::BackendCaps caps;
+    caps.present = true;
+    caps.requires_slot_selection_for_load = backend.requires_slot_selection_for_load();
+    caps.needs_unload_before_load = backend.needs_unload_before_load(info, 5);
+    caps.change_tool_completes_load = backend.change_tool_completes_load(5);
+
+    const auto plan = helix::ui::plan_load(info, caps, 5, /*macro_available=*/false);
+    // Still dispatched as a plain Load -- `T3` mounts the head and feeds nothing,
+    // so the ChangeTool arm stays off. That is exactly why is_swap has to be its
+    // own answer: reading the display off ams_call gave LOAD_FRESH here.
+    CHECK(plan.ams_call == helix::ui::AmsCall::Load);
+    CHECK(plan.is_swap);
+
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.load_filament(5).success());
+    REQUIRE(backend.captured_gcodes.size() == 2);
+    CHECK(backend.captured_gcodes[0] == "ACE_UNLOAD_HEAD HEAD=3");
+    CHECK(backend.captured_gcodes[1].find("ACE_LOAD_HEAD") != std::string::npos);
+
+    // Re-feeding the seated bay is one command and not a swap.
+    info = backend.get_system_info();
+    caps.needs_unload_before_load = backend.needs_unload_before_load(info, 4);
+    caps.change_tool_completes_load = backend.change_tool_completes_load(4);
+    CHECK_FALSE(helix::ui::plan_load(info, caps, 4, false).is_swap);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "the swap step model carries both halves in one bar",
+                 "[ams][multiace][swap][stepmodel]") {
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.load_filament(5).success()); // names head 3 as the target
+
+    const auto model = backend.get_operation_step_model(StepOperationType::LOAD_SWAP);
+    REQUIRE(model.steps.size() == 6);
+    CHECK(model.steps[0].label == "Home");
+    CHECK(model.steps[1].label == "Select");
+    CHECK(model.steps[2].label == "Heat nozzle");
+    CHECK(model.steps[3].label == "Retract filament");
+    CHECK(model.steps[4].label == "Feed filament");
+    CHECK(model.steps[5].label == "Purge");
+
+    // The ids are the point: steps 1-4 are driven by the UNLOAD half and 5-6 by
+    // the LOAD half, in one bar. Nothing covers the gap between them -- measured
+    // at ~4s on a live U1, too short to earn a row.
+    CHECK(model.steps[0].phase_id == AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 0);
+    CHECK(model.steps[3].phase_id == AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3);
+    CHECK(model.steps[4].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 3);
+    CHECK(model.steps[5].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 4);
+    CHECK(model.steps[2].live_temp);
+
+    // No two steps claim the same id — without that the bar cannot tell the
+    // retract from the feed, which was the original defect.
+    std::set<int> ids;
+    for (const auto& s : model.steps) {
+        INFO("duplicate phase id " << s.phase_id);
+        CHECK(ids.insert(s.phase_id).second);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "a feeder head's swap keeps the plain load model",
+                 "[ams][multiace][swap][stepmodel]") {
+    // Head 0 is on its stock feeder in the capture: no ACE, no ACE-side gap, so
+    // the swap model would be describing motion that does not happen.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    REQUIRE(backend.head_source_kind(0) == HeadSource::FEEDER);
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.unload_filament(0).success()); // names head 0 as the target
+
+    const auto model = backend.get_operation_step_model(StepOperationType::LOAD_SWAP);
+    CHECK(model.steps.size() == 5);
+    CHECK(model.steps.back().label == "Purge");
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "preload_finish is a boundary mid-swap, not an end",
+                 "[ams][multiace][swap]") {
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    REQUIRE(backend.head_source_kind(3) == HeadSource::ACE);
+
+    // Start the swap: this is what arms the latch.
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.load_filament(5).success());
+    REQUIRE(backend.captured_gcodes.size() == 2);
+
+    backend.handle_status_update(feed_frame(3, "unload_doing"));
+    CHECK(backend.get_current_action() == AmsAction::UNLOADING);
+    CHECK(backend.get_system_info().operation_phase ==
+          AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3);
+
+    // The boundary. Resolving to IDLE here hid the step bar, brought the action
+    // buttons back and armed a post-op cooldown -- mid-swap, with the new spool
+    // not yet fed. The bar holds on the retract step across the gap.
+    backend.handle_status_update(feed_frame(3, "preload_finish"));
+    CHECK(backend.get_current_action() != AmsAction::IDLE);
+
+    // The load half takes over and the latch disarms.
+    backend.handle_status_update(feed_frame(3, "load_feeding"));
+    CHECK(backend.get_system_info().operation_phase == AmsBackendSnapmaker::LOAD_PHASE_BASE + 3);
+
+    backend.handle_status_update(feed_frame(3, "load_finish"));
+    CHECK(backend.get_current_action() == AmsAction::IDLE);
+    helix::ui::UpdateQueue::instance().drain();
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "a standalone unload still resolves at preload_finish",
+                 "[ams][multiace][swap]") {
+    // The latch must not leak into the next operation: a plain Unload on the
+    // same ACE-fed head still ends where it always did.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+
+    REQUIRE(backend.load_filament(5).success()); // arms the swap latch
+    backend.handle_status_update(feed_frame(3, "load_finish"));
+    REQUIRE(backend.get_current_action() == AmsAction::IDLE);
+
+    REQUIRE(backend.unload_filament(3).success()); // disarms it
+    backend.handle_status_update(feed_frame(3, "unload_doing"));
+    REQUIRE(backend.get_current_action() == AmsAction::UNLOADING);
+    backend.handle_status_update(feed_frame(3, "preload_finish"));
+    CHECK(backend.get_current_action() == AmsAction::IDLE);
+    helix::ui::UpdateQueue::instance().drain();
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "a refused pre-unload leaves no swap latch behind",
+                 "[ams][multiace][swap]") {
+    // If the first half never reaches the printer there is no swap, and leaving
+    // the latch armed would stop preload_finish resolving unloads on this head
+    // for the rest of the session.
+    class RefusingMultiAce : public CapturingMultiAce {
+      public:
+        AmsError execute_gcode(const std::string& gcode) override {
+            captured_gcodes.push_back(gcode);
+            return AmsErrorHelper::command_failed(gcode, "refused");
+        }
+    };
+    RefusingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    CHECK_FALSE(backend.load_filament(5).success());
+
+    backend.handle_status_update(feed_frame(3, "unload_doing"));
+    REQUIRE(backend.get_current_action() == AmsAction::UNLOADING);
+    backend.handle_status_update(feed_frame(3, "preload_finish"));
+    CHECK(backend.get_current_action() == AmsAction::IDLE);
+    helix::ui::UpdateQueue::instance().drain();
 }

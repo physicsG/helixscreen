@@ -327,3 +327,43 @@ TEST_CASE("Ownership tells pre-start lag apart from completion",
         CHECK_FALSE(own.is_external()); // pre-start lag again, not completion
     }
 }
+
+// =============================================================================
+// A swap bar survives the load half
+//
+// The mirror of the UNLOAD guard above, and the defect it fixes is the same
+// one: a UI-initiated swap that preheats first spends the wait at HEATING and
+// then IDLE, which the ownership latch reads as "finished". The operation then
+// looks foreign, and the external-start arm rebuilt the multiACE 7-step swap
+// bar as the 5-step fresh-load one at the moment the backend reported LOADING,
+// discarding the retract half mid-operation.
+// =============================================================================
+
+TEST_CASE("a LOAD_SWAP bar is not demoted when loading starts", "[ams][step_operation][swap]") {
+    // Exactly the transient: prev IDLE (the preheat gap), LOADING now, and the
+    // operation misread as external.
+    auto result = detect_step_operation(AmsAction::LOADING, AmsAction::IDLE,
+                                        StepOperationType::LOAD_SWAP, /*is_external=*/true,
+                                        /*filament_loaded=*/true);
+    CHECK_FALSE(result.should_recreate);
+}
+
+TEST_CASE("an unloaded head still starts a fresh-load bar", "[ams][step_operation][swap]") {
+    // The guard must not swallow a genuine fresh load: with a LOAD_FRESH bar up
+    // the external-start arm still fires and still answers LOAD_FRESH.
+    auto result = detect_step_operation(AmsAction::LOADING, AmsAction::IDLE,
+                                        StepOperationType::LOAD_FRESH, /*is_external=*/true,
+                                        /*filament_loaded=*/false);
+    CHECK(result.should_recreate);
+    CHECK(result.op_type == StepOperationType::LOAD_FRESH);
+}
+
+TEST_CASE("an unload can still be upgraded to a swap", "[ams][step_operation][swap]") {
+    // The designed route for a swap the printer started itself must survive:
+    // LOADING while an UNLOAD bar is up is still the mid-operation upgrade.
+    auto result = detect_step_operation(AmsAction::LOADING, AmsAction::UNLOADING,
+                                        StepOperationType::UNLOAD, /*is_external=*/true,
+                                        /*filament_loaded=*/true);
+    CHECK(result.should_recreate);
+    CHECK(result.op_type == StepOperationType::LOAD_SWAP);
+}

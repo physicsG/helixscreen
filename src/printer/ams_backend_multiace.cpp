@@ -227,19 +227,23 @@ void AmsBackendMultiAce::handle_status_update(const nlohmann::json& notification
         return;
     }
     const auto& status = *status_ptr;
-    if (!status.contains("ace") || !status["ace"].is_object()) {
-        return;
-    }
 
     bool changed = false;
     bool want_overrides = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        parse_ace_object_locked(status["ace"], changed);
-        // Read, NOT cleared: only the fetch that actually goes out consumes the
-        // flag. Clearing it here lost every refetch that landed while a
-        // download was in flight (see the member comment).
-        want_overrides = override_refetch_wanted_;
+        if (status.contains("ace") && status["ace"].is_object()) {
+            parse_ace_object_locked(status["ace"], changed);
+            // Read, NOT cleared: only the fetch that actually goes out consumes
+            // the flag. Clearing it here lost every refetch that landed while a
+            // download was in flight (see the member comment).
+            want_overrides = override_refetch_wanted_;
+        }
+        // EVERY frame, not just the ones carrying `ace`. The swap phase is
+        // derived from the U1's channel_state, and that arrives in
+        // `filament_feed` frames which have no `ace` object at all -- gating this
+        // on one meant the ACE-side step was never synthesized in practice.
+        apply_swap_phase_locked(changed);
     }
     // Outside the lock on purpose: fetch_slot_overrides() takes mutex_ itself.
     if (want_overrides) {
@@ -263,6 +267,54 @@ void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool
         if (n != device_count_) {
             device_count_ = n;
             changed = true;
+        }
+    }
+
+    // multiACE's own swap telemetry. Cached for corroboration and for the log,
+    // NOT branched on: `swap_phase` is a string whose enumeration is unknown --
+    // every capture taken so far is "idle" -- and it is not established whether
+    // `swap_in_progress` tracks ACE_LOAD_HEAD/ACE_UNLOAD_HEAD or only the
+    // single-command ACE_SWAP_HEAD this backend does not use. The ACE-side step
+    // is therefore derived from the U1's own channel_state (see
+    // apply_swap_phase_locked), which is understood, and these only enrich it.
+    // Deliberately does NOT set `changed`: telemetry moving on its own must not
+    // force a UI resync (the same reason AceUnitState has whole-state equality).
+    if (ace.contains("swap_in_progress") && ace["swap_in_progress"].is_boolean()) {
+        ace_swap_in_progress_ = ace["swap_in_progress"].get<bool>();
+    }
+    ace_swap_phase_ = helix::json_util::safe_string(ace, "swap_phase", ace_swap_phase_);
+    ace_status_ = helix::json_util::safe_string(ace, "status", ace_status_);
+
+    // `last_swap_result` is an OBJECT, not a string:
+    //   {"head":3, "ace":0, "slot":1, "status":"ok", "ts":6163.707908022}
+    // (null before the first swap of a session). Read off a live U1 -- it was
+    // written as a string first, and `is_string()` meant the whole branch was
+    // simply dead on hardware rather than wrong, which is the harder kind to
+    // notice.
+    //
+    // It is the LAST result and it PERSISTS, so the value alone says nothing
+    // about now: surfacing a non-ok status on sight would pop an error for a
+    // swap that failed before the UI even started. `ts` is what makes it an
+    // event -- record it on the first frame, and only a CHANGE is news.
+    const auto& lsr = ace.contains("last_swap_result") ? ace["last_swap_result"] : nlohmann::json();
+    if (lsr.is_object()) {
+        const double ts = helix::json_util::safe_double(lsr, "ts", 0.0);
+        const auto status = helix::json_util::safe_string(lsr, "status", "ok");
+        const bool first_seen = last_swap_ts_ < 0.0;
+        if (ts != last_swap_ts_) {
+            last_swap_ts_ = ts;
+            const bool failed = !status.empty() && status != "ok" && status != "success";
+            if (failed && !first_seen) {
+                const int head = helix::json_util::safe_int(lsr, "head", -1);
+                spdlog::warn("{} swap on head {} reported '{}'", backend_log_tag(), head, status);
+                system_info_.action = AmsAction::ERROR;
+                system_info_.operation_detail = status;
+                swap_in_flight_head_ = -1;
+                changed = true;
+            } else if (failed) {
+                spdlog::debug("{} last_swap_result='{}' predates this session — not surfacing",
+                              backend_log_tag(), status);
+            }
         }
     }
 
@@ -968,20 +1020,19 @@ AmsError AmsBackendMultiAce::set_auto_dry_enabled(bool enabled, int unit) {
 
 AmsBackend::OperationStepModel
 AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
-    AmsBackend::OperationStepModel model = AmsBackendSnapmaker::get_operation_step_model(op);
-    if (op != StepOperationType::UNLOAD || model.steps.empty()) {
-        return model;
-    }
-    // Which head this unload is about. current_slot is the head for a U1-side
-    // op; a bay index resolves to the head it feeds, so both entry points (the
-    // sidebar's Unload and a bay's context menu) get the same answer. One lock
-    // scope for the three reads: current_slot, the bay's head and the head's
-    // kind are one snapshot, and the _locked helpers exist so nothing here
-    // re-takes the non-recursive mutex_.
+    // Which head the operation is about.
+    //
+    // op_target_head_ is the head the last dispatch NAMED; current_slot -- the
+    // head on the carriage -- is the fallback for an operation this backend did
+    // not dispatch. Preferring the target matters in `mode="multi"`, where bay
+    // *s* feeds head *s* and the bay being acted on routinely belongs to a head
+    // other than the mounted one; asking current_slot there read the wrong
+    // head's source kind. One lock scope so the reads are one snapshot, and the
+    // _locked helpers exist so nothing here re-takes the non-recursive mutex_.
     bool ace_fed = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        int head = system_info_.current_slot;
+        int head = op_target_head_ >= 0 ? op_target_head_ : system_info_.current_slot;
         if (head >= NUM_TOOLS) {
             if (auto bay = bay_source_locked(head)) {
                 head = bay->head;
@@ -989,11 +1040,111 @@ AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
         }
         ace_fed = head >= 0 && head < NUM_TOOLS && head_kind_[head] == HeadSource::ACE;
     }
-    if (!ace_fed) {
+
+    // A swap on an ACE-fed head is ONE operation with two halves and an ACE-side
+    // gap between them, so it gets a model of its own rather than the load model
+    // the base answers with. The ids are what make it work: unload states carry
+    // UNLOAD_PHASE_BASE ids, load states LOAD_PHASE_BASE ids, and the sidebar
+    // resolves ids through this list instead of indexing by them.
+    //
+    // The load half's own Home / Select / Heat (LOAD_PHASE_BASE + 0..2) are
+    // deliberately absent: by then the head is already mounted and already hot
+    // from steps 2-3, so they pass straight through, and an id this model does
+    // not declare holds the bar rather than moving it backwards.
+    //
+    // There is NO step for the ACE-side fetch, and that is a hardware finding
+    // rather than an omission. The design assumed a long blind window between
+    // the halves -- the ACE spooling the new bay down to the U1's gear with
+    // nothing on channel_state. Measured on a live U1 (firmware 20260722) it is
+    // a ~4 second blip of `inited` in a ~100 second operation, because the bay
+    // is already staged at its gate. A permanent row that is complete before it
+    // is read is worse than no row: the bar simply holds on "Retract filament"
+    // across it, which is honest.
+    //
+    // Labels carry no product name, per 99dbe2774 ("Remove specific ACE naming").
+    if (op == StepOperationType::LOAD_SWAP && ace_fed) {
+        OperationStepModel model;
+        model.steps.push_back({lv_tr("Home"), UNLOAD_PHASE_BASE + 0, false, false});
+        model.steps.push_back({lv_tr("Select"), UNLOAD_PHASE_BASE + 1, false, false});
+        model.steps.push_back(
+            {lv_tr("Heat nozzle"), UNLOAD_PHASE_BASE + 2, false, /*live_temp=*/true});
+        model.steps.push_back({lv_tr("Retract filament"), UNLOAD_PHASE_BASE + 3, false, false});
+        model.steps.push_back({lv_tr("Feed filament"), LOAD_PHASE_BASE + 3, false, false});
+        model.steps.push_back({lv_tr("Purge"), LOAD_PHASE_BASE + 4, false, false});
+        return model;
+    }
+
+    AmsBackend::OperationStepModel model = AmsBackendSnapmaker::get_operation_step_model(op);
+    if (op != StepOperationType::UNLOAD || model.steps.empty() || !ace_fed) {
         return model; // a stock feeder head retracts to its own buffer
     }
     model.steps.back().label = lv_tr("Retract filament");
     return model;
+}
+
+void AmsBackendMultiAce::apply_swap_phase_locked(bool& changed) {
+    (void)changed;
+    // Nothing to do unless a swap this backend dispatched is in flight.
+    if (swap_in_flight_head_ < 0) {
+        return;
+    }
+
+    // The pre-start lag has to be survived before an idle action can mean
+    // "over". do_load_filament() arms the latch when the gcode goes out, and the
+    // firmware has not picked it up yet -- the next frame still reports IDLE. A
+    // bare `action == IDLE` disarm therefore fired on the very first frame after
+    // dispatch, every time, which is the same trap OperationOwnership documents
+    // on the UI side. Only a running action makes a later idle one mean the end.
+    const bool running = system_info_.action == AmsAction::LOADING ||
+                         system_info_.action == AmsAction::UNLOADING ||
+                         system_info_.action == AmsAction::HEATING;
+    if (running) {
+        swap_progress_seen_ = true;
+    }
+
+    // The load half has begun, or the operation has ended: the swap is over as
+    // far as this latch is concerned. Disarming on the load half rather than on
+    // load_finish gives preload_finish its normal meaning back the moment it can
+    // no longer be the boundary between the two halves.
+    const int phase = system_info_.operation_phase;
+    const bool load_half_started = phase >= LOAD_PHASE_BASE;
+    const bool operation_over =
+        swap_progress_seen_ && (system_info_.action == AmsAction::IDLE ||
+                                system_info_.action == AmsAction::ERROR);
+    if (load_half_started || operation_over) {
+        spdlog::debug("{} swap on head {} done (phase={} action={})", backend_log_tag(),
+                      swap_in_flight_head_, phase, ams_action_to_string(system_info_.action));
+        swap_in_flight_head_ = -1;
+        swap_progress_seen_ = false;
+    }
+}
+
+bool AmsBackendMultiAce::bay_load_needs_unload_locked(int slot_index) const {
+    const auto bay = bay_source_locked(slot_index);
+    if (!bay || bay->head < 0) {
+        return false; // a head, an out-of-range index, or a bay bound to nothing
+    }
+    const auto& seated = head_seated_[static_cast<size_t>(bay->head)];
+    if (!seated) {
+        return false; // nothing at that head to retract
+    }
+    // Already the seated bay: ACE_LOAD_HEAD is a no-op re-feed, not a swap.
+    return !(seated->ace_index == bay->ace_index && seated->slot == bay->bay);
+}
+
+bool AmsBackendMultiAce::needs_unload_before_load(const AmsSystemInfo& info,
+                                                  int target_slot) const {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (bay_source_locked(target_slot)) {
+            return bay_load_needs_unload_locked(target_slot);
+        }
+    }
+    // Heads and feeder lanes keep the inherited answer. Delegated with the lock
+    // DROPPED: the base reaches slot_has_independent_path() -> get_unit_topology(),
+    // which this class overrides and which takes mutex_ (ams_backend.h records
+    // the same hazard for AFC).
+    return AmsBackendSnapmaker::needs_unload_before_load(info, target_slot);
 }
 
 std::optional<AmsBackendMultiAce::BaySource>
@@ -1058,6 +1209,7 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
     std::optional<BaySource> bay;
     std::optional<SeatedSource> seated;
     HeadSource head_kind = HeadSource::UNKNOWN;
+    bool needs_unload = false;
     int last_slot = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1065,8 +1217,18 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
         last_slot = system_info_.total_slots - 1;
         if (bay && bay->head >= 0) {
             seated = head_seated_[bay->head];
+            // The SAME predicate needs_unload_before_load() answers the planner
+            // with, so the bar the UI draws and the commands that go out are one
+            // decision. They used to be two hand-written copies of it.
+            needs_unload = bay_load_needs_unload_locked(slot_index);
+            op_target_head_ = bay->head;
+            // Arm BEFORE the gcode goes out: the two commands are queued back to
+            // back and the first channel_state can land before we return.
+            swap_in_flight_head_ = needs_unload ? bay->head : -1;
         } else if (!bay && slot_index >= 0 && slot_index < NUM_TOOLS) {
             head_kind = head_kind_[slot_index];
+            op_target_head_ = slot_index;
+            swap_in_flight_head_ = -1;
         }
     }
 
@@ -1074,21 +1236,28 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
         if (bay->head < 0) {
             return AmsErrorHelper::invalid_slot(slot_index, last_slot);
         }
-        const bool same_source =
-            seated && seated->ace_index == bay->ace_index && seated->slot == bay->bay;
-        if (seated && !same_source) {
+        if (needs_unload && seated) {
             spdlog::info("[AmsBackendMultiAce] head {} holds ACE {} slot {} -> unload before "
                          "loading ACE {} slot {}",
                          bay->head, seated->ace_index, seated->slot, bay->ace_index, bay->bay);
             AmsError unload_err = execute_gcode(fmt::format("ACE_UNLOAD_HEAD HEAD={}", bay->head));
             if (!unload_err.success()) {
+                // No swap is running after all — disarm, or preload_finish would
+                // stop resolving unloads on this head for the rest of the session.
+                std::lock_guard<std::mutex> lock(mutex_);
+                swap_in_flight_head_ = -1;
                 return unload_err;
             }
         }
         spdlog::info("[AmsBackendMultiAce] bay {} -> ACE_LOAD_HEAD HEAD={} ACE={} SLOT={}",
                      slot_index, bay->head, bay->ace_index, bay->bay);
-        return execute_gcode(fmt::format("ACE_LOAD_HEAD HEAD={} ACE={} SLOT={}", bay->head,
-                                         bay->ace_index, bay->bay));
+        AmsError load_err = execute_gcode(fmt::format("ACE_LOAD_HEAD HEAD={} ACE={} SLOT={}",
+                                                      bay->head, bay->ace_index, bay->bay));
+        if (!load_err.success()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            swap_in_flight_head_ = -1;
+        }
+        return load_err;
     }
 
     auto err = validate_slot_index(slot_index);
@@ -1126,6 +1295,10 @@ AmsError AmsBackendMultiAce::do_unload_filament(int slot_index) {
         if (head >= 0 && head < NUM_TOOLS) {
             head_kind = head_kind_[head];
         }
+        // A standalone unload, whichever entry point asked for it: name the head
+        // for the step model, and make sure no stale swap latch survives into it.
+        op_target_head_ = bay && bay->head >= 0 ? bay->head : head;
+        swap_in_flight_head_ = -1;
     }
 
     if (bay) {

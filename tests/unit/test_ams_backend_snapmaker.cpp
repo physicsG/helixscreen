@@ -18,6 +18,7 @@
 #include "printer_state.h"
 #include "spoolman_types.h" // SpoolInfo + apply_spool_to_slot (the picker-side writer)
 
+#include <set>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -31,6 +32,12 @@ using namespace helix::printer;
 using namespace helix;
 
 using json = nlohmann::json;
+
+// Shorthand for the two phase-id spaces the classifier emits into. Spelled out
+// in the tests so a row reads as "load direction, step 3" rather than a bare
+// integer that could belong to either direction.
+static constexpr int L = AmsBackendSnapmaker::LOAD_PHASE_BASE;
+static constexpr int U = AmsBackendSnapmaker::UNLOAD_PHASE_BASE;
 
 /// This file had no fixture at all, so nothing ever drained the UpdateQueue.
 /// handle_status_update() publishes first-gate port presence through
@@ -314,12 +321,14 @@ TEST_CASE_METHOD(SnapmakerFixture,
         CHECK(std::string(model.steps[2].label) == "Heat nozzle");
         CHECK(std::string(model.steps[3].label) == "Feed filament");
         CHECK(std::string(model.steps[4].label) == "Purge");
-        // phase_id mirrors the firmware operation_phase index the classifier emits.
-        CHECK(model.steps[0].phase_id == 0);
-        CHECK(model.steps[1].phase_id == 1);
-        CHECK(model.steps[2].phase_id == 2);
-        CHECK(model.steps[3].phase_id == 3);
-        CHECK(model.steps[4].phase_id == 4);
+        // phase_id mirrors the firmware operation_phase id the classifier emits,
+        // in the LOAD direction's own space — disjoint from the unload one so a
+        // single bar can carry both halves of a swap.
+        CHECK(model.steps[0].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 0);
+        CHECK(model.steps[1].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 1);
+        CHECK(model.steps[2].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 2);
+        CHECK(model.steps[3].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 3);
+        CHECK(model.steps[4].phase_id == AmsBackendSnapmaker::LOAD_PHASE_BASE + 4);
         // Only the Heat step shows a live nozzle temperature.
         CHECK(model.steps[2].live_temp);
         CHECK_FALSE(model.steps[0].live_temp);
@@ -341,9 +350,23 @@ TEST_CASE_METHOD(SnapmakerFixture,
         CHECK(std::string(model.steps[1].label) == "Select");
         CHECK(std::string(model.steps[2].label) == "Heat nozzle");
         CHECK(std::string(model.steps[3].label) == "Retract");
-        CHECK(model.steps[0].phase_id == 0);
-        CHECK(model.steps[3].phase_id == 3);
+        CHECK(model.steps[0].phase_id == AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 0);
+        CHECK(model.steps[3].phase_id == AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3);
         CHECK(model.steps[2].live_temp);
+    }
+
+    SECTION("the two directions share no phase id") {
+        // The invariant the whole scheme rests on. When they DID share 0..4, an
+        // unload's phase 3 (Retract) selected the load model's step 3 (Feed
+        // filament) on any bar that happened to be the load one — a multiACE
+        // swap, every time.
+        std::set<int> ids;
+        for (auto op : {StepOperationType::LOAD_FRESH, StepOperationType::UNLOAD}) {
+            for (const auto& step : backend.get_operation_step_model(op).steps) {
+                INFO("duplicate phase id " << step.phase_id << " (" << step.label << ")");
+                CHECK(ids.insert(step.phase_id).second);
+            }
+        }
     }
 }
 
@@ -736,17 +759,21 @@ TEST_CASE_METHOD(SnapmakerFixture, "Snapmaker channel_state maps to granular ope
                  "[ams][snapmaker][phase]") {
     // The U1 firmware emits four sequential sub-phases per direction
     // (<load|unload>_<homing|picking|heating|doing>), each many seconds long.
-    // operation_phase mirrors these into a 0..3 index that drives the sidebar's
-    // 4-step bar (0=Home, 1=Select, 2=Heat, 3=Move). All non-active states
+    // operation_phase mirrors these into a phase id that drives the sidebar's
+    // step bar (Home, Select, Heat, Move). The two directions use DISJOINT id
+    // spaces so one bar can carry both halves of a swap. All non-active states
     // (finish/idle/preload_finish) collapse to -1 = "no active step".
     struct Case {
         const char* channel_state;
         int expected_phase;
     };
     const Case cases[] = {
-        {"unload_homing", 0},  {"unload_picking", 1}, {"unload_heating", 2},  {"unload_doing", 3},
-        {"load_homing", 0},    {"load_picking", 1},   {"load_heating", 2},    {"load_feeding", 3},
-        {"unload_finish", -1}, {"load_finish", -1},   {"preload_finish", -1}, {"inited", -1},
+        {"unload_homing", U + 0},  {"unload_picking", U + 1},
+        {"unload_heating", U + 2}, {"unload_doing", U + 3},
+        {"load_homing", L + 0},    {"load_picking", L + 1},
+        {"load_heating", L + 2},   {"load_feeding", L + 3},
+        {"unload_finish", -1},     {"load_finish", -1},
+        {"preload_finish", -1},    {"inited", -1},
     };
 
     for (const auto& c : cases) {
@@ -1014,42 +1041,42 @@ TEST_CASE_METHOD(SnapmakerFixture,
         {"inited", AmsAction::IDLE, -1},
         {"wait_insert", AmsAction::IDLE, -1},
         {"test", AmsAction::IDLE, -1},
-        // preload
-        {"preload_prepare", AmsAction::LOADING, 0},
-        {"preload_feeding", AmsAction::LOADING, 3},
+        // preload — load direction
+        {"preload_prepare", AmsAction::LOADING, L + 0},
+        {"preload_feeding", AmsAction::LOADING, L + 3},
         {"preload_finish", AmsAction::IDLE, -1},
         {"preload_fail", AmsAction::ERROR, -1},
         // load
-        {"load_prepare", AmsAction::LOADING, 0},
-        {"load_homing", AmsAction::LOADING, 0},
-        {"load_picking", AmsAction::LOADING, 1},
-        {"load_heating", AmsAction::LOADING, 2},
-        {"load_feeding", AmsAction::LOADING, 3},
-        {"load_extruding", AmsAction::LOADING, 3},
-        {"load_flushing", AmsAction::LOADING, 4},
+        {"load_prepare", AmsAction::LOADING, L + 0},
+        {"load_homing", AmsAction::LOADING, L + 0},
+        {"load_picking", AmsAction::LOADING, L + 1},
+        {"load_heating", AmsAction::LOADING, L + 2},
+        {"load_feeding", AmsAction::LOADING, L + 3},
+        {"load_extruding", AmsAction::LOADING, L + 3},
+        {"load_flushing", AmsAction::LOADING, L + 4},
         {"load_finish", AmsAction::IDLE, -1},
         {"load_fail", AmsAction::ERROR, -1},
         // unload
-        {"unload_prepare", AmsAction::UNLOADING, 0},
-        {"unload_homing", AmsAction::UNLOADING, 0},
-        {"unload_picking", AmsAction::UNLOADING, 1},
-        {"unload_heating", AmsAction::UNLOADING, 2},
-        {"unload_heat_finish", AmsAction::UNLOADING, 2},
-        {"unload_doing", AmsAction::UNLOADING, 3},
+        {"unload_prepare", AmsAction::UNLOADING, U + 0},
+        {"unload_homing", AmsAction::UNLOADING, U + 0},
+        {"unload_picking", AmsAction::UNLOADING, U + 1},
+        {"unload_heating", AmsAction::UNLOADING, U + 2},
+        {"unload_heat_finish", AmsAction::UNLOADING, U + 2},
+        {"unload_doing", AmsAction::UNLOADING, U + 3},
         {"unload_finish", AmsAction::IDLE, -1},
         {"unload_fail", AmsAction::ERROR, -1},
-        // manual feed
-        {"manual_sta_prepare", AmsAction::LOADING, 0},
-        {"manual_sta_homing", AmsAction::LOADING, 0},
-        {"manual_sta_picking", AmsAction::LOADING, 1},
-        {"manual_sta_prepare_finish", AmsAction::LOADING, 1},
+        // manual feed — load direction
+        {"manual_sta_prepare", AmsAction::LOADING, L + 0},
+        {"manual_sta_homing", AmsAction::LOADING, L + 0},
+        {"manual_sta_picking", AmsAction::LOADING, L + 1},
+        {"manual_sta_prepare_finish", AmsAction::LOADING, L + 1},
         {"manual_sta_prepare_fail", AmsAction::ERROR, -1},
-        {"manual_sta_heating", AmsAction::LOADING, 2},
-        {"manual_sta_extruding", AmsAction::LOADING, 3},
-        {"manual_sta_extrude_finish", AmsAction::LOADING, 3},
+        {"manual_sta_heating", AmsAction::LOADING, L + 2},
+        {"manual_sta_extruding", AmsAction::LOADING, L + 3},
+        {"manual_sta_extrude_finish", AmsAction::LOADING, L + 3},
         {"manual_sta_extrude_fail", AmsAction::ERROR, -1},
-        {"manual_sta_flushing", AmsAction::LOADING, 4},
-        {"manual_sta_flush_finish", AmsAction::LOADING, 4},
+        {"manual_sta_flushing", AmsAction::LOADING, L + 4},
+        {"manual_sta_flush_finish", AmsAction::LOADING, L + 4},
         {"manual_sta_flush_fail", AmsAction::ERROR, -1},
         {"manual_sta_finish", AmsAction::IDLE, -1},
         {"manual_sta_fail", AmsAction::ERROR, -1},
@@ -1102,10 +1129,10 @@ TEST_CASE_METHOD(SnapmakerFixture, "Snapmaker full load progression walks the ph
         int phase;
     };
     const Step seq[] = {
-        {"load_prepare", AmsAction::LOADING, 0},  {"load_homing", AmsAction::LOADING, 0},
-        {"load_picking", AmsAction::LOADING, 1},  {"load_heating", AmsAction::LOADING, 2},
-        {"load_feeding", AmsAction::LOADING, 3},  {"load_extruding", AmsAction::LOADING, 3},
-        {"load_flushing", AmsAction::LOADING, 4}, {"load_finish", AmsAction::IDLE, -1},
+        {"load_prepare", AmsAction::LOADING, L + 0},  {"load_homing", AmsAction::LOADING, L + 0},
+        {"load_picking", AmsAction::LOADING, L + 1},  {"load_heating", AmsAction::LOADING, L + 2},
+        {"load_feeding", AmsAction::LOADING, L + 3},  {"load_extruding", AmsAction::LOADING, L + 3},
+        {"load_flushing", AmsAction::LOADING, L + 4}, {"load_finish", AmsAction::IDLE, -1},
     };
     AmsBackendSnapmaker backend(nullptr, nullptr);
     for (const auto& s : seq) {

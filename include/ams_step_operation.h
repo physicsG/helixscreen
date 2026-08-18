@@ -137,6 +137,25 @@ inline StepOperationResult detect_step_operation(AmsAction action, AmsAction pre
         return result; // no change — keep the unload bar
     }
 
+    // The same rule in the LOAD direction: a swap bar that is loading is never
+    // demoted to a fresh-load one.
+    //
+    // The guard above fixed only the unload direction, and the identical
+    // transient reaches this one. A UI-initiated swap that preheats first spends
+    // the whole wait at HEATING and then IDLE, which reads as "finished" — so at
+    // dispatch the operation looked foreign, the arm below saw LOADING out of
+    // IDLE, and the 7-step multiACE swap bar was rebuilt as the 5-step load one
+    // with the retract half already discarded.
+    //
+    // Ownership is re-armed at dispatch now, which is the root fix; this is the
+    // matching structural guard, and it also covers a swap the printer started
+    // on its own. A genuine fresh load never reaches here with a swap bar up:
+    // recreate_step_progress_for_operation() only builds LOAD_SWAP when the
+    // caller planned one.
+    if (current_op == StepOperationType::LOAD_SWAP && action == AmsAction::LOADING) {
+        return result; // no change — keep the swap bar
+    }
+
     // External operation just started (transitioned from IDLE to any active action)
     if (is_external && is_active_action && prev_action == AmsAction::IDLE) {
         result.should_recreate = true;
