@@ -93,7 +93,7 @@ These options modify the G-code on-the-fly — if you disable "Auto Bed Mesh" bu
 
 The UI switches to the Print Status panel automatically.
 
-> **Note:** On a multi-color print, HelixScreen checks your loaded filament before it starts and will stop with a **Check filament** dialog if a required tool maps to an empty slot. On printers with camera-based failure detection, it can also react to a print going wrong mid-job. See [Print Monitoring & Failure Detection](print-monitoring.md).
+> **Note:** On a multi-color print, HelixScreen checks your loaded filament before it starts and will stop with a **Check filament** dialog if a required tool maps to an empty slot. Printing from bypass skips that check, since the filament never passes through a slot. On printers with camera-based failure detection, it can also react to a print going wrong mid-job. See [Print Monitoring & Failure Detection](print-monitoring.md).
 
 ---
 
@@ -160,7 +160,7 @@ The overlay also includes Z-Offset / baby-step controls (see below).
 - **Speed %**: Slow down (60-80%) for intricate details or if you see layer separation. Speed up for large infill areas.
 - **Flow %**: Increase (105-110%) if you see gaps between extrusion lines. Decrease (95-98%) for blobs or over-packed lines.
 
-> **Note:** Tune adjustments are temporary and only affect the current print. The next print uses your slicer's original values.
+> **Note:** Speed and Flow adjustments are temporary and only affect the current print. The next print uses your slicer's original values. Z-Offset is the exception - see below.
 
 > **Fan speed:** Part cooling fan speed is not adjusted from the Tune overlay. Current fan speeds are shown on the Print Status panel; tap that fan row to open the separate fan control overlay.
 
@@ -168,7 +168,12 @@ The overlay also includes Z-Offset / baby-step controls (see below).
 
 ## Z-Offset / Baby Steps
 
-Fine-tune your first layer height while printing:
+Fine-tune your first layer height, during a print or while idle.
+
+**Getting there:**
+
+- **During a print:** the **Tune** button on the Print Status screen.
+- **Any time:** the **Z-Offset** row on the Controls panel. It shows the current offset and opens the same controls.
 
 **Adjusting:**
 
@@ -188,6 +193,16 @@ Choose a step size (0.05 / 0.025 / 0.01 / 0.005 mm), then tap up/down to raise o
 1. Get the first layer looking good
 2. Tap **Save Z-Offset** to write to Klipper config
 3. Future prints use this as the starting point
+
+**If there is no Save Z-Offset button**, your printer's firmware stores the offset
+itself and there is nothing to save - what you dialed in is already kept and is
+re-applied at the start of the next print. This is the case on the FlashForge
+AD5M / AD5X running ZMOD, and on the Snapmaker U1.
+
+> **AD5M / AD5X (ZMOD):** the firmware clears the *live* offset when a print
+> ends, so other interfaces can show 0.000 while idle even though your real
+> offset is stored and will be used. HelixScreen shows the stored value instead,
+> so the number on the Z-Offset row is what your next print will actually use.
 
 > **Tip:** Make small adjustments (0.01mm) and wait for the printer to complete a few moves before judging the result.
 

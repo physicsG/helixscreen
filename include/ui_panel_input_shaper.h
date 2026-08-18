@@ -286,6 +286,11 @@ class InputShaperPanel : public OverlayBase {
     // Number of shapers per axis (controls table row visibility)
     lv_subject_t is_x_num_shapers_{};
     lv_subject_t is_y_num_shapers_{};
+    /// Chart chips actually backed by a curve, per axis. The XML declares a
+    /// fixed MAX_SHAPERS of them, so the surplus must be hidden or they render
+    /// as empty outlines.
+    lv_subject_t is_x_num_chips_{};
+    lv_subject_t is_y_num_chips_{};
 
     // X axis result display
     char is_result_x_shaper_buf_[48] = {};

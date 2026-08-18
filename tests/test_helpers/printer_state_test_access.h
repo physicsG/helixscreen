@@ -76,6 +76,23 @@ class PrinterStateTestAccess {
     static void set_option_set(PrinterState& ps, PrePrintOptionSet set) {
         ps.pre_print_option_set_ = std::move(set);
     }
+
+    /**
+     * @brief Make the blocking-op guard see a SUSTAINED idle_timeout "Printing"
+     *
+     * Setting the subject alone no longer reaches is_blocking_operation_active():
+     * it reads IdleTimeoutBusy, which requires the flag to hold for SETTLE before
+     * it counts (see include/idle_timeout_busy.h). A test that means "an external
+     * blocking op is under way" means one that has already outlasted that window,
+     * so back-date the transition rather than sleeping. Use this instead of
+     * writing the subject directly; the settle behaviour itself is covered in
+     * test_idle_timeout_busy.cpp.
+     */
+    static void set_sustained_idle_timeout_printing(PrinterState& ps, bool on) {
+        lv_subject_set_int(ps.get_idle_timeout_printing_subject(), on ? 1 : 0);
+        ps.idle_timeout_busy().set_printing(on, IdleTimeoutBusy::clock::now() -
+                                                    IdleTimeoutBusy::SETTLE);
+    }
 };
 
 } // namespace helix

@@ -20,6 +20,7 @@
 #include "esp_websocket_client.h"
 #include "i_moonraker_client.h"
 #include "reconnect_backoff.h"
+#include "rpc_error_policy.h"
 
 #include <atomic>
 #include <cstdint>
@@ -53,10 +54,12 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     int send_jsonrpc(const std::string& method, const json& params) override;
     RequestId send_jsonrpc(const std::string& method, const json& params,
                            std::function<void(const json&)> cb) override;
-    RequestId send_jsonrpc(const std::string& method, const json& params,
-                           std::function<void(const json&)> success_cb,
-                           std::function<void(const MoonrakerError&)> error_cb,
-                           uint32_t timeout_ms = 0, bool silent = false) override;
+    RequestId
+    send_jsonrpc(const std::string& method, const json& params,
+                 std::function<void(const json&)> success_cb,
+                 std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
+                 bool silent = false,
+                 std::optional<rpc_error_policy::CallerIntent> intent = std::nullopt) override;
     int gcode_script(const std::string& gcode) override;
     void get_gcode_store(int count,
                          std::function<void(const std::vector<GcodeStoreEntry>&)> on_success,
@@ -85,7 +88,7 @@ class EspMoonrakerClient final : public IMoonrakerClient {
                                   std::function<void(const json&)> cb) override;
     bool unregister_method_callback(const std::string& method,
                                     const std::string& handler_name) override;
-    void dispatch_status_update(const json& status) override;
+    void dispatch_status_update(const json& status, bool from_cached_snapshot = false) override;
 
     // --- Connection state & observers ---
     ConnectionState get_connection_state() const override;

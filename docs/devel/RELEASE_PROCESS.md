@@ -86,6 +86,10 @@ git push origin v1.2.0
   validate-shell gate → build-platforms matrix (9):
     pi · pi32 · ad5m · cc1 · k1 · ad5x · k2 · x86 · snapmaker-u1
   plus build-android → publish-android
+    `release` needs build-android too, not just build-platforms — otherwise it
+    could publish before Android finished and ship with no APKs, silently.
+    build-android FAILS the whole release if ANDROID_KEYSTORE_BASE64 is unset;
+    it no longer falls back to the debug keystore. See ANDROID_PLAY_STORE.md.
 
   Each platform job: Docker cross-toolchain → target arch → package .zip
                                │

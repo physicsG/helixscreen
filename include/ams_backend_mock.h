@@ -164,6 +164,10 @@ class AmsBackendMock : public AmsBackend {
     AmsError disable_bypass() override;
     [[nodiscard]] bool is_bypass_active() const override;
 
+    /// nullopt until the "unaccounted" scenario runs; then true — the mock
+    /// cannot observe a toolhead, so only the staged scenario answers.
+    [[nodiscard]] std::optional<bool> toolhead_filament_unaccounted() const override;
+
     // Environment sensors
     [[nodiscard]] bool has_environment_sensors() const override;
 
@@ -412,6 +416,22 @@ class AmsBackendMock : public AmsBackend {
     void set_multi_unit_mode(bool enabled);
 
     /**
+     * @brief Enable the multi-unit torture profile (HELIX_MOCK_AMS=torture).
+     *
+     * Five units / 16 lanes / 4 Klipper extruders, modelled on a user rig
+     * captured 2026-08-16: Box Turtle + Claymore both feed e0, ViViD + EMU both
+     * feed e3, and a 2-tool Toolchanger sits between them. Two lanes are
+     * deliberately unmapped and the AFC tool aliases are neither dense nor
+     * unit-ordered.
+     *
+     * This is the only profile whose unit-card row overflows its container, so
+     * it is the only way to exercise the overview's card-row scrolling, its
+     * off-canvas connector clamping, and shared-nozzle hub placement. Every
+     * other profile tops out at 3 units, which always fit.
+     */
+    void set_torture_mode(bool enabled);
+
+    /**
      * @brief Check if multi-unit mode is active
      */
     [[nodiscard]] bool is_multi_unit_mode() const;
@@ -602,7 +622,7 @@ class AmsBackendMock : public AmsBackend {
      * before they can be applied. This stores the scenario name and applies
      * it at the end of start().
      *
-     * @param scenario One of: "idle", "loading", "error", "bypass"
+     * @param scenario One of: "idle", "loading", "error", "bypass", "unaccounted"
      */
     void set_initial_state_scenario(const std::string& scenario);
 
@@ -793,6 +813,7 @@ class AmsBackendMock : public AmsBackend {
     bool vivid_mixed_mode_ = false;      ///< Simulate 2x BoxTurtle + 1x ViViD
     bool ifs_mode_ = false;              ///< Simulate AD5X IFS (4 slots, LINEAR)
     bool htlf_toolchanger_mode_ = false; ///< Simulate HTLF + Toolchanger mixed topology
+    bool torture_mode_ = false;          ///< Simulate 5 units / 16 lanes / 4 shared extruders
     bool snapmaker_mode_ = false; ///< Simulate Snapmaker U1 (4 slots, PARALLEL, non-editable)
     bool multiace_mode_ = false;  ///< Simulate a U1 with two ACE units (see set_multiace_mode)
     /// Which ACE bay is seated at each U1 head in multiace mode, -1 = none.
@@ -827,6 +848,7 @@ class AmsBackendMock : public AmsBackend {
     std::string initial_state_scenario_;
     std::thread scenario_thread_; ///< Thread for deferred loading/bypass scenario
     std::atomic<bool> scenario_thread_running_{false}; ///< Guards against double-join
+    bool mock_toolhead_unaccounted_ = false; ///< "unaccounted" scenario staged (gate input)
 
     // Test override for native-tracking capability. False in production; tests
     // flip this to exercise the FilamentConsumptionTracker gating path.

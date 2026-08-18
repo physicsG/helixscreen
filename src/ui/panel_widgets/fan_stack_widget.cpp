@@ -237,10 +237,13 @@ void FanStackWidget::on_size_changed(int colspan, int rowspan, int width_px, int
     // Width-only: each row is icon + name + speed laid out horizontally
     // (panel_widget_fan_stack.xml), so a resolved name ("Hotend") only ever
     // competes for room along the width axis. Extra height centers the same
-    // three rows with more breathing space but never widens one — gating on
-    // height too would read a plain 1x1 as "bigger" on Large/XLarge, where a
-    // single grid row (141px, 169px) already clears H_TALL on its own.
-    bool bigger = (width_px >= widget_size::W_NORMAL);
+    // three rows with more breathing space but never widens one, so height
+    // carries no information about whether a resolved name fits.
+    //
+    // The band is per-tier: what has to fit is text, and font_small runs
+    // 10..26px across the tiers, so a width that holds "Part Cooling Fan" at
+    // Small does not hold it at XXLarge.
+    bool bigger = (width_px >= widget_size::w_normal());
 
     const char* font_token = bigger ? "font_small" : "font_xs";
     const lv_font_t* text_font = theme_manager_get_font(font_token);

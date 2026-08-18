@@ -15,6 +15,7 @@
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
+#include "test_helpers/ad5x_ifs_test_access.h"
 #include "test_helpers/scoped_home_confirm_prompter.h"
 
 #include <chrono>
@@ -63,529 +64,8 @@ struct Ad5xIfsTmpCacheDir {
 
 using json = nlohmann::json;
 
-// Test access helper — friend class for accessing internals
-class Ad5xIfsTestAccess {
-  public:
-    static void handle_status(AmsBackendAd5xIfs& b, const json& n) {
-        b.handle_status_update(n);
-    }
-    static void parse_vars(AmsBackendAd5xIfs& b, const json& v) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.parse_save_variables(v);
-    }
-    static int active_tool(const AmsBackendAd5xIfs& b) {
-        return b.active_tool_;
-    }
-    static bool external_mode(const AmsBackendAd5xIfs& b) {
-        return b.external_mode_;
-    }
-    static bool head_filament(const AmsBackendAd5xIfs& b) {
-        return b.head_filament_;
-    }
-    static bool port_presence(const AmsBackendAd5xIfs& b, int i) {
-        return b.port_presence_[static_cast<size_t>(i)];
-    }
-    static std::string build_colors(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.build_color_list_value();
-    }
-    static std::string runout_detail(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.build_runout_detail_locked();
-    }
-    static void set_runout_state(AmsBackendAd5xIfs& b, int slot, bool has_ifs_vars,
-                                 std::optional<bool> backup_variable) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.runout_slot_ = slot;
-        b.has_ifs_vars_ = has_ifs_vars;
-        b.ifs_backup_variable_ = backup_variable;
-    }
-    static std::string build_types(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.build_type_list_value();
-    }
-    static std::string build_tools(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.build_tool_map_value();
-    }
-    static AmsAction action(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.system_info_.action;
-    }
-    static void set_action(AmsBackendAd5xIfs& b, AmsAction a) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.system_info_.action = a;
-        b.action_start_time_ = std::chrono::steady_clock::now();
-    }
-    // Flip running_ so check_preconditions() passes without a live Moonraker
-    // connection (mirrors TestableAfcBackend::set_running). Required by any test
-    // exercising a public action method (load/unload/eject) that runs the
-    // precondition gate first.
-    static void set_running(AmsBackendAd5xIfs& b, bool state) {
-        b.running_.store(state);
-    }
-    // Seed the firmware's active-slot pointer + head-filament sensor so the
-    // "loaded in toolhead" refusal in eject_lane() can be exercised. These are
-    // the exact members eject_lane()/unload_filament() read (system_info_.current_slot
-    // and head_filament_).
-    static void set_current_slot(AmsBackendAd5xIfs& b, int slot, bool filament_loaded) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.system_info_.current_slot = slot;
-        b.system_info_.filament_loaded = filament_loaded;
-    }
-    static void set_head_filament(AmsBackendAd5xIfs& b, bool detected) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.head_filament_ = detected;
-    }
-    // Pin the toolhead SWITCH pair independently of the conflated head_filament_.
-    // Production latches these only in the switch branch of handle_status_update();
-    // tests need to express "switch says X while motion says Y", which is the
-    // whole point of the pair existing. `seen=false` models motion-only firmware
-    // that never publishes a switch sensor at all.
-    static void set_head_switch(AmsBackendAd5xIfs& b, bool seen, bool present) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.head_switch_seen_ = seen;
-        b.head_switch_present_ = present;
-    }
-    // Flag GET_ZCOLOR SILENT unsupported so schedule_zcolor_query() early-returns
-    // instead of spawning an HttpExecutor debounce task — keeps action dispatch
-    // tests fully synchronous and thread-free (avoids the [slow] tag, L052).
-    static void set_zcolor_supported(AmsBackendAd5xIfs& b, bool supported) {
-        b.zcolor_silent_supported_.store(supported);
-    }
-    static void check_action_timeout(AmsBackendAd5xIfs& b, std::chrono::seconds elapsed) {
-        b.action_start_time_ = std::chrono::steady_clock::now() - elapsed;
-        b.check_action_timeout();
-    }
-    // Age the action clock WITHOUT running the timeout check — lets a test age the
-    // clock, fire an event that may reset it, then check separately.
-    static void set_action_age(AmsBackendAd5xIfs& b, std::chrono::seconds elapsed) {
-        b.action_start_time_ = std::chrono::steady_clock::now() - elapsed;
-    }
-    // Run the timeout check against the current (possibly event-reset) clock.
-    static void run_action_timeout(AmsBackendAd5xIfs& b) {
-        b.check_action_timeout();
-    }
-    // Age the indeterminate ("Working…") no-progress clock WITHOUT running the
-    // detector, so a test can simulate a stalled progress feed then check
-    // separately. Distinct from set_action_age (which ages the ERROR-timeout
-    // clock); the indeterminate detector reads last_phase_progress_time_.
-    static void set_progress_age(AmsBackendAd5xIfs& b, std::chrono::seconds elapsed) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.last_phase_progress_time_ = std::chrono::steady_clock::now() - elapsed;
-    }
-    // Read the indeterminate ("Working…") busy flag the detector computes.
-    static bool operation_indeterminate(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.system_info_.operation_indeterminate;
-    }
-    static std::string var_prefix(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.var_prefix_;
-    }
-    static bool has_per_port_sensors(const AmsBackendAd5xIfs& b) {
-        return b.has_per_port_sensors_;
-    }
-    static size_t external_sync_count(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.external_sync_count_;
-    }
-    static void set_var_prefix(AmsBackendAd5xIfs& b, const std::string& prefix) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.var_prefix_ = prefix;
-    }
-    static bool has_ifs_vars(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.has_ifs_vars_;
-    }
-    static void set_has_ifs_vars(AmsBackendAd5xIfs& b, bool val) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.has_ifs_vars_ = val;
-    }
-    static void set_ifs_macro_confirmed_missing(AmsBackendAd5xIfs& b, bool val) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.ifs_macro_confirmed_missing_ = val;
-    }
-    static void parse_adventurer_json(AmsBackendAd5xIfs& b, const std::string& content) {
-        b.parse_adventurer_json(content);
-    }
-    static bool dirty(const AmsBackendAd5xIfs& b, size_t idx) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.dirty_[idx];
-    }
-    static void set_dirty(AmsBackendAd5xIfs& b, size_t idx, bool val) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.dirty_[idx] = val;
-    }
-    // Seed firmware-state arrays directly. parse_save_variables no longer
-    // writes colors_[]/materials_[] (those come from CHANGE_ZCOLOR/GET_ZCOLOR
-    // exclusively now); tests that previously seeded via _IFS_VARS save_variables
-    // should use these helpers and then re-run update_slot_from_state via
-    // handle_status, parse_adventurer_json, or apply_zcolor_result.
-    static void set_color(AmsBackendAd5xIfs& b, size_t idx, const std::string& hex) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.colors_[idx] = hex;
-        b.update_slot_from_state(static_cast<int>(idx));
-    }
-    static void set_material(AmsBackendAd5xIfs& b, size_t idx, const std::string& mat) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.materials_[idx] = mat;
-        b.update_slot_from_state(static_cast<int>(idx));
-    }
-    static void set_port_presence(AmsBackendAd5xIfs& b, size_t idx, bool val) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.port_presence_[idx] = val;
-        b.update_slot_from_state(static_cast<int>(idx));
-    }
-    // Mirror eject_lane()'s optimistic clear (#1065): drop presence and stamp the
-    // eject instant so the settling-suppression window is active. Used to test that
-    // a lagging follow-up Ports read can't resurrect the just-ejected lane.
-    static void mark_ejected(AmsBackendAd5xIfs& b, int slot) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.port_presence_[static_cast<size_t>(slot)] = false;
-        b.last_eject_time_[static_cast<size_t>(slot)] = std::chrono::steady_clock::now();
-        b.update_slot_from_state(slot);
-    }
-    // Age a lane's eject stamp past the suppression window so a genuine
-    // re-insertion (false->true presence) is honored again.
-    static void expire_eject_window(AmsBackendAd5xIfs& b, int slot) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.last_eject_time_[static_cast<size_t>(slot)] =
-            std::chrono::steady_clock::now() - std::chrono::hours(1);
-    }
-    static int current_slot(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.system_info_.current_slot;
-    }
-    static AmsBackendAd5xIfs::ZColorSilentResult
-    parse_zcolor_silent(const std::vector<std::string>& lines) {
-        return AmsBackendAd5xIfs::parse_zcolor_silent(lines, "test");
-    }
-    static bool zcolor_silent_supported(const AmsBackendAd5xIfs& b) {
-        return b.zcolor_silent_supported_.load();
-    }
-    static void apply_zcolor_result(AmsBackendAd5xIfs& b,
-                                    const AmsBackendAd5xIfs::ZColorSilentResult& r) {
-        b.apply_zcolor_result(r);
-    }
-    // Seed the remembered seated lane directly (bypasses the Moonraker
-    // "lane_data" DB load, which requires a live connection). Production loads
-    // this at init via override_store_; tests inject it to exercise the
-    // cold-boot restore path with a nullptr api/client.
-    static void set_persisted_seated_slot(AmsBackendAd5xIfs& b, std::optional<int> slot) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.persisted_seated_slot_ = slot;
-    }
-    static std::optional<int> persisted_seated_slot(const AmsBackendAd5xIfs& b) {
-        return b.persisted_seated_slot_;
-    }
-    // Seed / read the firmware's FFMInfo.channel seated authority (1-based; 0 =
-    // none). Production sets this in parse_adventurer_json; tests seed it to drive
-    // the seated-authority override in apply_zcolor_result without a full JSON parse.
-    static void set_ffm_channel(AmsBackendAd5xIfs& b, int chan) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.ffm_channel_ = chan;
-    }
-    static int ffm_channel(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.ffm_channel_;
-    }
-    // Read the seated channel (1-based; 0 = none). This is the value the
-    // head-gate (#1065 row 28) clears when the toolhead switch reads empty, and
-    // recompute_current_slot_locked derives current_slot from it on the native
-    // path.
-    static int seated_chan(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.seated_chan_;
-    }
-    static bool head_switch_seen(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.head_switch_seen_;
-    }
-    static bool head_switch_present(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.head_switch_present_;
-    }
-    // Drive the belt-and-suspenders eject clear directly (#1065 row 28). Mirrors
-    // what eject_lane() runs in its success block; exposed so the clear can be
-    // tested without a live Moonraker connection (execute_gcode needs the api).
-    static bool clear_seated_if_ejected(AmsBackendAd5xIfs& b, int slot_index) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.clear_seated_if_ejected_locked(slot_index);
-    }
-    // Seed the in-memory overrides map directly (bypasses load_blocking, which
-    // requires a live Moonraker connection). on_started() is the only
-    // production path that writes this field; tests must use this shim because
-    // the fixtures instantiate the backend with nullptr api/client.
-    static void seed_override(AmsBackendAd5xIfs& b, int slot_index,
-                              const helix::ams::FilamentSlotOverride& ovr) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.overrides_[slot_index] = ovr;
-    }
-    // Read the override currently staged for a slot (empty optional if none).
-    // Lets tests assert what set_slot_info(persist=true) wrote into the
-    // in-memory map without going through get_slot_info (which also layers
-    // apply_overrides on top of firmware state).
-    static std::optional<helix::ams::FilamentSlotOverride> get_override(const AmsBackendAd5xIfs& b,
-                                                                        int slot_index) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        auto it = b.overrides_.find(slot_index);
-        if (it == b.overrides_.end())
-            return std::nullopt;
-        return it->second;
-    }
-    // Inject an override store so persist=true set_slot_info has somewhere to
-    // write. Production creates the store inside on_started(); tests that
-    // build the backend with a concrete MoonrakerAPIMock but never call
-    // on_started() need this shim to populate override_store_.
-    static void inject_override_store(AmsBackendAd5xIfs& b,
-                                      std::unique_ptr<helix::ams::FilamentSlotOverrideStore> s) {
-        b.override_store_ = std::move(s);
-    }
-    // Drive check_external_color_change directly with a caller-chosen observed
-    // color. Convenience overloads:
-    //   - uint32_t form: pass a real reading (forwards as std::optional{value}).
-    //     Use this for tests asserting baseline updates / change detection.
-    //   - std::nullopt_t form: pass the explicit "no reading" signal.
-    //     Use this for tests asserting the "empty reading must not update
-    //     baseline" contract (parse-order race protection).
-    // `slot_has_filament` defaults to true so existing call sites that just
-    // want to drive the baseline-update path don't need to think about
-    // presence semantics.
-    static bool check_external_color_change(AmsBackendAd5xIfs& b, int slot_index,
-                                            uint32_t observed_color,
-                                            bool slot_has_filament = true) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.check_external_color_change(slot_index, std::optional<uint32_t>{observed_color},
-                                             slot_has_filament);
-    }
-    static bool check_external_color_change(AmsBackendAd5xIfs& b, int slot_index, std::nullopt_t,
-                                            bool slot_has_filament = true) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.check_external_color_change(slot_index, std::nullopt, slot_has_filament);
-    }
-    // Type-change counterpart. observed_color is passed through so the helper's
-    // "no color reading yet -> defer sync" branch can be exercised; defaults to
-    // a present reading matching the common case.
-    static bool check_external_type_change(AmsBackendAd5xIfs& b, int slot_index,
-                                           const std::string& observed_material,
-                                           bool slot_has_filament = true,
-                                           std::optional<uint32_t> observed_color = 0x808080u) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.check_external_type_change(slot_index, observed_material, observed_color,
-                                            slot_has_filament);
-    }
-    static std::optional<uint32_t> last_firmware_color(const AmsBackendAd5xIfs& b, int slot_index) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        auto it = b.last_firmware_color_.find(slot_index);
-        if (it == b.last_firmware_color_.end())
-            return std::nullopt;
-        return it->second;
-    }
-    static std::optional<std::string> last_firmware_material(const AmsBackendAd5xIfs& b,
-                                                             int slot_index) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        auto it = b.last_firmware_material_.find(slot_index);
-        if (it == b.last_firmware_material_.end())
-            return std::nullopt;
-        return it->second;
-    }
-    // Listener feedback fix (v0.99.51 spam loop) + JSON-poll watcher hooks.
-    static bool on_gcode_response_line(AmsBackendAd5xIfs& b, const std::string& line) {
-        return b.on_gcode_response_line(line);
-    }
-    static void set_zcolor_query_active(AmsBackendAd5xIfs& b, bool active) {
-        b.zcolor_query_active_.store(active);
-    }
-    static uint32_t zcolor_schedule_count(const AmsBackendAd5xIfs& b) {
-        return b.zcolor_schedule_count_.load();
-    }
-    static uint32_t zcolor_worker_submit_count(const AmsBackendAd5xIfs& b) {
-        return b.zcolor_worker_submit_count_.load();
-    }
-    static bool zcolor_schedule_armed(const AmsBackendAd5xIfs& b) {
-        return b.zcolor_schedule_armed_.load();
-    }
-    static size_t zcolor_buffer_size(AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.zcolor_buffer_mutex_);
-        return b.zcolor_response_buffer_.size();
-    }
-    static bool note_json_content(AmsBackendAd5xIfs& b, const std::string& content) {
-        return b.note_json_content(content);
-    }
-    // Override the resolved on-disk Adventurer5M.json path so tests can drive
-    // the direct-write path against a tmp file instead of the real
-    // /usr/prog/config target. Empty string forces the Moonraker fallback.
-    static void set_local_adventurer_json_path(AmsBackendAd5xIfs& b, const std::string& p) {
-        b.local_adventurer_json_path_ = p;
-    }
-    static const std::string& local_adventurer_json_path(const AmsBackendAd5xIfs& b) {
-        return b.local_adventurer_json_path_;
-    }
-    // Drive the local read-modify-write path directly so tests can assert
-    // file content without going through the full set_slot_info pipeline.
-    static AmsError write_adventurer_json_local(AmsBackendAd5xIfs& b, int slot_index) {
-        return b.write_adventurer_json_local(slot_index);
-    }
-    // tool_map snapshot: copy out for comparison without holding mutex_.
-    static std::array<int, AmsBackendAd5xIfs::TOOL_MAP_SIZE> tool_map(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.tool_map_;
-    }
-    // Custom-types snapshot. Test fixture inspects what bambufy_custom_types
-    // / user.cfg merging produced.
-    static std::vector<std::string> custom_material_types(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.custom_types_mutex_);
-        return b.custom_material_types_;
-    }
-
-    // --- filament.json eject-parameter cache (LEN/SPEED per material) ---
-
-    // Drive the pure parse helper directly (no IO).
-    static void parse_filament_json(AmsBackendAd5xIfs& b, const std::string& content) {
-        b.parse_filament_json(content);
-    }
-    // Seed the per-material eject-parameter cache directly (mirrors what
-    // fetch_filament_json applies on the main thread). Material key, tube
-    // length (LEN), ifs speed (SPEED).
-    static void seed_filament_eject_params(AmsBackendAd5xIfs& b, const std::string& material,
-                                           int tube_length, int ifs_speed) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.filament_eject_params_[material] = {tube_length, ifs_speed};
-    }
-    // Read a cached pair back (returns nullopt when the material isn't cached).
-    static std::optional<std::pair<int, int>> filament_eject_params(const AmsBackendAd5xIfs& b,
-                                                                    const std::string& material) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        auto it = b.filament_eject_params_.find(material);
-        if (it == b.filament_eject_params_.end()) {
-            return std::nullopt;
-        }
-        return it->second;
-    }
-    // Read the parsed "default" pair (tube length, ifs speed).
-    static std::pair<int, int> filament_eject_default(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.filament_eject_default_;
-    }
-
-    // --- Phase tracker hooks (live load/unload progress feedback) ---
-
-    // Read the dynamic operation_detail string the phase machine produced.
-    static std::string operation_detail(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.system_info_.operation_detail;
-    }
-
-    // Read the granular operation_phase index the phase machine produced. This
-    // is the generic AmsSystemInfo field AmsState mirrors into the
-    // ams_operation_phase subject the right-side step tracker observes.
-    static int operation_phase(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.system_info_.operation_phase;
-    }
-
-    // Activate the phase tracker directly, bypassing load_filament/unload_filament's
-    // check_preconditions() (which fails with the null api/client used in tests).
-    // Mirrors what those entry points do: sets HEATING + begins phase tracking +
-    // applies the initial synthesized action/detail under mutex_.
-    static void begin_phase(AmsBackendAd5xIfs& b, bool is_unload) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.system_info_.action = AmsAction::HEATING;
-        b.action_start_time_ = std::chrono::steady_clock::now();
-        b.begin_phase_tracking_locked(is_unload);
-        b.apply_phase_action_locked();
-    }
-
-    static bool phase_active(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.phase_tracker_.active;
-    }
-
-    // Flip swap_expected — mirrors what load_filament does at dispatch when
-    // another lane is currently seated (seated_chan_ != target). Lets tests
-    // exercise check_action_timeout's swap-aware LOADING budget without
-    // driving the full load_filament dispatch (which needs the gcode API).
-    static void set_swap_expected(AmsBackendAd5xIfs& b, bool val) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.phase_tracker_.swap_expected = val;
-    }
-    static bool swap_expected(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.phase_tracker_.swap_expected;
-    }
-
-    static void finalize_op_after_macro(AmsBackendAd5xIfs& b, bool is_unload) {
-        b.finalize_op_after_macro(is_unload);
-    }
-
-    // --- Unattended runout detection (#1250 / #1247) ---
-
-    // Is a runout-shaped candidate armed? (a head-switch present->absent edge
-    // seen while idle, not yet confirmed by the dwell)
-    static bool head_empty_armed(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.head_empty_since_.has_value();
-    }
-    // Backdate the armed candidate so the confirm dwell has elapsed without the
-    // test sleeping. No-op when nothing is armed.
-    static void age_head_empty(AmsBackendAd5xIfs& b, std::chrono::seconds age) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        if (b.head_empty_since_.has_value()) {
-            b.head_empty_since_ = std::chrono::steady_clock::now() - age;
-        }
-    }
-    // Backdate the "a filament op was just dispatched" stamp past the
-    // suppression window.
-    static void age_op_dispatch(AmsBackendAd5xIfs& b, std::chrono::seconds age) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.last_filament_op_dispatch_ = std::chrono::steady_clock::now() - age;
-    }
-    static std::chrono::steady_clock::time_point op_dispatch_stamp(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.last_filament_op_dispatch_;
-    }
-    // Run the predicate against the current clock, exactly as handle_status_update
-    // does after check_action_timeout(). Returns whether it changed state.
-    static bool evaluate_runout(AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.evaluate_runout_locked();
-    }
-    static bool runout_active(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.runout_active_;
-    }
-    static int runout_slot(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.runout_slot_;
-    }
-    // The cross-backend AmsSystemInfo flag AmsState mirrors into
-    // ams_filament_runout.
-    static bool filament_runout(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.system_info_.filament_runout;
-    }
-    static int find_backup_slot(const AmsBackendAd5xIfs& b, int runout_slot) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.find_backup_slot_locked(runout_slot);
-    }
-    static std::chrono::seconds runout_confirm_delay(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.runout_confirm_delay_locked();
-    }
-
-    // --- Plugin visibility (#1250 B1-4) ---
-
-    // Drive the `gcode_macro _ifs_vars` get_status() dict parse directly.
-    static bool parse_ifs_vars_macro(AmsBackendAd5xIfs& b, const json& macro_status) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.parse_ifs_vars_macro_locked(macro_status);
-    }
-    static int backup_state(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.backup_state_locked();
-    }
-};
+// Ad5xIfsTestAccess now lives in tests/test_helpers/ad5x_ifs_test_access.h
+// (verbatim move) so the toolhead-unaccounted suite can share it.
 
 // Helper to build an extruder temperature status frame (mirrors CFS shape:
 // `{"extruder": {"temperature": T, "target": Tgt}}`).
@@ -962,6 +442,81 @@ TEST_CASE("AD5X IFS get_system_info", "[ams][ad5x_ifs]") {
 }
 
 // ==========================================================================
+// 9b. get_tool_mapping() advertises only the tools the firmware actually maps
+//
+// build_ams_topology() (ams_state.cpp) takes ToolTopology::tool_count straight
+// from this vector's length, and ToolState turns that into the tool list every
+// tool-count consumer reads. A 4-port AD5X with one hotend must therefore not
+// hand back all 16 addressable T-numbers.
+// ==========================================================================
+
+TEST_CASE("AD5X IFS get_tool_mapping drops the trailing unmapped tools", "[ams][ad5x_ifs]") {
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_has_ifs_vars(backend, true);
+    Ad5xIfsTestAccess::handle_status(backend, make_save_variables(standard_variables()));
+
+    auto mapping = backend.get_tool_mapping();
+    REQUIRE(mapping.size() == 4);
+    REQUIRE(mapping == std::vector<int>{0, 1, 2, 3});
+
+    // The firmware register itself is untouched — only the advertised topology
+    // shrinks, so the 16-wide system_info view still reports every T-number.
+    REQUIRE(backend.get_system_info().tool_to_slot_map.size() == 16);
+}
+
+TEST_CASE("AD5X IFS get_tool_mapping keeps a mid-range hole", "[ams][ad5x_ifs]") {
+    // tool_to_slot[i] is indexed BY tool number, so an unmapped T1 has to stay
+    // a -1 hole rather than collapsing T2 down into its place.
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_has_ifs_vars(backend, true);
+    auto vars = standard_variables();
+    // T0 -> port 1, T1 unmapped, T2 -> port 3, everything above unmapped.
+    vars["less_waste_tools"] = json::array({1, 5, 3, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5});
+    Ad5xIfsTestAccess::handle_status(backend, make_save_variables(vars));
+
+    auto mapping = backend.get_tool_mapping();
+    REQUIRE(mapping == std::vector<int>{0, -1, 2});
+}
+
+TEST_CASE("AD5X IFS get_tool_mapping is empty when nothing is mapped", "[ams][ad5x_ifs]") {
+    // Same answer the !has_ifs_vars_ path already gives, which build_ams_topology
+    // reads as "fall back to a 1:1 map from the slot count".
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_has_ifs_vars(backend, true);
+    auto vars = standard_variables();
+    vars["less_waste_tools"] = json::array({5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5});
+    Ad5xIfsTestAccess::handle_status(backend, make_save_variables(vars));
+
+    REQUIRE(backend.get_tool_mapping().empty());
+}
+
+TEST_CASE("AD5X IFS set_tool_mapping still addresses the full 0..15 tool range",
+          "[ams][ad5x_ifs]") {
+    // Trimming is a topology decision, not a firmware one: zmod's _IFS_VARS tool
+    // map is 16 wide and the user can still pin a lane to T15.
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_has_ifs_vars(backend, true);
+    Ad5xIfsTestAccess::handle_status(backend, make_save_variables(standard_variables()));
+
+    // The gcode write fails with a null api_, but the local map is applied first.
+    backend.set_tool_mapping(15, 0);
+    REQUIRE(Ad5xIfsTestAccess::tool_map(backend)[15] == 1); // port = slot + 1
+
+    auto mapping = backend.get_tool_mapping();
+    REQUIRE(mapping.size() == 16);
+    REQUIRE(mapping[15] == 0);
+    for (size_t t = 4; t < 15; ++t) {
+        INFO("tool " << t);
+        REQUIRE(mapping[t] == -1);
+    }
+
+    // One past the top is still rejected, and leaves the map alone.
+    auto before = Ad5xIfsTestAccess::tool_map(backend);
+    REQUIRE_FALSE(backend.set_tool_mapping(AmsBackendAd5xIfs::TOOL_MAP_SIZE, 0).success());
+    REQUIRE(Ad5xIfsTestAccess::tool_map(backend) == before);
+}
+
+// ==========================================================================
 // 10. Bypass mode
 // ==========================================================================
 
@@ -1004,11 +559,50 @@ TEST_CASE("AD5X IFS build_color_list_value format", "[ams][ad5x_ifs]") {
     seed_standard_colors(backend);
 
     std::string colors = Ad5xIfsTestAccess::build_colors(backend);
-    // Expected: Python list literal with outer double quotes. Function is no
-    // longer wired into the color write path (CHANGE_ZCOLOR is per-slot), but
-    // it remains for any future _IFS_VARS payload that legitimately needs the
-    // shape — keep the formatter test as a regression guard.
-    REQUIRE(colors == "\"['FF0000', '00FF00', '0000FF', 'FFFFFF']\"");
+    // var_prefix_ defaults to "less_waste" and tool_map_ is all-unmapped, so
+    // the builder takes the identity fallback (T0..T3 -> ports 1..4, matching
+    // lessWaste's own variable_tools default) and emits a 16-entry
+    // TOOL-indexed list: the 4 port colours then 12 empty entries for the
+    // unmapped virtual tools (#1247 — lessWaste's _RUNOUT_HEAD scans all 16
+    // tool slots, so a 4-entry payload truncated the arrays and no backup
+    // lane could ever match).
+    std::string expected = "\"['FF0000', '00FF00', '0000FF', 'FFFFFF'";
+    for (int i = 0; i < 12; ++i) {
+        expected += ", ''";
+    }
+    expected += "]\"";
+    REQUIRE(colors == expected);
+}
+
+TEST_CASE("AD5X IFS lessWaste list payload projects tool_map_ per tool", "[ams][ad5x_ifs]") {
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    seed_standard_colors(backend);
+    Ad5xIfsTestAccess::set_has_ifs_vars(backend, true);
+
+    // Swapped T0/T1, T2/T3, virtual tools 4-14 unmapped, T15 -> port 1.
+    json vars{{"less_waste_tools", json::array({2, 1, 4, 3, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 1})}};
+    Ad5xIfsTestAccess::parse_vars(backend, vars);
+
+    // Tool t's entry is colors_[tool_map_[t]-1]; unmapped tools carry ''.
+    REQUIRE(Ad5xIfsTestAccess::build_colors(backend) ==
+            "\"['00FF00', 'FF0000', 'FFFFFF', '0000FF', '', '', '', '', '', '', '', "
+            "'', '', '', '', 'FF0000']\"");
+    REQUIRE(Ad5xIfsTestAccess::build_types(backend) ==
+            "\"['PETG', 'PLA', 'TPU', 'ABS', '', '', '', '', '', '', '', "
+            "'', '', '', '', 'PLA']\"");
+}
+
+TEST_CASE("AD5X IFS bambufy list payload stays port-indexed 4-entry", "[ams][ad5x_ifs]") {
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    seed_standard_colors(backend);
+    Ad5xIfsTestAccess::set_var_prefix(backend, "bambufy");
+
+    // bambufy's _RUNOUT_HEAD iterates ifs.types (4 entries) and indexes
+    // ifs.colors[port-1] — the port-indexed shape is correct there, and the
+    // #1247 tool-indexing must not leak across prefixes.
+    REQUIRE(Ad5xIfsTestAccess::build_colors(backend) ==
+            "\"['FF0000', '00FF00', '0000FF', 'FFFFFF']\"");
+    REQUIRE(Ad5xIfsTestAccess::build_types(backend) == "\"['PLA', 'PETG', 'ABS', 'TPU']\"");
 }
 
 // ==========================================================================
@@ -1598,8 +1192,10 @@ TEST_CASE("AD5X IFS phase: unload sequence (temp + head sensor)", "[ams][ad5x_if
     REQUIRE(Ad5xIfsTestAccess::phase_active(backend));
     REQUIRE(Ad5xIfsTestAccess::action(backend) == AmsAction::HEATING);
 
-    // Before any temp seen — detail names only the target (no live temp yet).
-    REQUIRE(Ad5xIfsTestAccess::operation_detail(backend) == "Heating nozzle to 230°C");
+    // Before any temp or target seen — detail names neither. The backend has no
+    // signal to name a target with, and asserting one it never observed would be
+    // a fabrication.
+    REQUIRE(Ad5xIfsTestAccess::operation_detail(backend) == "Heating nozzle");
 
     // First temp frame: still heating, detail gains the live current temp.
     Ad5xIfsTestAccess::handle_status(backend, make_extruder(185.0, 230.0));
@@ -5708,6 +5304,83 @@ TEST_CASE("AD5X IFS bambufy prefix gets SHOW=0 to suppress _IFS_VARS echo",
     CHECK(types_has_show0);
 }
 
+// #1247: lessWaste's <prefix>_colors/_types save_variables are 16-entry
+// TOOL-indexed arrays, but the HelixScreen mirror pushed 4-entry port-indexed
+// lists — and _IFS_VARS replaces the arrays wholesale, so every push truncated
+// them. _RUNOUT_HEAD's backup scan of tools 4..15 then read out of range and no
+// backup spool could ever match (the "filament backup fails to switch" report).
+// SAVE_VARIABLE persists the damage across reboots, so parse_save_variables
+// must detect the truncated shape and dispatch a correctly-shaped repair push.
+TEST_CASE("AD5X IFS repairs truncated lessWaste colors/types, leaves healthy state alone",
+          "[ams][ad5x_ifs][1247]") {
+    // nullptr api: the repair dispatch is captured by the execute_gcode
+    // override, and a null api keeps handle_status_update's JSON-poll backstop
+    // idle so the test queues no UpdateQueue work.
+    GcodeCapturingBackend backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_has_ifs_vars(backend, true);
+    seed_standard_colors(backend);
+
+    // Damaged frame: 4-entry colors/types (the truncation signature) beside a
+    // healthy 16-entry tools map — exactly what an affected install persists.
+    const json identity_tools = json::array({1, 2, 3, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5});
+    json damaged{{"less_waste_tools", identity_tools},
+                 {"less_waste_colors", json::array({"FF0000", "00FF00", "0000FF", "FFFFFF"})},
+                 {"less_waste_types", json::array({"PLA", "PETG", "ABS", "TPU"})}};
+    Ad5xIfsTestAccess::handle_status(backend, make_save_variables(damaged));
+
+    REQUIRE(backend.any_gcode_starts_with("_IFS_VARS colors="));
+    REQUIRE(backend.any_gcode_starts_with("_IFS_VARS types="));
+    std::string expected_tail = "\"['FF0000', '00FF00', '0000FF', 'FFFFFF'";
+    for (int i = 0; i < 12; ++i) {
+        expected_tail += ", ''";
+    }
+    expected_tail += "]\"";
+    bool repair_shapes_ok = false;
+    for (const auto& g : backend.captured_gcodes) {
+        if (g == "_IFS_VARS colors=" + expected_tail) {
+            repair_shapes_ok = true;
+        }
+    }
+    REQUIRE(repair_shapes_ok);
+    // lessWaste repair must not carry the bambufy-only SHOW=0 suffix.
+    for (const auto& g : backend.captured_gcodes) {
+        if (g.rfind("_IFS_VARS ", 0) == 0) {
+            CHECK(g.find("SHOW=0") == std::string::npos);
+        }
+    }
+
+    // Healthy frame: full 16-entry arrays — no further repair dispatch.
+    backend.captured_gcodes.clear();
+    json healthy_colors = json::array();
+    json healthy_types = json::array();
+    for (int i = 0; i < 16; ++i) {
+        healthy_colors.push_back(i < 4 ? "FF0000" : "");
+        healthy_types.push_back(i < 4 ? "PLA" : "");
+    }
+    json healthy{{"less_waste_tools", identity_tools},
+                 {"less_waste_colors", healthy_colors},
+                 {"less_waste_types", healthy_types}};
+    Ad5xIfsTestAccess::handle_status(backend, make_save_variables(healthy));
+    CHECK_FALSE(backend.any_gcode_starts_with("_IFS_VARS colors="));
+    CHECK_FALSE(backend.any_gcode_starts_with("_IFS_VARS types="));
+}
+
+TEST_CASE("AD5X IFS no repair for bambufy 4-entry arrays (#1247)", "[ams][ad5x_ifs][1247]") {
+    GcodeCapturingBackend backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_has_ifs_vars(backend, true);
+    Ad5xIfsTestAccess::set_var_prefix(backend, "bambufy");
+
+    // bambufy's arrays legitimately hold 4 port-indexed entries — its
+    // _RUNOUT_HEAD iterates ifs.types (4) — so the truncation signature check
+    // must not fire for that prefix.
+    json frame{{"bambufy_tools", json::array({1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4})},
+               {"bambufy_colors", json::array({"FF0000", "00FF00", "0000FF", "FFFFFF"})},
+               {"bambufy_types", json::array({"PLA", "PETG", "ABS", "TPU"})}};
+    Ad5xIfsTestAccess::handle_status(backend, make_save_variables(frame));
+    CHECK_FALSE(backend.any_gcode_starts_with("_IFS_VARS colors="));
+    CHECK_FALSE(backend.any_gcode_starts_with("_IFS_VARS types="));
+}
+
 TEST_CASE("AD5X IFS mirror skipped when has_ifs_vars_ is false (stock zmod)",
           "[ams][ad5x_ifs][filament_slot_override]") {
     // Stock zmod (no lessWaste/bambufy plugin) has no _IFS_VARS macro to call.
@@ -7449,7 +7122,7 @@ TEST_CASE("AD5X IFS declining the pre-load home confirmation unwinds the phase t
     });
 
     REQUIRE(backend.load_filament(0).success());
-    // load_filament() arms operation_detail (e.g. "Heating nozzle to 230°C")
+    // load_filament() arms operation_detail (e.g. "Heating nozzle")
     // via apply_phase_action_locked() in the same locked block that begins
     // phase tracking -- assert it actually got set so the post-decline check
     // below proves something was cleared, not that it was already empty.
@@ -9125,6 +8798,158 @@ TEST_CASE("AD5X IFS write_adventurer_json_local writes real colour/type for a no
     CHECK(doc["FFMInfo"]["ffmType3"] == "TPU");
 }
 
+// ==========================================================================
+// A filament-present slot must never persist an EMPTY ffmColor.
+//
+// zmod's cmd_RUN_ZCOLOR builds the "Change type" prompt button as
+// `CHANGE_ZCOLOR SLOT=n HEX={zhex}` with no TYPE= param. When ffmColor is "",
+// zhex is "" and the literal gcode becomes `CHANGE_ZCOLOR SLOT=n HEX=`, which
+// cmd_CHANGE_ZCOLOR rejects (both HEX and TYPE empty) AFTER it has already
+// emitted `action:prompt_end`. The dialog closes and nothing reopens.
+// ==========================================================================
+
+TEST_CASE("AD5X IFS write_adventurer_json_local writes zmod's default colour when the material is "
+          "set but the colour is empty",
+          "[ams][ad5x_ifs][local_write]") {
+    Ad5xIfsTmpJsonFile tmp("typed_empty_color", R"({"FFMInfo":{}})");
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_local_adventurer_json_path(backend, tmp.path.string());
+
+    // Real material, no colour: the poisoned combination.
+    Ad5xIfsTestAccess::set_color(backend, 0, "");
+    Ad5xIfsTestAccess::set_material(backend, 0, "PLA");
+
+    auto err = Ad5xIfsTestAccess::write_adventurer_json_local(backend, 0);
+    REQUIRE(err.success());
+
+    std::ifstream f(tmp.path);
+    std::stringstream ss;
+    ss << f.rdbuf();
+    auto doc = json::parse(ss.str());
+    CHECK(doc["FFMInfo"]["ffmColor1"] == "#161616");
+    CHECK(doc["FFMInfo"]["ffmType1"] == "PLA");
+}
+
+TEST_CASE("AD5X IFS write_adventurer_json_local writes zmod's default colour when the material is "
+          "set but the colour is the 808080 placeholder",
+          "[ams][ad5x_ifs][local_write]") {
+    Ad5xIfsTmpJsonFile tmp("typed_placeholder_color", R"({"FFMInfo":{}})");
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_local_adventurer_json_path(backend, tmp.path.string());
+
+    // 808080 is our in-memory "no colour" placeholder; it must not reach the
+    // file as an empty ffmColor either.
+    Ad5xIfsTestAccess::set_color(backend, 1, "808080");
+    Ad5xIfsTestAccess::set_material(backend, 1, "PETG");
+
+    auto err = Ad5xIfsTestAccess::write_adventurer_json_local(backend, 1);
+    REQUIRE(err.success());
+
+    std::ifstream f(tmp.path);
+    std::stringstream ss;
+    ss << f.rdbuf();
+    auto doc = json::parse(ss.str());
+    CHECK(doc["FFMInfo"]["ffmColor2"] == "#161616");
+    CHECK(doc["FFMInfo"]["ffmType2"] == "PETG");
+}
+
+TEST_CASE("AD5X IFS write_adventurer_json_local keeps the empty-slot sentinels when no material is "
+          "set",
+          "[ams][ad5x_ifs][local_write]") {
+    Ad5xIfsTmpJsonFile tmp("empty_slot_sentinel", R"({"FFMInfo":{}})");
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_local_adventurer_json_path(backend, tmp.path.string());
+
+    // No material at all: the firmware-native "no filament" pair must survive.
+    // A genuinely empty slot never reaches the RUN_ZCOLOR submenu, so the empty
+    // ffmColor is harmless there and is what stock ZMOD itself writes.
+    SECTION("empty hex") {
+        Ad5xIfsTestAccess::set_color(backend, 2, "");
+        Ad5xIfsTestAccess::set_material(backend, 2, "");
+    }
+    SECTION("808080 placeholder hex") {
+        Ad5xIfsTestAccess::set_color(backend, 2, "808080");
+        Ad5xIfsTestAccess::set_material(backend, 2, "");
+    }
+
+    auto err = Ad5xIfsTestAccess::write_adventurer_json_local(backend, 2);
+    REQUIRE(err.success());
+
+    std::ifstream f(tmp.path);
+    std::stringstream ss;
+    ss << f.rdbuf();
+    auto doc = json::parse(ss.str());
+    CHECK(doc["FFMInfo"]["ffmColor3"] == "");
+    CHECK(doc["FFMInfo"]["ffmType3"] == "?");
+}
+
+TEST_CASE("AD5X IFS write_adventurer_json_local leaves a fully-specified slot alone",
+          "[ams][ad5x_ifs][local_write]") {
+    Ad5xIfsTmpJsonFile tmp("full_slot_unchanged", R"({"FFMInfo":{}})");
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_local_adventurer_json_path(backend, tmp.path.string());
+
+    Ad5xIfsTestAccess::set_color(backend, 3, "FF7700");
+    Ad5xIfsTestAccess::set_material(backend, 3, "ABS");
+
+    auto err = Ad5xIfsTestAccess::write_adventurer_json_local(backend, 3);
+    REQUIRE(err.success());
+
+    std::ifstream f(tmp.path);
+    std::stringstream ss;
+    ss << f.rdbuf();
+    auto doc = json::parse(ss.str());
+    CHECK(doc["FFMInfo"]["ffmColor4"] == "#FF7700");
+    CHECK(doc["FFMInfo"]["ffmType4"] == "ABS");
+}
+
+// ==========================================================================
+// HEATING detail must not assert a target the printer never reported.
+// ==========================================================================
+
+TEST_CASE("AD5X IFS phase: HEATING detail omits the target when none is known",
+          "[ams][ad5x_ifs][phase]") {
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+
+    // No extruder frame and no RESPOND line have been seen, so there is no
+    // target and no current temperature.
+    Ad5xIfsTestAccess::begin_phase(backend, /*is_unload=*/true);
+    REQUIRE(Ad5xIfsTestAccess::action(backend) == AmsAction::HEATING);
+
+    const std::string detail = Ad5xIfsTestAccess::operation_detail(backend);
+    CHECK(detail == "Heating nozzle");
+    CHECK(detail.find("230") == std::string::npos);
+}
+
+TEST_CASE("AD5X IFS phase: HEATING detail names the live temp but no target when only the temp is "
+          "known",
+          "[ams][ad5x_ifs][phase]") {
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+
+    // Heater off (target 0) but the nozzle still reads a real temperature.
+    Ad5xIfsTestAccess::handle_status(backend, make_extruder(62.0, 0.0));
+    Ad5xIfsTestAccess::begin_phase(backend, /*is_unload=*/true);
+
+    const std::string detail = Ad5xIfsTestAccess::operation_detail(backend);
+    CHECK(detail == "Heating nozzle (62°C)");
+    CHECK(detail.find("230") == std::string::npos);
+}
+
+TEST_CASE("AD5X IFS phase: HEATING detail still names a real target when one is known",
+          "[ams][ad5x_ifs][phase]") {
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+
+    // A pre-op extruder frame reports a live 220°C target at 62°C. begin_phase
+    // seeds from it, so the very first detail carries the REAL target.
+    Ad5xIfsTestAccess::handle_status(backend, make_extruder(62.0, 220.0));
+    Ad5xIfsTestAccess::begin_phase(backend, /*is_unload=*/true);
+
+    CHECK(Ad5xIfsTestAccess::operation_detail(backend) == "Heating nozzle to 220°C (62°C)");
+}
+
 TEST_CASE("AD5X IFS parse_adventurer_json maps firmware '?' ffmType to empty material (FIX 4b)",
           "[ams][ad5x_ifs]") {
     AmsBackendAd5xIfs backend(nullptr, nullptr);
@@ -9741,9 +9566,14 @@ TEST_CASE("AD5X IFS: an empty first material observation is a baseline, not a sp
 // The macro completes fine, but the RPC times out at 300s and — unless silent —
 // surfaces a false "printer.gcode.script timed out after 300000ms" toast. The
 // backend owns completion via its phase tracker + IFS_STATUS, so the RPC timeout
-// is advisory here. execute_gcode() must dispatch silent=true (suppress ONLY the
-// timeout toast; genuine RPC-error toasts stay suppressed via the error_cb
-// caller_handles_ui path) while leaving the 300s ceiling unchanged.
+// is advisory here. execute_gcode() must dispatch silent=true (suppress the
+// timeout toast and the tracker's generic fallback) while leaving the 300s
+// ceiling unchanged.
+//
+// It must ALSO declare caller_surfaces_errors=false: the backend's error_cb only
+// writes to the log, which the user never sees. Claiming otherwise would record
+// the message for dedup and silence GcodeErrorRouter, leaving a real IFS macro
+// rejection with no surface at all. See include/rpc_error_policy.h.
 // ==========================================================================
 
 TEST_CASE("AD5X IFS execute_gcode dispatches silent with the AMS timeout ceiling",
@@ -9770,6 +9600,10 @@ TEST_CASE("AD5X IFS execute_gcode dispatches silent with the AMS timeout ceiling
         REQUIRE(client.last_send_silent() == true);
         // Ceiling unchanged — proves we did NOT alter AMS_OPERATION_TIMEOUT_MS.
         REQUIRE(client.last_send_timeout_ms() == 300000u);
+        // The log-only error_cb must NOT claim the report, or the `!!` router
+        // goes quiet for every AFC / Happy Hare / CFS / IFS macro rejection.
+        REQUIRE(client.current_send_intent().silent == true);
+        REQUIRE(client.current_send_intent().surfaces_errors == false);
     }
 
     SECTION("on_complete execute_gcode overload") {
@@ -9781,6 +9615,8 @@ TEST_CASE("AD5X IFS execute_gcode dispatches silent with the AMS timeout ceiling
         REQUIRE(client.last_send_method() == "printer.gcode.script");
         REQUIRE(client.last_send_silent() == true);
         REQUIRE(client.last_send_timeout_ms() == 300000u);
+        REQUIRE(client.current_send_intent().silent == true);
+        REQUIRE(client.current_send_intent().surfaces_errors == false);
     }
 }
 

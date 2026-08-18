@@ -28,11 +28,15 @@ void ensure_translation_loaded(const std::string& lang) {
     if (lang.empty())
         return;
 
-    // Earlier revision short-circuited for "en" on the theory that tags ARE
-    // English and lv_translation_get returns the tag when no pack matches the
-    // selected language. That's functionally correct but makes every lv_tr()
-    // call log `language is not found` — hundreds of warnings on the device.
-    // Loading en.xml costs ~140 KB of heap; tolerable vs the log spam.
+    // en.xml maps every tag to itself, so registering it buys nothing:
+    // lv_translation_get() already falls back to the tag when no pack matches
+    // the selected language. It was loaded anyway because the fallback path
+    // logged `language is not found` on EVERY lookup; LVGL now reports that
+    // once per language (patches/lvgl_translation_warn_once.patch), so the
+    // ~140 KB of heap has no remaining justification. Skipping it also drops
+    // English lookups from a linear scan of 2739 entries to an empty walk.
+    if (lang == kIdentityLocale)
+        return;
 
     if (loaded_locales().count(lang) > 0)
         return;

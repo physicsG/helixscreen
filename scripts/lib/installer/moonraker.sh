@@ -259,15 +259,49 @@ migrate_to_web_type() {
 # Path to os-release; overridable so tests can point at a fixture.
 : "${OS_RELEASE_FILE:=/etc/os-release}"
 
-# Detect buildroot-based firmware (K1/K2/Snapmaker U1 etc.).
-# Buildroot has no apt/PackageKit, so Moonraker's System Update Provider can't
-# initialize and emits a harmless "Unable to initialize System Update Provider
-# for distribution: buildroot" warning the moment any [update_manager] section
-# exists. We detect the exact condition that produces the warning rather than
-# hardcoding a platform list. Mirrors platform.sh's buildroot check.
+# Detect buildroot-based firmware (K1/AD5M/Snapmaker U1 etc.).
+# Mirrors platform.sh's buildroot check.
 # Returns: 0 if buildroot, 1 otherwise
 is_buildroot_distro() {
     [ -f "$OS_RELEASE_FILE" ] && grep -q "buildroot" "$OS_RELEASE_FILE" 2>/dev/null
+}
+
+# Commands that mean the OS has a package manager Moonraker could actually use.
+# Overridable so the BATS suite can simulate firmware without one.
+: "${OS_PACKAGE_MANAGER_CMDS:=apt-get apt}"
+
+# Returns: 0 if some usable OS package manager is on PATH, 1 otherwise.
+has_os_package_manager() {
+    local cmd
+    for cmd in $OS_PACKAGE_MANAGER_CMDS; do
+        command -v "$cmd" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+# True when Moonraker's System Update Provider cannot work on this OS.
+#
+# Moonraker's PackageDeploy tries PackageKit over DBus first, then falls back to
+# the apt CLI and nothing else (system_deploy.py _get_fallback_provider:
+# "Currently only the API Fallback provider is available"). On firmware with
+# neither, the moment ANY [update_manager] section exists Moonraker emits four
+# permanent warnings into Mainsail/Fluidd — three "Unable to find DBus PolKit
+# Interface" (one per PackageKit permission check) plus "Unable to initialize
+# System Update Provider for distribution" — and logs a traceback on every
+# refresh. Since we are the ones adding that section, we are the ones who put
+# the warnings there.
+#
+# The absence of a package manager IS the condition, so probe for that rather
+# than for a distro name. The name check alone missed two shipped platforms:
+#   CC1  (COSMOS/Yocto) — no /etc/os-release at all, so any grep on it fails
+#   K2+  (OpenWrt)      — ID="openwrt", nothing matching "buildroot"
+# is_buildroot_distro stays as a first term so the platforms this already
+# covered keep behaving identically.
+# Returns: 0 if the provider is unusable here, 1 if it should be left enabled.
+system_updates_unavailable() {
+    is_buildroot_distro && return 0
+    has_os_package_manager || return 0
+    return 1
 }
 
 # Check if moonraker.conf has a bare top-level [update_manager] section
@@ -295,11 +329,12 @@ bare_update_manager_has_enable_key() {
 }
 
 # Ensure "enable_system_updates: False" exists under a top-level
-# [update_manager] section, but only on buildroot firmware. This silences the
-# "Unable to initialize System Update Provider for distribution: buildroot"
-# warning in Mainsail/Fluidd without affecting our [update_manager helixscreen]
-# one-click updater. On non-buildroot distros (Pi/x86) the warning never fires
-# and OS updates actually work, so we leave them enabled.
+# [update_manager] section, but only where the OS package manager is missing.
+# This silences the "Unable to initialize System Update Provider" and "Unable to
+# find DBus PolKit Interface" warnings in Mainsail/Fluidd without affecting our
+# [update_manager helixscreen] one-click updater. On a distro with a working
+# package manager (Pi/x86) the warnings never fire and OS updates actually work,
+# so we leave them enabled. See system_updates_unavailable().
 #
 # Merge semantics (never blindly append — a duplicate bare section is a fatal
 # Moonraker config error):
@@ -312,7 +347,7 @@ bare_update_manager_has_enable_key() {
 disable_system_updates_on_buildroot() {
     local conf="$1"
 
-    is_buildroot_distro || return 0
+    system_updates_unavailable || return 0
     [ -f "$conf" ] || return 0
 
     # Already fully configured — nothing to do (keeps idempotency cheap and
@@ -327,7 +362,7 @@ disable_system_updates_on_buildroot() {
 
     if has_bare_update_manager_section "$conf"; then
         # Merge: insert the key on the line right after the bare section header.
-        log_info "Adding enable_system_updates: False to existing [update_manager] (buildroot)"
+        log_info "Adding enable_system_updates: False to existing [update_manager] (no OS package manager)"
         $fs awk '
             { print }
             !done && /^[[:space:]]*\[update_manager\][[:space:]]*$/ {
@@ -337,10 +372,10 @@ disable_system_updates_on_buildroot() {
         ' "$conf" > "${conf}.tmp" && $fs mv "${conf}.tmp" "$conf"
     elif has_update_manager_section "$conf"; then
         # Insert a fresh bare section immediately before our helixscreen block.
-        log_info "Adding [update_manager] enable_system_updates: False (buildroot)"
+        log_info "Adding [update_manager] enable_system_updates: False (no OS package manager)"
         $fs awk '
             !done && /^\[update_manager helixscreen\]/ {
-                print "# Disable OS package updates on buildroot firmware (no apt/PackageKit)."
+                print "# Disable OS package updates: this firmware has no apt/PackageKit."
                 print "# Silences Moonraker'\''s \"Unable to initialize System Update Provider\" warning."
                 print "[update_manager]"
                 print "enable_system_updates: False"
@@ -351,17 +386,17 @@ disable_system_updates_on_buildroot() {
         ' "$conf" > "${conf}.tmp" && $fs mv "${conf}.tmp" "$conf"
     else
         # No helixscreen block yet — append a bare section at EOF.
-        log_info "Adding [update_manager] enable_system_updates: False (buildroot)"
+        log_info "Adding [update_manager] enable_system_updates: False (no OS package manager)"
         {
             printf '\n'
-            printf '# Disable OS package updates on buildroot firmware (no apt/PackageKit).\n'
+            printf '# Disable OS package updates: this firmware has no apt/PackageKit.\n'
             printf '# Silences Moonraker'\''s "Unable to initialize System Update Provider" warning.\n'
             printf '[update_manager]\n'
             printf 'enable_system_updates: False\n'
         } | $fs tee -a "$conf" >/dev/null
     fi
 
-    log_success "Disabled OS package updates in $conf (buildroot)"
+    log_success "Disabled OS package updates in $conf (no OS package manager)"
 }
 
 # Remove unsupported options from the helixscreen update_manager section.
@@ -508,18 +543,43 @@ remove_moonraker_asvc() {
     log_success "Removed helixscreen from Moonraker service allowlist"
 }
 
-# Restart Moonraker to pick up configuration changes
+# Restart Moonraker to pick up configuration changes.
+#
+# The init script name varies by firmware, and knowing only systemd plus the K1's
+# S56moonraker_service meant this fell off the end silently on everything else.
+# On a CC1 that made the moonraker.conf edit take effect at the user's next
+# reboot instead of at install time, which reads as "an update spontaneously
+# changed my printer" (verified: the CC1 has no systemctl, no
+# S56moonraker_service, and its script is /etc/init.d/moonraker).
+#
+# HELIX_INITD_DIR is the same seam camera.sh uses, so the BATS suite can point
+# this at a temp dir rather than needing a writable /etc/init.d.
+# Always returns 0 — a failed restart must never abort an install.
 restart_moonraker() {
+    local initd script
+
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet moonraker 2>/dev/null; then
         log_info "Restarting Moonraker to apply configuration..."
         $SUDO systemctl restart moonraker || true
-    elif [ -x "/etc/init.d/S56moonraker_service" ]; then
-        # K1/Simple AF uses SysV init
-        log_info "Restarting Moonraker to apply configuration..."
-        if ! $SUDO /etc/init.d/S56moonraker_service restart 2>/dev/null; then
-            log_warn "Could not restart Moonraker - you may need to restart it manually"
-        fi
+        return 0
     fi
+
+    # SysV/procd firmware. S56moonraker_service is Creality K1/Simple AF; a plain
+    # "moonraker" covers COSMOS (CC1) and the rest.
+    initd="${HELIX_INITD_DIR:-/etc/init.d}"
+    for script in "${initd}/S56moonraker_service" "${initd}/moonraker" \
+                  "/etc/init.d/S56moonraker_service" "/etc/init.d/moonraker"; do
+        if [ -x "$script" ] || [ -f "$script" ]; then
+            log_info "Restarting Moonraker to apply configuration..."
+            if ! $SUDO "$script" restart 2>/dev/null; then
+                log_warn "Could not restart Moonraker - you may need to restart it manually"
+            fi
+            return 0
+        fi
+    done
+
+    log_warn "Could not find a way to restart Moonraker - restart it manually for the configuration change to take effect."
+    return 0
 }
 
 # Configure Moonraker update_manager
@@ -618,7 +678,7 @@ configure_moonraker_updates() {
     # (type: zip shows perpetual UP-TO-DATE in Mainsail — see mainsail-crew/mainsail#2444)
     if has_old_git_repo_section "$conf" || has_old_zip_section "$conf"; then
         migrate_to_web_type "$conf"
-        # On buildroot firmware, silence the System Update Provider warning.
+        # Where the OS has no package manager, silence the provider warnings.
         disable_system_updates_on_buildroot "$conf"
         ensure_moonraker_asvc "$conf"
         restart_moonraker
@@ -630,7 +690,7 @@ configure_moonraker_updates() {
         # Remove options not supported by type: web (persistent_files,
         # managed_services, install_script) that cause Moonraker warnings.
         cleanup_unsupported_options "$conf"
-        # On buildroot firmware, silence the System Update Provider warning.
+        # Where the OS has no package manager, silence the provider warnings.
         disable_system_updates_on_buildroot "$conf"
         # Still ensure asvc is correct even if section already exists
         ensure_moonraker_asvc "$conf"
@@ -638,7 +698,7 @@ configure_moonraker_updates() {
     fi
 
     add_update_manager_section "$conf"
-    # On buildroot firmware, silence the System Update Provider warning.
+    # Where the OS has no package manager, silence the provider warnings.
     disable_system_updates_on_buildroot "$conf"
     ensure_moonraker_asvc "$conf"
     restart_moonraker

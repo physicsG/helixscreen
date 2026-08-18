@@ -1712,14 +1712,26 @@ void PrintSelectPanel::set_api(IMoonrakerAPI* api) {
                 // one debug bundle it burned 97 KB of a ring that has to hold
                 // the whole session. Nothing downstream reads the other fields.
                 std::string action = "?";
+                std::string root;
                 std::string path;
                 if (msg.contains("params") && msg["params"].is_array() && !msg["params"].empty()) {
                     const json& p = msg["params"][0];
                     action = p.value("action", "?");
                     if (p.contains("item") && p["item"].is_object()) {
                         const json& item = p["item"];
-                        path = item.value("root", "") + ":" + item.value("path", "");
+                        root = item.value("root", "");
+                        path = root + ":" + item.value("path", "");
                     }
+                }
+
+                // Roots other than "gcodes" cannot change this list, and the
+                // config root churns constantly on an AFC printer. Log those at
+                // debug so the ring still shows they arrived without one line
+                // per 10 s of print time.
+                if (!filelist_change_affects_gcodes(root)) {
+                    spdlog::debug("[{}] notify_filelist_changed: {} {} (other root, ignored)",
+                                  self->get_name(), action, path);
+                    return;
                 }
                 spdlog::info("[{}] notify_filelist_changed: {} {}", self->get_name(), action, path);
 

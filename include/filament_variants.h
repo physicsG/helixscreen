@@ -105,6 +105,26 @@ class FilamentVariantsTestAccess {
     /// assets/filaments.json on the next orca_match_type() call.
     static void set_orca_tables(std::set<std::string> library_types,
                                 std::map<std::string, std::string> overrides);
+
+    /**
+     * @brief Run the Orca table reader over an in-memory document
+     *
+     * The production reader walks assets/filaments.json from a fixed search
+     * path, which a test cannot redirect. This exposes the same parse over a
+     * string so the extraction rules — which keys are captured, which nesting
+     * levels are ignored, what a malformed document does — can be pinned
+     * directly.
+     *
+     * @param json_text Document to read
+     * @param[out] library_types Captured `orca_library_types` entries
+     * @param[out] overrides Captured `orca_type_overrides` pairs
+     * @param[out] error Parser message when the document is malformed
+     * @return true if the document parsed AND its root was an object
+     */
+    static bool parse_orca_tables(const std::string& json_text,
+                                  std::set<std::string>& library_types,
+                                  std::map<std::string, std::string>& overrides,
+                                  std::string& error);
 };
 
 /// Force the Orca tables to load now, on the calling thread, instead of

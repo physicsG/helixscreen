@@ -303,6 +303,46 @@ if [ "$_enable_heap_diag" = "1" ]; then
 fi
 unset _arch _kernel _enable_heap_diag
 
+# Cap glibc's per-thread malloc arenas on memory-constrained boards.
+#
+# glibc spawns up to 8*ncores secondary arenas on demand. Each reserves
+# HEAP_MAX_SIZE (1 MB on 32-bit ARM) of address space and commits a head.
+# helix-screen runs ~12 threads, and they are IO-bound (websocket, HTTP,
+# thumbnail workers), not allocation-bound, so the extra arenas buy no
+# measurable contention relief and cost real memory.
+#
+# Measured A/B on a CC1 (114 MB RAM), two fresh processes at the same age:
+#   default          18,360 kB RSS / 7,352 kB anon / 4 secondary arenas
+#   MALLOC_ARENA_MAX=2  17,060 kB RSS / 6,180 kB anon / 1 secondary arena
+# 1.3 MB RSS back, 1.17 MB of it anonymous, plus 24 MB of 32-bit address space.
+#
+# Anonymous is the expensive kind on these boards: file pages can be dropped,
+# anonymous pages can only be swapped. helix-screen's working set already keeps
+# these devices in continuous reclaim, and the pages the kernel steals belong to
+# Klipper and Moonraker (measured on a CC1: 3675 and 5526 major faults against
+# helix-screen's 68). A Klipper stalled on flash IO is a "Timer too close".
+#
+# Gated on total RAM rather than a platform list, because a list is the thing
+# that has to be remembered for every new board and silently isn't. Measured
+# fleet: AD5M 110 MB, CC1 112 MB, K1C 209 MB, K2 Plus 488 MB, Snapmaker U1
+# 962 MB, CB1 987 MB — the 512 MB line sits inside a 2x gap, not on an edge.
+# A value already set (helixscreen.env or the environment) always wins.
+: "${HELIX_MEMINFO_FILE:=/proc/meminfo}"
+HELIX_CONSTRAINED_MEM_KB=${HELIX_CONSTRAINED_MEM_KB:-524288}
+if [ -z "${MALLOC_ARENA_MAX:-}" ] && [ -r "$HELIX_MEMINFO_FILE" ]; then
+    _mem_total_kb=$(awk '/^MemTotal:/ { print $2; exit }' "$HELIX_MEMINFO_FILE" 2>/dev/null || echo "")
+    # Ignore an unreadable or non-numeric MemTotal rather than guessing.
+    case "$_mem_total_kb" in
+        '' | *[!0-9]*) ;;
+        *)
+            if [ "$_mem_total_kb" -lt "$HELIX_CONSTRAINED_MEM_KB" ]; then
+                export MALLOC_ARENA_MAX=2
+            fi
+            ;;
+    esac
+    unset _mem_total_kb
+fi
+
 # Select binary AFTER env file is sourced so HELIX_DISPLAY_BACKEND=fbdev in env file works
 MAIN_BIN=$(select_binary "${BIN_DIR}")
 

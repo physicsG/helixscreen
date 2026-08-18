@@ -24,6 +24,7 @@
 #include "filament_op_router.h"
 #include "filament_sensor_manager.h"
 #include "format_utils.h"
+#include "klipper_extruder_naming.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "moonraker_api.h"
 #include "moonraker_client.h"
@@ -46,6 +47,7 @@
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <chrono>
 #include <string_view>
 #include <unordered_set>
@@ -686,21 +688,7 @@ void PrintStatusWidget::handle_library_last() {
         return;
     }
 
-    const auto& jobs = history->get_jobs();
-    if (jobs.empty()) {
-        spdlog::info("[PrintStatusWidget] Library: Print Last - no jobs in history");
-        return;
-    }
-
-    // Find most recent job where the file still exists
-    const PrintHistoryJob* last_job = nullptr;
-    for (const auto& job : jobs) {
-        if (job.exists) {
-            last_job = &job;
-            break;
-        }
-    }
-
+    const PrintHistoryJob* last_job = history->get_newest_existing_job();
     if (!last_job) {
         spdlog::info("[PrintStatusWidget] Library: Print Last - no files exist on disk");
         return;
@@ -814,16 +802,19 @@ void PrintStatusWidget::apply_esp_psram_thumbnail() {
 
 std::string PrintStatusWidget::get_last_print_thumbnail_path() const {
     auto* history = get_print_history_manager();
-    if (!history || !history->is_loaded()) {
+    if (!history) {
         return {};
     }
 
-    const auto& jobs = history->get_jobs();
-    if (jobs.empty()) {
+    // A deleted file's thumbnail never 404s: the cache is keyed on the job's
+    // relative path and validated against its `modified` stamp, neither of
+    // which changes when the gcode is removed. Skipping the job is the only
+    // thing that stops the dead file's image being served.
+    const PrintHistoryJob* newest = history->get_newest_existing_job();
+    if (!newest) {
         return {};
     }
-
-    const auto& job = jobs.front();
+    const auto& job = *newest;
 
     // Select the best thumbnail for the widget's actual rendered size
     if (!job.thumbnails.empty() && print_card_thumb_ && lv_obj_is_valid(print_card_thumb_)) {
@@ -857,18 +848,14 @@ std::string PrintStatusWidget::get_last_print_thumbnail_path() const {
 
 time_t PrintStatusWidget::get_last_print_source_modified() const {
     auto* history = get_print_history_manager();
-    if (!history || !history->is_loaded()) {
+    if (!history) {
         return 0;
     }
 
-    const auto& jobs = history->get_jobs();
-    if (jobs.empty()) {
-        return 0;
-    }
-
-    // Same head entry get_last_print_thumbnail_path() picks its key from, so the
+    // Same entry get_last_print_thumbnail_path() picks its key from, so the
     // freshness stamp always describes the key it is validating.
-    return static_cast<time_t>(jobs.front().modified);
+    const PrintHistoryJob* newest = history->get_newest_existing_job();
+    return newest ? static_cast<time_t>(newest->modified) : 0;
 }
 
 void PrintStatusWidget::defer_reset_print_card_to_idle() {
@@ -990,17 +977,7 @@ void PrintStatusWidget::set_thumb_on_widgets(const char* src) {
 
 void PrintStatusWidget::update_last_print_availability() {
     auto* history = get_print_history_manager();
-    last_print_available_ = false;
-
-    if (history && history->is_loaded()) {
-        const auto& jobs = history->get_jobs();
-        for (const auto& job : jobs) {
-            if (job.exists) {
-                last_print_available_ = true;
-                break;
-            }
-        }
-    }
+    last_print_available_ = history && history->get_newest_existing_job() != nullptr;
 
     // Apply to both full and compact "Print Last" rows
     lv_obj_t* rows[] = {library_row_last_, compact_row_last_};
@@ -1544,10 +1521,12 @@ void PrintStatusWidget::show_nozzle_tool_picker(lv_obj_t* anchor) {
     if (nozzle_picker_.is_visible() || !parent_screen_ || !anchor)
         return;
 
-    // Single-tool printer: picker has nothing useful to offer. The whole
+    // Single-hotend printer: picker has nothing useful to offer. The whole
     // nozzle group is now the click target (chevron is visual-only), so this
-    // can fire on a regular print and should be a clean no-op.
-    if (lv_subject_get_int(ToolState::instance().get_tool_count_subject()) <= 1) {
+    // can fire on a regular print and should be a clean no-op. Counts nozzles
+    // rather than tools, matching the print_status_multi_tool gate that hides
+    // the chevron — an AMS's filament lanes all feed the one hotend.
+    if (!ToolState::instance().has_multiple_extruders()) {
         return;
     }
 
@@ -1605,10 +1584,9 @@ void PrintStatusWidget::NozzleToolPicker::on_created(lv_obj_t* backdrop) {
                 NozzleToolPicker* picker = payload->picker;
                 picker->hide();
 
-                picker->owner_.nozzle_tool_override_ = tool_key;
-                picker->owner_.config_["nozzle_tool_override"] = tool_key;
-                if (s_formatter_)
-                    s_formatter_->set_nozzle_tool_override(tool_key);
+                // apply_nozzle_tool_override records whichever pin actually took
+                // effect, so a name the formatter refuses never reaches config.
+                picker->owner_.apply_nozzle_tool_override(tool_key);
                 LVGL_SAFE_EVENT_CB_END();
             },
             LV_EVENT_CLICKED, nullptr);
@@ -1626,26 +1604,63 @@ void PrintStatusWidget::NozzleToolPicker::on_created(lv_obj_t* backdrop) {
     };
 
     add_row(lv_tr("Follow active tool"), "auto");
-    // Use the same display names PrinterTemperatureState exposes — "Nozzle 1",
-    // "Nozzle 2", ... — for parity with the temp_graph config modal and the
-    // multi-tool nozzle_temps widget.
-    const auto& exts = owner_.printer_state_.temperature_state().extruders();
-    int count = ToolState::instance().tool_count();
-    for (int i = 0; i < count; ++i) {
-        std::string name = (i == 0) ? "extruder" : ("extruder" + std::to_string(i));
-        std::string label;
-        auto it = exts.find(name);
-        if (it != exts.end() && !it->second.display_name.empty()) {
-            label = it->second.display_name;
-        } else {
-            // Fallback when extruders haven't been discovered yet.
-            label = (i == 0) ? std::string(lv_tr("Nozzle"))
-                             : std::string(lv_tr("Nozzle")) + " " + std::to_string(i + 1);
-        }
-        add_row(label.c_str(), name);
+    const auto options =
+        build_nozzle_tool_options(owner_.printer_state_.temperature_state().extruders());
+    for (const auto& opt : options) {
+        add_row(opt.label.c_str(), opt.extruder_name);
     }
 
-    spdlog::debug("[PrintStatusWidget] Nozzle tool picker built with {} tools", count);
+    spdlog::debug("[PrintStatusWidget] Nozzle tool picker built with {} nozzle(s)", options.size());
+}
+
+std::vector<PrintStatusWidget::NozzleToolOption> PrintStatusWidget::build_nozzle_tool_options(
+    const std::unordered_map<std::string, helix::ExtruderInfo>& extruders) {
+    std::vector<NozzleToolOption> options;
+    options.reserve(extruders.size());
+    for (const auto& [name, info] : extruders) {
+        // Anything that is not a Klipper extruder object cannot be pinned — the
+        // formatter resolves the row's key straight to a per-extruder subject.
+        if (!helix::is_extruder_name(name)) {
+            continue;
+        }
+        NozzleToolOption opt;
+        opt.extruder_name = name;
+        // Use the display name PrinterTemperatureState already assigned —
+        // "Nozzle 1", "Nozzle 2", ... — for parity with the temp_graph config
+        // modal and the multi-tool nozzle_temps widget.
+        if (!info.display_name.empty()) {
+            opt.label = info.display_name;
+        } else {
+            const int index = helix::tool_number_for_extruder(name).value_or(0);
+            opt.label = index == 0 ? std::string(lv_tr("Nozzle"))
+                                   : std::string(lv_tr("Nozzle")) + " " + std::to_string(index + 1);
+        }
+        options.push_back(std::move(opt));
+    }
+    // extruders() is an unordered_map, so impose the printer's own order:
+    // "extruder" first, then extruder1, extruder2, ... A plain name sort would
+    // put extruder10 ahead of extruder2.
+    std::sort(options.begin(), options.end(), [](const auto& a, const auto& b) {
+        return helix::tool_number_for_extruder(a.extruder_name).value_or(0) <
+               helix::tool_number_for_extruder(b.extruder_name).value_or(0);
+    });
+    return options;
+}
+
+bool PrintStatusWidget::apply_nozzle_tool_override(const std::string& tool_key) {
+    const bool accepted = !s_formatter_ || s_formatter_->set_nozzle_tool_override(tool_key);
+    // A refused pin leaves the formatter bound to the active extruder, so the
+    // widget has to record "auto" too. Writing the rejected name instead left
+    // config disagreeing with what is on screen until the next attach() repaired
+    // it (see attach()'s set_nozzle_tool_override fallback).
+    const std::string effective = accepted ? tool_key : std::string("auto");
+    nozzle_tool_override_ = effective;
+    config_["nozzle_tool_override"] = effective;
+    if (!accepted) {
+        spdlog::info("[PrintStatusWidget] nozzle pin '{}' has no matching extruder — kept auto",
+                     tool_key);
+    }
+    return accepted;
 }
 
 // ============================================================================
@@ -1906,36 +1921,34 @@ bool PrintStatusWidget::DetailedFormatter::set_nozzle_tool_override(
 }
 
 void PrintStatusWidget::DetailedFormatter::update_multi_tool() {
-    int count = lv_subject_get_int(ToolState::instance().get_tool_count_subject());
-    lv_subject_set_int(&PrintStatusWidget::multi_tool_subject_, count > 1 ? 1 : 0);
+    // Gated on physical extruders, not tool_count(): set_ams_topology() expands
+    // ToolState's tool list to one entry per filament SLOT, so a 4-lane AMS or a
+    // 16-wide AD5X tool map reports many "tools" behind a single hotend. Naming
+    // which nozzle you are looking at only means something when there is more
+    // than one nozzle. Matches the nozzle_icon badge gate in ui_ams_tool_text.
+    const bool multi = ToolState::instance().has_multiple_extruders();
+    lv_subject_set_int(&PrintStatusWidget::multi_tool_subject_, multi ? 1 : 0);
 }
 
 void PrintStatusWidget::DetailedFormatter::update_tool_label() {
-    int count = lv_subject_get_int(ToolState::instance().get_tool_count_subject());
-    if (count <= 1) {
+    auto& tools = ToolState::instance();
+    if (!tools.has_multiple_extruders()) {
         nozzle_tool_label_buf_[0] = '\0';
     } else {
         // Label tracks what the user is VIEWING — the pinned tool when one
         // is set, otherwise the currently active tool. Anything else looks
         // broken right after a pin ("I picked Nozzle 2 but it still says T0").
         int idx = -1;
-        if (current_nozzle_override_ == "extruder") {
-            idx = 0;
-        } else if (current_nozzle_override_.rfind("extruder", 0) == 0 &&
-                   current_nozzle_override_.size() > 8) {
-            // Defend against hand-edited config — atoi parses leading digits
-            // only; check the parsed index is in range before trusting it.
-            const char* suffix = current_nozzle_override_.c_str() + 8;
-            if (suffix[0] >= '0' && suffix[0] <= '9') {
-                int parsed = std::atoi(suffix);
-                if (parsed >= 0 && parsed < count) {
-                    idx = parsed;
-                }
+        // Defend against hand-edited config — the name has to parse as a
+        // Klipper extruder AND name an extruder this printer has.
+        if (const auto parsed = helix::tool_number_for_extruder(current_nozzle_override_)) {
+            if (*parsed < tools.extruder_count()) {
+                idx = *parsed;
             }
         }
         if (idx < 0) {
             // "auto", unrecognized, or out-of-range → follow active tool.
-            idx = ToolState::instance().active_tool_index();
+            idx = tools.active_tool_index();
         }
         snprintf(nozzle_tool_label_buf_, sizeof(nozzle_tool_label_buf_), "T%d", idx);
     }
@@ -1944,14 +1957,20 @@ void PrintStatusWidget::DetailedFormatter::update_tool_label() {
 
 void PrintStatusWidget::DetailedFormatter::update_idle_fields() {
     auto* hm = get_print_history_manager();
-    if (!hm || !hm->is_loaded() || hm->get_jobs().empty()) {
+    // The tile's whole job is to offer a reprint, so it describes the newest
+    // print that can still be reprinted. When the newest history entry names a
+    // file the user has since deleted, that entry is not it - and when nothing
+    // survives, the tile presents as never-printed (empty name, disabled
+    // Reprint via print_status_idle_has_last).
+    const PrintHistoryJob* newest = hm ? hm->get_newest_existing_job() : nullptr;
+    if (!newest) {
         lv_subject_copy_string(&idle_filename_subject_, "");
         lv_subject_copy_string(&idle_when_subject_, "Never printed");
         lv_subject_copy_string(&idle_meta_subject_, "");
         lv_subject_set_int(&idle_has_last_subject_, 0);
         return;
     }
-    const PrintHistoryJob& job = hm->get_jobs().front();
+    const PrintHistoryJob& job = *newest;
     snprintf(idle_filename_buf_, sizeof(idle_filename_buf_), "%s", job.filename.c_str());
     lv_subject_copy_string(&idle_filename_subject_, idle_filename_buf_);
 
@@ -2031,7 +2050,7 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
         s_formatter_->filament_used_observer_.reset();
         s_formatter_->nozzle_temp_observer_.reset();
         s_formatter_->nozzle_target_observer_.reset();
-        s_formatter_->tool_count_observer_.reset();
+        s_formatter_->tools_version_observer_.reset();
         s_formatter_->active_tool_observer_.reset();
         s_formatter_->arc_value_observer_.reset();
         s_formatter_->nozzle_temp_lifetime_.reset();
@@ -2074,9 +2093,11 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
     update_filament_text();
     update_nozzle_text();
 
-    // Multi-tool: observe tool_count + active_tool to drive gate and T<n> label
-    tool_count_observer_ = observe_int_sync<DetailedFormatter>(
-        ToolState::instance().get_tool_count_subject(), this,
+    // Multi-extruder: observe the tool-list version + active_tool to drive the
+    // gate and the T<n> label. tools_version bumps on every tool-list rebuild,
+    // including the ones that leave the count alone.
+    tools_version_observer_ = observe_int_sync<DetailedFormatter>(
+        ToolState::instance().get_tools_version_subject(), this,
         [](DetailedFormatter* self, int) {
             self->update_multi_tool();
             self->update_tool_label();
@@ -2136,7 +2157,7 @@ PrintStatusWidget::DetailedFormatter::~DetailedFormatter() {
     filament_used_observer_.reset();
     nozzle_temp_observer_.reset();
     nozzle_target_observer_.reset();
-    tool_count_observer_.reset();
+    tools_version_observer_.reset();
     active_tool_observer_.reset();
     arc_value_observer_.reset();
     nozzle_temp_lifetime_.reset();

@@ -30,4 +30,19 @@ class EmergencyStopOverlayTestAccess {
     static void reset_suppression(EmergencyStopOverlay& o) {
         o.suppress_recovery_until_.store(0, std::memory_order_relaxed);
     }
+
+    /// Drop the dependency pointers init() installed. Same singleton problem as
+    /// reset_suppression(), but it outlives memory rather than a deadline: tests
+    /// pass init() a stack local or fixture member (test_unified_recovery_dialog
+    /// and test_fault_modal_dismiss both do), while the singleton keeps the raw
+    /// pointer for the rest of the suite. get_klippy_state_message() returns a
+    /// reference INTO that PrinterState, so a later test draining the queue runs
+    /// update_recovery_dialog_content() against a dead frame — ASan reports it as
+    /// a stack-use-after-return, blamed on whichever test reused those bytes.
+    /// Cleared centrally in HelixTestFixture::reset_all() rather than per test,
+    /// so the next init() caller cannot reintroduce it by forgetting.
+    static void reset_dependencies(EmergencyStopOverlay& o) {
+        o.printer_state_ = nullptr;
+        o.api_ = nullptr;
+    }
 };

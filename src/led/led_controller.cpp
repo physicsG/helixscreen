@@ -755,6 +755,12 @@ void NativeBackend::set_color(const std::string& strip_id, double r, double g, d
     spdlog::debug("[NativeBackend] set_color: {} r={:.2f} g={:.2f} b={:.2f} w={:.2f}", strip_id, r,
                   g, b, w);
 
+    // Captured before the wrapper below, which is non-null on every call and
+    // would otherwise read our own bookkeeping as a promise the caller never
+    // made — silencing GcodeErrorRouter's `!!` copy of the same rejection.
+    // See include/rpc_error_policy.h.
+    const bool caller_surfaces = (on_error != nullptr);
+
     api_->set_led(
         strip_id, r, g, b, w, std::move(on_success),
         [on_error](const MoonrakerError& err) {
@@ -762,7 +768,7 @@ void NativeBackend::set_color(const std::string& strip_id, double r, double g, d
                 on_error(err.message);
             }
         },
-        std::move(on_queued));
+        std::move(on_queued), caller_surfaces);
 }
 
 void NativeBackend::set_brightness(const std::string& strip_id, int brightness_pct, double r,
@@ -992,7 +998,8 @@ std::string LedEffectBackend::parse_klipper_led_target(const std::string& klippe
 void LedEffectBackend::activate_effect(const std::string& effect_name,
                                        NativeBackend::SuccessCallback on_success,
                                        NativeBackend::ErrorCallback on_error,
-                                       NativeBackend::SuccessCallback on_queued) {
+                                       NativeBackend::SuccessCallback on_queued,
+                                       bool caller_surfaces_errors) {
     if (!api_) {
         spdlog::warn("[LedEffectBackend] activate_effect called with no API (effect={})",
                      effect_name);
@@ -1012,6 +1019,9 @@ void LedEffectBackend::activate_effect(const std::string& effect_name,
     std::string gcode = "SET_LED_EFFECT EFFECT=" + bare_name;
     spdlog::debug("[LedEffectBackend] activate_effect: {} -> gcode: {}", effect_name, gcode);
 
+    // Captured before the wrapper below, which is non-null on every call.
+    const bool caller_surfaces = caller_surfaces_errors && (on_error != nullptr);
+
     api_->execute_gcode(
         gcode, std::move(on_success),
         [on_error](const MoonrakerError& err) {
@@ -1019,12 +1029,13 @@ void LedEffectBackend::activate_effect(const std::string& effect_name,
                 on_error(err.message);
             }
         },
-        /*timeout_ms=*/0, /*silent=*/false, std::move(on_queued));
+        /*timeout_ms=*/0, /*silent=*/false, std::move(on_queued), caller_surfaces);
 }
 
 void LedEffectBackend::stop_all_effects(NativeBackend::SuccessCallback on_success,
                                         NativeBackend::ErrorCallback on_error,
-                                        NativeBackend::SuccessCallback on_queued) {
+                                        NativeBackend::SuccessCallback on_queued,
+                                        bool caller_surfaces_errors) {
     if (!api_) {
         spdlog::warn("[LedEffectBackend] stop_all_effects called with no API");
         if (on_error) {
@@ -1035,6 +1046,9 @@ void LedEffectBackend::stop_all_effects(NativeBackend::SuccessCallback on_succes
 
     spdlog::debug("[LedEffectBackend] stop_all_effects: gcode: STOP_LED_EFFECTS");
 
+    // Captured before the wrapper below, which is non-null on every call.
+    const bool caller_surfaces = caller_surfaces_errors && (on_error != nullptr);
+
     api_->execute_gcode(
         "STOP_LED_EFFECTS", std::move(on_success),
         [on_error](const MoonrakerError& err) {
@@ -1042,7 +1056,7 @@ void LedEffectBackend::stop_all_effects(NativeBackend::SuccessCallback on_succes
                 on_error(err.message);
             }
         },
-        /*timeout_ms=*/0, /*silent=*/false, std::move(on_queued));
+        /*timeout_ms=*/0, /*silent=*/false, std::move(on_queued), caller_surfaces);
 }
 
 void LedEffectBackend::stop_effect(const std::string& effect_name,
@@ -1067,6 +1081,9 @@ void LedEffectBackend::stop_effect(const std::string& effect_name,
     std::string gcode = "SET_LED_EFFECT EFFECT=" + bare_name + " STOP=1";
     spdlog::debug("[LedEffectBackend] stop_effect: {} -> gcode: {}", effect_name, gcode);
 
+    // Captured before the wrapper below, which is non-null on every call.
+    const bool caller_surfaces = (on_error != nullptr);
+
     api_->execute_gcode(
         gcode, std::move(on_success),
         [on_error](const MoonrakerError& err) {
@@ -1074,7 +1091,7 @@ void LedEffectBackend::stop_effect(const std::string& effect_name,
                 on_error(err.message);
             }
         },
-        /*timeout_ms=*/0, /*silent=*/false, std::move(on_queued));
+        /*timeout_ms=*/0, /*silent=*/false, std::move(on_queued), caller_surfaces);
 }
 
 std::string LedEffectBackend::icon_hint_for_effect(const std::string& effect_name) {
@@ -1407,11 +1424,18 @@ void MacroBackend::execute_on(const std::string& macro_name,
                 return;
             }
             spdlog::debug("[MacroBackend] execute_on: {} -> {}", macro_name, gcode);
-            api_->execute_gcode(gcode, on_success, [on_error](const MoonrakerError& err) {
-                if (on_error) {
-                    on_error(err.message);
-                }
-            });
+            // Captured before the wrapper below, which is non-null on every call
+            // and would otherwise claim the report on the caller's behalf. See
+            // include/rpc_error_policy.h.
+            const bool caller_surfaces = (on_error != nullptr);
+            api_->execute_gcode(
+                gcode, on_success,
+                [on_error](const MoonrakerError& err) {
+                    if (on_error) {
+                        on_error(err.message);
+                    }
+                },
+                /*timeout_ms=*/0, /*silent=*/false, /*on_queued=*/nullptr, caller_surfaces);
             return;
         }
     }
@@ -1449,11 +1473,15 @@ void MacroBackend::execute_off(const std::string& macro_name,
                 return;
             }
             spdlog::debug("[MacroBackend] execute_off: {} -> {}", macro_name, gcode);
-            api_->execute_gcode(gcode, on_success, [on_error](const MoonrakerError& err) {
-                if (on_error) {
-                    on_error(err.message);
-                }
-            });
+            const bool caller_surfaces = (on_error != nullptr);
+            api_->execute_gcode(
+                gcode, on_success,
+                [on_error](const MoonrakerError& err) {
+                    if (on_error) {
+                        on_error(err.message);
+                    }
+                },
+                /*timeout_ms=*/0, /*silent=*/false, /*on_queued=*/nullptr, caller_surfaces);
             return;
         }
     }
@@ -1481,12 +1509,15 @@ void MacroBackend::execute_toggle(const std::string& macro_name,
             if (!macro.toggle_macro.empty()) {
                 spdlog::debug("[MacroBackend] execute_toggle: {} -> {}", macro_name,
                               macro.toggle_macro);
-                api_->execute_gcode(macro.toggle_macro, on_success,
-                                    [on_error](const MoonrakerError& err) {
-                                        if (on_error) {
-                                            on_error(err.message);
-                                        }
-                                    });
+                const bool caller_surfaces = (on_error != nullptr);
+                api_->execute_gcode(
+                    macro.toggle_macro, on_success,
+                    [on_error](const MoonrakerError& err) {
+                        if (on_error) {
+                            on_error(err.message);
+                        }
+                    },
+                    /*timeout_ms=*/0, /*silent=*/false, /*on_queued=*/nullptr, caller_surfaces);
             } else {
                 spdlog::warn("[MacroBackend] No toggle macro configured for '{}'", macro_name);
                 if (on_error) {
@@ -1515,11 +1546,15 @@ void MacroBackend::execute_custom_action(const std::string& macro_gcode,
     }
 
     spdlog::debug("[MacroBackend] execute_custom_action: {}", macro_gcode);
-    api_->execute_gcode(macro_gcode, on_success, [on_error](const MoonrakerError& err) {
-        if (on_error) {
-            on_error(err.message);
-        }
-    });
+    const bool caller_surfaces = (on_error != nullptr);
+    api_->execute_gcode(
+        macro_gcode, on_success,
+        [on_error](const MoonrakerError& err) {
+            if (on_error) {
+                on_error(err.message);
+            }
+        },
+        /*timeout_ms=*/0, /*silent=*/false, /*on_queued=*/nullptr, caller_surfaces);
 }
 
 bool MacroBackend::has_known_state(const std::string& macro_name) const {
@@ -1566,6 +1601,10 @@ void OutputPinBackend::set_value(const std::string& pin_id, double value,
 
     // Use spdlog's bundled fmt for locale-independent float formatting
     std::string gcode = fmt::format("SET_PIN PIN={} VALUE={:.4f}", pin_name, value);
+
+    // Captured before the wrapper below, which is non-null on every call.
+    const bool caller_surfaces = (on_error != nullptr);
+
     api_->execute_gcode(
         gcode, std::move(on_success),
         [on_error](const MoonrakerError& err) {
@@ -1573,7 +1612,7 @@ void OutputPinBackend::set_value(const std::string& pin_id, double value,
                 on_error(err.message);
             }
         },
-        /*timeout_ms=*/0, /*silent=*/false, std::move(on_queued));
+        /*timeout_ms=*/0, /*silent=*/false, std::move(on_queued), caller_surfaces);
 }
 
 void OutputPinBackend::turn_on(const std::string& pin_id, NativeBackend::SuccessCallback on_success,

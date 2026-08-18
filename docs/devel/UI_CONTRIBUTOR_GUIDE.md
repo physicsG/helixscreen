@@ -208,6 +208,8 @@ You almost never need to reference font tokens directly. Use the semantic `<text
 | `#input_height` | vertical | 48px | 52px | 56px | Text input / dropdown height |
 | `#temp_card_height` | vertical | 64px | 72px | 80px | Temperature card in print status |
 | `#dialog_content_max` | vertical | 260px | 320px | 440px | Max height of a modal's scrollable body |
+| `#dialog_content_pinned_max` | vertical | 164px | 207px | 272px | Same, plus one pinned block below the scroll area (measured 85% cap − chrome, #1277) |
+| `#dialog_content_tall_chrome_max` | vertical | 176px | 229px | 282px | Same, plus a second button row with its divider (measured 85% cap − chrome, #1277) |
 | `#badge_size` | neutral | 16px | 18px | 20px | Status badge diameter |
 | `#nav_width` | horizontal | 76px | 104px | 132px | Nav bar width — see note below |
 | `#icon_size` | neutral | md | lg | xl | Responsive icon size string |

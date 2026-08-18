@@ -225,11 +225,18 @@ class PrintTuneOverlay : public OverlayBase {
     //
 
     static constexpr double Z_STEP_AMOUNTS[] = {0.05, 0.025, 0.01, 0.005};
-    static constexpr int Z_STEP_DEFAULT = 2;     ///< Default step: 0.01mm
-    static constexpr double Z_OFFSET_MIN = -2.0; ///< Clamp: max 2mm closer
-    static constexpr double Z_OFFSET_MAX = 2.0;  ///< Clamp: max 2mm farther
+    static constexpr int Z_STEP_DEFAULT = 2; ///< Default step: 0.01mm
+
+    /// How far one tuning session may travel from the offset it opened on, in
+    /// either direction. The guard bounds the *travel*, not the absolute
+    /// offset: printers with several toolheads or nozzles legitimately run
+    /// offsets past this, and clamping the absolute value snapped them toward
+    /// zero on the first tap and drove the nozzle into the print.
+    static constexpr double Z_OFFSET_MAX_SESSION_TRAVEL = 2.0;
 
     double current_z_offset_ = 0.0;
+    /// Offset the overlay opened on; session travel is measured from here.
+    double session_base_z_offset_ = 0.0;
     int selected_z_step_idx_ = Z_STEP_DEFAULT;
     int speed_percent_ = 100;
     int flow_percent_ = 100;

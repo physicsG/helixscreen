@@ -550,6 +550,8 @@ export HELIX_TOUCH_MAX_Y=900
 ./build/bin/helix-screen
 ```
 
+**Known panel needing this:** the Qidi Q2's Goodix digitizer *over-reports* its ABS range — EVIOCGABS says 800x480 but the glass only emits ~460x237 — so the auto-installed coarse scale over-divides and taps compress toward the top-left until calibrated ([#943](https://github.com/prestonbrown/helixscreen/issues/943); calibration span-check logs the captured/target ratio, ~0.57x/0.49y on this panel). Setting the four values to the **emitted** range restores 1:1 mapping; the affine calibration from the wizard fixes it without env vars. Full hardware notes: [`printers/QIDI_SUPPORT.md`](printers/QIDI_SUPPORT.md).
+
 ### Affine Calibration (config file)
 
 For precise calibration including rotation and skew correction, use the touch calibration wizard. The wizard computes a 6-coefficient affine transform and saves it to the config file at `input.calibration.{a,b,c,d,e,f}`. (The legacy `display.calibration` path is auto-migrated to `input.calibration` on load — see `docs/devel/CONFIG_MIGRATION.md`.)
@@ -960,18 +962,23 @@ Select the mock AMS topology/type.
 
 | Property | Value |
 |----------|-------|
-| **Values** | `afc`, `toolchanger` / `tc`, `mixed`, `multi` |
+| **Values** | `none`, `afc`, `toolchanger` / `tc`, `mixed`, `multi`, `torture`, `vivid`, `ifs`, `htlf`, `snapmaker` |
 | **Default** | Happy Hare, LINEAR, 4 slots |
 | **File** | `src/printer/ams_backend.cpp` |
 
-| Value | What it simulates |
-|-------|-------------------|
-| *(unset)* | Happy Hare, LINEAR, 4 slots (default constructor) |
-| `afc` | AFC Box Turtle, HUB, 4 slots |
-| `toolchanger` / `tc` | Tool Changer, PARALLEL topology |
-| `mixed` | Box Turtle + 2x OpenAMS, 6 tools |
-| `multi` | Box Turtle (4 slots) + Night Owl (2 slots), single toolhead |
-| `htlf_toolchanger` | AFC HTLF + Toolchanger: 4 HTLF lanes (2 direct, 2 hub→shared extruder) + 3 standalone toolheads. Tests MIXED topology. Aliases: `htlf_tc`, `htlf` |
+| Value | Units | What it simulates |
+|-------|-------|-------------------|
+| *(unset)* | 1 | Happy Hare, LINEAR, 4 slots (default constructor) |
+| `none` | - | No mock AMS at all |
+| `afc` | 1 | AFC Box Turtle, HUB, 4 slots. Aliases: `box_turtle`, `boxturtle` |
+| `toolchanger` / `tc` | 1 | Tool Changer, PARALLEL topology. Alias: `tool_changer` |
+| `mixed` | 3 | Box Turtle + 2x OpenAMS, 6 tools |
+| `multi` | 2 | Box Turtle (4 slots) + Night Owl (2 slots), single toolhead |
+| `torture` | **5** | **The only profile whose unit-card row overflows.** See below |
+| `vivid` | 3 | 2x Box Turtle + ViViD, 12 slots |
+| `ifs` | 1 | AD5X IFS, 4 slots, LINEAR. Aliases: `ad5x`, `ad5x_ifs` |
+| `htlf_toolchanger` | 2 | AFC HTLF + Toolchanger: 4 HTLF lanes (2 direct, 2 hub→shared extruder) + 3 standalone toolheads. Tests MIXED topology. Aliases: `htlf_tc`, `htlf` |
+| `snapmaker` | 1 | Snapmaker U1, 4 slots, PARALLEL, non-editable mapping. Aliases: `snapswap`, `u1` |
 
 ```bash
 # Simulate AFC Box Turtle
@@ -987,6 +994,30 @@ HELIX_MOCK_AMS=mixed ./build/bin/helix-screen --test
 HELIX_MOCK_AMS=multi ./build/bin/helix-screen --test
 ```
 
+#### `torture` - the multi-unit stress profile
+
+Modelled on a real user rig captured 2026-08-16. **Five** units / 16 lanes / **4**
+Klipper extruders:
+
+| Unit | Lanes | Topology | Extruder |
+|------|-------|----------|----------|
+| Box_Turtle Turtle_1 | lane1-4 | HUB | **e0** |
+| Toolchanger Tools | e1, e2 | PARALLEL | e1, e2 |
+| ViViD Vivid_1 | lane5-8 | HUB | **e3** |
+| EMU EMU_1 | lane9-10 | HUB | **e3** |
+| Claymore HTLF_claymore_1 | lane11-14 | HUB | **e0** |
+
+Two pairs of HUB units share a nozzle, two lanes are unmapped, and the AFC tool
+aliases are neither dense nor unit-ordered (T0 and T10 are absent). Every other
+profile tops out at 3 units, and unit cards shrink to `#ams_card_min_width`, so
+in every other profile `unit_cards_row` measures `scroll.right == 0` even at
+`-s tiny`. Anything that only misbehaves once that row can scroll is
+unreproducible without this profile.
+
+```bash
+HELIX_MOCK_AMS=torture ./build/bin/helix-screen --test -vv
+```
+
 **Multi-extruder and tool testing:** Setting `HELIX_MOCK_AMS=toolchanger` also creates multiple tool definitions and extruders in the mock environment. Multiple extruders (extruder, extruder1, etc.) and tools are auto-discovered from Klipper objects at runtime, so no separate env var is needed to control extruder count. The toolchanger mock provides a complete multi-tool, multi-extruder test environment.
 
 ### `HELIX_MOCK_AMS_STATE`
@@ -995,7 +1026,7 @@ Select the mock AMS visual scenario.
 
 | Property | Value |
 |----------|-------|
-| **Values** | `idle`, `loading`, `error`, `bypass` |
+| **Values** | `idle`, `loading`, `error`, `bypass`, `unaccounted` |
 | **Default** | `idle` (slot 0 loaded, slot 3 empty, others available) |
 | **File** | `src/printer/ams_backend.cpp` |
 
@@ -1005,6 +1036,7 @@ Select the mock AMS visual scenario.
 | `loading` | Active load in progress with realistic segment animation |
 | `error` | Slot errors visible; buffer fault also shown when combined with `afc` mode |
 | `bypass` | Bypass mode active |
+| `unaccounted` | Filament at the toolhead that no lane accounts for (drives the print-start gate warning) |
 
 ```bash
 # Show error states (slot errors + buffer fault)
@@ -1670,7 +1702,7 @@ journalctl -u helixscreen | grep '\[TouchDebug\]'  # Pi/x86 (systemd journal)
 
 ### `HELIX_CRASH_TEST`
 
-Deliberately segfault through a known call chain to verify that the crash handler's stack unwind works on a given piece of hardware. Fires immediately after `crash_handler::install()`, so the resulting `crash.txt` exercises the real handler and can be checked for correct frame resolution.
+Deliberately segfault through a known call chain to verify that the crash handler's stack unwind works on a given piece of hardware. Fires immediately after `crash_handler::install()`, so the resulting crash.txt exercises the real handler and can be checked for correct frame resolution.
 
 | Property | Value |
 |----------|-------|
@@ -1887,6 +1919,8 @@ The threshold has to clear the longest *legitimate* main-thread block, and those
 
 Size the in-memory log ring, in messages. The ring sink is what a debug bundle harvests — it holds recent lines that the WARN-level file/syslog sinks never persisted, which is the whole point of attaching a bundle to a bug report. Shrink it on a device where even a few hundred KB matters.
 
+Read by `init_early()`, not by `init()`: the ring is allocated before the config system comes up so the startup diagnostics land in it, and `init()` adopts that same buffer. So this variable has to be in the process environment (`helixscreen.env`, a systemd `Environment=`, or the invoking shell) - there is no settings key equivalent, and nothing read from `settings.json` can influence the capacity.
+
 | Property | Value |
 |----------|-------|
 | **Values** | Positive integer (message count). Zero, negative, and unparseable values are ignored. |
@@ -1933,6 +1967,8 @@ HELIX_BUNDLE_LOG_DEBUG=0 ./build/bin/helix-screen
 ```
 
 This only affects the ring sink. The file/syslog/journal sinks keep running at the configured level either way.
+
+The variable is read twice, because the ring is installed by `init_early()` and adopted by `init()` (see `LOGGING.md` § "Ring-Buffer Sink Lifecycle"). Before `init()` there is no configured level to fall back to, so during startup `=0` leaves the ring at WARN alongside the early console sink; from Phase 3 onward it means the configured level as documented above.
 
 ### `HELIX_LOG_ROTATE_BYTES` / `HELIX_LOG_ROTATE_FILES`
 
@@ -2140,7 +2176,7 @@ Used as fallback when `XDG_DATA_HOME` is not set.
 
 ### `HELIX_CONFIG_DIR`
 
-Override the directory HelixScreen reads and writes its user configuration from — `settings.json`, `helixscreen.env`, `crash.txt` and everything else resolved through `helix::writable_path()`.
+Override the directory HelixScreen reads and writes its user configuration from — `settings.json`, `helixscreen.env`, crash.txt and everything else resolved through `helix::writable_path()`.
 
 | Property | Value |
 |----------|-------|
@@ -2315,7 +2351,7 @@ Set these in `helixscreen.env`, which the launcher sources before it builds the 
 - Resolution is CLI flag > env var (including `helixscreen.env` and hook exports) > `/log_dest` and `/log_path` in `settings.json` > default.
 - `HELIX_LOG_LEVEL` takes priority over `HELIX_DEBUG`: a named level emits `--log-level=<level>` and the legacy `-vv` branch is never reached.
 - `HELIX_LOG_DEST=auto` is the only value that produces no launcher flag. `auto` resolves to the systemd journal when `/run/systemd/journal/socket` exists, otherwise syslog on Linux, console on macOS. It **never** resolves to a file on any platform — the file sink has to be asked for, which is what the embedded platform hooks do.
-- The launcher resolves these **after** sourcing `platform/hooks.sh`, so a value exported from `platform_pre_start` is picked up. Six of the seven hooks rely on that.
+- The launcher resolves these **after** sourcing platform/hooks.sh, so a value exported from `platform_pre_start` is picked up. Six of the seven hooks rely on that.
 - An unopenable `HELIX_LOG_FILE` is not fatal: the sink construction is caught and the platform's normal system sink takes over with a warning.
 
 **Example:**
@@ -2439,4 +2475,4 @@ HELIX_BACKLIGHT_DEVICE=sysfs \
 - [Development Guide](DEVELOPMENT.md) - Daily development workflow
 - [Build System](BUILD_SYSTEM.md) - Build configuration
 - [Testing Guide](TESTING.md) - Test infrastructure
-- [User Configuration](user/CONFIGURATION.md) - End-user setup
+- [User Configuration](../user/CONFIGURATION.md) - End-user setup

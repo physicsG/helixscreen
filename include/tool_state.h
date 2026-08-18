@@ -213,6 +213,8 @@ class ToolState {
     }
 
   private:
+    friend class ToolStateTestAccess;
+
     ToolState() = default;
     SubjectManager subjects_;
     /// See get_subjects_lifetime(). Created with the object and REPLACED (never

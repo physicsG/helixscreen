@@ -152,6 +152,9 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     AmsError enable_bypass() override;
     AmsError disable_bypass() override;
     [[nodiscard]] bool is_bypass_active() const override;
+    /// mmu.filament "Loaded" while mmu.gate names no gate (-1). Gate -2 is
+    /// bypass — accounted there (the gate layer also silences under bypass).
+    [[nodiscard]] std::optional<bool> toolhead_filament_unaccounted() const override;
     /// Happy Hare users have a console; the screen passes their command through
     /// rather than synthesising a prerequisite operation they never asked for
     /// (#1229).
@@ -215,6 +218,10 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
 
     [[nodiscard]] bool has_firmware_spool_persistence() const override {
         return true; // Happy Hare persists via MMU_GATE_MAP SPOOLID
+    }
+
+    [[nodiscard]] bool firmware_reports_spool_ids() const override {
+        return true; // Happy Hare publishes gate spool_id in mmu status
     }
 
     [[nodiscard]] RemapStrategy get_remap_strategy() const override {

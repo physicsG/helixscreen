@@ -1332,7 +1332,7 @@ extract_release() {
                 log_error "Cannot write to ${INSTALL_DIR} (read-only under ProtectSystem)."
                 log_error "The systemd service file needs updating to allow self-updates."
                 log_error "Fix: re-run the installer once with:"
-                log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | bash"
+                log_error "  curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update"
                 rm -rf "$extract_dir"
                 exit 1
             fi
@@ -1372,7 +1372,7 @@ extract_release() {
 
                 if [ "$_inplace_failed" = true ]; then
                     log_error "In-place update failed. Install may be in a broken state."
-                    log_error "Fix: re-run the installer: curl -fsSL https://releases.helixscreen.org/install.sh | bash"
+                    log_error "Fix: re-run the installer: curl -fsSL https://releases.helixscreen.org/install.sh | sh -s -- --update"
                     rm -rf "$extract_dir"
                     exit 1
                 fi
@@ -1464,7 +1464,7 @@ extract_release() {
                 log_info "Install partition tight (${install_free_mb}MB free, need ~${new_install_mb}MB); staging rollback backup off-partition at ${HELIX_OFFSITE_ROLLBACK_DIR}"
 
                 # Cross-fs move (copy to roomy + delete) frees the install fs.
-                if ! $(file_sudo "${INSTALL_DIR}") mv "${INSTALL_DIR}" "$INSTALL_BACKUP"; then
+                if ! $(path_sudo "${INSTALL_DIR}") mv "${INSTALL_DIR}" "$INSTALL_BACKUP"; then
                     log_error "Failed to relocate existing installation off-partition."
                     rm -rf "$extract_dir"
                     exit 1
@@ -1491,7 +1491,7 @@ extract_release() {
             fi
 
             # Atomic swap: move old install to backup
-            if ! $(file_sudo "${INSTALL_DIR}") mv "${INSTALL_DIR}" "$INSTALL_BACKUP"; then
+            if ! $(path_sudo "${INSTALL_DIR}") mv "${INSTALL_DIR}" "$INSTALL_BACKUP"; then
                 log_error "Failed to backup existing installation."
                 rm -rf "$extract_dir"
                 exit 1
@@ -1506,9 +1506,19 @@ extract_release() {
         # ROLLBACK: restore old installation
         if [ -d "${INSTALL_BACKUP:-}" ]; then
             log_warn "Rolling back to previous installation..."
-            # Remove partial new install that may block the rollback mv
-            [ -d "${INSTALL_DIR}" ] && $SUDO rm -rf "${INSTALL_DIR}"
-            if $SUDO mv "$INSTALL_BACKUP" "${INSTALL_DIR}"; then
+            # Remove partial new install that may block the rollback mv.
+            # Unescalated first, then escalate — the same two-attempt idiom the
+            # stale-backup removals above use. A forced $SUDO is not the safe
+            # choice here: under NoNewPrivileges (self-update) sudo cannot run at
+            # all, so escalating first turns a rollback that would have worked on
+            # a user-owned parent into a failed one, and a failed rollback leaves
+            # the box with no install.
+            if [ -d "${INSTALL_DIR}" ]; then
+                $(path_sudo "${INSTALL_DIR}") rm -rf "${INSTALL_DIR}" 2>/dev/null || \
+                    $SUDO rm -rf "${INSTALL_DIR}" 2>/dev/null || true
+            fi
+            if $(path_sudo "$INSTALL_BACKUP") mv "$INSTALL_BACKUP" "${INSTALL_DIR}" 2>/dev/null || \
+               $SUDO mv "$INSTALL_BACKUP" "${INSTALL_DIR}"; then
                 log_warn "Rollback complete. Previous installation restored."
                 # Off-partition rollback: the cross-fs mv leaves an empty
                 # helixscreen-rollback/ dir behind. Remove it, but ONLY when its

@@ -10,6 +10,7 @@
 #include <cctype>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 
 #include "hv/json.hpp"
 
@@ -179,6 +180,130 @@ std::map<std::string, std::string> g_orca_overrides;
 const char* ORCA_TABLE_PATHS[] = {"assets/filaments.json", "../assets/filaments.json",
                                   "/opt/helixscreen/assets/filaments.json"};
 
+/**
+ * @brief SAX reader for the two Orca tables, skipping the rest of the file
+ *
+ * The tables we want are 426 bytes of strings living beside a 72 KB `filaments`
+ * array we do not read here (FilamentCatalog owns that, and loads it on demand).
+ * A DOM parse would materialize all 360 product objects to reach two sibling
+ * keys — measured at 872 kB of allocation versus 44 kB for this handler, and
+ * twice the parse time. That matters at boot rather than later because freeing
+ * a DOM does not hand the pages back (see PrinterDatabase::compact()), so the
+ * transient parse permanently raises the arena high-water mark.
+ *
+ * Depth is tracked so that keys inside `filaments` entries (depth 3) can never
+ * be mistaken for the top-level keys (depth 1) that select a capture target.
+ */
+class OrcaTableSax : public nlohmann::json_sax<nlohmann::json> {
+  public:
+    std::set<std::string> library_types;
+    std::map<std::string, std::string> overrides;
+    bool root_is_object = false;
+
+    bool key(string_t& val) override {
+        if (depth_ == 1) {
+            in_types_ = (val == "orca_library_types");
+            in_overrides_ = (val == "orca_type_overrides");
+        } else if (in_overrides_ && depth_ == 2) {
+            pending_key_ = val;
+        }
+        return true;
+    }
+
+    bool string(string_t& val) override {
+        if (in_types_ && depth_ == 2) {
+            library_types.insert(val);
+        } else if (in_overrides_ && depth_ == 2 && !pending_key_.empty()) {
+            overrides[pending_key_] = val;
+            pending_key_.clear();
+        }
+        return true;
+    }
+
+    bool start_object(std::size_t) override {
+        if (depth_ == 0) {
+            root_is_object = true;
+        }
+        ++depth_;
+        return true;
+    }
+    bool end_object() override {
+        --depth_;
+        if (depth_ <= 1) {
+            in_overrides_ = false;
+        }
+        return true;
+    }
+    bool start_array(std::size_t) override {
+        ++depth_;
+        return true;
+    }
+    bool end_array() override {
+        --depth_;
+        if (depth_ <= 1) {
+            in_types_ = false;
+        }
+        return true;
+    }
+
+    // Everything else in the file is skipped rather than stored.
+    bool null() override {
+        return true;
+    }
+    bool boolean(bool) override {
+        return true;
+    }
+    bool number_integer(number_integer_t) override {
+        return true;
+    }
+    bool number_unsigned(number_unsigned_t) override {
+        return true;
+    }
+    bool number_float(number_float_t, const string_t&) override {
+        return true;
+    }
+    bool binary(binary_t&) override {
+        return true;
+    }
+    bool parse_error(std::size_t, const std::string&,
+                     const nlohmann::detail::exception& e) override {
+        error = e.what();
+        return false;
+    }
+
+    std::string error;
+
+  private:
+    int depth_ = 0;
+    bool in_types_ = false;
+    bool in_overrides_ = false;
+    std::string pending_key_;
+};
+
+/**
+ * @brief Read both Orca tables out of a JSON stream
+ *
+ * @param[out] error Set only when the document is malformed; a well-formed
+ *                   document whose root is not an object returns false with
+ *                   @p error empty, so the caller can tell "corrupt" (warn)
+ *                   apart from "wrong shape" (skip quietly).
+ * @return true when the tables were extracted from an object root
+ */
+bool read_orca_tables(std::istream& in, std::set<std::string>& types,
+                      std::map<std::string, std::string>& overrides, std::string& error) {
+    OrcaTableSax sax;
+    if (!nlohmann::json::sax_parse(in, &sax)) {
+        error = sax.error;
+        return false;
+    }
+    if (!sax.root_is_object) {
+        return false;
+    }
+    types = std::move(sax.library_types);
+    overrides = std::move(sax.overrides);
+    return true;
+}
+
 /// Load the tables from the first readable asset. Caller holds g_orca_mutex.
 void load_orca_tables_locked() {
     if (g_orca_loaded)
@@ -188,28 +313,20 @@ void load_orca_tables_locked() {
         std::ifstream f(path);
         if (!f.is_open())
             continue;
-        try {
-            auto doc = nlohmann::json::parse(f);
-            if (!doc.is_object())
-                continue;
-            if (auto it = doc.find("orca_library_types"); it != doc.end() && it->is_array()) {
-                for (const auto& t : *it) {
-                    if (t.is_string())
-                        g_orca_library_types.insert(t.get<std::string>());
-                }
+        std::set<std::string> types;
+        std::map<std::string, std::string> overrides;
+        std::string error;
+        if (!read_orca_tables(f, types, overrides, error)) {
+            if (!error.empty()) {
+                spdlog::warn("[filament] Orca table parse failed {}: {}", path, error);
             }
-            if (auto it = doc.find("orca_type_overrides"); it != doc.end() && it->is_object()) {
-                for (const auto& [k, v] : it->items()) {
-                    if (v.is_string())
-                        g_orca_overrides[k] = v.get<std::string>();
-                }
-            }
-            spdlog::debug("[filament] loaded {} Orca library types, {} overrides from {}",
-                          g_orca_library_types.size(), g_orca_overrides.size(), path);
-            return;
-        } catch (const std::exception& e) {
-            spdlog::warn("[filament] Orca table parse failed {}: {}", path, e.what());
+            continue;
         }
+        g_orca_library_types = std::move(types);
+        g_orca_overrides = std::move(overrides);
+        spdlog::debug("[filament] loaded {} Orca library types, {} overrides from {}",
+                      g_orca_library_types.size(), g_orca_overrides.size(), path);
+        return;
     }
     // No asset: every lookup misses, so orca_match_type returns "" and the
     // caller omits `material`. Orca then shows the lane empty — visibly wrong
@@ -278,6 +395,14 @@ std::string display_family(std::string_view type) {
     // A type we cannot reduce is its own family — one heading, one entry — so
     // user-overlay and firmware-only types stay reachable instead of vanishing.
     return base.empty() ? std::string(type) : base;
+}
+
+bool FilamentVariantsTestAccess::parse_orca_tables(const std::string& json_text,
+                                                   std::set<std::string>& library_types,
+                                                   std::map<std::string, std::string>& overrides,
+                                                   std::string& error) {
+    std::istringstream in(json_text);
+    return read_orca_tables(in, library_types, overrides, error);
 }
 
 void FilamentVariantsTestAccess::set_orca_tables(std::set<std::string> library_types,

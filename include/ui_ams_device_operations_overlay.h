@@ -140,6 +140,10 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
     /// Callback for the AFC unload-after-print toggle (AFC backends only)
     static void on_afc_unload_after_print_toggled(lv_event_t* e);
     static void on_always_show_bypass_spool_toggled(lv_event_t* e);
+
+    /// Callback for the keep-spool-info-on-eject toggle (backends whose
+    /// firmware reports spool ids per lane only)
+    static void on_keep_spool_info_toggled(lv_event_t* e);
     static void on_force_bypass_controls_toggled(lv_event_t* e);
 
     /// Callback for the QIDI eject distance slider (QIDI Box backends only)
@@ -203,6 +207,12 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
     /// Subject for AFC backend detection (0=not AFC, 1=AFC) — gates the
     /// unload-after-print toggle, which only applies to AFC systems
     lv_subject_t is_afc_subject_;
+
+    /// Subject gating the keep-spool-info-on-eject row (0=hidden, 1=shown).
+    /// Set from AmsBackend::firmware_reports_spool_ids(), so the row appears
+    /// only on systems whose firmware reports spool ids per lane (AFC, Happy
+    /// Hare); no backend means hidden.
+    lv_subject_t reports_spool_ids_subject_;
 
     /// Subject for QIDI Box backend detection (0=not QIDI, 1=QIDI) — gates the
     /// eject distance/velocity rows, which only apply to QIDI Box systems

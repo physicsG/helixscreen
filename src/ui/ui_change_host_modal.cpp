@@ -441,10 +441,26 @@ void show_connection_failed_modal(const std::string& title, const std::string& m
     // this mirrors what ui_notification_error() does internally for the
     // OK-only path this replaces.
     helix::ui::queue_update([title, message]() {
+        // Reconnect first: a wedged transport (reported on Android, where the
+        // process outlives its sockets) cannot be revived from outside the app,
+        // and a full teardown/rebuild re-resolves the host — the one thing the
+        // auto-retry loop cannot do for a changed IP. The prompt's job is to
+        // offer that action; address surgery stays one tap away but secondary.
+        auto reconnect_and_dismiss = [](lv_event_t*) {
+            if (lv_obj_t* top = Modal::get_top()) {
+                Modal::hide(top);
+            }
+            if (auto* client = get_moonraker_client()) {
+                client->force_reconnect();
+            } else {
+                spdlog::warn("[ChangeHost] Reconnect requested but no client is registered");
+            }
+        };
+
         // On a printer that runs HelixScreen itself, the address is not the
         // fault and "Change Address" is a trap: it walks the user into editing
         // a correct 127.0.0.1 while the real problem is a Moonraker service
-        // that did not start. Offer plain acknowledgement there.
+        // that did not start. Retrying those services is the meaningful action.
         //
         // Only when we POSITIVELY know the printer is this machine. The default
         // is deliberately "" rather than "localhost": an unconfigured host is
@@ -457,12 +473,13 @@ void show_connection_failed_modal(const std::string& title, const std::string& m
         }
         if (!host.empty() && helix::is_moonraker_on_same_host(host)) {
             helix::ui::modal_show_alert(title.c_str(), message.c_str(), ModalSeverity::Error,
-                                        lv_tr("OK"));
+                                        lv_tr("Reconnect"), reconnect_and_dismiss);
             return;
         }
 
         helix::ui::modal_show_confirmation(
-            title.c_str(), message.c_str(), ModalSeverity::Error, lv_tr("Change Address"),
+            title.c_str(), message.c_str(), ModalSeverity::Error, lv_tr("Reconnect"),
+            reconnect_and_dismiss,
             [](lv_event_t*) {
                 // Dismiss this prompt before opening the next dialog. Stacking
                 // works, but leaving a live error modal underneath means its
@@ -472,7 +489,7 @@ void show_connection_failed_modal(const std::string& title, const std::string& m
                 }
                 show_change_host_modal();
             },
-            nullptr, nullptr, lv_tr("OK"));
+            nullptr, lv_tr("Change Address"));
     });
 }
 

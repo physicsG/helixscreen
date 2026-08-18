@@ -982,7 +982,7 @@ TEST_CASE_METHOD(DebugBundleTestFixture,
 // Bundle 3Q2GB74K ("cannot update HelixScreen", pi32) was undiagnosable because
 // nothing in the bundle said whether the update rows were even rendered. The
 // About overlay binds both "Check for Updates" and "Install Update" to
-// show_update_settings = !in_app_updates_suppressed(); when that is true the
+// show_update_settings = !update_install_suppressed(); when that is true the
 // rows are absent and the user has no in-app path to an update at all.
 // ============================================================================
 
@@ -994,6 +994,7 @@ helix::UpdateDiagnostics healthy_diag() {
     helix::UpdateDiagnostics d;
     d.install_root = "/opt/helixscreen";
     d.install_parent_writable = true;
+    d.install_root_writable = true;
     d.self_update_supported = true;
     d.externally_managed = false;
     d.channel = "stable";
@@ -1011,6 +1012,7 @@ TEST_CASE("DebugBundleCollector: build_update_info reports a healthy install as 
 
     REQUIRE(upd["install_root"].get<std::string>() == "/opt/helixscreen");
     REQUIRE(upd["install_parent_writable"].get<bool>() == true);
+    REQUIRE(upd["install_root_writable"].get<bool>() == true);
     REQUIRE(upd["self_update_supported"].get<bool>() == true);
     REQUIRE(upd["externally_managed"].get<bool>() == false);
     REQUIRE(upd["suppressed"].get<bool>() == false);
@@ -1030,6 +1032,7 @@ TEST_CASE("DebugBundleCollector: build_update_info marks a read-only install tre
     auto d = healthy_diag();
     // Neither writable nor escalatable — a genuinely read-only rootfs.
     d.install_parent_writable = false;
+    d.install_root_writable = false;
     d.self_update_supported = false;
 
     json upd = helix::DebugBundleCollector::build_update_info(d);
@@ -1041,20 +1044,43 @@ TEST_CASE("DebugBundleCollector: build_update_info marks a read-only install tre
     REQUIRE(upd["externally_managed"].get<bool>() == false);
 }
 
-TEST_CASE("DebugBundleCollector: build_update_info leaves a sudo-updatable install unsuppressed",
+TEST_CASE("DebugBundleCollector: build_update_info leaves an in-place-updatable install "
+          "unsuppressed",
           "[debug-bundle][update]") {
-    // The standard Pi shape: /opt is root-owned so the parent isn't writable by
-    // the service user, but install.sh escalates and the swap works. Reporting
-    // this as suppressed is what sent the last "updates are disabled" diagnosis
-    // down the wrong branch, so the two fields must not be conflated.
+    // The standalone-display shape: /opt is root-owned so no rename can happen
+    // there, but the root itself is owned by the service user, and install.sh
+    // replaces its contents in place. Reporting this as suppressed is the bug
+    // that locked a user out for good, so the three fields must stay distinct:
+    // WHICH route is open is the entire diagnostic value.
     auto d = healthy_diag();
     d.install_parent_writable = false;
+    d.install_root_writable = true;
     d.self_update_supported = true;
 
     json upd = helix::DebugBundleCollector::build_update_info(d);
 
     REQUIRE(upd["suppressed"].get<bool>() == false);
     REQUIRE(upd["install_parent_writable"].get<bool>() == false);
+    REQUIRE(upd["install_root_writable"].get<bool>() == true);
+    REQUIRE(upd["self_update_supported"].get<bool>() == true);
+}
+
+TEST_CASE("DebugBundleCollector: build_update_info keeps the sudo-only install distinguishable",
+          "[debug-bundle][update]") {
+    // Neither writability term open, yet self_update_supported() said yes: the
+    // answer came from root escalation alone. Worth telling apart from the two
+    // cases above, because it is the one that stops working the moment the app
+    // runs under the shipped systemd unit (NoNewPrivileges=true blocks sudo).
+    auto d = healthy_diag();
+    d.install_parent_writable = false;
+    d.install_root_writable = false;
+    d.self_update_supported = true;
+
+    json upd = helix::DebugBundleCollector::build_update_info(d);
+
+    REQUIRE(upd["suppressed"].get<bool>() == false);
+    REQUIRE(upd["install_parent_writable"].get<bool>() == false);
+    REQUIRE(upd["install_root_writable"].get<bool>() == false);
     REQUIRE(upd["self_update_supported"].get<bool>() == true);
 }
 
@@ -1083,7 +1109,7 @@ TEST_CASE("DebugBundleCollector: build_update_info suppressed matches the UI gat
             json upd = helix::DebugBundleCollector::build_update_info(d);
             INFO("managed=" << managed << " self_update_supported=" << supported);
             REQUIRE(upd["suppressed"].get<bool>() ==
-                    compute_in_app_updates_suppressed(managed, supported));
+                    compute_update_install_suppressed(managed, supported));
         }
     }
 }
@@ -1151,7 +1177,7 @@ TEST_CASE_METHOD(HelixTestFixture,
         REQUIRE(upd["self_update_supported"].get<bool>());
     }
     REQUIRE(upd["externally_managed"].get<bool>() == updates_externally_managed());
-    REQUIRE(upd["suppressed"].get<bool>() == in_app_updates_suppressed());
+    REQUIRE(upd["suppressed"].get<bool>() == update_install_suppressed());
 
     // The exact artifact this device asks for — #993 was a drifted copy of it.
     REQUIRE(upd["platform_asset_name"].get<std::string>() == UpdateChecker::platform_asset_name());
@@ -1205,11 +1231,11 @@ TEST_CASE("UpdateChecker: channel_name covers every channel", "[debug-bundle][up
     REQUIRE(std::string(UpdateChecker::channel_name(UpdateChecker::UpdateChannel::Dev)) == "dev");
 }
 
-TEST_CASE("app_globals: compute_in_app_updates_suppressed truth table", "[debug-bundle][update]") {
-    REQUIRE(compute_in_app_updates_suppressed(false, true) == false); // normal, updatable
-    REQUIRE(compute_in_app_updates_suppressed(true, true) == true);   // firmware-managed
-    REQUIRE(compute_in_app_updates_suppressed(false, false) == true); // read-only install tree
-    REQUIRE(compute_in_app_updates_suppressed(true, false) == true);  // both
+TEST_CASE("app_globals: compute_update_install_suppressed truth table", "[debug-bundle][update]") {
+    REQUIRE(compute_update_install_suppressed(false, true) == false); // normal, updatable
+    REQUIRE(compute_update_install_suppressed(true, true) == true);   // firmware-managed
+    REQUIRE(compute_update_install_suppressed(false, false) == true); // read-only install tree
+    REQUIRE(compute_update_install_suppressed(true, false) == true);  // both
 }
 
 // ----------------------------------------------------------------------------

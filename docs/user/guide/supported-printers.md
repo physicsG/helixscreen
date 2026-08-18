@@ -10,7 +10,12 @@ This page is the detailed breakdown of what actually works on those specially-su
 
 **1. You don't have to run it on the printer.** Some printers can run HelixScreen directly on their own built-in touchscreen (see the list below). But HelixScreen is a Moonraker client, so for *any* printer you can also run it on a separate Raspberry Pi, mini PC, or tablet with a touchscreen and control the printer over the network. See [Can I run HelixScreen on a separate device?](../FAQ.md#can-i-run-helixscreen-on-a-separate-device-instead-of-on-my-printer) and [Remote Screen Setup](../INSTALL.md#remote-screen-setup-run-on-a-separate-device).
 
-**2. Your printer is auto-detected.** The first-run setup wizard identifies your printer from a database of 90+ models — filling in the right name, image, bed size, probe type, and preset options automatically. If it guesses wrong, you can pick your model by hand, and if your printer isn't in the database at all, it still works fully via generic detection (see [Every Other Klipper Printer](#every-other-klipper-printer) below).
+**2. Your printer is auto-detected.** The first-run setup wizard identifies your printer from a database of 90+ models — filling in the right name, image, bed size, probe type, and preset options automatically. The **printer type** this sets drives features and calibration dialogs; the image picker in Printer Manager is cosmetic only. If the wizard guesses wrong, its **Printer Setup: Identity** step lets you pick your model by hand. To change the type later, see [Wrong printer model identified](../TROUBLESHOOTING.md#wrong-printer-model-identified) — the short version: re-add the printer and pick the right model, or re-run the wizard via Factory Reset (which wipes settings). Two caveats:
+
+- The model pick exists **only in the setup wizard** — there is no "change printer model" option in Printer Manager or Settings.
+- Device-specific install packages (Creality K1, FlashForge Adventurer 5M, and similar) run the wizard in **preset mode**, which *skips* printer identification entirely — the printer type on those installs comes from the install package itself, not from detection. If such an install is showing the wrong printer (for example, an AD5M package running against a different machine), the fix is to install the HelixScreen package built for your hardware (or the generic remote-screen setup) — no settings change can override the preset.
+
+If your printer isn't in the database at all, it still works fully via generic detection (see [Every Other Klipper Printer](#every-other-klipper-printer) below).
 
 > **What the status labels mean:** Throughout this page and the FAQ, **Tested** = the HelixScreen team verified it on real hardware; **Supported** = works, with the noted firmware; **Community** = a community user confirmed it, but we haven't tested it ourselves; **Preliminary** = support exists from the printer's published config but isn't hardware-verified. If you run HelixScreen on hardware we haven't tested, [let us know](settings/help-about.md) — reports are how printers move up the list.
 
@@ -27,6 +32,7 @@ Runs directly on the printer's built-in 4.3" screen as a replacement for the sto
 **What works:**
 - Full temperature, motion, bed mesh (with 3D visualization), fan, and macro control on the printer's own display
 - Reliable on-device operation tuned for the AD5M's embedded hardware
+- **Firmware-managed Z-offset** when running ZMOD — the offset is stored by the firmware, and HelixScreen shows the stored value while idle rather than the 0.000 the firmware leaves in Klipper between prints. See [Printing → Z-Offset](printing.md#z-offset--baby-steps)
 
 **Requirements:** Forge-X or Klipper-Mod firmware (which provides Moonraker). See [Installation → Adventurer 5M](../INSTALL.md#flashforge-adventurer-5m--5m-pro).
 
@@ -44,6 +50,7 @@ The AD5X's four-color **IFS (Intelligent Filament System)** is fully integrated,
 - **External-spool bypass mode** for feeding a spool directly
 - **[Spoolman](filament-tracking.md) integration** for assigning tracked spools to slots
 - **Infinite Spool Mode** reporting — when a slot runs out, the IFS automatically switches to another slot with the same filament type *and* color, if one is loaded. HelixScreen tells you this plainly on the runout screen and in the AMS panel
+- **Firmware-managed Z-offset** — ZMOD stores the offset itself, so there is no Save step. HelixScreen shows the *stored* value while the printer is idle, where other interfaces read 0.000, and adjusts from it correctly. See [Printing → Z-Offset](printing.md#z-offset--baby-steps)
 
 **Requirements:** ZMOD firmware v1.7.0 or newer (a community firmware mod, separate from FlashForge stock). See [Installation → Adventurer 5X](../INSTALL.md#flashforge-adventurer-5x).
 

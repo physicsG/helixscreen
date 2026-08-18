@@ -546,13 +546,41 @@ detect_k1_firmware() {
     echo "stock_klipper"
 }
 
+# Locations a HelixScreen install may already occupy, for the existing-install
+# probe below. Mirrors HELIX_INSTALL_DIRS in uninstall.sh — same question, same
+# answer. Overridable so the bats suite can point it at a sandbox.
+: "${_HELIX_KNOWN_INSTALL_DIRS:=/opt/helixscreen /srv/helixscreen /usr/data/helixscreen /root/printer_software/helixscreen /user-resource/helixscreen /userdata/helixscreen}"
+
+# Print the directory of an install that is already on disk, or return 1.
+# Checks $KLIPPER_HOME/helixscreen first so an ecosystem install outranks a stale
+# tree in one of the fixed locations.
+#
+# bin/helix-screen is what makes a directory an install: uninstall leaves the
+# directory (and its config/) behind on several platforms, and treating that
+# husk as a live install would pin every future install to it.
+_detect_existing_install_dir() {
+    _eid_candidates=""
+    [ -n "${KLIPPER_HOME:-}" ] && _eid_candidates="${KLIPPER_HOME}/helixscreen"
+    _eid_candidates="${_eid_candidates} ${_HELIX_KNOWN_INSTALL_DIRS}"
+
+    for _eid_dir in $_eid_candidates; do
+        if [ -x "${_eid_dir}/bin/helix-screen" ]; then
+            printf '%s\n' "$_eid_dir"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Detect Pi install directory based on Klipper ecosystem presence
 # Cascade (first match wins):
 #   1. User explicitly set INSTALL_DIR → keep it
-#   2. ~/klipper or ~/moonraker exists → ~/helixscreen
-#   3. ~/printer_data exists → ~/helixscreen
-#   4. moonraker.service is active → ~/helixscreen
-#   5. Fallback → /opt/helixscreen
+#   2. An install already on disk → keep it where it is
+#   3. ~/klipper or ~/moonraker exists → ~/helixscreen
+#   4. ~/printer_data exists → ~/helixscreen
+#   5. moonraker.service is active → ~/helixscreen
+#   6. Non-root service user with a home they own → ~/helixscreen
+#   7. Fallback → /opt/helixscreen
 # Requires: KLIPPER_HOME to be set (by detect_klipper_user)
 # Sets: INSTALL_DIR
 detect_pi_install_dir() {
@@ -566,27 +594,38 @@ detect_pi_install_dir() {
         return 0
     fi
 
+    # 2. An install already on disk decides, whatever the cascade below would
+    #    have picked. Relocating it orphans the old tree and the config in it,
+    #    and the cascade's answer is not stable across releases — a box that
+    #    matched one branch on first install can match a different one later.
+    _existing_install_dir=$(_detect_existing_install_dir) || _existing_install_dir=""
+    if [ -n "$_existing_install_dir" ]; then
+        INSTALL_DIR="$_existing_install_dir"
+        log_info "Install directory (existing install): $INSTALL_DIR"
+        return 0
+    fi
+
     # Need KLIPPER_HOME for ecosystem detection
     if [ -z "$KLIPPER_HOME" ]; then
         INSTALL_DIR="/opt/helixscreen"
         return 0
     fi
 
-    # 2. Klipper or Moonraker source directories
+    # 3. Klipper or Moonraker source directories
     if [ -d "$KLIPPER_HOME/klipper" ] || [ -d "$KLIPPER_HOME/moonraker" ]; then
         INSTALL_DIR="$KLIPPER_HOME/helixscreen"
         log_info "Install directory (klipper ecosystem): $INSTALL_DIR"
         return 0
     fi
 
-    # 3. printer_data directory (Klipper config structure)
+    # 4. printer_data directory (Klipper config structure)
     if [ -d "$KLIPPER_HOME/printer_data" ]; then
         INSTALL_DIR="$KLIPPER_HOME/helixscreen"
         log_info "Install directory (printer_data): $INSTALL_DIR"
         return 0
     fi
 
-    # 4. Moonraker service running (ecosystem present but maybe different layout)
+    # 5. Moonraker service running (ecosystem present but maybe different layout)
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl is-active --quiet moonraker.service 2>/dev/null || \
            systemctl is-active --quiet moonraker 2>/dev/null; then
@@ -596,7 +635,29 @@ detect_pi_install_dir() {
         fi
     fi
 
-    # 5. Fallback: no ecosystem detected
+    # 6. No ecosystem, but a real non-root service user with a home they own.
+    #    Prefer it over /opt, because an update applies by RENAMING the install
+    #    root ("mv <root> <root>.old; mv <new> <root>") and rename mutates the
+    #    parent's directory entries — so the parent is what has to be writable by
+    #    the service user. /opt is root-owned, which leaves only install.sh's
+    #    in-place fallback: delete the root's contents, then move the new ones in.
+    #    That path works and is not going away, but it deletes before it moves, so
+    #    a failure part-way leaves a half-installed tree (#970). A home-owned
+    #    parent keeps the atomic route available.
+    #
+    #    This is the standalone-display shape: a Pi driving a panel with Klipper
+    #    and Moonraker on another box, so every ecosystem check above misses.
+    #    Escalation is not an answer here — the unit sets NoNewPrivileges=true, so
+    #    sudo cannot run from the app or from the install.sh it forks.
+    if [ "${KLIPPER_USER:-root}" != "root" ] && [ -d "$KLIPPER_HOME" ] && \
+       [ "$(stat -c '%U' "$KLIPPER_HOME" 2>/dev/null)" = "$KLIPPER_USER" ]; then
+        INSTALL_DIR="$KLIPPER_HOME/helixscreen"
+        log_info "Install directory (service user home, no ecosystem): $INSTALL_DIR"
+        return 0
+    fi
+
+    # 7. Fallback: no ecosystem, and no home we can rename inside (root installs,
+    #    where /opt is writable anyway).
     INSTALL_DIR="/opt/helixscreen"
     return 0
 }
@@ -1038,7 +1099,7 @@ setup_config_symlink() {
         log_info "Migrating from old config symlink layout..."
         local old_target
         old_target=$(readlink "$pd_helix" 2>/dev/null || echo "")
-        $(file_sudo "$pd_helix") rm -f "$pd_helix"
+        $(path_sudo "$pd_helix") rm -f "$pd_helix"
         log_info "Removed old directory symlink (was: $old_target)"
     fi
 

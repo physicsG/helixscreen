@@ -344,8 +344,9 @@ void SpoolEditModal::update_spool_preview() {
         parse_spool_color(working_spool_.color_hex, theme_manager_get_color("text_muted"));
     ui_spool_canvas_set_color(canvas, color);
 
-    // Set fill level from remaining weight
-    float fill_level = 0.5f;
+    // Set fill level from remaining weight; an unweighed spool draws full, the
+    // same answer SlotInfo::display_fill_level() gives for a lane with no weights.
+    float fill_level = 1.0f;
     if (working_spool_.initial_weight_g > 0) {
         fill_level = static_cast<float>(working_spool_.remaining_weight_g) /
                      static_cast<float>(working_spool_.initial_weight_g);

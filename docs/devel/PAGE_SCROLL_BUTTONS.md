@@ -185,7 +185,7 @@ you confirm whether a container qualifies. The walk logs its result per root:
 `managed=0` means nothing on that root qualified. Two gotchas that will waste
 your time otherwise:
 
-- **`--test` reads `settings-test.json`, not `settings.json`.** Setting
+- **`--test` reads settings-test.json, not `settings.json`.** Setting
   `display.page_scroll_buttons` in the wrong file silently does nothing.
 - **The desktop default is off.** You have to enable it explicitly to see any of
   this on a dev machine, which is the whole reason an ESP32-only regression is
@@ -217,7 +217,7 @@ wanted gone.
 
 ## Related Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Panel Widget System, including the
+- [chapter 09 — Home panel widgets](architecture/09-home-widgets.md) - Panel Widget System, including the
   `LV_OBJ_FLAG_USER_*` ledger that `PANEL_WIDGET_TILE_FLAG` is part of
 - [LAYOUT_SYSTEM.md](LAYOUT_SYSTEM.md) - the home widget grid that sizes tiles
 - [LVGL9_XML_GUIDE.md](LVGL9_XML_GUIDE.md) - `lv_obj` defaults, and why

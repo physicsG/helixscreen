@@ -376,10 +376,11 @@ void populate_release_urls_from_manifest(const json& platform_asset,
     }
 }
 
-/// Which half of in_app_updates_suppressed() actually fired. The two causes need
+/// Which half of update_install_suppressed() actually fired. The two causes need
 /// completely different follow-up — one is a deliberate firmware opt-out, the
 /// other is a machine that cannot apply the swap — and a support report often has
-/// nothing but this log line to go on. Only call when suppressed.
+/// nothing but this log line to go on. Only call when installing is suppressed;
+/// the check gate has one cause and names it inline.
 const char* suppression_reason() {
     if (updates_externally_managed()) {
         return "firmware-managed (HELIX_DISABLE_AUTO_UPDATES is set)";
@@ -1234,8 +1235,8 @@ void UpdateChecker::start_download() {
     // read-only / non-writable install tree can't be swapped at all. Never
     // self-download/install in either case — it would fight the firmware's setup
     // or fail the atomic directory rename.
-    if (in_app_updates_suppressed()) {
-        spdlog::info("[UpdateChecker] Update skipped: in-app updates are suppressed - {}",
+    if (update_install_suppressed()) {
+        spdlog::info("[UpdateChecker] Download skipped: installing is suppressed - {}",
                      suppression_reason());
         return;
     }
@@ -2351,13 +2352,13 @@ void UpdateChecker::check_for_updates(Callback callback) {
         return;
     }
 
-    // Firmware-managed devices own updates externally, and a non-writable install
-    // tree can't be updated in place — never check remotely in either case. Gating
-    // this top-level entry covers both manual and auto-check callers so no
-    // download/install path can ever proceed.
-    if (in_app_updates_suppressed()) {
-        spdlog::info("[UpdateChecker] Update skipped: in-app updates are suppressed - {}",
-                     suppression_reason());
+    // Firmware-managed devices own updates externally, so looking is pointless
+    // there. Everything else checks, INCLUDING a tree we cannot write: the check
+    // is a manifest fetch and touches no files, and reporting the available
+    // version is what lets a user on a non-updatable install know to re-run the
+    // installer. start_download() is where applying is refused.
+    if (update_checks_suppressed()) {
+        spdlog::info("[UpdateChecker] Check skipped: updates are firmware-managed");
         return;
     }
 
@@ -2812,18 +2813,44 @@ void UpdateChecker::dismiss_current_version() {
 // ============================================================================
 
 void UpdateChecker::start_auto_check() {
-    // Firmware-managed devices own updates externally, and a non-writable install
-    // tree can't be updated in place — never schedule the periodic auto-check timer
-    // in either case, so the "update available" notification path can never fire.
-    if (in_app_updates_suppressed()) {
-        spdlog::info("[UpdateChecker] Auto-check disabled: in-app updates are suppressed - {}",
-                     suppression_reason());
+    // Firmware-managed devices own updates externally — nothing to schedule. A
+    // non-writable install tree still auto-checks: the notification tells the user
+    // a newer version exists, which on that layout is the only prompt they will
+    // ever get to go re-run the installer.
+    if (update_checks_suppressed()) {
+        spdlog::info("[UpdateChecker] Auto-check disabled: updates are firmware-managed");
         return;
     }
 
     if (auto_check_timer_) {
         spdlog::debug("[UpdateChecker] Auto-check timer already running");
         return;
+    }
+
+    // A machine that can check but cannot install. Report it: this state shipped
+    // in v0.99.96 and was found in v0.99.113 only because one user kept pushing on
+    // Discord — in aggregate it would have shown as a cohort of installs that
+    // never once fetched a manifest. Emitted here rather than from init() because
+    // TelemetryManager::init() runs after UpdateChecker::init() (application.cpp),
+    // and after the auto_check_timer_ guard so a Moonraker reconnect does not
+    // re-send it. Firmware-managed installs returned above and are not reported:
+    // that is a deliberate configuration, not a fault.
+    //
+    // The context is a SHAPE, not a path. install_root embeds a username and
+    // record_error()'s contract is pre-defined strings only; which of the two
+    // writability terms was missing is the whole diagnostic value anyway.
+    if (update_install_suppressed()) {
+        const std::string root = app_get_install_root();
+        const std::string parent = root.empty() ? std::string() : helix::paths::dirname(root);
+        TelemetryManager::instance().record_error(
+            "updates", "install_suppressed",
+            fmt::format("parent_writable={},root_writable={},escalate={}",
+                        !parent.empty() && helix::paths::probe_writable(parent) ? 1 : 0,
+                        !root.empty() && helix::paths::probe_writable(root) ? 1 : 0,
+                        root_escalation_available() ? 1 : 0));
+        spdlog::warn("[UpdateChecker] Install is not self-updatable ({}); checking anyway so the "
+                     "user can be told to re-run the installer",
+                     suppression_reason());
     }
 
     spdlog::info("[UpdateChecker] Starting auto-check (15s initial delay, 24h periodic)");

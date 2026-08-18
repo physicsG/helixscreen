@@ -16,6 +16,7 @@
 #include "platform_info.h"
 #include "printer_state.h"
 #include "system/crash_history.h"
+#include "system/helix_paths.h"
 #include "system/log_collector.h"
 #include "system/moonraker_local_probe.h"
 #include "system/telemetry_manager.h"
@@ -302,18 +303,23 @@ json DebugBundleCollector::build_update_info(const UpdateDiagnostics& diag) {
 
     // The predicates the update UI actually gates on. `suppressed` is the one
     // that decides whether the "Check for Updates" / "Install Update" rows
-    // exist at all (show_update_settings = !in_app_updates_suppressed()); the
+    // exist at all (show_update_settings = !update_checks_suppressed()); the
     // rest say which cause fired.
     //
-    // install_parent_writable is reported alongside self_update_supported (their
-    // OR with root escalation) because the pair distinguishes the two shapes that
-    // matter: false/false is a genuinely read-only install, while false/true is the
-    // ordinary /opt + unprivileged-service layout where install.sh sudoes the swap.
+    // The two writability terms are reported separately from self_update_supported
+    // (their OR with root escalation) because each names a different update route
+    // and a different fix. parent writable → install.sh takes the atomic swap;
+    // only the root writable → it takes the in-place replacement; neither, with
+    // self_update_supported still true → it is leaning on sudo, which the shipped
+    // systemd unit forbids (NoNewPrivileges=true); neither, with
+    // self_update_supported false → genuinely read-only, and the user needs to
+    // re-run the installer rather than wait for the in-app updater.
     upd["install_parent_writable"] = diag.install_parent_writable;
+    upd["install_root_writable"] = diag.install_root_writable;
     upd["self_update_supported"] = diag.self_update_supported;
     upd["externally_managed"] = diag.externally_managed;
     upd["suppressed"] =
-        compute_in_app_updates_suppressed(diag.externally_managed, diag.self_update_supported);
+        compute_update_install_suppressed(diag.externally_managed, diag.self_update_supported);
 
     // These two come from UpdateChecker's main-thread config snapshot, which is
     // empty until init() runs. Report that as "unknown" rather than "" so a
@@ -339,11 +345,16 @@ json DebugBundleCollector::collect_update_info() {
     UpdateDiagnostics diag;
 
     diag.install_root = app_get_install_root();
-    // can_escalate=false isolates the raw writability term; self_update_supported()
-    // is the cached OR of it and root_escalation_available(). Reading them in this
-    // order means a writable parent still never triggers the sudo probe — the
-    // cached value is already decided by the time the bundle asks.
-    diag.install_parent_writable = compute_self_update_supported(diag.install_root, false);
+    // Probe the two writability terms directly rather than through
+    // compute_self_update_supported(): that function ORs them together (plus
+    // escalation), so routing either one through it reports the OR under a name
+    // that promises one term. Which term is open decides which update route
+    // install.sh will take, and that is the whole diagnostic value here.
+    if (!diag.install_root.empty()) {
+        const std::string parent = std::filesystem::path(diag.install_root).parent_path().string();
+        diag.install_parent_writable = !parent.empty() && helix::paths::is_writable_dir(parent);
+        diag.install_root_writable = helix::paths::is_writable_dir(diag.install_root);
+    }
     diag.self_update_supported = self_update_supported();
     diag.externally_managed = updates_externally_managed();
 

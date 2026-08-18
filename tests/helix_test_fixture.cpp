@@ -21,6 +21,7 @@
 #include "src/ui/panel_widgets/print_status_widget.h"
 #include "system_settings_manager.h"
 #include "test_helpers/config_test_access.h"
+#include "test_helpers/emergency_stop_test_access.h"
 #include "test_helpers/print_control_buttons_test_access.h"
 #include "tool_state.h"
 
@@ -175,6 +176,14 @@ void HelixTestFixture::reset_all() {
     // lv_init_safe() is idempotent and also re-arms the UpdateQueue if a prior
     // fixture's destructor shut it down. Safe to call from non-LVGL tests.
     lv_init_safe();
+
+    // BEFORE the drain, not after: EmergencyStopOverlay is a process-wide
+    // singleton holding raw init() pointers to a PrinterState that in tests is a
+    // stack local or fixture member. By the time a fixture destructor reaches
+    // here the test body's locals are already gone, so draining first would run
+    // a queued update_recovery_dialog_content() straight into the freed object.
+    // Nulled, its `if (printer_state_ && ...)` guard makes that callback a no-op.
+    EmergencyStopOverlayTestAccess::reset_dependencies(EmergencyStopOverlay::instance());
 
     // Drain any callbacks queued by a prior test before we touch state they read.
     helix::ui::UpdateQueue::instance().drain();

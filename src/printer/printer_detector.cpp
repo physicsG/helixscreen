@@ -22,6 +22,10 @@
 #include <fstream>
 #include <unordered_set>
 
+#ifdef __GLIBC__
+#include <malloc.h> // malloc_trim() — see PrinterDatabase::compact()
+#endif
+
 // C++17 filesystem - use std::filesystem if available, fall back to experimental
 #if __cplusplus >= 201703L && __has_include(<filesystem>)
 #include <filesystem>
@@ -131,6 +135,22 @@ struct PrinterDatabase {
             }
         }
         compacted = true;
+
+#ifdef __GLIBC__
+        // Erasing the heuristics only hands those nodes back to glibc's free
+        // lists — they are small scattered chunks that never reach the top of
+        // the arena, so brk() never moves and RSS is completely unchanged.
+        // Measured in-app: the free alone gives back 0 kB every time, and the
+        // trim is what actually returns pages to the OS. Without this line,
+        // compaction reclaims nothing at all.
+        //
+        // This runs once per boot, right after detection, so the cost of
+        // walking the arena is paid at the point where the boot transients are
+        // also free — which is why the trim gives back more than the
+        // heuristics themselves.
+        malloc_trim(0);
+#endif
+
         spdlog::debug("[PrinterDetector] Database compacted (heuristics stripped)");
     }
 
@@ -1828,4 +1848,17 @@ std::string PrinterDetector::screws_tilt_direction_override() {
         }
     }
     return "";
+}
+
+bool PrinterDetector::should_warn_type_mismatch(const std::string& saved_type,
+                                                const std::string& detected_type,
+                                                int detected_confidence,
+                                                const std::string& flag_value) {
+    if (detected_confidence < 70)
+        return false;
+    if (detected_type.empty() || detected_type == saved_type)
+        return false;
+    if (saved_type.empty() || saved_type == "Custom/Other" || saved_type == "Unknown")
+        return false;
+    return flag_value != saved_type;
 }

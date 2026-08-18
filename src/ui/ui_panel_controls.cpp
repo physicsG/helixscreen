@@ -502,9 +502,7 @@ void ControlsPanel::refresh_all_displays() {
     if (auto* subj = printer_state_.get_pending_z_offset_delta_subject()) {
         update_z_offset_delta_display(lv_subject_get_int(subj));
     }
-    if (auto* subj = printer_state_.get_gcode_z_offset_subject()) {
-        update_controls_z_offset_display(lv_subject_get_int(subj));
-    }
+    update_controls_z_offset_display();
 
     spdlog::trace("[{}] All displays refreshed after activation", get_name());
 }
@@ -709,9 +707,35 @@ void ControlsPanel::register_observers() {
     // Subscribe to gcode Z-offset for live tuning display (skip formatting when hidden)
     gcode_z_offset_observer_ = observe_int_sync<ControlsPanel>(
         printer_state_.get_gcode_z_offset_subject(), this,
-        [](ControlsPanel* self, int offset_microns) {
+        [](ControlsPanel* self, int /* offset_microns */) {
             if (self->active_)
-                self->update_controls_z_offset_display(offset_microns);
+                self->update_controls_z_offset_display();
+        },
+        printer_state_.get_subjects_lifetime());
+
+    // The displayed Z-offset switches source between the live and the
+    // firmware-persisted reading, so all three inputs have to retrigger it.
+    persisted_z_offset_observer_ = observe_int_sync<ControlsPanel>(
+        printer_state_.get_persisted_z_offset_subject(), this,
+        [](ControlsPanel* self, int /* offset_microns */) {
+            if (self->active_)
+                self->update_controls_z_offset_display();
+        },
+        printer_state_.get_subjects_lifetime());
+
+    persisted_z_offset_valid_observer_ = observe_int_sync<ControlsPanel>(
+        printer_state_.get_persisted_z_offset_valid_subject(), this,
+        [](ControlsPanel* self, int /* valid */) {
+            if (self->active_)
+                self->update_controls_z_offset_display();
+        },
+        printer_state_.get_subjects_lifetime());
+
+    z_offset_print_active_observer_ = observe_int_sync<ControlsPanel>(
+        printer_state_.get_print_active_subject(), this,
+        [](ControlsPanel* self, int /* print_active */) {
+            if (self->active_)
+                self->update_controls_z_offset_display();
         },
         printer_state_.get_subjects_lifetime());
 
@@ -1002,7 +1026,12 @@ void ControlsPanel::update_z_offset_delta_display(int delta_microns) {
                   z_offset_delta_display_buf_);
 }
 
-void ControlsPanel::update_controls_z_offset_display(int offset_microns) {
+void ControlsPanel::update_controls_z_offset_display() {
+    // ZMOD's END_PRINT/CANCEL_PRINT zero gcode_move's offset and START_PRINT
+    // re-applies the stored one, so while idle the live reading is 0.000 and the
+    // persisted value is what the next print will actually use.
+    const int offset_microns = helix::zoffset::displayed_z_offset_microns(printer_state_);
+
     auto* bp_subj = theme_manager_get_breakpoint_subject();
     auto bp = bp_subj ? as_breakpoint(lv_subject_get_int(bp_subj)) : UiBreakpoint::Medium;
     if (bp == UiBreakpoint::Tiny || bp == UiBreakpoint::Micro) {

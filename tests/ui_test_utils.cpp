@@ -880,7 +880,14 @@ bool updates_externally_managed() {
 }
 
 // Mirror of src/app_globals.cpp compute_self_update_supported / self_update_supported /
-// in_app_updates_suppressed (app_globals.o is excluded from the test link).
+// update_install_suppressed / update_checks_suppressed (app_globals.o is
+// excluded from the test link).
+//
+// Keep the branch structure identical to the original, comments aside. A mirror that
+// drifts turns the tests below into a test of this file: the parent-only version of
+// this predicate was a false negative that hid the updater on every /opt install, and
+// nothing here would have noticed, because the assertions would have been passing
+// against the same wrong logic.
 #include "system/helix_paths.h"
 
 #include <unistd.h> // geteuid
@@ -889,11 +896,14 @@ bool compute_self_update_supported(const std::string& install_root, bool can_esc
         return true;
     }
     const std::string parent = std::filesystem::path(install_root).parent_path().string();
+    if (!parent.empty() && helix::paths::is_writable_dir(parent)) {
+        return true; // atomic swap
+    }
     if (parent.empty()) {
         return true;
     }
-    if (helix::paths::is_writable_dir(parent)) {
-        return true;
+    if (helix::paths::is_writable_dir(install_root)) {
+        return true; // in-place replacement
     }
     return can_escalate;
 }
@@ -917,12 +927,16 @@ bool self_update_supported() {
     return cached;
 }
 
-bool compute_in_app_updates_suppressed(bool externally_managed, bool self_update_ok) {
+bool compute_update_install_suppressed(bool externally_managed, bool self_update_ok) {
     return externally_managed || !self_update_ok;
 }
 
-bool in_app_updates_suppressed() {
-    return compute_in_app_updates_suppressed(updates_externally_managed(), self_update_supported());
+bool update_install_suppressed() {
+    return compute_update_install_suppressed(updates_externally_managed(), self_update_supported());
+}
+
+bool update_checks_suppressed() {
+    return updates_externally_managed();
 }
 
 // Stubs for the manager accessors in app_globals.h. Each getter reads a file-static
@@ -996,9 +1010,12 @@ void app_store_argv(int /*argc*/, char** /*argv*/) {
 // but don't need real network/hardware connections.
 
 // Stub for app_globals_init_subjects (creates test notification + edit mode subjects)
+#include "platform_info.h"
+
 static lv_subject_t s_test_notification_subject;
 static lv_subject_t s_test_home_edit_mode_subject;
 static lv_subject_t s_test_wizard_active_subject;
+static lv_subject_t s_test_host_power_supported_subject;
 static bool s_test_notification_subject_initialized = false;
 
 void app_globals_init_subjects() {
@@ -1007,6 +1024,14 @@ void app_globals_init_subjects() {
         lv_subject_init_int(&s_test_home_edit_mode_subject, 0);
         lv_subject_init_int(&s_test_wizard_active_subject, 0);
         s_test_notification_subject_initialized = true;
+        // Mirrors the real seeding in app_globals.cpp — the rule itself lives
+        // in helix::platform_host_power_supported() (real code, linked here).
+        lv_subject_init_int(&s_test_host_power_supported_subject,
+                            helix::platform_host_power_supported() ? 1 : 0);
+        if (!lv_xml_get_subject(nullptr, "platform_host_power_supported")) {
+            lv_xml_register_subject(nullptr, "platform_host_power_supported",
+                                    &s_test_host_power_supported_subject);
+        }
         spdlog::debug("[Test Stub] app_globals_init_subjects: subjects initialized");
     }
 }
@@ -1016,6 +1041,7 @@ void app_globals_deinit_subjects() {
         lv_subject_deinit(&s_test_notification_subject);
         lv_subject_deinit(&s_test_home_edit_mode_subject);
         lv_subject_deinit(&s_test_wizard_active_subject);
+        lv_subject_deinit(&s_test_host_power_supported_subject);
         s_test_notification_subject_initialized = false;
         spdlog::debug("[Test Stub] app_globals_deinit_subjects: subjects deinitialized");
     }

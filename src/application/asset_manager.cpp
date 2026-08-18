@@ -12,6 +12,15 @@
 
 #include <lvgl.h>
 
+// Mirrors cjk_font_manager.cpp:10 and theme_manager.cpp:29. Without it, a build
+// path that forgot -DHELIX_MAX_FONT_TIER would evaluate every guard below as
+// `0 >= N` and silently register almost no fonts -- a blank UI rather than a
+// build error. mk/cross.mk always passes it; this is the backstop for the day
+// something doesn't.
+#ifndef HELIX_MAX_FONT_TIER
+#define HELIX_MAX_FONT_TIER 6 // default: all tiers (micro=0 .. xxlarge=6)
+#endif
+
 // Static member definitions
 bool AssetManager::s_fonts_registered = false;
 bool AssetManager::s_images_registered = false;
@@ -96,19 +105,27 @@ int register_base_fonts() {
 
 /// Faces that MEDIUM (and up) is the first tier to reference.
 int register_medium_tier_fonts() {
+#if HELIX_MAX_FONT_TIER >= 3
     lv_xml_register_font(nullptr, "montserrat_26", &noto_sans_26);            // font_heading_medium
     lv_xml_register_font(nullptr, "noto_sans_26", &noto_sans_26);             // font_heading_medium
     lv_xml_register_font(nullptr, "noto_sans_light_16", &noto_sans_light_16); // font_small_medium
     return 3;
+#else
+    return 0;
+#endif
 }
 
 /// Faces that LARGE (and up) is the first tier to reference.
 int register_large_tier_fonts() {
+#if HELIX_MAX_FONT_TIER >= 4
     lv_xml_register_font(nullptr, "montserrat_28", &noto_sans_28);            // font_heading_large
     lv_xml_register_font(nullptr, "noto_sans_28", &noto_sans_28);             // font_heading_large
     lv_xml_register_font(nullptr, "noto_sans_light_14", &noto_sans_light_14); // font_xs_large
     lv_xml_register_font(nullptr, "noto_sans_light_18", &noto_sans_light_18); // font_small_large
     return 4;
+#else
+    return 0;
+#endif
 }
 
 /// XLarge tier fonts (HiDPI screens > LARGE_MAX on the constrained axis).

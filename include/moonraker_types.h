@@ -67,6 +67,48 @@ struct FileInfo {
 };
 
 /**
+ * @brief One entry of the file manager's root list (server.files.roots)
+ *
+ * The only place on the HTTP API that names a writable directory in absolute
+ * terms. Everything else Moonraker reports about its config is relative to a
+ * root we are trying to locate in the first place, which is why the roots are
+ * needed to decide whether an absolute `[include /some/where.conf]` is a path
+ * HelixScreen can reach through the file API.
+ */
+struct FileRoot {
+    std::string name;        ///< "config", "gcodes", "logs", ...
+    std::string path;        ///< absolute path on the printer
+    std::string permissions; ///< "rw" or "r"
+
+    /// True only when Moonraker explicitly said the root is writable. A root
+    /// with no permissions field is never assumed writable.
+    [[nodiscard]] bool writable() const {
+        return permissions.find('w') != std::string::npos;
+    }
+};
+
+namespace helix {
+
+/**
+ * @brief Absolute path of the named root, but only when it is writable
+ *
+ * Returns "" for a read-only root and for a name that is not in the list, so a
+ * caller that treats "" as "no root" cannot accidentally write into a root
+ * Moonraker marked "r".
+ */
+inline std::string writable_root_path(const std::vector<FileRoot>& roots, const std::string& name) {
+    if (name.empty())
+        return "";
+    for (const auto& r : roots) {
+        if (r.name == name)
+            return r.writable() ? r.path : std::string();
+    }
+    return "";
+}
+
+} // namespace helix
+
+/**
  * @brief Thumbnail info with dimensions
  */
 struct ThumbnailInfo {

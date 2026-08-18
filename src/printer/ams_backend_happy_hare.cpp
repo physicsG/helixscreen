@@ -12,6 +12,7 @@
 #include "i_moonraker_api.h"
 #include "json_utils.h"
 #include "operation_patterns.h" // helix::contains_ci
+#include "settings_manager.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -2394,39 +2395,33 @@ AmsError AmsBackendHappyHare::cancel() {
 // ============================================================================
 
 void AmsBackendHappyHare::apply_overrides(SlotInfo& slot, int slot_index) {
-    // Callers hold mutex_. Same merge policy as AFC/ACE: the override wins only
-    // where it carries a real value; sentinels fall through to firmware.
+    // Callers hold mutex_. The whole spec §5 policy + the re-bind/eject rules
+    // live in helix::ams::merge_override — the single implementation every
+    // backend shares.
     auto it = overrides_.find(slot_index);
-    if (it == overrides_.end()) {
+    if (it == overrides_.end())
         return;
+    helix::ams::MergeOptions opts;
+    opts.firmware_reports_spool_ids = firmware_reports_spool_ids();
+    opts.keep_spool_info_on_eject = SettingsManager::instance().get_ams_keep_spool_info_on_eject();
+    // Own-write echo suppression (SlotFingerprintTracker::expect()
+    // semantics): if we just re-linked this gate's spool id, in-flight
+    // frames keep reporting the old firmware id for a poll or two — Rule 1
+    // must not read that stale frame as an external re-bind.
+    const auto [own_old_id, own_new_id] = own_write_expectation(slot_index, slot.spoolman_id);
+    opts.suppress_rebind_firmware_old_id = own_old_id;
+    opts.suppress_rebind_firmware_new_id = own_new_id;
+    const auto result = helix::ams::merge_override(slot, it->second, opts);
+    if (result.cleared_rebind || result.cleared_eject) {
+        overrides_.erase(it);
+        if (override_store_) {
+            override_store_->clear_async(slot_index, [slot_index](bool ok, const std::string& err) {
+                if (!ok)
+                    spdlog::warn("[AMS HH] override clear persist failed for slot {}: {}",
+                                 slot_index, err);
+            });
+        }
     }
-    const auto& o = it->second;
-    if (!o.brand.empty())
-        slot.brand = o.brand;
-    if (!o.spool_name.empty())
-        slot.spool_name = o.spool_name;
-    if (o.spoolman_id > 0)
-        slot.spoolman_id = o.spoolman_id;
-    if (o.spoolman_vendor_id > 0)
-        slot.spoolman_vendor_id = o.spoolman_vendor_id;
-    if (o.remaining_weight_g >= 0.0f)
-        slot.remaining_weight_g = o.remaining_weight_g;
-    if (o.total_weight_g >= 0.0f)
-        slot.total_weight_g = o.total_weight_g;
-    if (o.color_set)
-        slot.color_rgb = o.color_rgb;
-    if (!o.color_name.empty())
-        slot.color_name = o.color_name;
-    if (!o.material.empty())
-        slot.material = o.material;
-    // Catalog product identity — same "override wins only when it carries a
-    // real value" rule as the strings above. Firmware never populates these
-    // (no AMS protocol has a notion of a branded product id), so a non-empty
-    // value here is always a user pick and always wins.
-    if (!o.catalog_id.empty())
-        slot.catalog_id = o.catalog_id;
-    if (!o.product_name.empty())
-        slot.product_name = o.product_name;
 }
 
 void AmsBackendHappyHare::persist_override(int slot_index, const SlotInfo& info) {
@@ -2563,6 +2558,11 @@ AmsError AmsBackendHappyHare::set_slot_info(int slot_index, const SlotInfo& info
     // weight updates would trigger MMU_GATE_MAP → firmware status_update WebSocket
     // event → sync_from_backend → refresh_spoolman_weights → set_slot_info again,
     // creating an infinite feedback loop.
+    // Set when the material could not be expressed as a G-code parameter. Reported
+    // after every other write has gone out, so a name the gate map cannot store costs
+    // the user only the material rather than the whole save — but is never silent.
+    std::string rejected_material;
+
     if (persist) {
         bool has_changes = false;
         std::string cmd = fmt::format("MMU_GATE_MAP GATE={}", slot_index);
@@ -2573,13 +2573,17 @@ AmsError AmsBackendHappyHare::set_slot_info(int slot_index, const SlotInfo& info
             has_changes = true;
         }
 
-        // Material (validate to prevent command injection)
-        if (!info.material.empty() && IMoonrakerAPI::is_safe_gcode_param(info.material)) {
-            cmd += fmt::format(" MATERIAL={}", info.material);
+        // Material (validate to prevent command injection). The material charset is
+        // deliberately wider than an identifier's: `PLA+`, `PA6-CF` and `Silk PLA` are
+        // all in our own filament database, and gating this on is_safe_gcode_param()
+        // dropped every one of them.
+        if (!info.material.empty() && IMoonrakerAPI::is_safe_material_param(info.material)) {
+            cmd += fmt::format(" MATERIAL={}", IMoonrakerAPI::gcode_param_value(info.material));
             has_changes = true;
         } else if (!info.material.empty()) {
             spdlog::warn("[AMS HappyHare] Skipping MATERIAL - unsafe characters in: {}",
                          info.material);
+            rejected_material = info.material;
         }
 
         // Spoolman ID (-1 to clear)
@@ -2589,6 +2593,16 @@ AmsError AmsBackendHappyHare::set_slot_info(int slot_index, const SlotInfo& info
         } else if (info.spoolman_id == 0 && old_spoolman_id > 0) {
             cmd += " SPOOLID=-1"; // Clear existing link
             has_changes = true;
+        }
+
+        // Record our own id write so Rule 1 does not read the in-flight
+        // frames (still reporting old_spoolman_id until the echo lands) as
+        // an external re-bind. An unlink (SPOOLID=-1) erases the pending
+        // expectation instead. The gcode block above runs OUTSIDE mutex_ —
+        // take the lock just for the record, matching every other writer.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            record_own_spool_write(slot_index, info.spoolman_id, old_spoolman_id);
         }
 
         // Only send command if there are actual changes to persist
@@ -2607,6 +2621,16 @@ AmsError AmsBackendHappyHare::set_slot_info(int slot_index, const SlotInfo& info
 
     // Emit OUTSIDE the lock to avoid deadlock with callbacks
     emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+
+    if (!rejected_material.empty()) {
+        return AmsError(AmsResult::COMMAND_FAILED,
+                        "Material '" + rejected_material +
+                            "' contains characters that cannot be "
+                            "sent as a G-code parameter",
+                        "Couldn't save the material name",
+                        "Everything else was saved. Rename the material using letters, digits, "
+                        "spaces, and + - _ . ( ) /");
+    }
 
     return AmsErrorHelper::success();
 }
@@ -2717,6 +2741,15 @@ AmsError AmsBackendHappyHare::disable_bypass() {
 bool AmsBackendHappyHare::is_bypass_active() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return system_info_.current_slot == -2;
+}
+
+std::optional<bool> AmsBackendHappyHare::toolhead_filament_unaccounted() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!system_info_.filament_loaded) {
+        return false;
+    }
+    // current_slot: >=0 gate feeding, -1 none, -2 bypass.
+    return system_info_.current_slot == -1;
 }
 
 // ============================================================================

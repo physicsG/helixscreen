@@ -318,6 +318,13 @@ TEST_APP_OBJS := $(filter-out \
     $(OBJ_DIR)/remote/remote_client.o \
     ,$(APP_OBJS) $(APP_C_OBJS))
 
+# The PWM buzzer backend is platform-gated out of APP_SRCS (only ad5m/ad5x ship
+# it), but tests/unit/test_pwm_sound_backend.cpp exercises its pure helpers on
+# the host. The gate decides what SHIPS, not what is testable, so add the object
+# back for the test link. $(sort) keeps this idempotent on the platforms where
+# APP_OBJS already contains it.
+TEST_APP_OBJS := $(sort $(TEST_APP_OBJS) $(OBJ_DIR)/system/pwm_sound_backend.o)
+
 # ============================================================================
 # Test Targets
 # ============================================================================
@@ -1182,6 +1189,87 @@ ASAN_MAKE_OVERRIDES := OBJ_DIR=$(ASAN_OBJ_DIR) PCH=$(ASAN_PCH) \
 TSAN_MAKE_OVERRIDES := OBJ_DIR=$(TSAN_OBJ_DIR) PCH=$(TSAN_PCH) \
 	CXXFLAGS='$(CXXFLAGS) $(TSAN_FLAGS)' LDFLAGS='$(LDFLAGS) $(TSAN_FLAGS)'
 
+# Patterns that mean "the sanitizer reported something". Kept as variables so
+# the four sanitizer recipes share one definition. No commas — these are passed
+# as $(call) arguments.
+# LeakSanitizer is deliberately NOT in this pattern. Leaks are gated separately by
+# scripts/check_asan_leaks.py against a shrink-only baseline, because the suite
+# leaves widgets and subjects alive on purpose — freeing them means close-time
+# teardown (prestonbrown/helixscreen#1246), not a one-line fix. An ASan error is a
+# real memory bug and stays fatal here; a leak is measured against the baseline.
+# Working that baseline down is tracked in prestonbrown/helixscreen#1279.
+ASAN_REPORT_RE := ERROR: AddressSanitizer
+TSAN_REPORT_RE := (WARNING|ERROR): ThreadSanitizer
+
+# Report the result of the immediately-preceding sanitizer run, FAILING the
+# recipe if the sanitizer said anything. Captures $$? as its first action, so it
+# MUST directly follow the run, and the run MUST be under `set -o pipefail`.
+#
+# Two independent checks, because neither alone is sufficient:
+#
+#   - Exit status alone misses reports from forked children. The [subprocess]
+#     crash-handler tests fork, and a child killed by ASan leaves the parent
+#     free to exit 0 — that is how eight stack-buffer-underflow reports rode
+#     along in a "passing" run.
+#   - Grepping the log alone misses an ordinary Catch2 assertion failure, which
+#     produces no sanitizer report at all.
+#
+# `set -o pipefail` at the call site is what makes the status meaningful in the
+# first place. Make runs recipes under bash WITHOUT pipefail, so a pipeline into
+# tee otherwise yields tee's status, which is always 0. Combined with an
+# unconditional "✓ complete" banner on the next line, that made these gates
+# incapable of reporting red: the 2026-08-14 nightly logged ten
+# "ERROR: AddressSanitizer" reports and was still reported green.
+#
+# Note on halt_on_error=0: it only affects RECOVERABLE errors, which need
+# -fsanitize-recover=address at compile time. We do not build with that, so
+# every finding is fatal and the run stops at the first one in the parent
+# process. The option is left in place as documentation of intent, but do not
+# read it as "this run collected every finding".
+#
+# Args: $(1) = human label, $(2) = output file, $(3) = report regex.
+define report_sanitizer_result
+	SAN_RC=$$?; \
+	if grep -qE '$(3)' "$(2)" 2>/dev/null; then \
+		echo "$(RED)$(BOLD)✗ $(1) FAILED — $$(grep -cE '$(3)' "$(2)") sanitizer report(s) in $(2)$(RESET)"; \
+		grep -nE '$(3)' "$(2)" | head -20 | sed 's/^/     /'; \
+		exit 1; \
+	fi; \
+	if [ $$SAN_RC -ne 0 ]; then \
+		echo "$(RED)$(BOLD)✗ $(1) FAILED (exit $$SAN_RC) — see $(2)$(RESET)"; \
+		exit $$SAN_RC; \
+	fi; \
+	echo "$(GREEN)$(BOLD)✓ $(1) clean — no sanitizer reports$(RESET)"
+endef
+
+# Runtime options for the sanitizer binaries. Defined once so the -one variants
+# cannot drift from the full-suite ones — that drift is how test-tsan-one ended
+# up running without the suppressions file.
+#
+# allocator_may_return_null=1 makes an oversized request return NULL, which is
+# what a real allocator does under exhaustion; the sanitizers' default is to
+# report allocation-size-too-big and ABORT. The [ui_utils][l069] tests
+# deliberately ask lv_malloc for SIZE_MAX-1 to prove set_owned_user_string()
+# reports the failure instead of memcpy'ing into a null result, so the default
+# aborted the whole run ~1000 lines in and hid everything after it. The cost is
+# that a genuine overflow-driven huge allocation now returns NULL rather than
+# raising here; every other error class is unaffected, and our own callers log
+# the null.
+#
+# BOTH sanitizers need it — the option is shared runtime, not an ASan feature.
+# TSan was left without it and died on that same test in the 2026-08-16 nightly,
+# taking every test ordered after it down with it.
+ASAN_RUN_OPTIONS := detect_leaks=1:halt_on_error=0:allocator_may_return_null=1
+TSAN_RUN_OPTIONS := halt_on_error=0 allocator_may_return_null=1 \
+	suppressions=$(CURDIR)/tests/tsan_suppressions.txt
+
+# Leaks still get DETECTED and printed (detect_leaks=1 above); exitcode=0 only stops
+# them from setting the process exit status. That keeps the two verdicts separate:
+# a non-zero exit now means a genuine failure — an ASan error, a crash, or a failed
+# assertion — and never "the suite passed but leaked". Without this the gate would
+# need to guess why the binary exited non-zero, which is how it got masked before.
+LSAN_RUN_OPTIONS := exitcode=0
+
 # AddressSanitizer test binary
 TEST_ASAN_BIN := $(BIN_DIR)/helix-tests-asan
 
@@ -1193,8 +1281,12 @@ test-asan:
 	$(ECHO) "$(CYAN)$(BOLD)Building tests with AddressSanitizer...$(RESET)"
 	@$(MAKE) $(ASAN_MAKE_OVERRIDES) TEST_BIN=$(TEST_ASAN_BIN) $(TEST_ASAN_BIN)
 	$(ECHO) "$(CYAN)$(BOLD)Running tests with AddressSanitizer...$(RESET)"
-	@ASAN_OPTIONS=detect_leaks=1:halt_on_error=0 $(TEST_ASAN_BIN) "~[.]" 2>&1 | tee /tmp/asan_output.txt
-	$(ECHO) "$(GREEN)✓ ASAN test complete - check /tmp/asan_output.txt for issues$(RESET)"
+	@set -o pipefail; \
+	ASAN_OPTIONS=$(ASAN_RUN_OPTIONS) LSAN_OPTIONS=$(LSAN_RUN_OPTIONS) \
+	  $(TEST_ASAN_BIN) "~[.]" 2>&1 | tee /tmp/asan_output.txt; \
+	$(call report_sanitizer_result,ASAN,/tmp/asan_output.txt,$(ASAN_REPORT_RE))
+	@python3 scripts/check_asan_leaks.py \
+	  --baseline scripts/asan_leak_baseline.txt /tmp/asan_output.txt
 
 # Build and run tests with ThreadSanitizer
 # Override TSAN_FILTER to change which tests run (default: all non-hidden)
@@ -1203,22 +1295,31 @@ test-tsan:
 	$(ECHO) "$(CYAN)$(BOLD)Building tests with ThreadSanitizer...$(RESET)"
 	@$(MAKE) $(TSAN_MAKE_OVERRIDES) TEST_BIN=$(TEST_TSAN_BIN) $(TEST_TSAN_BIN)
 	$(ECHO) "$(CYAN)$(BOLD)Running tests with ThreadSanitizer (filter: $(TSAN_FILTER))...$(RESET)"
-	@TSAN_OPTIONS="halt_on_error=0 suppressions=$(CURDIR)/tests/tsan_suppressions.txt" $(TEST_TSAN_BIN) "$(TSAN_FILTER)" 2>&1 | tee /tmp/tsan_output.txt
-	$(ECHO) "$(GREEN)✓ TSAN test complete - check /tmp/tsan_output.txt for issues$(RESET)"
+	@set -o pipefail; \
+	TSAN_OPTIONS="$(TSAN_RUN_OPTIONS)" $(TEST_TSAN_BIN) "$(TSAN_FILTER)" 2>&1 | tee /tmp/tsan_output.txt; \
+	$(call report_sanitizer_result,TSAN,/tmp/tsan_output.txt,$(TSAN_REPORT_RE))
 
 # Run specific test with ASAN (usage: make test-asan-one TEST="[streaming]")
 test-asan-one:
 	$(ECHO) "$(CYAN)$(BOLD)Building tests with AddressSanitizer...$(RESET)"
 	@$(MAKE) $(ASAN_MAKE_OVERRIDES) TEST_BIN=$(TEST_ASAN_BIN) $(TEST_ASAN_BIN)
 	$(ECHO) "$(CYAN)$(BOLD)Running test '$(TEST)' with AddressSanitizer...$(RESET)"
-	@ASAN_OPTIONS=detect_leaks=1:halt_on_error=0 $(TEST_ASAN_BIN) "$(TEST)" 2>&1 | tee /tmp/asan_output.txt
+	@set -o pipefail; \
+	ASAN_OPTIONS=$(ASAN_RUN_OPTIONS) LSAN_OPTIONS=$(LSAN_RUN_OPTIONS) \
+	  $(TEST_ASAN_BIN) "$(TEST)" 2>&1 | tee /tmp/asan_output.txt; \
+	$(call report_sanitizer_result,ASAN,/tmp/asan_output.txt,$(ASAN_REPORT_RE))
+# NOTE: no leak ratchet here. The baseline is pinned to the full-suite invocation
+# above; a filtered run leaks a different population, so checking it would fail on
+# a subset and pass on nothing useful.
 
 # Run specific test with TSAN (usage: make test-tsan-one TEST="[streaming]")
 test-tsan-one:
 	$(ECHO) "$(CYAN)$(BOLD)Building tests with ThreadSanitizer...$(RESET)"
 	@$(MAKE) $(TSAN_MAKE_OVERRIDES) TEST_BIN=$(TEST_TSAN_BIN) $(TEST_TSAN_BIN)
 	$(ECHO) "$(CYAN)$(BOLD)Running test '$(TEST)' with ThreadSanitizer...$(RESET)"
-	@TSAN_OPTIONS=halt_on_error=0 $(TEST_TSAN_BIN) "$(TEST)" 2>&1 | tee /tmp/tsan_output.txt
+	@set -o pipefail; \
+	TSAN_OPTIONS="$(TSAN_RUN_OPTIONS)" $(TEST_TSAN_BIN) "$(TEST)" 2>&1 | tee /tmp/tsan_output.txt; \
+	$(call report_sanitizer_result,TSAN,/tmp/tsan_output.txt,$(TSAN_REPORT_RE))
 
 # Clean sanitizer binaries
 clean-sanitizers:

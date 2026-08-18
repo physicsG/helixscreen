@@ -303,7 +303,7 @@ This means the countdown display is only available on firmware that exposes `box
 
 ### Write-path logging
 
-The write-path is always enabled. (The former `HELIX_QIDI_BOX_WRITE` field-testing gate was removed once the command syntax was verified against QIDI's open-source firmware — `box_stepper.py`/`box_extras.py`, #1030.) Every write op (`start_drying`/`stop_drying`, load/unload/mapping) emits an `info`-level entry log plus the raw G-code via `execute_gcode`, so field behavior stays fully visible while the protocol is confirmed on real hardware.
+The write-path is always enabled. (The former `HELIX_QIDI_BOX_WRITE` field-testing gate was removed once the command syntax was verified against QIDI's open-source firmware — box_stepper.py/box_extras.py, #1030.) Every write op (`start_drying`/`stop_drying`, load/unload/mapping) emits an `info`-level entry log plus the raw G-code via `execute_gcode`, so field behavior stays fully visible while the protocol is confirmed on real hardware.
 
 ---
 

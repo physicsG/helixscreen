@@ -145,11 +145,12 @@ nlohmann::json to_lane_data_record(int slot_index, const FilamentSlotOverride& o
     j["helix_locked_color"] = o.user_locked_color;
     j["helix_locked_material"] = o.user_locked_material;
     if (!o.brand.empty()) {
-        j["vendor"] = o.brand;      // legacy/AFC key
-        j["vendor_name"] = o.brand; // Happy Hare key; the one Orca is most likely
-                                    // to consume as it moves toward vendor-aware
-                                    // matching. Zero-cost alias today (Orca
-                                    // ignores unknown keys).
+        j["vendor"] = o.brand;      // legacy key, ours
+        j["vendor_name"] = o.brand; // the shared lane_data spelling, established by
+                                    // Happy Hare and adopted by AFC in #833, so a
+                                    // reader of this namespace finds our overrides
+                                    // under the one key it already looks for.
+                                    // Zero-cost alias (consumers ignore unknown keys).
     }
     if (o.spoolman_id > 0)
         j["spool_id"] = o.spoolman_id;
@@ -165,8 +166,9 @@ nlohmann::json to_lane_data_record(int slot_index, const FilamentSlotOverride& o
     if (temps.nozzle_temp > 0)
         j["nozzle_temp"] = temps.nozzle_temp;
     if (!o.spool_name.empty()) {
-        j["spool_name"] = o.spool_name; // HelixScreen/AFC key
-        j["name"] = o.spool_name;       // Happy Hare key; alias for forward-compat
+        j["spool_name"] = o.spool_name; // legacy key, ours
+        j["name"] = o.spool_name;       // the shared lane_data spelling — same rationale
+                                        // as `vendor_name` above
     }
     if (o.spoolman_vendor_id > 0)
         j["spoolman_vendor_id"] = o.spoolman_vendor_id;
@@ -462,9 +464,11 @@ std::optional<std::pair<int, FilamentSlotOverride>> from_lane_data_record(const 
     o.user_locked_color = helix::json_util::safe_bool(j, "helix_locked_color", o.color_set);
     o.user_locked_material =
         helix::json_util::safe_bool(j, "helix_locked_material", !o.material.empty());
-    // Prefer our own `vendor` key; fall back to Happy Hare's `vendor_name` so
-    // alias-only records (e.g. written by HH's mmu_server push_lane_data) read
-    // correctly. Round-trips of our own records stay exact.
+    // Prefer our own `vendor` key; fall back to `vendor_name`, the shared
+    // lane_data spelling that Happy Hare established (mmu_server
+    // push_lane_data) and AFC adopted in AFCProject/AFC-Klipper-Add-On#833, so
+    // alias-only foreign records read correctly. Round-trips of our own records
+    // stay exact.
     o.brand = string_with_alias(j, "vendor", "vendor_name");
     o.spoolman_id = helix::json_util::safe_int(j, "spool_id", 0);
     o.bed_temp = helix::json_util::safe_int(j, "bed_temp", 0);
@@ -472,7 +476,8 @@ std::optional<std::pair<int, FilamentSlotOverride>> from_lane_data_record(const 
     if (j.contains("scan_time") && j["scan_time"].is_string()) {
         o.updated_at = parse_iso8601(j["scan_time"].get<std::string>());
     }
-    // Prefer `spool_name`; fall back to Happy Hare's `name` alias.
+    // Same rule as `brand` above: prefer `spool_name`, fall back to the shared
+    // `name` alias.
     o.spool_name = string_with_alias(j, "spool_name", "name");
     o.spoolman_vendor_id = helix::json_util::safe_int(j, "spoolman_vendor_id", 0);
     o.remaining_weight_g = helix::json_util::safe_float(j, "remaining_weight_g", -1.0f);
@@ -1714,17 +1719,39 @@ FingerprintEvent SlotFingerprintTracker::observe(int slot_index, const std::stri
     if (exp == expected_.end())
         return FingerprintEvent::Changed;
 
-    // Single-shot: any change consumes the expectation, matching or not. A
-    // non-matching change means the slot moved somewhere we did not send it, so
-    // whatever echo was outstanding is no longer meaningful — and swap
-    // detection returns to normal immediately rather than staying suppressed.
-    const bool matched = (exp->second == observed);
+    // Single-shot per value: an exact match consumes only its own entry
+    // (OwnWriteEcho). Any other change means the slot moved somewhere we did
+    // not send it, so whatever echoes were outstanding are no longer
+    // meaningful — consume them all and return to normal swap detection
+    // immediately rather than staying suppressed.
+    for (auto eit = exp->second.begin(); eit != exp->second.end(); ++eit) {
+        if (*eit == observed) {
+            exp->second.erase(eit);
+            if (exp->second.empty())
+                expected_.erase(exp);
+            return FingerprintEvent::OwnWriteEcho;
+        }
+    }
     expected_.erase(exp);
-    return matched ? FingerprintEvent::OwnWriteEcho : FingerprintEvent::Changed;
+    return FingerprintEvent::Changed;
 }
 
 void SlotFingerprintTracker::expect(int slot_index, std::string expected_value) {
-    expected_[slot_index] = std::move(expected_value);
+    expected_[slot_index] = {std::move(expected_value)};
+}
+
+void SlotFingerprintTracker::expect_any_of(int slot_index,
+                                           std::vector<std::string> expected_values) {
+    std::vector<std::string> kept;
+    kept.reserve(expected_values.size());
+    for (auto& v : expected_values) {
+        if (!v.empty())
+            kept.push_back(std::move(v));
+    }
+    if (kept.empty())
+        expected_.erase(slot_index);
+    else
+        expected_[slot_index] = std::move(kept);
 }
 
 void SlotFingerprintTracker::forget_expected(int slot_index) {
@@ -1745,6 +1772,72 @@ bool SlotFingerprintTracker::has_expected(int slot_index) const {
 void SlotFingerprintTracker::clear() {
     baseline_.clear();
     expected_.clear();
+}
+
+// =============================================================================
+// merge_override — shared spec §5 implementation
+// =============================================================================
+
+MergeResult merge_override(SlotInfo& slot, const FilamentSlotOverride& o,
+                           const MergeOptions& options) {
+    // Rule 1 — external re-bind. Another well-behaved writer (Mainsail, the
+    // AFC plugin) explicitly set a DIFFERENT spool on this lane. That is a
+    // statement, not a guess: the whole record drops, firmware truth paints.
+    // Never gated by the setting; never fires on eject's 0/null (#1281 step 7).
+    // The two suppress ids exclude our OWN in-flight re-links: after
+    // HelixScreen writes a spool id, status frames already parsed (or parsed
+    // before the write lands) keep reporting the OLD firmware id for a poll
+    // or two — that stale frame is us, not Mainsail (SlotFingerprintTracker
+    // ::expect() semantics; see MergeOptions). Suppression only skips this
+    // clear; the field merge below still paints the override.
+    if (slot.spoolman_id > 0 && o.spoolman_id > 0 && slot.spoolman_id != o.spoolman_id &&
+        slot.spoolman_id != options.suppress_rebind_firmware_old_id &&
+        slot.spoolman_id != options.suppress_rebind_firmware_new_id) {
+        MergeResult r;
+        r.cleared_rebind = true;
+        return r;
+    }
+    // Rule 2 — eject signal, setting-gated. Only meaningful where firmware
+    // reports ids while loaded (AFC, Happy Hare): there, 0/null is the eject
+    // the plugin itself writes. Elsewhere 0 is the everyday reading — stock
+    // CFS firmware reports no ids at all, and flat-schema CFS parses a
+    // per-slot id without giving 0 an eject meaning — so the rule stays
+    // inert.
+    if (options.firmware_reports_spool_ids && slot.spoolman_id <= 0 && o.spoolman_id > 0 &&
+        !options.keep_spool_info_on_eject) {
+        MergeResult r;
+        r.cleared_eject = true;
+        return r;
+    }
+    // Spec §5 — override wins field-by-field; sentinels fall through.
+    if (!o.brand.empty())
+        slot.brand = o.brand;
+    if (!o.spool_name.empty())
+        slot.spool_name = o.spool_name;
+    if (o.spoolman_id > 0)
+        slot.spoolman_id = o.spoolman_id;
+    if (o.spoolman_vendor_id > 0)
+        slot.spoolman_vendor_id = o.spoolman_vendor_id;
+    if (o.remaining_weight_g >= 0.0f)
+        slot.remaining_weight_g = o.remaining_weight_g;
+    if (o.total_weight_g >= 0.0f)
+        slot.total_weight_g = o.total_weight_g;
+    if (o.color_set)
+        slot.color_rgb = o.color_rgb;
+    if (!o.color_name.empty())
+        slot.color_name = o.color_name;
+    // Material is the one §5 field firmware may also state; see
+    // MergeOptions::firmware_states_material for why it is not a plain
+    // override-wins.
+    if (!o.material.empty() &&
+        (!options.firmware_states_material || slot.material.empty() || o.user_locked_material)) {
+        slot.material = o.material;
+    }
+    if (!o.catalog_id.empty())
+        slot.catalog_id = o.catalog_id;
+    if (!o.product_name.empty())
+        slot.product_name = o.product_name;
+    return {};
 }
 
 } // namespace helix::ams

@@ -283,6 +283,7 @@ void AmsState::init_subjects(bool register_xml) {
     if (register_xml)
         lv_xml_register_subject(nullptr, "ams_supports_bypass", &supports_bypass_);
     INIT_SUBJECT_INT(ams_slot_count, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(ams_cards_compact, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(slots_version, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(tool_map_version, 0, subjects_, register_xml);
     // Default 1 (present) so non-auto-feed / unknown backends never gate Resume (#991).
@@ -537,6 +538,21 @@ void AmsState::init_subjects(bool register_xml) {
             lv_xml_register_subject(nullptr, name_buf, &env_ind_drying_text_[i]);
         }
     }
+
+    // Always-off placeholders for units past MAX_UNITS. A rig with more units
+    // than we allocate subjects for still gets a card per unit; its environment
+    // indicator binds these, so the badge stays hidden instead of the parser
+    // warning once per binding about names nothing registered.
+    lv_subject_init_int(&env_ind_off_flag_, 0);
+    subjects_.register_subject(&env_ind_off_flag_);
+    if (register_xml)
+        lv_xml_register_subject(nullptr, ENV_IND_OFF_FLAG_SUBJECT, &env_ind_off_flag_);
+
+    lv_subject_init_string(&env_ind_off_text_, env_ind_off_text_buf_, nullptr,
+                           ENV_IND_TEXT_BUF_SIZE, "");
+    subjects_.register_subject(&env_ind_off_text_);
+    if (register_xml)
+        lv_xml_register_subject(nullptr, ENV_IND_OFF_TEXT_SUBJECT, &env_ind_off_text_);
 
     // Detail-view env indicator mirror subjects.
     lv_subject_init_string(&env_ind_detail_temp_text_, env_ind_detail_temp_text_buf_, nullptr,
@@ -896,6 +912,16 @@ std::vector<helix::AvailableSlot> AmsState::collect_available_slots() const {
     return slots;
 }
 
+bool AmsState::any_bypass_active() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (const auto& backend : backends_) {
+        if (backend && backend->is_bypass_active()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 AmsBackend* AmsState::get_backend() const {
     return get_backend(0);
 }
@@ -1077,6 +1103,35 @@ lv_subject_t* AmsState::get_env_ind_drying_text_subject(int unit_index) {
         return nullptr;
     }
     return &env_ind_drying_text_[unit_index];
+}
+
+AmsState::EnvIndicatorSubjectNames AmsState::env_indicator_subject_names(int unit_index) {
+    EnvIndicatorSubjectNames names;
+
+    if (unit_index < 0 || unit_index >= MAX_UNITS) {
+        names.temp_text = ENV_IND_OFF_TEXT_SUBJECT;
+        names.humidity_text = ENV_IND_OFF_TEXT_SUBJECT;
+        names.drying_text = ENV_IND_OFF_TEXT_SUBJECT;
+        names.humidity_status = ENV_IND_OFF_FLAG_SUBJECT;
+        names.humidity_visible = ENV_IND_OFF_FLAG_SUBJECT;
+        names.visible = ENV_IND_OFF_FLAG_SUBJECT;
+        names.drying_active = ENV_IND_OFF_FLAG_SUBJECT;
+        return names;
+    }
+
+    auto expand = [unit_index](const char* suffix) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "ams_env_ind_%d_%s", unit_index, suffix);
+        return std::string(buf);
+    };
+    names.temp_text = expand("temp_text");
+    names.humidity_text = expand("humidity_text");
+    names.humidity_status = expand("humidity_status");
+    names.humidity_visible = expand("humidity_visible");
+    names.visible = expand("visible");
+    names.drying_active = expand("drying_active");
+    names.drying_text = expand("drying_text");
+    return names;
 }
 
 lv_subject_t* AmsState::get_slot_color_subject(int backend_index, int slot_index) {
@@ -1527,6 +1582,24 @@ void AmsState::sync_from_backend() {
     int new_bypass = info.current_slot == -2 ? 1 : 0;
     if (lv_subject_get_int(&bypass_active_) != new_bypass) {
         lv_subject_set_int(&bypass_active_, new_bypass);
+    }
+
+    // Engaging bypass changes nothing about any slot, so the per-slot delta scan
+    // in sync_slots_from_backend() never bumps slots_version. The pre-print
+    // filament check keys on bypass (PreflightValidator) and slots_version is its
+    // ONLY refresh trigger, so without this the cached result goes stale: engage
+    // bypass while a file's detail view is already open and the false
+    // "T0 has no filament loaded" block still fires on Print.
+    //
+    // Tracked off any_bypass_active() rather than the bypass_active_ subject
+    // above — that one is derived from current_slot == -2, which later writes in
+    // the same status frame can clobber.
+    const bool bypass_now = any_bypass_active();
+    if (bypass_now != last_bypass_active_) {
+        last_bypass_active_ = bypass_now;
+        spdlog::debug("[AmsState] Bypass -> {}, bumping slots_version for the pre-print check",
+                      bypass_now);
+        bump_slots_version();
     }
     int new_supports_bypass = helix::bypass_available_for(info.supports_bypass) ? 1 : 0;
     if (lv_subject_get_int(&supports_bypass_) != new_supports_bypass) {
@@ -2736,36 +2809,6 @@ void AmsState::set_current_loaded_defaults() {
     }
 }
 
-void AmsState::sync_active_spool_after_edit(int slot_index, int spoolman_id) {
-    if (!api_ || spoolman_id <= 0)
-        return;
-
-    int current_slot = lv_subject_get_int(&current_slot_);
-    if (slot_index != current_slot)
-        return;
-
-    // Skip direct Spoolman API call when the backend manages active spool
-    // natively (e.g., AFC sends SET_SPOOL_ID gcode which triggers AFC to call
-    // spoolman_set_active_spool on its own). Calling Spoolman directly here
-    // would bypass AFC, causing the Spoolman widget to update but not AFC's
-    // internal state (issue #644).
-    AmsBackend* backend = get_backend();
-    if (backend && backend->manages_active_spool()) {
-        spdlog::debug("[AmsState] Skipping direct Spoolman sync for slot {} — backend manages "
-                      "active spool natively",
-                      slot_index);
-        return;
-    }
-
-    spdlog::info("[AmsState] Edited slot {} is loaded, syncing active Spoolman spool to {}",
-                 slot_index, spoolman_id);
-    api_->spoolman().set_active_spool(
-        spoolman_id, []() {},
-        [](const MoonrakerError& err) {
-            spdlog::warn("[AmsState] Failed to set active spool: {}", err.message);
-        });
-}
-
 void AmsState::sync_current_loaded_from_backend() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -3111,4 +3154,148 @@ void AmsState::clear_external_spool_info() {
         lv_subject_set_int(&external_spool_color_, 1);
     }
     lv_subject_set_int(&external_spool_color_, 0);
+}
+
+// ============================================================================
+// Slot edit commit (single authority for spool assignment changes)
+// ============================================================================
+
+AmsError AmsState::commit_slot_edit(int slot_index, const SlotInfo& original,
+                                    const SlotInfo& info) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    AmsBackend* backend = get_backend();
+    if (!backend) {
+        return AmsError(AmsResult::NO_AMS_DETECTED, "no AMS backend",
+                        lv_tr("Multi-Filament System not available"));
+    }
+
+    // S1 — server-side active spool (fire-and-forget, warn on failure)
+    if (api_) {
+        if (info.spoolman_id > 0) {
+            api_->spoolman().set_active_spool(
+                info.spoolman_id, []() {},
+                [](const MoonrakerError& err) {
+                    spdlog::warn("[AmsState] Failed to set active spool: {}", err.message);
+                });
+        } else if (original.spoolman_id > 0) {
+            api_->spoolman().set_active_spool(
+                0, []() {},
+                [](const MoonrakerError& err) {
+                    spdlog::warn("[AmsState] Failed to clear active spool: {}", err.message);
+                });
+        }
+    }
+
+    // S6 — stale identity otherwise survives until a server 404
+    if (original.spoolman_id > 0 && original.spoolman_id != info.spoolman_id) {
+        SpoolmanManager::invalidate_identity(original.spoolman_id);
+    }
+
+    // S3 — backend slot info + firmware gcode
+    AmsError err = backend->set_slot_info(slot_index, info);
+    if (!err.success()) {
+        return err;
+    }
+
+    // S4 + S7
+    sync_from_backend();
+    return err;
+}
+
+void AmsState::apply_external_spool_store(const SlotInfo& info) {
+    // S5 + S7 — same emptiness predicate as the FilamentPanel completion arm
+    if (info.spoolman_id > 0 || !info.material.empty()) {
+        set_external_spool_info(info);
+    } else {
+        clear_external_spool_info();
+    }
+}
+
+void AmsState::invalidate_stale_external_identity(const SlotInfo& info) {
+    // S6 — stale identity otherwise survives until a server 404
+    const int previous_id = get_external_spool_info().value_or(SlotInfo{}).spoolman_id;
+    if (previous_id > 0 && previous_id != info.spoolman_id) {
+        SpoolmanManager::invalidate_identity(previous_id);
+    }
+}
+
+void AmsState::commit_external_spool_edit(const SlotInfo& info) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+    // S1 — match the server active spool to what we are committing
+    if (api_) {
+        if (info.spoolman_id > 0) {
+            api_->spoolman().set_active_spool(
+                info.spoolman_id, []() {},
+                [](const MoonrakerError& err) {
+                    spdlog::warn("[AmsState] Failed to set active spool: {}", err.message);
+                });
+        } else if (get_external_spool_info().value_or(SlotInfo{}).spoolman_id > 0) {
+            // Committing a manual entry (id=0, material set) over a linked
+            // spool intentionally clears the server link — the UI no longer
+            // shows that spool as in use, so the server must not either.
+            api_->spoolman().set_active_spool(
+                0, []() {},
+                [](const MoonrakerError& err) {
+                    spdlog::warn("[AmsState] Failed to clear active spool: {}", err.message);
+                });
+        }
+    }
+
+    invalidate_stale_external_identity(info);
+
+    // S5 + S7
+    apply_external_spool_store(info);
+}
+
+void AmsState::commit_external_spool_edit(const SlotInfo& info, std::function<void()> on_committed,
+                                          std::function<void(const MoonrakerError& err)> on_error) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+    invalidate_stale_external_identity(info);
+
+    if (api_ && info.spoolman_id > 0) {
+        // Server-first: the store subset waits for the server round-trip. The
+        // API callbacks fire on a background thread, so both the store write
+        // and the caller's completion are marshalled to the main thread.
+        api_->spoolman().set_active_spool(
+            info.spoolman_id,
+            [info, on_committed = std::move(on_committed)]() {
+                helix::ui::queue_update("AmsState::commit_external_spool_edit",
+                                        [info, on_committed]() {
+                                            if (s_shutdown_flag.load(std::memory_order_acquire)) {
+                                                return;
+                                            }
+                                            AmsState::instance().apply_external_spool_store(info);
+                                            if (on_committed) {
+                                                on_committed();
+                                            }
+                                        });
+            },
+            [on_error = std::move(on_error)](const MoonrakerError& err) {
+                helix::ui::queue_update("AmsState::commit_external_spool_edit", [on_error, err]() {
+                    if (on_error) {
+                        on_error(err);
+                    }
+                });
+            });
+        return;
+    }
+
+    // Manual entry or clear: no server identity gates the store write. The
+    // clear arm (replacing a linked spool with an empty record) still tells
+    // the server, fire-and-forget, exactly like the sync commit.
+    if (api_ && info.spoolman_id == 0 &&
+        get_external_spool_info().value_or(SlotInfo{}).spoolman_id > 0) {
+        api_->spoolman().set_active_spool(
+            0, []() {},
+            [](const MoonrakerError& err) {
+                spdlog::warn("[AmsState] Failed to clear active spool: {}", err.message);
+            });
+    }
+
+    apply_external_spool_store(info);
+    if (on_committed) {
+        on_committed();
+    }
 }

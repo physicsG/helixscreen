@@ -45,7 +45,11 @@ struct ApplyConfig {
  * @brief Callback types for InputShaperCalibrator
  */
 using AccelCheckCallback = std::function<void(float noise_level)>;
-using ProgressCallback = std::function<void(int percent)>;
+
+/// Progress during a resonance run. The phase says whether the toolhead is
+/// still sweeping or Klipper has moved on to fitting shapers; it is reported
+/// explicitly because the percentage alone cannot distinguish the two.
+using ProgressCallback = std::function<void(int percent, ShaperCalibrationPhase phase)>;
 using ResultCallback = std::function<void(const InputShaperResult& result)>;
 using SuccessCallback = std::function<void()>;
 using ErrorCallback = std::function<void(const std::string& message)>;
@@ -69,7 +73,7 @@ using ErrorCallback = std::function<void(const std::string& message)>;
  *   });
  *
  *   calibrator.run_calibration('X',
- *       [](int pct) { update_progress(pct); },
+ *       [](int pct, ShaperCalibrationPhase phase) { update_progress(pct, phase); },
  *       [](const InputShaperResult& r) { show_result(r); },
  *       [](const std::string& err) { show_error(err); });
  * @endcode
@@ -188,7 +192,7 @@ class InputShaperCalibrator {
      * frequency response data and all fitted shaper alternatives.
      *
      * @param axis Axis to test ('X' or 'Y')
-     * @param on_progress Called with percentage (0-100) during test
+     * @param on_progress Called with percentage (0-100) and the current phase
      * @param on_complete Called with calibration result on success
      * @param on_error Called with error message on failure
      */

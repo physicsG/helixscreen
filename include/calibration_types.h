@@ -362,6 +362,21 @@ enum class BedLevelingMethod {
 struct ShaperOption;
 
 /**
+ * @brief Which stage of SHAPER_CALIBRATE a progress report belongs to
+ *
+ * Klipper's resonance test has two visibly different halves: a frequency sweep
+ * that moves the toolhead, then an offline fit of each shaper against the
+ * captured data. The UI shows different text for each, so the phase travels
+ * alongside the percentage instead of being re-derived from it — a percentage
+ * threshold cannot distinguish "sweep pinned at its ceiling" from "sweep done".
+ */
+enum class ShaperCalibrationPhase {
+    Sweeping,  ///< Toolhead is being driven through the test frequencies
+    Analyzing, ///< Sweep finished; Klipper is fitting shapers to the data
+    Complete,  ///< Recommendation and CSV path parsed
+};
+
+/**
  * @brief Per-shaper frequency response curve from calibration CSV
  *
  * Contains the filtered PSD response for one shaper type at all frequency bins.

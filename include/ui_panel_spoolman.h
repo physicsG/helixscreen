@@ -102,6 +102,8 @@ class SpoolmanPanel : public OverlayBase {
     char header_title_buf_[64];
 
     // ========== Private Methods ==========
+    friend class SpoolmanPanelTestAccess;
+
     [[nodiscard]] const SpoolInfo* find_cached_spool(int spool_id) const;
 
     void populate_spool_list();

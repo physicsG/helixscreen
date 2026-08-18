@@ -10,6 +10,7 @@
 #include "gcode_file_modifier.h"
 #include "gcode_ops_detector.h"
 #include "i_moonraker_api.h"
+#include "operation_timeout_guard.h"
 #include "preprint_predictor.h"
 #include "print_start_analyzer.h"
 #include "printer_detector.h"
@@ -518,6 +519,9 @@ class PrintPreparationManager {
     std::optional<gcode::ScanResult> cached_scan_result_;
     std::string cached_scan_filename_;
     std::optional<size_t> cached_file_size_; ///< File size from Moonraker metadata
+    /// Job temps for {bed_temp}/{extruder_temp} come from the scan cache's
+    /// print_start call (the file's own START_PRINT line) — see
+    /// collect_pre_start_gcode_lines().
 
     /**
      * @brief Get the cached pre-print option set from PrinterState
@@ -552,6 +556,52 @@ class PrintPreparationManager {
     // === Connection Observer ===
     // Triggers macro analysis when printer connection becomes CONNECTED
     ObserverGuard connection_observer_;
+
+    // === Pre-start completion wait ===
+    // When the pre-start gcode RPC times out but Klipper still reports
+    // idle_timeout "Printing", the macro is still executing on the printer
+    // (execute_gcode blocks until it finishes, and a long macro — e.g.
+    // Creality's BED_MESH_CALIBRATE_START_PRINT chain — can outlive the RPC
+    // ceiling). Instead of failing the print start, wait for the busy->idle
+    // edge and start the print then. The guard is the backstop: if the
+    // printer never goes idle within another ceiling, the start fails.
+    bool pre_start_wait_active_ = false;
+    OperationTimeoutGuard pre_start_wait_guard_;
+    ObserverGuard pre_start_wait_observer_;
+
+    /**
+     * @brief Continue the print start after the pre-start block is done
+     *
+     * Shared continuation of the pre-start success callback and the
+     * completion wait: modifies the file when operations must be stripped,
+     * otherwise starts the print directly.
+     */
+    void continue_print_start(const std::string& filename,
+                              const std::vector<gcode::OperationType>& ops_to_disable,
+                              NavigateToStatusCallback on_navigate_to_status,
+                              PrintCompletionCallback on_completion);
+
+    /**
+     * @brief Pre-start RPC failed — decide failure vs. wait-for-idle
+     *
+     * Main thread only (called via token.defer). A TIMEOUT error while the
+     * printer still reports idle_timeout "Printing" enters the completion
+     * wait; anything else fails the print start.
+     */
+    void handle_pre_start_gcode_error(const MoonrakerError& error, const std::string& filename,
+                                      const std::vector<gcode::OperationType>& ops_to_disable,
+                                      NavigateToStatusCallback on_navigate_to_status,
+                                      PrintCompletionCallback on_completion);
+
+    /// Arm the busy->idle observer + backstop. Main thread only.
+    void begin_pre_start_completion_wait(const MoonrakerError& timeout_error,
+                                         const std::string& filename,
+                                         const std::vector<gcode::OperationType>& ops_to_disable,
+                                         NavigateToStatusCallback on_navigate_to_status,
+                                         PrintCompletionCallback on_completion);
+
+    /// Tear the wait down (observer + backstop). Idempotent.
+    void finish_pre_start_wait();
 
     // === Internal Methods ===
 
@@ -661,7 +711,8 @@ class PrintPreparationManager {
      *
      * @return Vector of rendered gcode lines, e.g. {"LOAD_AI_RUN SWITCH=1"}.
      */
-    [[nodiscard]] std::vector<std::string> collect_pre_start_gcode_lines() const;
+    [[nodiscard]] std::vector<std::string>
+    collect_pre_start_gcode_lines(const std::string& filename = {}) const;
 
     /**
      * @brief Build the combined pre-start gcode block executed before START_PRINT.

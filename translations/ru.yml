@@ -63,7 +63,7 @@ translations:
   120 seconds: 120 секунд
   15 seconds: 15 секунд
   180°: 180°
-  180° Upside Down: ''
+  180° Upside Down: 180° вверх ногами
   2 min: '2 мин'
   2 minutes: 2 минуты
   2. Place paper between nozzle and bed: 2. Положите бумагу между соплом и столом
@@ -72,7 +72,7 @@ translations:
   20 minutes: 20 минут
   24 Hour: 24 часа
   270°: 270°
-  270° Clockwise: ''
+  270° Clockwise: 270° по часовой стрелке
   2D Heatmap: 2D тепловая карта
   2D Layers: 2D слои
   3. Adjust screws, then re-probe to verify: 3. Отрегулируйте винты, затем перепроверьте
@@ -91,7 +91,7 @@ translations:
   5V: 5V
   60 seconds: 60 секунд
   90°: 90°
-  90° Clockwise: ''
+  90° Clockwise: 90° по часовой стрелке
   = Loosen: = Ослабить
   = Tighten: = Затянуть
   A: A
@@ -334,12 +334,15 @@ translations:
   Button taps and navigation sounds: Звуки нажатий и навигации
   Buzz Servo: 'Дёрнуть сервопривод'
   Bypass: Обход
+  Bypass Is Active: ''
   Bypass Mode: Режим обхода
   Bypass controlled by hardware sensor: Обход управляется аппаратным датчиком
   Bypass controlled by sensor: Байпас управляется датчиком
   Bypass disabled: Байпас отключён
   Bypass enabled: Байпас включён
   Bypass failed: Ошибка байпаса
+  ? Bypass is active, but this print uses AMS lanes. The printer may refuse to load a lane while bypass filament is in the toolhead. Remove the filament and turn bypass off before printing. Start anyway?
+  : ''
   Bypass toggle failed: Не удалось переключить байпас
   C: К
   CALIBRATION: КАЛИБРОВКА
@@ -1038,6 +1041,7 @@ translations:
   Filament: Филамент
   Filament Detected: Филамент обнаружен
   Filament Environment: Среда хранения филамента
+  Filament In The Toolhead: ''
   Filament Mapping: Назначение филамента
   Filament Runout: Окончание филамента
   Filament Sensor: Датчик филамента
@@ -1051,6 +1055,8 @@ translations:
     компенсации потока
   Filament is loose: Филамент ослаблен
   Filament is pulling tight: Филамент натянут
+  ? Filament is still at the nozzle after unloading. The cut or retract may not have completed. Clear the toolhead before loading another spool.
+  : ''
   'Filament load failed: {}': 'Ошибка загрузки филамента: {}'
   Filament loaded: Филамент загружен
   Filament operation failed: Операция с филаментом не удалась
@@ -1060,6 +1066,7 @@ translations:
   : 'Филамент закончился, и CFS не нашла подходящей катушки для замены. Загрузите катушку того же материала и цвета и продолжите печать.'
   Filament ran out at the toolhead: 'Филамент закончился у печатающей головки'
   Filament ran out. Auto-refill is off, so the CFS will not switch spools on its own. Load filament, then resume.: 'Филамент закончился. Автопополнение выключено, поэтому CFS не сменит катушку сам. Загрузите филамент и продолжите печать.'
+  Filament ran out. The CFS knows which spools match, but those slots are empty. Load one of them, then resume.: ''
   Filament runout: Окончание филамента
   Filament runout and motion detection sensors: Датчики окончания и движения филамента
   Filament runout detection status: 'Состояние датчика окончания филамента'
@@ -1327,6 +1334,8 @@ translations:
   Keep Navigation Bar: Сохранить панель навигации
   Keep Printing: Продолжить печать
   Keep Required: Оставить обязательным
+  Keep current: ''
+  Keep Spool Info on Eject: ''
   Keep the bypass spool visible when bypass is off: Показывать катушку байпаса, даже когда байпас выключен
   Kick away: 'Сброс остатка'
   Kinematics: Кинематика
@@ -1697,9 +1706,11 @@ translations:
   No width sensor detected: 'Датчик диаметра не обнаружен'
   None: Нет
   None (disable): Нет (отключить)
-  Normal: ''
+  Normal: Обычная
   Not Enough Filament: Недостаточно филамента
   Not Now: Не сейчас
+  Not available here. Update from a terminal.: Здесь недоступно. Обновите через терминал.
+  Not available on Android: ''
   Not calibrated: Не откалиброван
   Not configured: Не настроено
   Not connected: Не подключен
@@ -1979,6 +1990,7 @@ translations:
   Printer name: Название принтера
   Printer not ready: Принтер не готов
   Printer ready: Принтер готов
+  Printer type mismatch: ''
   'Printer:': 'Принтер:'
   'Printer: ': 'Принтер: '
   PrinterIdentify: Определить принтер
@@ -2060,6 +2072,7 @@ translations:
   Ramming Volume: 'Объём рэмминга'
   Raspberry Pi: Raspberry Pi
   Raspberry Pi (32-bit): Raspberry Pi (32-bit)
+  Re-identify: ''
   Re-probe: Перепроверить
   Re-read spool RFID tags and remaining length: 'Перечитать RFID-метки катушек и остаток'
   Re-syncs Happy Hare's tracked state with the hardware.: Повторно синхронизирует
@@ -2077,6 +2090,7 @@ translations:
     подробные результаты в любое время в Настройках.
   Recent Prints: Недавние печати
   Recently Printed: Недавно напечатано
+  Reconnect: ''
   Record Timelapse: Записать таймлапс
   Record timelapses of your prints: Записывайте таймлапсы ваших печатей
   Recorded timelapses will appear here: Записанные таймлапсы появятся здесь
@@ -2104,6 +2118,7 @@ translations:
   Remap Tool: Переназначить инструмент
   Remap needs the HelixPrint plugin: Для переназначения нужен плагин HelixPrint
   Remap…: Переназначить…
+  Remember lane spool details across an eject: ''
   Remove: Удалить
   Remove PIN: Удалить PIN
   Remove Spoolman?: Удалить Spoolman?
@@ -2213,6 +2228,7 @@ translations:
     загрузку/выгрузку филамента даже при холодном сопле (для макросов, которые сами
     нагревают сопло)
   Run test sequence on all lanes: 'Запустить тестовую последовательность на всех слотах'
+  Run the HelixScreen installer with --update from a terminal on this printer. Scan for the command for your platform.: Запустите установщик HelixScreen с ключом --update в терминале на этом принтере. Отсканируйте код, чтобы получить команду для вашей платформы.
   Run without parameter prompt: Запускать без запроса параметров
   Run {}?: Запустить {}?
   Running {}...: Выполнение {}...
@@ -2283,7 +2299,7 @@ translations:
   Screen: 'Экран'
   Screen Blank: Гашение экрана
   Screen Dim: Затемнение экрана
-  Screen Rotation: ''
+  Screen Rotation: Поворот экрана
   Screen dims to lower brightness after period of inactivity: Экран затемняется после
     периода простоя
   Screen lock and PIN settings: Блокировка экрана и настройки PIN
@@ -2622,6 +2638,8 @@ translations:
     interfering with prints. You can re-enable it in Settings > Display.
   : Анимированная заставка была отключена на данном устройстве, чтобы она не мешала
     печати. Вы можете снова включить её в Настройки > Дисплей.
+  ? The filament did not reach the nozzle. The CFS reported no error, but the toolhead sensor still sees no filament. Check that the spool is seated and the path is clear, then try again.
+  : ''
   The filament system reported an error: Система филамента сообщила об ошибке
   The heater will cycle on and off several times.: Нагреватель будет несколько раз
     включаться и выключаться.
@@ -2641,6 +2659,7 @@ translations:
   The printer's firmware chooses the backup spool itself: Прошивка принтера сама выбирает резервную катушку
   The runout sensor indicates no filament is loaded. Start print anyway?: Датчик окончания
     филамента показывает, что филамент не загружен. Всё равно начать печать?
+  The toolhead has filament but no AMS lane reports it loaded. Pull it out manually before printing. Start anyway?: ''
   The toolhead sensor indicates filament is already loaded. Proceed with load anyway?: Датчик
     печатающей головки показывает, что филамент уже загружен. Всё равно продолжить
     загрузку?
@@ -2682,6 +2701,8 @@ translations:
     включения опциональных шагов.
   This print needs about %.0fg but the spool has about %.0fg remaining. Start anyway?: Для
     этой печати нужно около %.0fг, но на катушке осталось около %.0fг. Всё равно начать?
+  ? This printer looks like a {} ({}% confidence), but it is set up as a {}. A wrong type applies incorrect pre-print options and presets.
+  : ''
   This tool probes each bed screw and tells you how much to adjust.: Этот инструмент
     проверяет каждый винт стола и показывает, насколько его нужно отрегулировать.
   ? This will apply the Z-offset to your endstop and restart Klipper to save the configuration.
@@ -2787,7 +2808,7 @@ translations:
   Turn On LEDs: 'Включить LED'
   Turn on LEDs when printer starts: Включать LED при запуске принтера
   Turn the extruder heater off after a load or unload finishes: Выключать нагреватель экструдера после загрузки или выгрузки
-  Turn the picture to match how the screen is mounted. Applies after restart.: ''
+  Turn the picture to match how the screen is mounted. Applies after restart.: Поворачивает изображение в соответствии с положением экрана. Применяется после перезапуска.
   Type: Тип
   Type to preview input field...: Введите для предпросмотра поля ввода...
   'Type:': 'Тип:'
@@ -2841,11 +2862,12 @@ translations:
   Update Channel: Канал обновлений
   Update Failed: Ошибка обновления
   Update Success: Обновление успешно
+  Update from a Terminal: Обновление через терминал
   Update installed!: Обновление установлено!
   Update your security PIN: Обновите ваш PIN-код
-  Updates aren't available on this installation.: Обновления недоступны в этой установке.
   Updating Configuration...: Обновление конфигурации...
   Upgrade to AFC 1.2.0 or newer for filament names and multi-color spools.: Обновите AFC до версии 1.2.0 или новее, чтобы получить имена филамента и многоцветные катушки.
+  Upgrade to AFC 1.2.0 or newer for multi-color spools. It also adds filament names, which otherwise need Spoolman.: ''
   Upload: Отправить
   Upload Debug Bundle: Отправить пакет диагностики
   Upload Failed: Ошибка отправки
@@ -3038,10 +3060,8 @@ translations:
   nozzle: сопло
   of: из
   'off': выкл
-  pre_print_option.ai_detect.description: Отслеживание дефектов печати (на основе
-    камеры K2 Plus)
-  pre_print_option.ai_detect.label: AI-детекция
-  pre_print_option.timelapse.label: Таймлапс
+  Monitor for print abnormalities (K2 Plus camera-based): Отслеживание дефектов печати (на основе камеры K2 Plus)
+  AI detection: AI-детекция
   prints: печатей
   remaining: осталось
   remaining before clog detection triggers: осталось до срабатывания обнаружения засора
@@ -3051,33 +3071,20 @@ translations:
   steppers: шаговые двигатели
   tall: высотой
   tool(s): инструмент(ы)
-  tour.step.advanced.body: Макросы, консоль G-code, инструменты калибровки (PID, Input
-    Shaper, Z-смещение), обновления прошивки и утилиты для разработчиков.
-  tour.step.advanced.title: Дополнительно
-  tour.step.controls.body: Перемещайте печатающую головку, паркуйте оси, выравнивайте
-    стол и точно настраивайте температуры, вентиляторы и другие параметры движения.
-  tour.step.controls.title: Управление
-  tour.step.customize.body: Долгое нажатие на любую плитку переводит в режим редактирования
-    — переставляйте, изменяйте размер, удаляйте или добавляйте виджеты, а также добавляйте
-    дополнительные страницы под свой макет.
-  tour.step.customize.title: Настройте главный экран
-  tour.step.filament.body: Загружайте, выгружайте и меняйте катушки. Просматривайте
-    вашу мультифиламентную систему одним взглядом, сопоставляйте цвета со слотами
-    и отслеживайте датчики окончания филамента.
-  tour.step.filament.title: Филамент
-  tour.step.home_grid.body: Нажмите на любую плитку, чтобы открыть её полные элементы
-    управления или переключить состояние.
-  tour.step.home_grid.title: Ваш принтер одним взглядом
-  tour.step.print.body: Отслеживайте выполняющиеся печати — оставшееся время, текущий
-    слой и прогресс. Нажмите, чтобы приостановить, возобновить или отменить активное
-    задание.
-  tour.step.print.title: Статус печати
-  tour.step.settings.body: Сеть, дисплей, звук, настройка принтера и многое другое.
-    Этот тур можно повторить в любой момент из раздела «Справка и о программе».
-  tour.step.settings.title: Настройки
-  tour.step.welcome.body: Давайте устроим краткий тур, чтобы вы могли быстро находить
-    всё нужное.
-  tour.step.welcome.title: Добро пожаловать в HelixScreen
+  'Macros, G-code console, calibration tools (PID, input shaper, z-offset), firmware updates, and developer utilities.': 'Макросы, консоль G-code, инструменты калибровки (PID, Input Shaper, Z-смещение), обновления прошивки и утилиты для разработчиков.'
+  Advanced: Дополнительно
+  'Move the toolhead, home axes, level the bed, and fine-tune temperatures, fans, and other motion settings.': 'Перемещайте печатающую головку, паркуйте оси, выравнивайте стол и точно настраивайте температуры, вентиляторы и другие параметры движения.'
+  Controls: Управление
+  'Long-press any tile to enter edit mode — rearrange, resize, remove, or add widgets, and add extra pages for your preferred layout.': 'Долгое нажатие на любую плитку переводит в режим редактирования — переставляйте, изменяйте размер, удаляйте или добавляйте виджеты, а также добавляйте дополнительные страницы под свой макет.'
+  Customize your home screen: Настройте главный экран
+  'Load, unload, and swap spools. View your multi-filament system at a glance, map colors to slots, and monitor runout sensors.': 'Загружайте, выгружайте и меняйте катушки. Просматривайте вашу мультифиламентную систему одним взглядом, сопоставляйте цвета со слотами и отслеживайте датчики окончания филамента.'
+  Tap any tile to open its full controls or toggle its state.: 'Нажмите на любую плитку, чтобы открыть её полные элементы управления или переключить состояние.'
+  Your printer at a glance: Ваш принтер одним взглядом
+  'Monitor prints in progress — time remaining, current layer, and progress. Tap to pause, resume, or cancel the active job.': 'Отслеживайте выполняющиеся печати — оставшееся время, текущий слой и прогресс. Нажмите, чтобы приостановить, возобновить или отменить активное задание.'
+  Print status: Статус печати
+  'Network, display, sound, printer setup, and more. You can replay this tour anytime from Help & About.': 'Сеть, дисплей, звук, настройка принтера и многое другое. Этот тур можно повторить в любой момент из раздела «Справка и о программе».'
+  Let's take a quick tour so you can find things fast.: 'Давайте устроим краткий тур, чтобы вы могли быстро находить всё нужное.'
+  Welcome to HelixScreen: Добро пожаловать в HelixScreen
   used: использ.
   v%s available: Доступна v%s
   v{} installed! Restarting...: v{} установлена! Перезапуск...

@@ -359,9 +359,14 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
         }
     }
 
-    // Disable a widget that could not be placed, sending it back to the catalog
-    // as an available widget, and tell the user WHICH condition failed — "grid
-    // full" is a lie when the widget is simply wider than the whole grid (#1216).
+    // Disable a widget that does not fit the grid AT ALL — it is wider or taller
+    // than the whole grid even at its declared minimum, so no arrangement of the
+    // other widgets could ever seat it. Sending it back to the catalog as an
+    // available widget is the only outcome it has. Tell the user WHICH condition
+    // failed: "grid full" is a lie here (#1216).
+    //
+    // GridFull is the other branch and is deliberately NOT routed here — see
+    // evict_for_full_grid below.
     auto disable_unplaceable = [&](const std::string& widget_id,
                                    GridLayout::PlacementFailure reason) {
         auto& mut_entries = widget_config.page_entries_mut(page_index);
@@ -374,6 +379,51 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
         }
         const char* why = GridLayout::failure_text(reason);
         spdlog::info("[PanelWidgetManager] Disabled widget '{}' — {}", widget_id, why);
+        const auto* def = find_widget_def(widget_id);
+        const char* name = def ? def->display_name : widget_id.c_str();
+        ui_notification_warning(fmt::format("'{}' removed — {}", name, why).c_str());
+    };
+
+    // Drop a widget that fits the grid fine but has no free cell left. Unlike
+    // TooLargeForGrid this is a property of THIS screen's occupancy, not of the
+    // widget: remove any other widget, close a hardware gate, or lay the same
+    // config out on a taller grid and it seats without complaint.
+    //
+    // So it must never write enabled=false. The layout is stored once per printer
+    // (/printers/<id>/panel_widgets/<panel>) with no breakpoint key, so a disable
+    // forced by one screen's occupancy takes the widget away at EVERY size — the
+    // same mistake the span write-back already refuses to make (#1216). Worse, it
+    // was not even deterministic: the disable only reached disk if some unrelated
+    // save() happened to follow, so whether the user permanently lost the widget
+    // depended on what they did next.
+    //
+    // What IS recorded is that the widget has no position. That is the truth (it
+    // is configured, it just has nowhere to go), it lets the widget re-place
+    // itself the moment a cell frees, and it doubles as the memo that stops the
+    // nagging: a widget with no saved position was never on the user's screen, so
+    // announcing a removal would be false. Bundle XGVDYEB5 — 6x4 grid, ten
+    // widgets filling all 24 cells — toasted "'Fan Speeds' removed — grid full"
+    // on every single launch because the in-memory disable never reached disk.
+    bool evicted_position = false;
+    auto evict_for_full_grid = [&](const std::string& widget_id) {
+        auto& mut_entries = widget_config.page_entries_mut(page_index);
+        auto cfg_it = std::find_if(mut_entries.begin(), mut_entries.end(),
+                                   [&](const PanelWidgetEntry& e) { return e.id == widget_id; });
+        const bool was_on_screen = cfg_it != mut_entries.end() && cfg_it->has_grid_position();
+        const char* why = GridLayout::failure_text(GridLayout::PlacementFailure::GridFull);
+
+        if (!was_on_screen) {
+            spdlog::debug("[PanelWidgetManager] Widget '{}' has no cell — {} (stays enabled)",
+                          widget_id, why);
+            return;
+        }
+
+        cfg_it->col = -1;
+        cfg_it->row = -1;
+        evicted_position = true;
+        spdlog::info("[PanelWidgetManager] Evicted widget '{}' — {} (stays enabled; returns when "
+                     "a cell frees)",
+                     widget_id, why);
         const auto* def = find_widget_def(widget_id);
         const char* name = def ? def->display_name : widget_id.c_str();
         ui_notification_warning(fmt::format("'{}' removed — {}", name, why).c_str());
@@ -520,6 +570,8 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
             spdlog::info("[PanelWidgetManager] Skipping widget '{}' — grid full due to "
                          "temporary firmware_restart injection",
                          f.widget_id);
+        } else if (f.reason == GridLayout::PlacementFailure::GridFull) {
+            evict_for_full_grid(f.widget_id);
         } else {
             disable_unplaceable(f.widget_id, f.reason);
         }
@@ -577,7 +629,11 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
                 }
             }
         }
-        if (any_written) {
+        // `evicted_position` is the other reason to save: a widget that lost its
+        // cell this pass changed nothing about the widgets that WERE placed, so
+        // any_written stays false and the eviction would never reach disk — which
+        // is exactly how the "grid full" toast came back on every launch.
+        if (any_written || evicted_position) {
             widget_config.save();
         }
     }

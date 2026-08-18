@@ -3,6 +3,9 @@
 
 #include "ui_nav_manager.h"
 
+#include <utility>
+#include <vector>
+
 class NavigationManagerTestAccess {
   public:
     /// Force the keyboard-visible-at-press latch that take_backdrop_keyboard_dismiss()
@@ -15,6 +18,22 @@ class NavigationManagerTestAccess {
     /// Read the raw backdrop pointer, to assert it does not outlive the widget.
     static lv_obj_t* overlay_backdrop(NavigationManager& nav) {
         return nav.overlay_backdrop_;
+    }
+
+    /// Create the darkened snapshot backdrop, as the first push_overlay() does.
+    static void adopt_overlay_backdrop(NavigationManager& nav, lv_obj_t* screen) {
+        nav.adopt_overlay_backdrop(screen);
+    }
+
+    /// Re-take the backdrop snapshot from the live tree.
+    static void refresh_overlay_backdrop(NavigationManager& nav) {
+        nav.refresh_overlay_backdrop();
+    }
+
+    /// Seed panel_stack_ without going through the queued push path, so a test
+    /// can put a stand-in base panel and overlay in the stack synchronously.
+    static void set_panel_stack(NavigationManager& nav, std::vector<lv_obj_t*> stack) {
+        nav.panel_stack_ = std::move(stack);
     }
 
     /// Drive the navbar path directly. The production entry point is a static

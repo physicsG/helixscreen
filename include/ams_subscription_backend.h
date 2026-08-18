@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <optional>
 
 /// Base class for AMS backends that use Moonraker subscription-based status updates.
 /// Extracts common lifecycle, event, and state query logic from AFC/HappyHare/ToolChanger.
@@ -114,6 +115,10 @@ class AmsSubscriptionBackend : public AmsBackend {
     ///                   themselves (CFS Fork variant).
     /// @param silent     Suppress REQUEST_TIMEOUT toasts on the payload. True
     ///                   matches every backend except CFS, which passes false.
+    /// @param caller_surfaces_errors Whether @p on_error shows the user
+    ///                   something. Unset means "derive from @p on_error";
+    ///                   pass false when the callback only logs and unwinds
+    ///                   state, so GcodeErrorRouter keeps the report.
     ///
     /// @warning Call from the main thread only — checks toolhead_homed(),
     /// which (in the production override) reads an LVGL subject, and may
@@ -121,7 +126,8 @@ class AmsSubscriptionBackend : public AmsBackend {
     AmsError ensure_homed_then(std::string gcode, std::function<void()> on_complete = nullptr,
                                std::function<void(const MoonrakerError&)> on_error = nullptr,
                                uint32_t timeout_ms = IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
-                               bool skip_homing = false, bool silent = true);
+                               bool skip_homing = false, bool silent = true,
+                               std::optional<bool> caller_surfaces_errors = std::nullopt);
 
     /// See AmsBackend::arm_home_preconfirmed(). Consumed single-shot by the
     /// NEXT ensure_homed_then() call that finds the toolhead genuinely
@@ -370,10 +376,17 @@ class AmsSubscriptionBackend : public AmsBackend {
     /// hardcoded virtuals can't carry a caller's own error/timeout/toast
     /// policy), the same way AmsBackendCfs::dispatch_action_script used to
     /// before this method existed to replace it.
+    ///
+    /// @param caller_surfaces_errors Whether @p on_error shows the user
+    ///        something. Left unset it is derived from @p on_error being
+    ///        non-null, which is right for the callers that pass none. Set it
+    ///        explicitly to false when the callback exists but only logs and
+    ///        unwinds state — see include/rpc_error_policy.h.
     AmsError dispatch_payload(std::string gcode, std::function<void()> on_complete,
                               std::function<void(const MoonrakerError&)> on_error = nullptr,
                               uint32_t timeout_ms = IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
-                              bool silent = true);
+                              bool silent = true,
+                              std::optional<bool> caller_surfaces_errors = std::nullopt);
 
     /// Report a gcode failure through @p on_error when set, else fall back to
     /// the historical behaviour: log at error level and reset the action to

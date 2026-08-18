@@ -172,7 +172,7 @@ the largest is libhv's HTTP client at 8 files.
 ### Method
 
 - **Flags:** the exact g++ command ESP-IDF generates for its own C++ TUs
-  (from `build/compile_commands.json`: sysroot, `-mlongcalls`, `-fno-rtti`,
+  (from build/compile_commands.json: sysroot, `-mlongcalls`, `-fno-rtti`,
   `-fexceptions`), plus the app side mirrored from the Linux Makefile compile line
   — same include order, same `-include include/lvgl_pch.h`, same feature defines
   minus Linux-only ones (`HELIX_DISPLAY_SDL`, `HELIX_HAS_SYSTEMD/ALSA/SOUND/TRACKER`,
@@ -224,7 +224,7 @@ Pass 2 (seam carved — the real distribution underneath):
 |---|---|---|
 | `typeid` with `-fno-rtti` | 23 (19 via `include/panel_widget_manager.h:40` alone) | `CONFIG_COMPILER_CXX_RTTI=y` (IDF supports it, costs flash — measure in Task 3) or replace that one header's typeid with static type tags |
 | `std::min/max/clamp` arg mix | 4 | Xtensa newlib defines `int32_t` as `long`; mixed `int32_t`/`int` args break template deduction — cast-level fixes |
-| `sys/statvfs.h` ×2, `ifaddrs.h`, `sys/utsname.h` | 4 | POSIX headers newlib lacks; disk-space/hostname probes — #ifdef with esp_vfs/esp_netif equivalents |
+| sys/statvfs.h ×2, ifaddrs.h, sys/utsname.h | 4 | POSIX headers newlib lacks; disk-space/hostname probes — #ifdef with esp_vfs/esp_netif equivalents |
 | `spdlog/sinks/base_sink.h` | 1 (+1 via `crash_error_log_sink.h`) | log-backend setup; replaced wholesale by esp_log on a port |
 | POSIX signals (`SA_*`), `timegm()`, missing `<thread>` include | 3 | one-liners |
 
@@ -234,7 +234,7 @@ Pass 2 (seam carved — the real distribution underneath):
 |---|---|---|
 | `hv/requests.h` (libhv HTTP client) | 8 | camera_stream, crash_reporter, debug_bundle_collector, ipp_printer, snapshot_qr_scanner, telemetry_manager, update_checker, ui_spoolman_overlay — the biggest real porting surface beyond the WS client; ESP-IDF's esp_http_client is the natural target |
 | BlueZ/RFCOMM Bluetooth | 2 | bt_print_utils, makeid_bt_printer (label printing) — feature-gate off for v1 |
-| `dlfcn.h`, `ucontext.h`, `hv/hlog.h` | 3 | bluetooth_loader (dlopen), crash_handler (signal-context dumps → esp coredump instead), logging_init (log backend) |
+| dlfcn.h, ucontext.h, `hv/hlog.h` | 3 | bluetooth_loader (dlopen), crash_handler (signal-context dumps → esp coredump instead), logging_init (log backend) |
 
 Direct libhv API leakage outside the client seam is tiny: two UI files call
 `setReconnect()` on the client; everything else reaches libhv only through

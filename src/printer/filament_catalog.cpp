@@ -7,8 +7,11 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <system_error>
 
@@ -161,6 +164,47 @@ FilamentCatalog FilamentCatalog::load_with_overlay(const std::string& builtin_pa
         cat.products_.push_back(to_effective(merged[id]));
     cat.index();
     return cat;
+}
+
+namespace {
+
+/// Bumped on every successful user-overlay write. The code-slice cache stores
+/// the value it was built at and rebuilds when it no longer matches, so a
+/// product the user just added shows up without a restart.
+std::atomic<uint64_t> g_user_overlay_generation{0};
+
+std::mutex g_codes_cache_mutex;
+/// scheme -> (generation it was built at, snapshot)
+std::map<std::string, std::pair<uint64_t, std::shared_ptr<const FilamentCatalog>>> g_codes_cache;
+
+} // namespace
+
+uint64_t FilamentCatalog::user_overlay_generation() {
+    return g_user_overlay_generation.load(std::memory_order_acquire);
+}
+
+std::shared_ptr<const FilamentCatalog>
+FilamentCatalog::load_codes_cached(const std::string& scheme) {
+    const uint64_t gen = g_user_overlay_generation.load(std::memory_order_acquire);
+    {
+        std::lock_guard<std::mutex> lock(g_codes_cache_mutex);
+        auto it = g_codes_cache.find(scheme);
+        if (it != g_codes_cache.end() && it->second.first == gen) {
+            return it->second.second;
+        }
+    }
+
+    // Built outside the lock: load_codes() parses ~100 KB and we do not want a
+    // save on the main thread blocking behind a rebuild on the WebSocket thread.
+    // Two threads racing here both build and the later one wins — wasteful once,
+    // never wrong, and cheaper than serializing every reader.
+    auto built = std::make_shared<const FilamentCatalog>(load_codes(scheme));
+    {
+        std::lock_guard<std::mutex> lock(g_codes_cache_mutex);
+        g_codes_cache[scheme] = {gen, built};
+    }
+    spdlog::debug("[filament] built '{}' code-slice cache (generation {})", scheme, gen);
+    return built;
 }
 
 FilamentCatalog FilamentCatalog::load_codes(const std::string& scheme) {
@@ -371,6 +415,11 @@ bool FilamentCatalog::save_user_products_to(const std::vector<nlohmann::json>& p
         std::filesystem::remove(tmp, rm_ec);
         return false;
     }
+
+    // The overlay contributes to every code-slice snapshot, so a successful
+    // write retires them. Bumped only after the rename lands: a failed save must
+    // leave readers on the snapshot that still matches what is on disk.
+    g_user_overlay_generation.fetch_add(1, std::memory_order_release);
     return true;
 }
 

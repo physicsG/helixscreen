@@ -278,8 +278,14 @@ jobs:
         KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       run: |
         if [ -z "$KEYSTORE_B64" ]; then
-          echo "::warning::ANDROID_KEYSTORE_BASE64 not set — build will sign with the debug keystore. Play Store will reject the resulting AAB. See docs/devel/ANDROID_PLAY_STORE.md."
-          echo "keystore_path=" >> $GITHUB_OUTPUT
+          # A release tag has no business producing unsigned or debug-signed
+          # artifacts. This used to be a ::warning:: and the build carried on
+          # with the debug keystore — that is how v0.99.43 shipped a
+          # debug-signed AAB that Play Store rejects. Gradle refuses the same
+          # case now, but failing here names the missing secret instead of
+          # surfacing as a build error 40 minutes later.
+          echo "::error::ANDROID_KEYSTORE_BASE64 is not set. A release build must be signed with the upload keystore; see docs/devel/ANDROID_PLAY_STORE.md for the four ANDROID_KEYSTORE_* / ANDROID_KEY_* secrets."
+          exit 1
         else
           mkdir -p "$RUNNER_TEMP/keystore"
           printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/keystore/upload.jks"
@@ -304,6 +310,81 @@ jobs:
         ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
       run: ./gradlew bundleRelease -PuseCcache
+
+    # Runs before anything is renamed or uploaded, so a debug-signed artifact
+    # can never reach an artifact store or a GitHub release. Gradle already
+    # refuses to build the release variant without a keystore; this verifies
+    # the signature that actually landed on the bytes, which is the thing Play
+    # Store checks.
+    - name: Verify release artifacts are signed with the upload key
+      run: |
+        set -euo pipefail
+
+        # apksigner lives under a versioned build-tools dir. Pick the highest
+        # installed version rather than pinning one the runner image may drop.
+        APKSIGNER="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name apksigner -type f 2>/dev/null | sort -V | tail -1)"
+        if [ -z "$APKSIGNER" ]; then
+          echo "::error::apksigner not found under $ANDROID_HOME/build-tools"
+          exit 1
+        fi
+        echo "Using $APKSIGNER"
+
+        fail=0
+
+        # Fails on the debug keystore's well-known DN. Every Android SDK ships
+        # the same one, so matching CN=Android Debug catches the fallback no
+        # matter which machine produced it.
+        check_certs() {
+          local label="$1" certs="$2"
+          printf '%s\n' "$certs"
+
+          # Positive evidence first. Absence of the debug DN is NOT proof of a
+          # good signature: `keytool -printcert -jarfile` prints "Not a signed
+          # jar file" and still EXITS 0, so a bundle that lost its v1 signature
+          # would sail through a check that only looks for CN=Android Debug.
+          # Requiring a fingerprint turns "no debug key seen" into "a real
+          # certificate was read, and it is not the debug one".
+          local fp
+          # Require hex after the label. A bare 'SHA-?256' also matches
+          # keytool's "Signature algorithm name: SHA256withRSA" line, which
+          # would satisfy the presence check without any fingerprint present.
+          fp="$(printf '%s\n' "$certs" | grep -iE 'SHA-?256[^:]*:[[:space:]]*[0-9A-Fa-f]{2}' || true)"
+          if [ -z "$fp" ]; then
+            echo "::error::$label — no SHA-256 certificate fingerprint found. The artifact is unsigned, or the tool could not read its signature."
+            fail=1
+            return
+          fi
+
+          if printf '%s\n' "$certs" | grep -q 'CN=Android Debug'; then
+            echo "::error::$label is signed with the Android debug keystore"
+            fail=1
+          fi
+
+          # The SHA-256 fingerprint is what Play Console and Android developer
+          # verification register against the package name, so keep it easy to
+          # read off a release run.
+          printf '%s\n' "$fp" | sed "s|^|  ${label} SHA-256: |"
+        }
+
+        for apk in android/app/build/outputs/apk/release/*.apk; do
+          [ -f "$apk" ] || continue
+          echo "--- $(basename "$apk")"
+          check_certs "$(basename "$apk")" "$("$APKSIGNER" verify --print-certs "$apk")"
+        done
+
+        # apksigner cannot read a bundle (an .aab is not an APK), so the AAB
+        # goes through keytool's jar-signature reader instead.
+        for aab in android/app/build/outputs/bundle/release/*.aab; do
+          [ -f "$aab" ] || continue
+          echo "--- $(basename "$aab")"
+          check_certs "$(basename "$aab")" "$(keytool -printcert -jarfile "$aab")"
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::Refusing to publish debug-signed Android artifacts. See docs/devel/ANDROID_PLAY_STORE.md."
+          exit 1
+        fi
+        echo "All Android artifacts are signed with a non-debug key."
 
     - name: Extract version
       id: version
@@ -359,14 +440,24 @@ jobs:
         mkdir -p release-whatsnew
         # Play Store uploader (r0adkll) expects whatsnew-<locale> files in a flat dir.
         # Fastlane source of truth is android/fastlane/metadata/android/en-US/changelogs/<versionCode>.txt
-        VERSION_CODE=$(awk -F. '{print $1*10000 + $2*100 + ($3+0)}' VERSION.txt)
+        # Same packing as the script that just wrote the file. Both sides call
+        # scripts/android-version-code.sh; when this step re-derived it locally
+        # the two drifted (10014 vs 99114) and the copy below silently missed.
+        VERSION_CODE=$(scripts/android-version-code.sh)
         SRC="android/fastlane/metadata/android/en-US/changelogs/${VERSION_CODE}.txt"
         if [ -f "$SRC" ]; then
           cp "$SRC" release-whatsnew/whatsnew-en-US
           echo "What's new (en-US, ${VERSION_CODE}):"
           cat release-whatsnew/whatsnew-en-US
         else
-          echo "::warning::No whatsnew generated — $SRC missing; Play upload will use the AAB's default"
+          # generate-whatsnew.sh wrote this exact path a moment ago, so a miss
+          # means the two disagree about the versionCode — a bug, not a
+          # tolerable condition. publish-android's download-artifact step
+          # hard-fails on the missing artifact anyway; fail here where the
+          # cause is visible.
+          echo "::error::$SRC is missing right after scripts/generate-whatsnew.sh wrote it — the versionCode used to name the file and the one used to read it disagree."
+          ls -la android/fastlane/metadata/android/en-US/changelogs/ || true
+          exit 1
         fi
 
     - name: Upload Play Store whatsnew artifact
@@ -375,7 +466,9 @@ jobs:
         name: release-android-whatsnew
         path: release-whatsnew/
         retention-days: 7
-        if-no-files-found: ignore
+        # publish-android downloads this by name; an empty upload turns into a
+        # hard failure there, with no clue as to why.
+        if-no-files-found: error
 
   # ============================================================================
   # Publish Android AAB to Google Play Store (internal track)
@@ -450,7 +543,14 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-platforms]
+    # build-android is a dependency, not just a co-runner. This job downloads
+    # every artifact unfiltered and globs *.apk / *.aab with
+    # fail_on_unmatched_files: false, so with build-android still running (90
+    # min budget, against the platform matrix's 82) the release was created
+    # with no Android assets and nothing went red.
+    # No cycle: publish-android needs [build-android, release], and build-android
+    # needs only validate-shell.
+    needs: [build-platforms, build-android]
     permissions:
       contents: write  # Required to create releases
     outputs:
@@ -492,6 +592,34 @@ jobs:
         cp scripts/install.sh release-files/
         echo "Release files:"
         ls -lh release-files/
+
+    # softprops/action-gh-release runs with fail_on_unmatched_files: false —
+    # deliberately, because several of its globs are optional — so a missing
+    # Android artifact would publish a release with no Android downloads and
+    # still report success. Assert the four by name instead of flipping that
+    # flag globally. The names must stay in step with the rename steps in
+    # build-android and with the download instructions in the release notes.
+    - name: Verify Android artifacts are present
+      run: |
+        set -euo pipefail
+        VERSION="${GITHUB_REF_NAME#v}"
+        missing=""
+        for f in "helixscreen-android-arm64-v${VERSION}.apk" \
+                 "helixscreen-android-x86_64-v${VERSION}.apk" \
+                 "helixscreen-android-universal-v${VERSION}.apk" \
+                 "helixscreen-android-v${VERSION}.aab"; do
+          if [ -f "release-files/$f" ]; then
+            echo "  ok: $f"
+          else
+            missing="$missing $f"
+          fi
+        done
+        if [ -n "$missing" ]; then
+          echo "::error::Android artifacts missing from the release:$missing"
+          echo "Present:"
+          ls -1 release-files/*android* 2>/dev/null || echo "  (no android artifacts at all)"
+          exit 1
+        fi
 
     - name: Prepare symbol files for release
       run: |

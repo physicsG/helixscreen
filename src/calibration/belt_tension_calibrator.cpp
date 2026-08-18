@@ -433,9 +433,12 @@ void BeltTensionCalibrator::set_strobe_frequency(float frequency_hz) {
 
     api_->advanced().set_strobe_frequency(
         hardware_.pwm_led_pin, frequency_hz, []() {},
+        // Log-only handler: the user is told nothing here, so the report stays
+        // with GcodeErrorRouter's `!!` broadcast (include/rpc_error_policy.h).
         [](const MoonrakerError& err) {
             spdlog::warn("[BeltTension] Failed to update strobe frequency: {}", err.message);
-        });
+        },
+        /*caller_surfaces_errors=*/false);
 }
 
 // ============================================================================
@@ -453,9 +456,11 @@ void BeltTensionCalibrator::stop_strobe() {
         api_->advanced().set_strobe_frequency(
             hardware_.pwm_led_pin, 0.0f, // 0 = turn off
             []() {},
+            // Log-only handler — see set_strobe_frequency().
             [](const MoonrakerError& err) {
                 spdlog::warn("[BeltTension] Failed to stop strobe: {}", err.message);
-            });
+            },
+            /*caller_surfaces_errors=*/false);
     }
 
     strobe_frequency_ = 0.0f;

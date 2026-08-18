@@ -654,9 +654,14 @@ void ZOffsetCalibrationPanel::adjust_z(float delta) {
                                   delta, cumulative_z_delta_);
                 });
             },
+            // Log-only error handler: nothing here reaches the user, so the
+            // report belongs to GcodeErrorRouter's `!!` broadcast rather than
+            // to this callback (include/rpc_error_policy.h).
             [](const MoonrakerError& err) {
                 spdlog::warn("[ZOffsetCal] Z adjust failed: {}", err.message);
-            });
+            },
+            /*timeout_ms=*/0, /*silent=*/false, /*on_queued=*/nullptr,
+            /*caller_surfaces_errors=*/false);
     } else {
         // TESTZ for probe_calibrate/endstop strategies
         char cmd[64];
@@ -667,7 +672,9 @@ void ZOffsetCalibrationPanel::adjust_z(float delta) {
             cmd, []() { spdlog::debug("[ZOffsetCal] TESTZ sent"); },
             [](const MoonrakerError& err) {
                 spdlog::warn("[ZOffsetCal] TESTZ failed: {}", err.message);
-            });
+            },
+            /*timeout_ms=*/0, /*silent=*/false, /*on_queued=*/nullptr,
+            /*caller_surfaces_errors=*/false);
         // Z position display is updated by the manual_probe_z_position observer
     }
 }
@@ -757,16 +764,21 @@ void ZOffsetCalibrationPanel::send_abort() {
         spdlog::info("[ZOffsetCal] Aborting gcode_offset mode, retracting");
         api_->execute_gcode(
             "G90\nG1 Z5 F1000", []() { spdlog::info("[ZOffsetCal] Retracted after abort"); },
+            // Log-only handlers on both abort paths — see adjust_z().
             [](const MoonrakerError& err) {
                 spdlog::warn("[ZOffsetCal] Retract failed: {}", err.message);
-            });
+            },
+            /*timeout_ms=*/0, /*silent=*/false, /*on_queued=*/nullptr,
+            /*caller_surfaces_errors=*/false);
     } else {
         spdlog::info("[ZOffsetCal] Sending ABORT");
         api_->execute_gcode(
             "ABORT", []() { spdlog::info("[ZOffsetCal] Aborted"); },
             [](const MoonrakerError& err) {
                 spdlog::warn("[ZOffsetCal] ABORT failed: {}", err.message);
-            });
+            },
+            /*timeout_ms=*/0, /*silent=*/false, /*on_queued=*/nullptr,
+            /*caller_surfaces_errors=*/false);
     }
 
     turn_off_bed_if_needed();
@@ -832,9 +844,12 @@ void ZOffsetCalibrationPanel::turn_off_bed_if_needed() {
     spdlog::info("[ZOffsetCal] Turning off bed heater after calibration");
     api_->execute_gcode(
         "M140 S0", []() { spdlog::debug("[ZOffsetCal] Bed heater off"); },
+        // Log-only handler — see adjust_z().
         [](const MoonrakerError& err) {
             spdlog::warn("[ZOffsetCal] Failed to turn off bed: {}", err.message);
-        });
+        },
+        /*timeout_ms=*/0, /*silent=*/false, /*on_queued=*/nullptr,
+        /*caller_surfaces_errors=*/false);
 }
 
 // ============================================================================

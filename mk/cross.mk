@@ -362,6 +362,13 @@ else ifeq ($(PLATFORM_TARGET),cc1)
     ENABLE_SCREENSAVER := no
     ENABLE_EVDEV := yes
     BUILD_SUBDIR := cc1
+    # Mock backends are dev/test scaffolding. The Makefile defaults ENABLE_MOCKS
+    # to yes and no cross target has ever overridden it, so every shipped device
+    # binary has carried the full mock Moonraker client. mk/cross.mk is included
+    # before the Makefile's `?=`, so setting it here wins. The
+    # #ifdef HELIX_ENABLE_MOCKS guards at every consumer are already complete --
+    # the ESP32 port builds this way today.
+    ENABLE_MOCKS := no
     # Strip binary for size on memory-constrained device
     STRIP_BINARY := yes
     FONT_TIERS := micro tiny
@@ -754,6 +761,30 @@ CFLAGS += -DHELIX_MAX_FONT_TIER=$(HELIX_MAX_FONT_TIER)
 CXXFLAGS += -DHELIX_MAX_FONT_TIER=$(HELIX_MAX_FONT_TIER)
 SUBMODULE_CFLAGS += -DHELIX_MAX_FONT_TIER=$(HELIX_MAX_FONT_TIER)
 SUBMODULE_CXXFLAGS += -DHELIX_MAX_FONT_TIER=$(HELIX_MAX_FONT_TIER)
+
+# =============================================================================
+# Size flags for the memory-constrained boards
+# =============================================================================
+# On these devices helix-screen's file-backed text competes for page cache with
+# Klipper: measured on a CC1, Klipper takes 3675 major faults and Moonraker 5526
+# while helix-screen takes 68, because helix-screen's working set is what drives
+# the reclaim. A Klipper stalled on flash IO is a "Timer too close".
+#
+# -DNDEBUG   drops assert() and nlohmann's JSON_ASSERT. LVGL's asserts are
+#            controlled separately by LV_USE_ASSERT_* and are unaffected.
+# -fno-rtti  the codebase is already RTTI-free by policy and lint-enforced
+#            (tests/shell/test_code_lint.bats); a grep for non-comment
+#            typeid/dynamic_cast across src/ and include/ returns zero. The
+#            ESP32 firmware already builds this way via ESP-IDF's
+#            CONFIG_COMPILER_CXX_RTTI. Applied to our C++ only, NOT to
+#            SUBMODULE_CXXFLAGS -- libhv throws, and its catch clauses want
+#            typeinfo for the thrown types.
+ifeq ($(PLATFORM_TARGET),cc1)
+    CFLAGS += -DNDEBUG
+    CXXFLAGS += -DNDEBUG -fno-rtti
+    SUBMODULE_CFLAGS += -DNDEBUG
+    SUBMODULE_CXXFLAGS += -DNDEBUG
+endif
 
 # For size-optimized targets, override -O2 with -Os
 # (GCC uses last optimization flag, but this makes it explicit)
@@ -2313,7 +2344,7 @@ k1-dynamic-test: k1-dynamic-docker deploy-k1-dynamic-fg
 # Hardware-validated on K2 Plus (2026-03-23).
 # See docs/devel/printers/CREALITY_K2_SUPPORT.md
 #
-# Example: make deploy-k2 K2_HOST=192.168.30.197
+# Example: make deploy-k2 K2_HOST=192.168.30.196
 # Note: K2 uses BusyBox/OpenWrt - tar/ssh transfer, no rsync
 # Note: K2 hostname does NOT resolve via mDNS - always use IP address
 K2_HOST ?=
@@ -2487,6 +2518,13 @@ define release-clean-assets
 	@find $(1)/assets/fonts -name '.clang-format' -delete 2>/dev/null || true
 	@find $(1)/assets -name '*.icns' -delete 2>/dev/null || true
 	@find $(1)/assets -name 'mdi-icon-metadata.json.gz' -delete 2>/dev/null || true
+	@# assets/sounds is 919 KB of MOD/MED tracker modules, playable only where
+	@# the tracker player is compiled in. TRACKER_CXXFLAGS (Makefile, sound
+	@# section) is the same switch that gates that code, so the payload and the
+	@# player can't drift apart. AD5M has sound but deliberately no tracker --
+	@# its single core busy-waits and kills prints -- and CC1/K1/K2/MIPS have
+	@# neither, so all of them were shipping music they can never play.
+	$(if $(TRACKER_CXXFLAGS),,@rm -rf $(1)/assets/sounds)
 endef
 
 # PII / runtime-state files that must NEVER ship in a release tarball.
@@ -2523,6 +2561,15 @@ DEV_PANEL_XML := gcode_test_panel.xml glyphs_panel.xml step_test_panel.xml test_
 define release-copy-xml-config
 	@cp -r ui_xml config $(1)/
 	@rm -f $(addprefix $(1)/ui_xml/,$(DEV_PANEL_XML))
+	@# Minify the STAGED copy only -- never ui_xml/ in the source tree. The XML
+	@# engine keeps a verbatim copy of every component's <view> source text alive
+	@# for the whole session (lv_xml_component.c extract_view_content: it is
+	@# re-parsed on each lv_xml_create, so it cannot be freed), which makes shipped
+	@# comments and indentation permanently resident heap on every device. Fails
+	@# loudly rather than shipping unminified: this is not an optional nicety on
+	@# the 114 MB boards, and a silent skip is how the FONT_TIERS trim went
+	@# unnoticed for months.
+	@python3 scripts/minify_xml_tree.py $(1)/ui_xml
 endef
 
 # Bake release_info.json (consumed by Moonraker's type:web self-update) into the

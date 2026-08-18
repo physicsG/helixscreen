@@ -115,6 +115,24 @@ TEST_CASE("IMoonrakerAPI sub-API accessors return interface references", "[compi
     SUCCEED("IMoonrakerAPI accessor return types pinned to interface references");
 }
 
+TEST_CASE("IFilesAPI exposes the file manager's root list", "[compile][drift]") {
+    // server.files.roots is the only call that names the writable config directory
+    // in absolute terms, which is what lets an absolute [include] be judged reachable
+    // (stock Creality K2). It must stay on the interface, not just the concrete class,
+    // or every consumer would have to name MoonrakerFileAPI to reach it.
+    static_assert(
+        std::is_same_v<decltype(std::declval<IFilesAPI&>().get_file_roots(
+                           std::declval<IFilesAPI::FileRootsCallback>(),
+                           std::declval<IFilesAPI::ErrorCallback>())),
+                       void>,
+        "IFilesAPI::get_file_roots(FileRootsCallback, ErrorCallback) must exist and return void");
+    static_assert(
+        std::is_same_v<IFilesAPI::FileRootsCallback,
+                       std::function<void(const std::vector<FileRoot>&)>>,
+        "IFilesAPI::FileRootsCallback must deliver parsed FileRoot entries, not raw JSON");
+    SUCCEED("IFilesAPI::get_file_roots pinned");
+}
+
 #ifdef HELIX_ENABLE_MOCKS
 #include "moonraker_api_mock.h"
 

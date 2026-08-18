@@ -29,7 +29,7 @@ Welcome to the HelixScreen documentation. Choose your path:
 | [**UI Contributor Guide**](devel/UI_CONTRIBUTOR_GUIDE.md) | **Start here for UI/layout work** — breakpoints, tokens, widgets, overrides |
 | [**Your First Contribution**](devel/YOUR_FIRST_CONTRIBUTION.md) | Annotated walkthrough of a real settings overlay, plus pattern tour of a full subsystem |
 | [**Contributor Gotchas**](devel/CONTRIBUTOR_GOTCHAS.md) | "If you see X, you forgot Y" — symptom-indexed troubleshooting for common traps |
-| [**Architecture**](devel/ARCHITECTURE.md) | System design and patterns |
+| [**Architecture**](devel/ARCHITECTURE.md) | Whole-app model + routing to the 15-chapter guide (`devel/architecture/`) |
 | [**Build System**](devel/BUILD_SYSTEM.md) | Makefile, cross-compilation, patches |
 | [**Testing**](devel/TESTING.md) | Test infrastructure and Catch2 usage |
 
@@ -47,6 +47,7 @@ Welcome to the HelixScreen documentation. Choose your path:
 | [**Modal System**](devel/MODAL_SYSTEM.md) | ui_dialog, modal_button_row, Modal pattern |
 | [**Environment Variables**](devel/ENVIRONMENT_VARIABLES.md) | All runtime and build env vars |
 | [**Moonraker Architecture**](devel/MOONRAKER_ARCHITECTURE.md) | Moonraker integration details |
+| [**RPC Error Ownership**](devel/RPC_ERROR_OWNERSHIP.md) | Which surface reports a failed JSON-RPC call — caller UI, generic fallback, or the `!!` router |
 | [**Theme System**](devel/THEME_SYSTEM.md) | Reactive theming, color tokens, responsive sizing |
 | [**Theme Contributor Guide**](devel/THEME_CONTRIBUTOR_GUIDE.md) | For people creating themes — JSON schema, palette design, no C++ needed |
 | [**Layout System**](devel/LAYOUT_SYSTEM.md) | Alternative layouts, auto-detection, CLI override, home widget grid |
@@ -65,6 +66,7 @@ Welcome to the HelixScreen documentation. Choose your path:
 | [**Label Printer System**](devel/LABEL_PRINTER_SYSTEM.md) | Brother QL, Phomemo, Niimbot, MakeID; USB/TCP/Bluetooth |
 | [**Filament Management**](devel/FILAMENT_MANAGEMENT.md) | AFC, Happy Hare, ACE, CFS, AD5X IFS, Snapmaker U1, tool changers |
 | [**Filament Slot Metadata (internal)**](devel/FILAMENT_SLOT_METADATA.md) | `FilamentSlotOverrideStore` implementation: per-backend hooks, hardware-event clearing, cache, migration |
+| [**Creality CFS Internals**](devel/CREALITY_CFS_INTERNALS.md) | K1-family CFS box-wrapper RE reference: `BOX_*` semantics, the printer-side tn_data.json userdata, deferred-failure/resume traps |
 | [**Filament Slots Spec (public)**](specs/filament_slots.md) | Wire-format convention for the `lane_data` Moonraker DB namespace — readable by any third party |
 | [**Input Shaper & PID**](devel/INPUT_SHAPER.md) | Calibration, frequency response charts, CSV parser |
 | [**Preprint Prediction**](devel/PREPRINT_PREDICTION.md) | ETA prediction engine, phase timing, history |
@@ -135,7 +137,8 @@ docs/
 ├── devel/                    # DEVELOPER DOCUMENTATION
 │   ├── CLAUDE.md             # Full developer doc index
 │   ├── DEVELOPMENT.md        # Developer setup, contributing
-│   ├── ARCHITECTURE.md       # System design
+│   ├── ARCHITECTURE.md       # Architecture router (whole-app model)
+│   ├── architecture/         # 15-chapter architecture guide
 │   ├── BUILD_SYSTEM.md       # Build internals
 │   ├── TESTING.md            # Test infrastructure
 │   ├── LVGL9_XML_GUIDE.md    # XML reference
@@ -177,7 +180,7 @@ moonraker-plugin/
 | Write my first contribution | [Your First Contribution](devel/YOUR_FIRST_CONTRIBUTION.md) |
 | Debug "my change did nothing" | [Contributor Gotchas](devel/CONTRIBUTOR_GOTCHAS.md) |
 | Create XML layouts | [LVGL 9 XML Guide](devel/LVGL9_XML_GUIDE.md) |
-| Understand the architecture | [Architecture Guide](devel/ARCHITECTURE.md) |
+| Understand the architecture | [Architecture router](devel/ARCHITECTURE.md) → chapter series |
 | Cross-compile for Pi | [Build System - Cross-Compilation](devel/BUILD_SYSTEM.md#cross-compilation-embedded-targets) |
 
 ---

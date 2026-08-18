@@ -38,6 +38,8 @@ typedef struct _lv_subject_t lv_subject_t;
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 /**
@@ -435,6 +437,22 @@ class AmsBackend {
      * @return true if filament is loaded
      */
     [[nodiscard]] virtual bool is_filament_loaded() const = 0;
+
+    /**
+     * @brief Whether filament sits in the toolhead that this backend cannot
+     *        account for (no lane/spool claims it).
+     *
+     * Print-start gate input: an unaccounted toolhead load at print start
+     * usually means leftover filament from a cancelled or aborted operation;
+     * the print-start pipeline warns so the user can purge it or accept it.
+     * Backends that cannot determine this return std::nullopt ("unknown" —
+     * no warning). The base default is "cannot determine".
+     *
+     * @return true/false when known, std::nullopt when the backend cannot tell
+     */
+    [[nodiscard]] virtual std::optional<bool> toolhead_filament_unaccounted() const {
+        return std::nullopt;
+    }
 
     // ========================================================================
     // Filament Path Visualization
@@ -2326,6 +2344,73 @@ class AmsBackend {
         return false;
     }
 
+    /// Whether this backend's firmware reports a Spoolman spool id per slot
+    /// while a spool is loaded (AFC and Happy Hare publish spool_id in their
+    /// status). merge_override() uses this to arm ONLY the eject rule: just
+    /// there a firmware id of 0/null means "ejected", while elsewhere 0 is
+    /// the everyday reading and must not clear. The re-bind rule is NOT
+    /// gated by this capability — it can fire on ANY backend whose firmware
+    /// reports a positive spool id that disagrees with the override (AFC,
+    /// Happy Hare, and flat-schema CFS, whose per-slot spoolman_id parse
+    /// feeds it today).
+    [[nodiscard]] virtual bool firmware_reports_spool_ids() const {
+        return false;
+    }
+
+  protected:
+    /// @name Own-write spool-id expectations (Rule-1 echo-race suppression)
+    ///
+    /// When HelixScreen itself writes a spool id to firmware (AFC's
+    /// SET_SPOOL_ID, Happy Hare's MMU_GATE_MAP SPOOLID, the CFS fork's
+    /// _BOX_SLOT_SET SPOOLMAN_ID), the write is asynchronous: for an
+    /// unknown number of polls firmware keeps reporting the OLD id while
+    /// the just-saved override already carries the NEW one. Rule 1
+    /// (external re-bind) in merge_override() would read that stale frame
+    /// as another writer's statement and destroy our own record — the same
+    /// race SlotFingerprintTracker::expect() solves for CFS's RFID pushes.
+    /// Backends that write firmware ids call record_own_spool_write() at
+    /// the write site, and every apply_overrides() consults
+    /// own_write_expectation() to feed MergeOptions' suppress ids.
+    ///
+    /// @warning **The caller must already hold the backend's own mutex_.**
+    ///          Both methods touch shared state with no internal lock; every
+    ///          call site runs inside the backend's mutex_ scope
+    ///          (set_slot_info's lock block, apply_overrides' documented
+    ///          lock-held precondition). The mutexes are plain std::mutex,
+    ///          not recursive — taking the lock again from inside deadlocks.
+    ///@{
+
+    /// Record that WE just wrote @p new_id to firmware for this slot.
+    /// @p previous_firmware_id is the id firmware reported before the write
+    /// (captured before the optimistic mirror update). A second write
+    /// before the first echo landed keeps the ORIGINAL previous id (a
+    /// chained re-link 42->169 then 169->180 suppresses stale 42 frames,
+    /// not just 169). @p new_id <= 0 is an unlink: the pending expectation
+    /// is dropped, since nothing will echo but an id Rule 1 ignores.
+    void record_own_spool_write(int slot_index, int new_id, int previous_firmware_id);
+
+    /// Consult (and possibly consume) the pending expectation for a slot
+    /// given the id firmware reports in THIS frame. Returns the {old, new}
+    /// pair to feed MergeOptions::suppress_rebind_firmware_{old,new}_id;
+    /// {0, 0} when nothing should be suppressed. Consumption mirrors the
+    /// fingerprint tracker's single-shot semantics:
+    ///   - firmware_id == the written id: the echo landed — erased (firmware
+    ///     and override now agree; nothing to suppress).
+    ///   - firmware_id is any OTHER positive id: a genuine external change
+    ///     ends the expectation — erased, nothing suppressed.
+    ///   - firmware_id == the old id (stale pre-echo frame): returned as the
+    ///     suppression pair; the entry survives for the next poll.
+    ///   - firmware_id <= 0: no signal (Rule 1 cannot fire on it); the entry
+    ///     survives because the echo may still be in flight.
+    std::pair<int, int> own_write_expectation(int slot_index, int firmware_id);
+
+    /// Pending per-slot own-write expectation: {id firmware reported before
+    /// the write, id we wrote}. Guarded by the subclass's mutex_ (above).
+    std::unordered_map<int, std::pair<int, int>> own_write_expectations_;
+
+    ///@}
+
+  public:
     /**
      * @brief Whether firmware states what filament is in each slot
      *

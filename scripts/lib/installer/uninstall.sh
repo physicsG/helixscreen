@@ -109,7 +109,7 @@ undo_klipper_includes() {
             cfg)
                 if [ -f "$rest" ]; then
                     log_info "Removing Klipper snippet: $rest"
-                    $(file_sudo "$rest") rm -f "$rest" 2>/dev/null || true
+                    $(path_sudo "$rest") rm -f "$rest" 2>/dev/null || true
                 fi
                 ;;
             include)
@@ -165,7 +165,7 @@ undo_seeded_settings() {
     done < "$state_file"
 
     # Remove only the marker; settings.json is left untouched on purpose.
-    $(file_sudo "$state_file") rm -f "$state_file" 2>/dev/null || true
+    $(path_sudo "$state_file") rm -f "$state_file" 2>/dev/null || true
 }
 
 # Uninstall HelixScreen
@@ -470,7 +470,7 @@ uninstall() {
 
     # Clean up macOS resource fork files (created by scp from Mac)
     for pattern in /opt/._helixscreen /root/._helixscreen; do
-        $(file_sudo "$pattern") rm -f "$pattern" 2>/dev/null || true
+        $(path_sudo "$pattern") rm -f "$pattern" 2>/dev/null || true
     done
 
     # Remove config symlinks (preserves user files in printer_data)

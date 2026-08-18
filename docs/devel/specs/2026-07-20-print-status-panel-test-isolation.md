@@ -42,7 +42,7 @@ Note the pair `[print_status]` + the wizard teardown test alone does **not** rep
 `deinit_subjects()` first.
 
 **Stack-local path:** reverting only the fixture change and keeping the new tests
-SIGSEGVs at `tests/unit/test_print_status_widget_m117.cpp:50`.
+SIGSEGVs at tests/unit/test_print_status_widget_m117.cpp:50.
 
 ## Fixture-level fixes attempted and rejected
 
@@ -95,7 +95,7 @@ test-infrastructure redesign on a critical path was the worse trade.
 
 XML row visibility for `panel_widget_print_status.xml` has no automated coverage. That is
 the same gap that allowed a clipped, dead M117 row to exist in view 4 undetected — see
-`docs/devel/specs/2026-07-19-m117-preprint-visibility-design.md`. Verification for those
+`docs/devel/specs/plans/2026-07-19-m117-preprint-visibility.md`. Verification for those
 rows is currently manual (runtime launch + screenshot).
 
 The reverted tests are recoverable from `ef34fe998` and `79b723199`; they were correct and

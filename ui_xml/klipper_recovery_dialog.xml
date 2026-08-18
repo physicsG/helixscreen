@@ -8,22 +8,24 @@
        and without it the card grew past both screen edges and lost its header and
        buttons on a 480x272 panel.
 
-       90% rather than modal_dialog's 85%: this card carries more chrome than that one
-       (a restart button row AND a Dismiss row, each with its divider). Measured at the
-       MICRO breakpoint, chrome is 97px and #dialog_content_max is 140, so the card needs
-       97+140=237px. 85% of a 272px panel is only 231 and the surplus overflowed downward,
-       clipping the bottom of Dismiss; 90% gives 244. -->
+       85% like every other modal: this card carries more chrome than modal_dialog
+       (a restart button row AND a Dismiss row, each with its divider), and that
+       extra chrome is budgeted by capping the message area at
+       #dialog_content_tall_chrome_max instead of #dialog_content_max — measured
+       per breakpoint for exactly this shape (#1277). An earlier revision raised
+       the card to 90% to fit; that unsized the shared ladder arithmetic, so the
+       hack was ported back onto the token. -->
   <view name="klipper_recovery_card"
-        extends="ui_dialog" width="85%" height="content" style_max_height="90%" align="center"
-        flex_flow="column" style_flex_main_place="start" style_pad_gap="0" style_border_width="2"
-        style_border_color="#warning" scrollable="false">
+        extends="ui_dialog" width="85%" height="content" style_max_height="85%" align="center" flex_flow="column"
+        style_flex_main_place="start" style_pad_gap="0" style_border_width="2" style_border_color="#warning"
+        scrollable="false">
     <!-- Header: icon and title share one row, error code trailing. Collapsing what was
          a stacked icon above a centred title buys back a whole row of height, which is
          what lets a multi-line message fit on the smallest panels. -->
     <lv_obj width="100%"
             height="content" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="#space_lg"
-            style_pad_bottom="#space_md" flex_flow="row" style_flex_cross_place="center"
-            style_pad_gap="#space_sm" scrollable="false">
+            style_pad_bottom="#space_md" flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm"
+            scrollable="false">
       <icon src="alert_octagon" size="md" variant="warning"/>
       <!-- Title (driven by recovery_title subject) -->
       <text_heading name="recovery_title" bind_text="recovery_title" flex_grow="1"/>
@@ -38,22 +40,23 @@
     <!-- Horizontal divider below header -->
     <divider_horizontal/>
     <!-- Message (driven by recovery_message subject). Capped and scrollable so a long
-         shutdown reason scrolls within the card rather than growing it. flex_grow makes
-         this the element that yields once the card hits style_max_height: with a fixed
-         cap here instead, the leftover overflowed downward and clipped the bottom of the
-         Dismiss button. -->
+         shutdown reason scrolls within the card rather than growing it. The cap is
+         #dialog_content_tall_chrome_max — the ladder measured for this card's TWO
+         button rows — so chrome + full cap lands 8px under the shared 85% card cap
+         at every breakpoint. flex_grow makes this the element that yields once the
+         card hits style_max_height. -->
     <lv_obj name="recovery_message_scroll"
-            width="100%" height="content" style_max_height="#dialog_content_max"
-            style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="#space_md"
-            style_pad_bottom="#space_md" scrollable="true" scroll_snap_y="none">
+            width="100%" height="content" style_max_height="#dialog_content_tall_chrome_max" style_pad_left="#space_lg"
+            style_pad_right="#space_lg" style_pad_top="#space_md" style_pad_bottom="#space_md" scrollable="true"
+            scroll_snap_y="none">
       <text_muted name="recovery_message" width="100%" bind_text="recovery_message" long_mode="wrap"/>
     </lv_obj>
     <!-- Restart actions, side by side rather than stacked. Wrapped so the whole row
          (including modal_button_row's own leading divider) hides as a unit when
          disconnected, leaving Dismiss as the only button. -->
     <lv_obj name="recovery_restart_actions"
-            width="100%" height="content" style_pad_all="0" style_pad_gap="0" style_bg_opa="0"
-            style_border_width="0" scrollable="false">
+            width="100%" height="content" style_pad_all="0" style_pad_gap="0" style_bg_opa="0" style_border_width="0"
+            scrollable="false">
       <bind_flag_if_eq subject="recovery_can_restart" flag="hidden" ref_value="0"/>
       <modal_button_row secondary_text="Firmware Restart"
                         secondary_tag="Firmware Restart" secondary_icon="update"

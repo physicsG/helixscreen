@@ -1014,9 +1014,17 @@ OverlayHeights compute_overlay_heights(int32_t hor_res, int32_t ver_res, int32_t
 // axis-neutral tokens (space_*, widths, square icon/badge sizes) stay on the
 // cramped ladder and belong nowhere near here.
 static constexpr const char* VERTICAL_AXIS_TOKENS[] = {
-    "button_height",      "button_height_sm", "button_height_lg",
-    "header_height",      "input_height",     "temp_card_height",
-    "dialog_content_max", "spinner_lg",       "header_button_height",
+    "button_height",
+    "button_height_sm",
+    "button_height_lg",
+    "header_height",
+    "input_height",
+    "temp_card_height",
+    "dialog_content_max",
+    "dialog_content_pinned_max",
+    "dialog_content_tall_chrome_max",
+    "spinner_lg",
+    "header_button_height",
 };
 
 bool theme_manager_token_uses_vertical_axis(const char* base_name) {

@@ -15,13 +15,16 @@
 #include "esp_psram_thumbnail.h"
 #endif
 #include "print_history_manager.h"
+#include "printer_temperature_state.h"
 #include "subject_managed_panel.h"
 
 #include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace helix {
 
@@ -46,6 +49,28 @@ class PrintStatusWidget : public PanelWidget {
     /// widget list can match on id() and static_cast, instead of dynamic_cast —
     /// the firmware builds -fno-rtti.
     static constexpr const char* WIDGET_ID = "print_status";
+
+    /// One row of the nozzle-tool picker: what it reads, and the Klipper
+    /// extruder object it pins the temperature display to.
+    struct NozzleToolOption {
+        std::string label;
+        std::string extruder_name;
+    };
+
+    /// The nozzle rows the picker should offer, ordered by extruder index.
+    ///
+    /// Sourced from the extruders PrinterTemperatureState actually discovered,
+    /// never from a tool count: an AMS expands ToolState's tool list to one
+    /// entry per filament slot, so deriving names from that count offered
+    /// "extruder1".."extruder15" on a 4-port AD5X with one hotend - names no
+    /// Klipper object answers to, every one of which the formatter then refused.
+    [[nodiscard]] static std::vector<NozzleToolOption> build_nozzle_tool_options(
+        const std::unordered_map<std::string, helix::ExtruderInfo>& extruders);
+
+    /// Adopt a nozzle pin from the picker. Returns false when the formatter
+    /// cannot bind the named extruder, in which case the widget records the
+    /// "auto" fallback it actually applied rather than the rejected name.
+    bool apply_nozzle_tool_override(const std::string& tool_key);
 
     const char* id() const override {
         return WIDGET_ID;
@@ -102,6 +127,9 @@ class PrintStatusWidget : public PanelWidget {
     }
     const std::string& nozzle_tool_override_for_test() const {
         return nozzle_tool_override_;
+    }
+    const nlohmann::json& config_for_test() const {
+        return config_;
     }
     static lv_subject_t* layout_effective_subject_for_test() {
         return &layout_effective_subject_;
@@ -438,7 +466,10 @@ class PrintStatusWidget : public PanelWidget {
         ObserverGuard nozzle_temp_observer_;
         ObserverGuard nozzle_target_observer_;
 
-        ObserverGuard tool_count_observer_;
+        /// Bound to ToolState's tools_version subject, not tool_count: the badge
+        /// gate counts extruders, and a spool/status refresh can change the
+        /// extruder mapping without moving the tool count.
+        ObserverGuard tools_version_observer_;
         ObserverGuard active_tool_observer_;
 
         void update_layer_text();

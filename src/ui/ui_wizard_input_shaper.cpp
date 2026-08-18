@@ -214,7 +214,10 @@ static void begin_is_calibration_flow(WizardInputShaperStep* step) {
                 InputShaperCalibrator* cal = step->get_calibrator();
                 if (cal) {
                     cal->run_calibration(
-                        'X', [token](int percent) { safe_update_progress(token, percent / 2); },
+                        'X',
+                        [token](int percent, ShaperCalibrationPhase) {
+                            safe_update_progress(token, percent / 2);
+                        },
                         [token](const InputShaperResult& result) {
                             (void)result;
                             if (token.expired()) {
@@ -234,7 +237,7 @@ static void begin_is_calibration_flow(WizardInputShaperStep* step) {
                             if (cal2) {
                                 cal2->run_calibration(
                                     'Y',
-                                    [token](int percent) {
+                                    [token](int percent, ShaperCalibrationPhase) {
                                         safe_update_progress(token, 50 + percent / 2);
                                     },
                                     [token](const InputShaperResult& result) {

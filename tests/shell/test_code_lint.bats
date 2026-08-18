@@ -138,7 +138,8 @@ setup() {
 # (helix::IMoonrakerClient, IMoonrakerAPI, and the ten IXxxAPI sub-API
 # interfaces in include/i_moonraker_sub_apis.h), not the concrete classes. The
 # concretes live behind MoonrakerManager, which owns them via
-# std::unique_ptr<helix::IMoonrakerClient> / std::unique_ptr<IMoonrakerAPI> and
+# std::unique_ptr<MoonrakerAPI> (the concrete facade; the mock inherits it) /
+# std::unique_ptr<helix::IMoonrakerClient> and
 # constructs them in create_client()/create_api(). Naming a concrete type
 # outside the allowlist below reintroduces a hard dependency the interface
 # split was meant to remove (mock-parity, and — for the ESP32 port — a

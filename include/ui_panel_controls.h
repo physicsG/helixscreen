@@ -376,6 +376,11 @@ class ControlsPanel : public PanelBase {
     char controls_z_offset_buf_[16] = {};
     lv_subject_t controls_z_offset_subject_{};
     ObserverGuard gcode_z_offset_observer_;
+    // ZMOD zeroes the live offset outside a print, so the row has to re-pick its
+    // source when either the persisted value or the print state changes.
+    ObserverGuard persisted_z_offset_observer_;
+    ObserverGuard persisted_z_offset_valid_observer_;
+    ObserverGuard z_offset_print_active_observer_;
 
     //
     // === Speed/Flow Override Subjects ===
@@ -515,7 +520,12 @@ class ControlsPanel : public PanelBase {
     //
 
     void handle_zoffset_tune(); ///< Open Print Tune overlay for live Z-offset tuning
-    void update_controls_z_offset_display(int offset_microns);
+    /// Reformat the Z-offset row from whichever reading is currently truthful.
+    /// Takes no value: the choice between Klipper's live offset and the
+    /// firmware-persisted one depends on three subjects, so every caller would
+    /// otherwise have to repeat the selection. See
+    /// helix::zoffset::displayed_z_offset_microns().
+    void update_controls_z_offset_display();
 
     //
     // === Fan Slider Handler ===

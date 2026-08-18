@@ -18,11 +18,34 @@
 
 class PrintStartControllerTestAccess {
   public:
-    // --- pre-print filament gate (test_print_start_filament_gate.cpp) ---
+    // --- gate-pipeline runner (test_print_start_gates.cpp) ---
 
-    static bool check(helix::ui::PrintStartController& c) {
-        return c.check_required_filament_present();
+    static void run_gates(helix::ui::PrintStartController& c, size_t index = 0) {
+        c.run_gates_from(index);
     }
+
+    static void gate_proceed(helix::ui::PrintStartController& c) {
+        c.on_gate_proceed();
+    }
+
+    static void gate_cancel(helix::ui::PrintStartController& c) {
+        c.on_gate_cancel();
+    }
+
+    static void set_gates(helix::ui::PrintStartController& c,
+                          std::vector<helix::PrintStartGate> gates) {
+        c.gate_list_ = std::move(gates);
+    }
+
+    static lv_obj_t* print_gate_modal(const helix::ui::PrintStartController& c) {
+        return c.print_gate_modal_;
+    }
+
+    static size_t gate_resume_index(const helix::ui::PrintStartController& c) {
+        return c.gate_resume_index_;
+    }
+
+    // --- remap-unsupported discriminator (test_print_start_filament_gate.cpp) ---
 
     static bool should_warn_remap_unsupported(const helix::printer::ToolMappingCapabilities& caps,
                                               bool applies_via_preprint) {

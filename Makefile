@@ -453,6 +453,24 @@ endif
 # Mock backends (enabled by default, disable with ENABLE_MOCKS=no for production)
 ENABLE_MOCKS ?= yes
 
+# PWM sysfs buzzer backend — ad5m/ad5m-br/ad5x only.
+#
+# The backend's own runtime probe is just "does /sys/class/pwm/pwmchip0 exist",
+# which is true on boards whose PWM controller drives something else entirely: a
+# CC1 has 8 channels there, no beeper on any of them, and its backlight on the
+# same controller. So the probe cannot be trusted to decide this — the platform
+# must. M300 (the PRINTER's beeper, over gcode) is deliberately NOT gated and
+# keeps working everywhere.
+#
+# Decided HERE, above APP_OBJS, and not down in the sound-flags section: APP_OBJS
+# is computed from APP_SRCS a few lines below, so a filter-out placed after it is
+# a silent no-op that still compiles and still links the backend.
+ifneq (,$(filter ad5m ad5m-br ad5x,$(PLATFORM_TARGET)))
+    PWM_SOUND_CXXFLAGS := -DHELIX_HAS_PWM_SOUND
+else
+    APP_SRCS := $(filter-out $(SRC_DIR)/system/pwm_sound_backend.cpp,$(APP_SRCS))
+endif
+
 ifneq ($(ENABLE_MOCKS),yes)
     APP_SRCS := $(filter-out $(wildcard $(SRC_DIR)/api/*_mock*.cpp),$(APP_SRCS))
     APP_SRCS := $(filter-out $(SRC_DIR)/printer/ams_backend_mock.cpp,$(APP_SRCS))
@@ -984,7 +1002,7 @@ else ifeq ($(PLATFORM_TARGET),native)
     TRACKER_CXXFLAGS := -DHELIX_HAS_TRACKER
 endif
 # K1, K2, MIPS — no sound at all
-CXXFLAGS += $(SOUND_CXXFLAGS) $(TRACKER_CXXFLAGS)
+CXXFLAGS += $(SOUND_CXXFLAGS) $(TRACKER_CXXFLAGS) $(PWM_SOUND_CXXFLAGS)
 
 # Feature gates — default ON for all platforms.
 # Disabled per-platform in mk/cross.mk for memory-constrained targets.

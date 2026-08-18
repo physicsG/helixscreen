@@ -89,6 +89,29 @@ file_sudo() {
     fi
 }
 
+# Get sudo prefix needed to RENAME or REMOVE a path (mv/rm/rmdir of the path
+# itself, not of something inside it).
+#
+# Always checks the PARENT, existing target or not. rename(2) and unlink(2)
+# mutate the parent directory's entries; the target's own mode has nothing to do
+# with it. So a user-owned directory inside a root-owned parent is writable and
+# still cannot be moved or deleted.
+#
+# That is not hypothetical, it is the /opt/helixscreen layout: helixscreen.service
+# chowns the install dir to the service user via ExecStartPre while /opt stays
+# root:root. file_sudo() answers "can I write INTO this", returns "" there, and the
+# swap runs bare:
+#
+#   mv: cannot move '/opt/helixscreen' to '/opt/helixscreen.old': Permission denied
+#
+# Use file_sudo() when writing a file into a directory; use this when the path is
+# the thing being moved or deleted.
+path_sudo() {
+    local dir
+    dir="$(dirname "$1")"
+    [ -w "$dir" ] && echo "" || echo "$SUDO"
+}
+
 # Resolve the directory holding the user's Klipper/Moonraker config files.
 #
 # Almost every Klipper install puts them in <klipper home>/printer_data/config,

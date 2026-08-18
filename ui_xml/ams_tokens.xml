@@ -98,6 +98,17 @@
     <px name="ams_card_min_width_xlarge" value="140"/>
     <px name="ams_card_min_width_xxlarge" value="180"/>
 
+    <!-- Unit card title: ONE line of font_body, so long_mode="dots" ellipsizes
+         rather than wrapping the card taller (which steals height from the path
+         canvas below). Track font_body: 12/14/18/20/24/32 px + ~40% leading. -->
+    <px name="ams_unit_name_h_micro" value="17"/>
+    <px name="ams_unit_name_h_tiny" value="17"/>
+    <px name="ams_unit_name_h_small" value="20"/>
+    <px name="ams_unit_name_h_medium" value="25"/>
+    <px name="ams_unit_name_h_large" value="28"/>
+    <px name="ams_unit_name_h_xlarge" value="34"/>
+    <px name="ams_unit_name_h_xxlarge" value="45"/>
+
     <px name="ams_card_max_width_small" value="160"/>
     <px name="ams_card_max_width_medium" value="200"/>
     <px name="ams_card_max_width_large" value="240"/>

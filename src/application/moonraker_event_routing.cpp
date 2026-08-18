@@ -28,6 +28,22 @@ MoonrakerEventDecision decide_moonraker_event(MoonrakerEventType type, bool is_e
                     MoonrakerEventSuppression::DiscoveryDeferred};
         }
         if (type == MoonrakerEventType::CONNECTION_FAILED) {
+            // The wizard owns the screen, and its Connection step is the UI
+            // that collects the address and reports the result inline — this
+            // prompt is a second, competing host-entry dialog on top of it. On
+            // a fresh install there is no saved host at all, so the address
+            // that "failed" is only the 127.0.0.1 default the wizard exists to
+            // replace, and on a standalone display the message even claims
+            // Klipper runs on this machine. Bundle L53W5PKG: pushed over the
+            // Language step and left sitting there for 16.5 minutes.
+            //
+            // Suppressed, not degraded to a toast like the modal case below:
+            // there the user is doing something else and needs to learn the
+            // connection failed, here they are already in the flow that fixes
+            // it.
+            if (wizard_active) {
+                return {MoonrakerEventRoute::Ignore, nullptr, MoonrakerEventSuppression::Wizard};
+            }
             // Never steal an open modal. This event is latched and fires 60 s
             // after startup, which on an unreachable printer is exactly when the
             // user is in Settings > Network typing a WiFi password to fix it —

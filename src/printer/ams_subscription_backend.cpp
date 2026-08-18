@@ -370,7 +370,8 @@ bool AmsSubscriptionBackend::toolhead_homed() const {
 AmsError
 AmsSubscriptionBackend::ensure_homed_then(std::string gcode, std::function<void()> on_complete,
                                           std::function<void(const MoonrakerError&)> on_error,
-                                          uint32_t timeout_ms, bool skip_homing, bool silent) {
+                                          uint32_t timeout_ms, bool skip_homing, bool silent,
+                                          std::optional<bool> caller_surfaces_errors) {
     // The homed answer comes from the live homed_axes subject, not an RPC:
     // toolhead is in the standing objects.subscribe set, so querying it again
     // was a redundant round trip. skip_homing short-circuits the check
@@ -384,7 +385,7 @@ AmsSubscriptionBackend::ensure_homed_then(std::string gcode, std::function<void(
     // branch has already proven the toolhead genuinely needs a G28.
     if (skip_homing || toolhead_homed()) {
         return dispatch_payload(std::move(gcode), std::move(on_complete), std::move(on_error),
-                                timeout_ms, silent);
+                                timeout_ms, silent, caller_surfaces_errors);
     }
 
     auto gcode_copy = std::move(gcode);
@@ -399,7 +400,7 @@ AmsSubscriptionBackend::ensure_homed_then(std::string gcode, std::function<void(
     // this same call for all of them.
     auto token = lifetime_.token();
     auto send_g28_then_dispatch = [this, token, gcode_copy, on_complete, on_error, timeout_ms,
-                                   silent]() {
+                                   silent, caller_surfaces_errors]() {
         // Runs either inline in this call (no prompter, or a synchronous
         // test prompter) or later from an LVGL confirm-button event
         // callback. Both cases are on the main thread -- the modal only
@@ -431,7 +432,8 @@ AmsSubscriptionBackend::ensure_homed_then(std::string gcode, std::function<void(
                 handle_dispatch_error(synthetic, on_error);
                 return;
             }
-            dispatch_payload(gcode_copy, on_complete, on_error, timeout_ms, silent);
+            dispatch_payload(gcode_copy, on_complete, on_error, timeout_ms, silent,
+                             caller_surfaces_errors);
             return;
         }
 
@@ -441,20 +443,26 @@ AmsSubscriptionBackend::ensure_homed_then(std::string gcode, std::function<void(
         // never returned the send_jsonrpc() call either).
         api_->execute_gcode(
             "G28",
-            [this, token, gcode_copy, on_complete, on_error, timeout_ms, silent]() {
+            [this, token, gcode_copy, on_complete, on_error, timeout_ms, silent,
+             caller_surfaces_errors]() {
                 // L081 Mechanism C: the ack lands on a bg thread and
                 // dispatch_payload touches api_/members. Marshal to main.
                 token.defer("AmsSubscriptionBackend::ensure_homed_then_g28_success",
-                            [this, gcode_copy, on_complete, on_error, timeout_ms, silent]() {
+                            [this, gcode_copy, on_complete, on_error, timeout_ms, silent,
+                             caller_surfaces_errors]() {
                                 dispatch_payload(gcode_copy, on_complete, on_error, timeout_ms,
-                                                 silent);
+                                                 silent, caller_surfaces_errors);
                             });
             },
             [this, token, on_error](const MoonrakerError& err) {
                 token.defer("AmsSubscriptionBackend::ensure_homed_then_g28_error",
                             [this, err, on_error]() { handle_dispatch_error(err, on_error); });
             },
-            IMoonrakerAPI::HOMING_TIMEOUT_MS);
+            IMoonrakerAPI::HOMING_TIMEOUT_MS, /*silent=*/false, /*on_queued=*/nullptr,
+            // The G28 error leg lands in handle_dispatch_error(), which without
+            // a caller on_error only logs and resets the action to IDLE. Its
+            // ownership answer is the caller's, not this wrapper's.
+            caller_surfaces_errors.value_or(on_error != nullptr));
     };
 
     // Single-shot consume: a UI surface that already asked "home printer
@@ -502,7 +510,8 @@ void AmsSubscriptionBackend::handle_dispatch_error(
 AmsError
 AmsSubscriptionBackend::dispatch_payload(std::string gcode, std::function<void()> on_complete,
                                          std::function<void(const MoonrakerError&)> on_error,
-                                         uint32_t timeout_ms, bool silent) {
+                                         uint32_t timeout_ms, bool silent,
+                                         std::optional<bool> caller_surfaces_errors) {
     // Legacy shape: dispatch through the SAME two virtuals as before this
     // method grew these parameters. ~20 fixtures override ONLY
     // execute_gcode(gcode) / execute_gcode(gcode, on_complete) (see the
@@ -530,6 +539,15 @@ AmsSubscriptionBackend::dispatch_payload(std::string gcode, std::function<void()
 
     const char* tag = backend_log_tag();
     auto token = lifetime_.token();
+
+    // Captured from the CALLER's on_error, before the wrapper below makes the
+    // callback we hand to IMoonrakerAPI unconditionally non-null. A caller that
+    // passed none gets handle_dispatch_error()'s log-and-reset-to-IDLE, which no
+    // user ever sees, so the `!!` router must keep the report. A caller whose
+    // own on_error also only logs overrides this explicitly (CFS does). See
+    // include/rpc_error_policy.h.
+    const bool caller_surfaces = caller_surfaces_errors.value_or(on_error != nullptr);
+
     api_->execute_gcode(
         gcode,
         [tag, on_complete = std::move(on_complete)]() {
@@ -545,7 +563,7 @@ AmsSubscriptionBackend::dispatch_payload(std::string gcode, std::function<void()
             token.defer("AmsSubscriptionBackend::dispatch_payload_error",
                         [this, err, on_error]() { handle_dispatch_error(err, on_error); });
         },
-        timeout_ms, silent);
+        timeout_ms, silent, /*on_queued=*/nullptr, caller_surfaces);
     return AmsErrorHelper::success();
 }
 
@@ -574,11 +592,15 @@ AmsError AmsSubscriptionBackend::execute_gcode(const std::string& gcode) {
         // so the RPC timeout is advisory for these long macros. A cold-start
         // load can legitimately run past the 300s ceiling (bundle 77TDH9N6:
         // heat-from-cold + load + double purge + clean), completing fine ~47s
-        // later — silent suppresses ONLY the false REQUEST_TIMEOUT toast. The
-        // error_cb above still logs "may still be running", and genuine Klipper
-        // RPC-error toasts stay suppressed anyway via the error_cb
-        // caller_handles_ui path in the request tracker.
-        /*silent=*/true);
+        // later — silent suppresses ONLY the false REQUEST_TIMEOUT toast and the
+        // tracker's generic fallback.
+        /*silent=*/true, /*on_queued=*/nullptr,
+        // caller_surfaces_errors=false: the error_cb above only writes to the
+        // log, which the user never sees. Declaring otherwise would silence
+        // GcodeErrorRouter, so a real AFC/Happy Hare/CFS macro rejection would
+        // reach nobody. With this false, Klipper's `!!` broadcast stays free to
+        // surface it. See include/rpc_error_policy.h.
+        /*caller_surfaces_errors=*/false);
     return AmsErrorHelper::success();
 }
 
@@ -611,8 +633,14 @@ AmsError AmsSubscriptionBackend::execute_gcode(const std::string& gcode,
         IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
         // silent=true: completion is owned by the phase tracker + IFS_STATUS, not
         // the RPC return, so the advisory 300s timeout must not surface a false
-        // "timed out" toast for a legitimately-long macro (bundle 77TDH9N6).
-        // Genuine RPC-error toasts remain suppressed via the error_cb path.
-        /*silent=*/true);
+        // "timed out" toast for a legitimately-long macro (bundle 77TDH9N6),
+        // along with the tracker's generic fallback.
+        /*silent=*/true, /*on_queued=*/nullptr,
+        // caller_surfaces_errors=false: the error_cb above only writes to the
+        // log, which the user never sees. Declaring otherwise would silence
+        // GcodeErrorRouter, so a real AFC/Happy Hare/CFS macro rejection would
+        // reach nobody. With this false, Klipper's `!!` broadcast stays free to
+        // surface it. See include/rpc_error_policy.h.
+        /*caller_surfaces_errors=*/false);
     return AmsErrorHelper::success();
 }

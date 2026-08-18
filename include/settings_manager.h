@@ -337,6 +337,26 @@ class SettingsManager {
     }
 
     /**
+     * @brief Keep Spoolman spool info on a slot the firmware reports as ejected.
+     *
+     * merge_override() arms its eject rule only on backends whose firmware
+     * reports spool ids (AFC, Happy Hare): there, firmware id 0/null means
+     * the spool was ejected. This setting decides whether the slot keeps its
+     * Spoolman color/material metadata anyway. Default true — retention is
+     * the designed behavior; disabling restores the pre-override strip.
+     * Per-printer setting.
+     */
+    bool get_ams_keep_spool_info_on_eject() const;
+
+    /** @brief Set whether spool info survives a firmware-reported eject */
+    void set_ams_keep_spool_info_on_eject(bool enabled);
+
+    /** @brief Keep-spool-info-on-eject subject (integer: 0=off, 1=on) */
+    lv_subject_t* subject_ams_keep_spool_info_on_eject() {
+        return &ams_keep_spool_info_on_eject_subject_;
+    }
+
+    /**
      * @brief Expose the bypass controls even though the firmware reports none.
      *
      * Distinct from get_ams_always_show_bypass_spool(), which only un-suppresses
@@ -351,6 +371,20 @@ class SettingsManager {
 
     /** @brief Set whether bypass controls appear despite a firmware "no bypass" */
     void set_ams_force_bypass_controls(bool enabled);
+
+    /**
+     * @brief Whether bypass was declared on a system with no firmware bypass
+     *        command (per-printer, backend-owned).
+     *
+     * Persists the user's bypass toggle for backends whose firmware cannot
+     * hold that state itself — today only the stock CFS dialect (its
+     * BOX_ENABLE_CFS_PRINT stand-down persists in the box, but HelixScreen's
+     * declaration is ours to remember across restarts). Not a user setting;
+     * no subject — read once at backend start, written on the toggle.
+     */
+    bool get_bypass_declared() const;
+    /** @brief Persist the bypass declaration (see get_bypass_declared) */
+    void set_bypass_declared(bool declared);
 
     /** @brief Force-bypass-controls subject (integer: 0=off, 1=on) */
     lv_subject_t* subject_ams_force_bypass_controls() {
@@ -542,6 +576,7 @@ class SettingsManager {
     lv_subject_t auto_color_map_subject_;
     lv_subject_t afc_unload_after_print_subject_;
     lv_subject_t ams_always_show_bypass_spool_subject_;
+    lv_subject_t ams_keep_spool_info_on_eject_subject_;
     lv_subject_t ams_force_bypass_controls_subject_;
     lv_subject_t filament_auto_cooldown_subject_;
     lv_subject_t console_filter_temps_subject_;

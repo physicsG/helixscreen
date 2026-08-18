@@ -243,7 +243,7 @@ The base container for all modal dialog cards. Registered as a custom LVGL XML w
   answers "am I inside a dialog" by walking an object's parents looking for this
   bit, so **nothing else may set it**, on any object, for any reason. It is one
   of only four user flag bits; see the ledger in
-  [ARCHITECTURE.md](ARCHITECTURE.md) under Panel Widget System before claiming
+  [chapter 09 — Home panel widgets](architecture/09-home-widgets.md) before claiming
   one
 
 Usage in XML:
@@ -379,6 +379,35 @@ Key rules:
 - Use `modal_button_row` for standard two-button footers
 - Use `modal_header` for icon + title rows (or build custom headers)
 - Use design tokens for all spacing (`#space_lg`, `#space_md`, etc.)
+- Cap the card at `style_max_height="85%"` and the scroll area at a
+  `#dialog_content_*` token — see the next section
+
+### Height budget: the `#dialog_content_*` ladder family
+
+The card cap and the content cap are ONE piece of arithmetic, shared by every
+modal: the card is `height="content"` capped at **85% of the screen**, and the
+scrollable body is capped at a token whose per-breakpoint values were measured
+as (85% cap − that shape's chrome). There is no flex-shrink in LVGL, so a card
+whose children total more than its cap clips its LAST child off the bottom —
+the button row — and the modal cannot be dismissed.
+
+Pick the token by the card's chrome shape (values in `ui_xml/globals.xml`):
+
+| Token | Card shape | Measured on |
+|-------|------------|-------------|
+| `#dialog_content_max` | header + divider + scroll area + divider + ONE button row | `modal_dialog` |
+| `#dialog_content_pinned_max` | …plus ONE pinned block below the scroll area (a diagram, a status row) | `ams_loading_error_modal` |
+| `#dialog_content_tall_chrome_max` | …plus a SECOND button row with its divider | `klipper_recovery_dialog` |
+
+- Prefer moving content INSIDE the scroll container over pinning it — then
+  `#dialog_content_max` is correct by construction.
+- Never raise a card above 85% to fit extra chrome (klipper_recovery carried
+  90% for a while; #1277 ported it back onto the tall-chrome token). The
+  chrome-budget lint gate (`scripts/check_modal_chrome_budget.py`) flags both
+  the raised cap and an unbudgeted block below a scroll area.
+- A shape beyond one extra block (action_prompt's diagram + wrapping rows +
+  footer) fits no single ladder: measure it at every breakpoint with
+  `ctl demo` + `ctl geom` and mark the file `MODAL_CHROME_OK`.
 
 ---
 

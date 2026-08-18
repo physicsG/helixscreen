@@ -108,4 +108,85 @@ std::vector<std::string> listeners_on_port(uint16_t port);
 /// without /proc, or when neither is running — which is itself the finding.
 std::vector<ProcMatch> find_moonraker_processes();
 
+/**
+ * @brief How to bolt a HelixScreen config onto a Moonraker whose own config is
+ *        out of the file API's reach
+ *
+ * Stock Creality K2 launches `moonraker.py -c /usr/share/moonraker/moonraker.conf`
+ * while the file manager's only writable config root is
+ * /mnt/UDISK/printer_data/config, so that moonraker.conf is a 404 over HTTP and
+ * no Moonraker call can edit it. HelixScreen runs on that printer as root, so the
+ * file is reachable locally — but only if we know precisely which file to touch
+ * and exactly what to append.
+ */
+struct LocalIncludePlan {
+    /// True only when every input needed to write safely was recovered.
+    bool viable = false;
+    /// Absolute path of the config Moonraker actually loaded — the file to append to.
+    std::string vendor_config_abs;
+    /// Absolute path of the helixscreen.conf the include will point at.
+    std::string helix_conf_abs;
+    /// The same file addressed through the file API, relative to the config root.
+    std::string helix_conf_upload;
+    /// The exact line to append to @ref vendor_config_abs.
+    std::string include_line;
+    /// Why the plan is not viable. Empty when it is.
+    std::string error;
+};
+
+/**
+ * @brief Decide whether, and how, to reach Moonraker's config as a local file
+ *
+ * @param procs           Output of find_moonraker_processes(); the caller must
+ *                        already have established that Moonraker is on this host.
+ * @param config_root_abs Absolute path of the file manager's writable "config"
+ *                        root, from server.files.roots.
+ *
+ * The include is always absolute: Moonraker resolves a relative include against
+ * the *including* file's directory, so a bare "helixscreen.conf" written into a
+ * vendor config under /usr/share names a file that does not exist — and an
+ * include with no matching file makes Moonraker refuse to start outright.
+ *
+ * Not viable when the loaded config already sits under @p config_root_abs. That
+ * is not the K2 situation, and writing the file behind Moonraker's back there
+ * would paper over whatever else made the file API fail. Both sides are resolved
+ * through symlinks before that comparison — on the AD5M /root/printer_data/config
+ * IS /opt/config, and a literal prefix test would miss it.
+ */
+LocalIncludePlan plan_local_include(const std::vector<ProcMatch>& procs,
+                                    const std::string& config_root_abs);
+
+/**
+ * @brief Append @p include_line to a local config file, without truncating it
+ *
+ * The one write in this module, and the riskiest thing in the Spoolman flow: the
+ * file belongs to the vendor firmware and a half-written one leaves the printer
+ * with a Moonraker that will not start. So the existing content is read whole,
+ * the new line appended, the result written to a temp file in the same directory,
+ * fsync'd, and renamed over the original, with the directory fsync'd after — a
+ * crash OR a power cut mid-write loses the temp file, not the config. (The rename
+ * alone would order only the directory entry, not the temp file's data: with
+ * delayed allocation that is exactly how a power cut yields a zero-length config.)
+ *
+ * A @p config_abs that is a symlink is resolved first and the real file edited,
+ * since rename() would otherwise replace the link itself with a regular file.
+ *
+ * Idempotent, and it shares MoonrakerConfigManager::has_include_line() with the
+ * file-API path so the two can never disagree about whether a write is needed:
+ * a file already including @p include_target is left untouched and the call
+ * still succeeds.
+ *
+ * Blocking file IO — never call this from the LVGL main thread.
+ *
+ * @param config_abs     Absolute path of the config to edit. Must already exist;
+ *                       creating it would replace a file we failed to read with
+ *                       one defining no [server] at all.
+ * @param include_target What to include, e.g. "/mnt/.../helixscreen.conf". The
+ *                       `[include ...]` line is built from it.
+ * @param error          Out: reason on failure, cleared on success.
+ * @return False when the file could not be read or the replacement not landed.
+ */
+bool append_include_to_local_config(const std::string& config_abs,
+                                    const std::string& include_target, std::string& error);
+
 } // namespace helix::diag

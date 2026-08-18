@@ -163,6 +163,37 @@ class NavigationManager {
      */
     void set_active(helix::PanelId panel_id);
 
+    /// How the caller wants the panel switch itself run. An LVGL event callback
+    /// must queue it — mutating widgets mid-render corrupts the draw. A caller
+    /// already inside an UpdateQueue callback (RemoteControlServer's
+    /// execute_on_ui_thread) is in exactly the context switch_to_panel_impl()
+    /// is written for and runs it inline, so the state it changes is readable
+    /// the moment the call returns.
+    enum class SwitchDispatch { Queued, Inline };
+
+    /// What request_panel() did, so a programmatic caller can tell a real
+    /// switch from a request that was silently declined.
+    enum class PanelRequest {
+        Switched,              ///< The panel switch ran (or was queued)
+        AlreadyActive,         ///< Already there with nothing stacked over it
+        HomeRetapped,          ///< Already on Home — the carousel reset instead
+        BlockedDisconnected,   ///< Panel needs a printer connection
+        BlockedKlippyNotReady, ///< Panel needs Klipper ready
+    };
+
+    /**
+     * @brief Do what tapping this panel's navbar button does
+     *
+     * The whole navbar-tap decision: the already-there special cases (a second
+     * tap on Home resets the carousel), the connection/Klipper gating, and the
+     * switch — which clears any open overlay stack, unlike set_active(), whose
+     * job is to swap the base panel *underneath* whatever is stacked on it.
+     *
+     * Shared so `helix-screen ctl navigate` and a finger produce the same
+     * result; they differ only in @p dispatch.
+     */
+    PanelRequest request_panel(helix::PanelId panel_id, SwitchDispatch dispatch);
+
     /**
      * @brief Register C++ panel instance for lifecycle callbacks
      *
@@ -604,6 +635,24 @@ class NavigationManager {
     // it without going through go_back(); the scrub hook is what keeps
     // overlay_backdrop_ from outliving it.
     void adopt_overlay_backdrop(lv_obj_t* screen);
+    /**
+     * @brief Re-take the overlay backdrop snapshot from the live widget tree
+     *
+     * The backdrop is a frozen bitmap of the screen as it looked when the first
+     * overlay opened, so anything outside the overlay — the navigation bar —
+     * stops tracking the widgets beneath it. A setting whose UI lives in an
+     * overlay but whose effect lands in the navbar (show_printer_switcher) would
+     * otherwise appear to do nothing until the stack popped.
+     *
+     * Hides every screen child except the app layout and un-hides the base
+     * panel, so the new snapshot captures the same content the original did
+     * rather than the overlays and the outgoing backdrop stacked on top of it.
+     * The replacement is inserted directly above the outgoing one, which is then
+     * deleted deferred — z-order is preserved without touching the overlays.
+     *
+     * No-op when no backdrop is live. Safe to call from a subject observer.
+     */
+    void refresh_overlay_backdrop();
 
     // Event callbacks
     static void backdrop_click_event_cb(lv_event_t* e);
@@ -712,6 +761,7 @@ class NavigationManager {
     ObserverGuard connection_state_observer_;
     ObserverGuard klippy_state_observer_;
     ObserverGuard printer_dot_observer_;
+    ObserverGuard printer_switcher_observer_;
 
     // Printer connection status dot widget
     lv_obj_t* printer_dot_widget_ = nullptr;

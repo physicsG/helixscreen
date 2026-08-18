@@ -12,11 +12,14 @@
 #include "filament_variants.h"
 
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
 
 #include "../catch_amalgamated.hpp"
+#include "hv/json.hpp"
 
 namespace {
 
@@ -254,4 +257,149 @@ TEST_CASE_METHOD(TableFixture, "merge_user_orca_overrides supersedes a case-vari
     CHECK(filament::orca_match_type("Silk") == "");
     CHECK(filament::orca_match_type("SILK") == "");
     CHECK(filament::orca_match_type("silk") == "");
+}
+
+// ============================================================================
+// Orca table reader
+// ============================================================================
+//
+// The reader walks assets/filaments.json with a SAX handler rather than
+// building a DOM, because the two tables it wants (426 bytes) sit beside a
+// 72 KB `filaments` array it has no use for. Skipping a subtree by hand means
+// the nesting rules are now load-bearing: these pin them.
+
+namespace {
+using filament::FilamentVariantsTestAccess;
+
+struct ParsedTables {
+    bool ok;
+    std::set<std::string> types;
+    std::map<std::string, std::string> overrides;
+    std::string error;
+};
+
+ParsedTables parse(const std::string& doc) {
+    ParsedTables r;
+    r.ok = FilamentVariantsTestAccess::parse_orca_tables(doc, r.types, r.overrides, r.error);
+    return r;
+}
+} // namespace
+
+TEST_CASE("orca table reader extracts both tables", "[orca_match][orca_tables]") {
+    auto r = parse(R"({
+        "orca_library_types": ["PLA", "ABS", "TPU"],
+        "orca_type_overrides": {"PLA+": "PLA", "TPE": "TPU"}
+    })");
+
+    REQUIRE(r.ok);
+    CHECK(r.types == std::set<std::string>{"PLA", "ABS", "TPU"});
+    CHECK(r.overrides == std::map<std::string, std::string>{{"PLA+", "PLA"}, {"TPE", "TPU"}});
+}
+
+TEST_CASE("orca table reader ignores the filaments array it skips over",
+          "[orca_match][orca_tables]") {
+    // The whole point of the SAX walk: `filaments` must cost nothing and
+    // contribute nothing, no matter what it contains.
+    auto r = parse(R"({
+        "orca_library_types": ["PLA"],
+        "filaments": [
+            {"name": "Some PLA", "type": "PETG", "vendor": "Acme"},
+            {"name": "Other",    "type": "ASA",  "colors": ["#fff", "#000"]}
+        ],
+        "orca_type_overrides": {"PLA+": "PLA"}
+    })");
+
+    REQUIRE(r.ok);
+    CHECK(r.types == std::set<std::string>{"PLA"});
+    CHECK(r.overrides.size() == 1);
+}
+
+TEST_CASE("orca table reader does not capture nested keys of the same name",
+          "[orca_match][orca_tables]") {
+    // Regression guard for the depth tracking. A product entry that happens to
+    // carry keys named like the top-level tables must not feed them — without a
+    // depth check, "NOT-A-TYPE" lands in the library set and silently makes an
+    // unmatchable filament type look matchable.
+    auto r = parse(R"({
+        "orca_library_types": ["PLA"],
+        "filaments": [
+            {
+                "name": "Trap",
+                "orca_library_types": ["NOT-A-TYPE"],
+                "orca_type_overrides": {"BOGUS": "PLA"}
+            }
+        ]
+    })");
+
+    REQUIRE(r.ok);
+    CHECK(r.types == std::set<std::string>{"PLA"});
+    CHECK(r.types.count("NOT-A-TYPE") == 0);
+    CHECK(r.overrides.empty());
+}
+
+TEST_CASE("orca table reader skips non-string entries", "[orca_match][orca_tables]") {
+    // Matches the DOM reader's is_string() guards: a hand-edited file with a
+    // number or a nested array in the list must drop that entry, not abort the
+    // whole load.
+    auto r = parse(R"({
+        "orca_library_types": ["PLA", 42, null, ["PETG"], "ABS"],
+        "orca_type_overrides": {"PLA+": "PLA", "Bad": 7, "Worse": {"x": "PLA"}}
+    })");
+
+    REQUIRE(r.ok);
+    CHECK(r.types == std::set<std::string>{"PLA", "ABS"});
+    CHECK(r.overrides == std::map<std::string, std::string>{{"PLA+", "PLA"}});
+}
+
+TEST_CASE("orca table reader reports malformed documents", "[orca_match][orca_tables]") {
+    auto r = parse(R"({"orca_library_types": ["PLA",})");
+
+    CHECK_FALSE(r.ok);
+    CHECK_FALSE(r.error.empty()); // non-empty error is what makes the caller warn
+}
+
+TEST_CASE("orca table reader rejects a non-object root", "[orca_match][orca_tables]") {
+    // Well-formed but the wrong shape: the caller must skip to the next search
+    // path quietly rather than warning about a parse failure.
+    auto r = parse(R"(["PLA", "ABS"])");
+
+    CHECK_FALSE(r.ok);
+    CHECK(r.error.empty());
+}
+
+TEST_CASE("orca table reader tolerates missing tables", "[orca_match][orca_tables]") {
+    auto r = parse(R"({"_attribution": {"source": "OrcaSlicer"}, "filaments": []})");
+
+    REQUIRE(r.ok);
+    CHECK(r.types.empty());
+    CHECK(r.overrides.empty());
+}
+
+TEST_CASE("orca table reader matches the shipped asset", "[orca_match][orca_tables]") {
+    // End-to-end against the real file: the reader must agree with what the
+    // shipped catalog actually declares, so a future edit to filaments.json
+    // that moves or renames these keys fails here rather than at runtime.
+    std::ifstream f("assets/filaments.json");
+    REQUIRE(f.is_open());
+    std::string doc((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+    auto r = parse(doc);
+    REQUIRE(r.ok);
+
+    // Independently derived: the DOM view of the same document.
+    auto dom = nlohmann::json::parse(doc);
+    std::set<std::string> expect_types;
+    for (const auto& t : dom["orca_library_types"]) {
+        if (t.is_string())
+            expect_types.insert(t.get<std::string>());
+    }
+    std::map<std::string, std::string> expect_overrides;
+    for (const auto& [k, v] : dom["orca_type_overrides"].items()) {
+        if (v.is_string())
+            expect_overrides[k] = v.get<std::string>();
+    }
+
+    CHECK(r.types == expect_types);
+    CHECK(r.overrides == expect_overrides);
+    CHECK(r.types.size() > 20); // the file is not silently empty
 }

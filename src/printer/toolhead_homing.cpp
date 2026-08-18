@@ -56,6 +56,15 @@ void ensure_homed_then(IMoonrakerAPI* api, AsyncLifetimeGuard& guard, std::funct
     }
 
     spdlog::info("[ensure_homed_then] Not fully homed, sending G28");
+
+    // Capture the caller's error-reporting intent BEFORE on_error is moved into
+    // the wrapper below. The wrapper is non-null for every call — including the
+    // many that pass on_error == nullptr — so intent derived after the move
+    // reads our own logging as a promise the caller never made, and silences
+    // Klipper's `!!` broadcast for a G28 failure nobody else reports. See
+    // include/rpc_error_policy.h.
+    const bool caller_surfaces = (on_error != nullptr);
+
     api->execute_gcode("G28",
                        guard.bg_cb("ensure_homed_then::g28_done",
                                    [then = std::move(then)]() {
@@ -72,7 +81,9 @@ void ensure_homed_then(IMoonrakerAPI* api, AsyncLifetimeGuard& guard, std::funct
                                            on_error(err);
                                        }
                                    }),
-                       IMoonrakerAPI::HOMING_TIMEOUT_MS);
+                       IMoonrakerAPI::HOMING_TIMEOUT_MS, /*silent=*/false,
+                       /*on_queued=*/nullptr,
+                       /*caller_surfaces_errors=*/caller_surfaces);
 }
 
 } // namespace helix

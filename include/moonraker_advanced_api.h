@@ -249,15 +249,19 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
     /**
      * @brief Start resonance test for input shaper calibration
      *
-     * Executes TEST_RESONANCES command for the specified axis.
+     * Executes SHAPER_CALIBRATE for the specified axis.
      * Requires accelerometer configuration in printer.cfg.
      *
+     * The sweep range is read from `configfile.settings.resonance_tester`
+     * before the command is sent, so progress tracks the frequencies this
+     * printer will actually test rather than an assumed range.
+     *
      * @param axis Axis to test ('X' or 'Y')
-     * @param on_progress Called with progress percentage (0-100)
+     * @param on_progress Called with progress percentage (0-100) and phase
      * @param on_complete Called with test results
      * @param on_error Called on failure
      */
-    void start_resonance_test(char axis, helix::AdvancedProgressCallback on_progress,
+    void start_resonance_test(char axis, helix::ShaperProgressCallback on_progress,
                               helix::InputShaperCallback on_complete,
                               ErrorCallback on_error) override;
 
@@ -425,6 +429,8 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
      * @param params Parameter map (e.g., {"TEMP": "210"})
      * @param on_success Called when macro execution starts
      * @param on_error Called on failure
+     * @param suppress_auto_toast Maps to helix::rpc_error_policy::CallerIntent::silent
+     *        — opts out of the tracker's generic fallback toast, nothing more.
      */
     void execute_macro(const std::string& name, const std::map<std::string, std::string>& params,
                        SuccessCallback on_success, ErrorCallback on_error, uint32_t timeout_ms = 0,
@@ -504,9 +510,15 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
      * @param freq_hz Strobe frequency in Hz, 0 to turn off
      * @param on_success Called on success
      * @param on_error Called on failure
+     * @param caller_surfaces_errors Whether @p on_error actually shows the user
+     *        something. Forwarded to execute_gcode() — see its contract and
+     *        include/rpc_error_policy.h. Pass false when the callback only logs.
+     *        Default must stay in sync with IAdvancedAPI's declaration: default
+     *        arguments on virtuals resolve from the static type.
      */
     void set_strobe_frequency(const std::string& pin_name, float freq_hz,
-                              SuccessCallback on_success, ErrorCallback on_error) override;
+                              SuccessCallback on_success, ErrorCallback on_error,
+                              bool caller_surfaces_errors = true) override;
 
     /**
      * @brief Download raw accelerometer CSV from Klipper data store

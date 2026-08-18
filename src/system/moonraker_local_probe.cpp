@@ -3,13 +3,19 @@
 
 #include "system/moonraker_local_probe.h"
 
+#include "moonraker_config_manager.h"
+#include "spdlog/spdlog.h"
+
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -341,6 +347,239 @@ std::vector<ProcMatch> find_moonraker_processes() {
     }
 
     return out;
+}
+
+LocalIncludePlan plan_local_include(const std::vector<ProcMatch>& procs,
+                                    const std::string& config_root_abs) {
+    LocalIncludePlan plan;
+
+    std::string root = config_root_abs;
+    while (root.size() > 1 && root.back() == '/')
+        root.pop_back();
+    if (root.empty() || root.front() != '/') {
+        // Without a writable root there is nowhere to create the file the include
+        // would point at — and an include naming a file that does not exist stops
+        // Moonraker from starting at all. A relative root is no better: it would
+        // resolve against HelixScreen's cwd, not Moonraker's.
+        plan.error = "the file manager did not report a writable, absolute config root";
+        return plan;
+    }
+
+    // Only moonraker's own argv says where moonraker's config is. klippy sits in
+    // the same process list and carries a printer.cfg that would look plausible.
+    std::string config;
+    for (const auto& proc : procs) {
+        if (proc.cmdline.find("moonraker") == std::string::npos ||
+            proc.cmdline.find("klippy") != std::string::npos)
+            continue;
+        const auto h = parse_log_hints(proc.cmdline);
+        if (!h.config_file.empty()) {
+            config = h.config_file; // -c is authoritative
+            break;
+        }
+        if (!h.data_path.empty() && config.empty())
+            config = h.data_path + "/config/moonraker.conf";
+    }
+
+    if (config.empty()) {
+        plan.error = "no local Moonraker process names its config file (-c) or data path (-d)";
+        return plan;
+    }
+    if (config.front() != '/') {
+        plan.error = "Moonraker's config path '" + config +
+                     "' is relative, so it names a different file from here";
+        return plan;
+    }
+
+    // A config under the writable root is not this problem. The file API should
+    // have reached it, and writing it locally instead would hide whatever did go
+    // wrong rather than fix it.
+    //
+    // Compared after resolving symlinks, because the two are routinely the same
+    // directory named two ways: on the Flashforge AD5M /root/printer_data/config is
+    // a symlink to /opt/config, so a literal prefix test calls the printer a
+    // local-write case when the file API addresses its config perfectly well.
+    // weakly_canonical() is deliberate — it normalises paths that do not exist
+    // (every unit-test fixture here, and a -d path Moonraker has yet to create)
+    // instead of failing, and falls back to the literal strings if it does fail.
+    auto resolve = [](const std::string& p) {
+        std::error_code ec;
+        const auto canonical = fs::weakly_canonical(fs::path(p), ec);
+        if (ec)
+            return p;
+        std::string s = canonical.string();
+        while (s.size() > 1 && s.back() == '/')
+            s.pop_back();
+        return s;
+    };
+    const std::string real_root = resolve(root);
+    const std::string real_config = resolve(config);
+    const std::string real_prefix = (real_root == "/") ? real_root : real_root + "/";
+    if (real_config == real_root || real_config.compare(0, real_prefix.size(), real_prefix) == 0) {
+        plan.error = "Moonraker's config '" + config + "' resolves to '" + real_config +
+                     "', already inside the writable config root, so a local write "
+                     "would not explain why the file API could not reach it";
+        return plan;
+    }
+
+    const std::string prefix = (root == "/") ? root : root + "/";
+
+    plan.vendor_config_abs = config;
+    plan.helix_conf_upload = "helixscreen.conf";
+    plan.helix_conf_abs = prefix + plan.helix_conf_upload;
+    // Absolute: Moonraker resolves a relative include against the including file's
+    // own directory, which here is the vendor directory, not the config root.
+    plan.include_line = "[include " + plan.helix_conf_abs + "]";
+    plan.viable = true;
+    return plan;
+}
+
+bool append_include_to_local_config(const std::string& config_abs,
+                                    const std::string& include_target, std::string& error) {
+    error.clear();
+
+    if (include_target.empty()) {
+        error = "refusing to append an include with no target";
+        return false;
+    }
+    if (config_abs.empty()) {
+        error = "no config path to append to";
+        return false;
+    }
+    const std::string line = "[include " + include_target + "]";
+
+    // Rename replaces whatever sits at the path, symlink included — so a config
+    // reached through one would be silently converted into a regular file and
+    // whatever else pointed at the real target left behind. Resolve first and edit
+    // the file itself; the caller's path stays in the messages.
+    std::string target = config_abs;
+    {
+        std::error_code link_ec;
+        if (fs::is_symlink(fs::path(config_abs), link_ec) && !link_ec) {
+            std::error_code real_ec;
+            const auto real = fs::canonical(fs::path(config_abs), real_ec);
+            if (real_ec) {
+                error = "cannot resolve the symlink " + config_abs;
+                return false;
+            }
+            target = real.string();
+            spdlog::info("[MoonrakerLocalProbe] {} is a symlink; editing {}", config_abs, target);
+        }
+    }
+
+    std::error_code perm_ec;
+    const fs::perms original_mode = fs::status(target, perm_ec).permissions();
+
+    std::string content;
+    {
+        std::ifstream in(target, std::ios::binary);
+        if (!in.is_open()) {
+            // Deliberately not created: replacing a config we could not read with a
+            // fresh one that defines no [server] is worse than doing nothing.
+            error = "cannot read " + config_abs;
+            return false;
+        }
+        content.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+
+    // Same "is it already there" test the file-API path uses, so the two can never
+    // disagree about whether a write is needed.
+    if (MoonrakerConfigManager::has_include_line(content, include_target))
+        return true; // already there — nothing to do, and nothing to risk
+
+    // Appended, not inserted before the first section the way add_include_line()
+    // does. This file belongs to the vendor firmware: leaving every existing byte
+    // at its original offset is the most conservative edit available, and nothing
+    // here needs to precede the sections it sits beside.
+    if (!content.empty() && content.back() != '\n')
+        content += '\n';
+    content += line;
+    content += '\n';
+
+    // Land the replacement by rename so an interrupted write costs the temp file
+    // rather than Moonraker's config. Same directory, or rename() would cross a
+    // filesystem boundary and fail.
+    //
+    // The rename alone is not enough. It orders the DIRECTORY entry, not the temp
+    // file's DATA: with delayed allocation a power cut between the two leaves a
+    // zero-length moonraker.conf, and Moonraker answers a config that defines no
+    // [server] by refusing to start — taking the printer's whole web stack with it.
+    // Losing mains power mid-write is the ordinary failure on a 3D printer, so the
+    // file is fsync'd before the rename and the directory after it.
+    const std::string tmp_path = target + ".helix-tmp";
+    {
+        const int fd = ::open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0) {
+            error = "cannot write " + tmp_path + " (" + std::strerror(errno) + ")";
+            return false;
+        }
+        auto fail = [&](const std::string& what) {
+            ::close(fd);
+            std::error_code rm_ec;
+            fs::remove(tmp_path, rm_ec);
+            error = what + " " + tmp_path + " (" + std::strerror(errno) + ")";
+            return false;
+        };
+        size_t written = 0;
+        while (written < content.size()) {
+            const ssize_t n = ::write(fd, content.data() + written, content.size() - written);
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;
+                return fail("failed writing");
+            }
+            written += static_cast<size_t>(n);
+        }
+        if (::fsync(fd) != 0)
+            return fail("failed to flush");
+        if (::close(fd) != 0) {
+            // Deferred write errors surface here on some filesystems, so a failing
+            // close is a failed write, not a cleanup detail.
+            std::error_code rm_ec;
+            fs::remove(tmp_path, rm_ec);
+            error = "failed to close " + tmp_path + " (" + std::strerror(errno) + ")";
+            return false;
+        }
+    }
+
+    // The replacement arrives by rename and would otherwise carry the mode above,
+    // not the vendor file's. Moonraker's config can hold an API key, so widening it
+    // silently is a disclosure and narrowing it locks out whatever else on the
+    // firmware reads the file.
+    if (!perm_ec) {
+        std::error_code mode_ec;
+        fs::permissions(tmp_path, original_mode, fs::perm_options::replace, mode_ec);
+        if (mode_ec)
+            spdlog::warn("[MoonrakerLocalProbe] Could not copy permissions onto {}: {}", tmp_path,
+                         mode_ec.message());
+    }
+
+    std::error_code rename_ec;
+    fs::rename(tmp_path, target, rename_ec);
+    if (rename_ec) {
+        // A separate error_code: reusing rename_ec for the cleanup would discard the
+        // reason the rename failed before anything could report it.
+        std::error_code rm_ec;
+        fs::remove(tmp_path, rm_ec);
+        error = "failed to replace " + config_abs + " (" + rename_ec.message() + ")";
+        return false;
+    }
+
+    // Persist the directory entry itself. Without this the rename can still be lost
+    // to a power cut, leaving the original config intact but the include missing —
+    // survivable, unlike the truncation above, but it makes setup a silent no-op.
+    const size_t slash = target.rfind('/');
+    const std::string dir = slash == std::string::npos ? std::string(".") : target.substr(0, slash);
+    const int dir_fd = ::open((dir.empty() ? "/" : dir).c_str(), O_RDONLY | O_DIRECTORY);
+    if (dir_fd >= 0) {
+        if (::fsync(dir_fd) != 0)
+            spdlog::warn("[MoonrakerLocalProbe] Could not fsync {}: {}", dir, std::strerror(errno));
+        ::close(dir_fd);
+    } else {
+        spdlog::warn("[MoonrakerLocalProbe] Could not open {} to fsync: {}", dir,
+                     std::strerror(errno));
+    }
+    return true;
 }
 
 } // namespace helix::diag

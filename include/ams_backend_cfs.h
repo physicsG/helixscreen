@@ -24,7 +24,9 @@ namespace helix::printer {
 /// favor of FilamentCatalog::load_codes("cfs") — see AmsBackendCfs::parse_box_status.
 class CfsMaterialDb {
   public:
-    /// Strip CFS material_type code prefix: "101001" -> "01001", "-1" -> ""
+    /// Strip the firmware material_type brand-prefix digit (6-char code =
+    /// prefix + 5-char catalog id): "101001" -> "01001" (K2, Creality prefix),
+    /// "000003" -> "00003" (K1, Generic prefix), sentinels -> ""
     static std::string strip_code(const std::string& code);
 
     /// Parse CFS color: "0RRGGBB" -> 0xRRGGBB, sentinels -> 0x808080
@@ -203,12 +205,14 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
     // stock CFS dialects have no equivalent command.
     void clear_box_slot_profile(int slot_index);
 
-    // Bypass (not supported)
+    // Bypass / external spool. Fork firmware owns the flow (`T<external>` to
+    // feed, BOX_UNLOAD to eject — box.py registers T for the external slot
+    // alongside the bays); stock K1/K2 firmware has no command for the holder,
+    // so enabling is a declaration backed by toolhead-sensor confirmation and
+    // the state is derived from the sensor + active-lane pair.
     AmsError enable_bypass() override;
     AmsError disable_bypass() override;
-    [[nodiscard]] bool is_bypass_active() const override {
-        return false;
-    }
+    [[nodiscard]] bool is_bypass_active() const override;
 
     // Capabilities
 
@@ -310,7 +314,52 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
     static std::string swap_gcode(int global_slot_index,
                                   CfsMacroVariant variant = CfsMacroVariant::K2);
     static std::string reset_gcode();
-    static std::string recover_gcode();
+
+    /// Resume the box after an error. Dialect-dependent: K1's box extension
+    /// registers no `cmd_error_resume_process`, so `BOX_ERROR_RESUME_PROCESS`
+    /// is an unknown command there. See the implementation for the evidence.
+    static std::string recover_gcode(CfsMacroVariant variant = CfsMacroVariant::K2);
+
+    /// Result of checking a finished operation against what it was supposed to
+    /// achieve. See `verify_phase_outcome()`.
+    enum class PhaseVerdict {
+        Ok,                    ///< End state matches the operation's intent
+        Unverifiable,          ///< No toolhead filament-sensor reading has ever arrived
+        LoadDidNotReachNozzle, ///< Load/swap finished with no filament at the nozzle
+        UnloadLeftFilament,    ///< Unload finished with filament still at the nozzle
+    };
+
+    /// Decide whether a completed CFS operation actually did what it was asked.
+    ///
+    /// The `BOX_*` primitives are workflow internals, not an API with clean
+    /// success semantics: on failure they *record and queue* an error rather
+    /// than raising at the failing command, so the gcode script drains
+    /// normally and every RPC reports success while nothing moved. Gcode
+    /// acceptance therefore proves only that Klipper parsed our text. The
+    /// toolhead filament switch is the one independent physical witness, and
+    /// this is the rule that reads it. See
+    /// docs/devel/CREALITY_CFS_INTERNALS.md § "Failures are deferred".
+    ///
+    /// Pure: no locking, no member access, so the policy is testable on its
+    /// own. `op` is the latched intent (`PhaseTracker::intent`), never
+    /// `system_info_.action`, which by completion holds a synthesized
+    /// sub-phase instead.
+    ///
+    /// Deliberately conservative — it reports a failure only on unambiguous
+    /// evidence. Without a sensor reading it answers `Unverifiable`, because a
+    /// false "load failed" modal on a printer that loaded fine is worse than
+    /// staying quiet.
+    [[nodiscard]] static PhaseVerdict verify_phase_outcome(AmsAction op, bool sensor_ever_read,
+                                                           bool filament_at_end);
+
+    /// Human-facing sentence for a non-Ok verdict, or empty for `Ok` /
+    /// `Unverifiable`. Separate from the rule so the wording can move without
+    /// touching the policy or its tests.
+    [[nodiscard]] static std::string phase_verdict_message(PhaseVerdict verdict);
+
+    /// Surface a verification failure to `AmsErrorBridge`, which polls this on
+    /// the rising edge into `AmsAction::ERROR`.
+    [[nodiscard]] std::optional<helix::ErrorEvent> current_error() const override;
 
     /// Recognize the CFS runout handler's give-up messages and turn them into a
     /// CRITICAL runout fault with recovery buttons.
@@ -327,6 +376,15 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
     [[nodiscard]] std::optional<helix::ErrorEvent>
     classify_error(const std::string& raw_line, const helix::ClassifyContext& ctx) const override;
 
+    /// The #1199 pair read together for the pre-print unaccounted gate:
+    /// toolhead switch detected while no bay letter (T{n}.filament) names the
+    /// seated lane. nullopt until the switch has ever published a reading.
+    /// current_slot < 0 deliberately includes the bypass sentinel (-2):
+    /// bypass suppression is centralized in the gate layer's
+    /// any_bypass_active early-out (gate_unaccounted_toolhead_filament,
+    /// print_start_checks.cpp) — do not narrow to == -1.
+    [[nodiscard]] std::optional<bool> toolhead_filament_unaccounted() const override;
+
   protected:
     /// Recovery buttons for a CFS runout. **Caller must hold mutex_** (base
     /// contract; this override takes no lock of its own and mutex_ is not
@@ -339,28 +397,44 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
     }
     void on_started() override;
 
-    /// Push the user's chosen color back to firmware via the undocumented
-    /// `BOX_MODIFY_TN_DATA` gcode (registered by box_wrapper.cpython-39.so,
+    /// Push the user's chosen slot identity back to firmware via the
+    /// `BOX_MODIFY_TN_DATA` gcode (registered by the box_wrapper C extension,
     /// not in `gcode/help`). Format reverse-engineered from K2's master-server
-    /// binary: `BOX_MODIFY_TN_DATA ADDR=<1..4> NUM=<A|B|C|D> PART=color_value
-    /// DATA=0RRGGBB`. Writes persist to `/mnt/UDISK/creality/userdata/box/tn_data.json`.
+    /// binary and confirmed against the K1 module: `BOX_MODIFY_TN_DATA
+    /// ADDR=<1..4> NUM=<A|B|C|D> PART=<field> DATA=<value>`. Writes persist to
+    /// the box userdata (`creality/userdata/box/tn_data.json`), whose shape is
+    /// documented by the #968 reporter dumps.
     ///
-    /// Color-only for now — material_type uses CFS-internal codes (e.g. "101001"
-    /// for PLA) that we lack a complete reverse-map for; round-tripping the
-    /// material risks pushing a wrong/empty code and could confuse the K2's
-    /// stock LCD or the LOAD_MATERIAL macros. Color is the primary user-edit
-    /// anyway and round-trips cleanly because the format is just RGB hex.
+    /// Two fields:
+    ///  - `color_value`, always: `DATA=0RRGGBB` (RGB hex behind a constant 0
+    ///    nibble, matching the firmware's own format).
+    ///  - `material_type`, only when a code for the user's material is known:
+    ///    `DATA=<6-char code>` (e.g. "000003"). Codes are NEVER synthesized —
+    ///    only full codes this printer's firmware itself has reported in a box
+    ///    status are eligible (see observed_material_*_), because a malformed
+    ///    or unknown code can poison the wrapper's material-DB lookups (flush
+    ///    temps, same-material matching) and the stock LCD's slot display.
+    ///    Lookup order: catalog product id, then brand|material, then material
+    ///    family. No code found → color-only write (previous behavior).
+    ///
+    /// The two PART writes go out as ONE gcode script. Firmware applies them
+    /// sequentially and a status poll can land between the echoes, so the
+    /// self-wipe expectation registered with rfid_tracker_ is the SET of
+    /// fingerprints the slot may transiently or finally report (intermediate
+    /// composite + final pair) via SlotFingerprintTracker::expect_any_of.
     ///
     /// **CRITICAL:** sending invalid args (ADDR=0, malformed payload) triggers
     /// a `TypeError` deep in box_wrapper which Klipper escalates to
     /// `invoke_shutdown` — the entire printer goes offline and needs a full
-    /// `RESTART`. This method validates `global_index` in [0, 16) and skips
-    /// when `color_rgb == 0` BEFORE formatting the gcode. Non-fatal on dispatch
-    /// failure (the override is in lane_data either way).
+    /// `RESTART`. This method validates `global_index` in [0, 16) BEFORE
+    /// formatting the gcode. Non-fatal on dispatch failure (the override is in
+    /// lane_data either way).
     ///
     /// Marked virtual + protected so test subclasses can override and capture
     /// the gcode without a live Moonraker connection.
-    virtual void push_slot_color_to_firmware(int global_index, uint32_t color_rgb);
+    virtual void push_slot_identity_to_firmware(int global_index, const std::string& material,
+                                                const std::string& brand,
+                                                const std::string& catalog_id, uint32_t color_rgb);
 
   private:
     friend class ::CfsTestAccess;
@@ -391,9 +465,32 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
     /// kept off stock command paths.
     CfsSchema schema_ = CfsSchema::Stock;
 
+    /// slots[] index of the `external: true` entry in the last Flat payload,
+    /// -1 when none was seen. The Fork firmware registers `T<external_slot>`
+    /// itself (external_slot = max_physical_slot + 1, so it moves with the
+    /// configured box_count) — this records what the payload actually said
+    /// rather than recomputing the arithmetic.
+    int external_slot_index_ = -1;
+
+    /// Stock dialect only: the user has declared bypass intent (sidebar toggle
+    /// ON after the chained unload). Paired with BOX_ENABLE_CFS_PRINT ENABLE=0
+    /// on enable (the box must stand down or it can drive bay filament into a
+    /// tube the external spool occupies) and ENABLE=1 on disable. The engaged
+    /// display state is confirmed by the toolhead sensor. The Fork dialect
+    /// never sets it — its firmware owns the external slot natively.
+    bool bypass_declared_ = false;
+
     /// SUCCESS for stock schemas and the identified Fork dialect; returns
     /// not_supported for an unidentified Flat implementation.
     [[nodiscard]] AmsError reject_if_flat_schema(const char* operation) const;
+
+    /// Stock-dialect bypass derivation: filament at the toolhead with no
+    /// active CFS lane means the user hand-fed the external holder — map
+    /// current_slot to the -2 sentinel, and back to -1 when the filament
+    /// leaves the sensor. Caller must hold mutex_. Flat/Fork is excluded
+    /// (that firmware reports the external slot itself) as is any non-IDLE
+    /// action (a mid-load sensor rise is the bay feed, not a bypass engage).
+    void derive_stock_bypass_locked();
 
     // Callback lifetime management
     helix::AsyncLifetimeGuard lifetime_;
@@ -473,11 +570,13 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
     /// override-exclusive fields (spool_name / spoolman_id /
     /// spoolman_vendor_id / remaining_weight_g) are reset.
     ///
-    /// One fingerprint component — color_value — is also WRITTEN by
-    /// push_slot_color_to_firmware, so firmware eventually echoes our own edit
-    /// back as a fingerprint change. That echo is not a swap. push_ therefore
-    /// registers the expected post-write fingerprint with rfid_tracker_, which
-    /// classifies the echo as OwnWriteEcho and leaves the override intact.
+    /// One fingerprint component pair — color_value, and material_type when a
+    /// firmware-observed code for the user's pick exists — is also WRITTEN by
+    /// push_slot_identity_to_firmware, so firmware eventually echoes our own
+    /// edit back as a fingerprint change. That echo is not a swap. push_
+    /// therefore registers the expected post-write fingerprints with
+    /// rfid_tracker_, which classifies the echo as OwnWriteEcho and leaves the
+    /// override intact.
     ///
     /// Returns true iff the override was cleared, so the caller can skip the
     /// lane_data mirror for this parse (a DELETE and a POST against the same
@@ -521,9 +620,21 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
 
     // Per-slot last-observed RFID fingerprint (material_type + "|" +
     // color_value, using the raw pre-strip_code strings), plus the pending
-    // expected fingerprint for a color push we issued. Shared with the other
-    // RFID-fingerprint backend (Snapmaker). All access under mutex_.
+    // expected fingerprints for an identity push we issued. Shared with the
+    // other RFID-fingerprint backend (Snapmaker). All access under mutex_.
     helix::ams::SlotFingerprintTracker rfid_tracker_;
+
+    // Firmware-observed material_type code vocabulary, harvested from box
+    // status by handle_status_update and consulted by
+    // push_slot_identity_to_firmware. Keys are 5-char stripped catalog ids /
+    // "brand|type" / "type"; values are the FULL 6-char codes exactly as the
+    // firmware reported them (brand prefix included) — those full forms are
+    // the only values we ever write back. Insert-if-absent: the first code
+    // observed for a key wins, so a value stays stable across frames. All
+    // access under mutex_.
+    std::unordered_map<std::string, std::string> observed_material_id_codes_;
+    std::unordered_map<std::string, std::string> observed_material_codes_;
+    std::unordered_map<std::string, std::string> observed_material_type_codes_;
 
     // Sub-phase synthesis: CFS sets system_info_.action=LOADING/UNLOADING once
     // at gcode dispatch and leaves it there through cut/retract/feed/purge.
@@ -533,7 +644,13 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
     // and overwrite system_info_.action so the UI's existing step mapping
     // shows the correct phase. All access under mutex_.
     struct PhaseTracker {
-        bool active = false;                // true between dispatch and on_complete/on_error
+        bool active = false; // true between dispatch and on_complete/on_error
+        // The operation the user actually asked for, latched at dispatch.
+        // system_info_.action cannot stand in for this at completion time:
+        // apply_synthesized_action_locked() overwrites it with the synthesized
+        // sub-phase (CUTTING / PURGING / ...) as physical signals arrive, so by
+        // on_complete it no longer says LOADING or UNLOADING.
+        AmsAction intent = AmsAction::IDLE;
         bool started_with_filament = false; // filament_detected at op start
         bool seen_filament_drop = false;    // true→false transition (cut completed)
         bool seen_filament_rise = false;  // false→true transition after a drop (new filament fed)
@@ -546,6 +663,12 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
     int last_extruder_target_deci_ = 0;
     int last_extruder_temp_deci_ = 0;
     bool last_filament_detected_ = false;
+    // False until the toolhead filament switch has published a real boolean.
+    // Klipper reports `filament_detected` as null until the sensor takes its
+    // first reading, and a printer without the sensor never publishes one at
+    // all — in both cases last_filament_detected_ is a default, not an
+    // observation, and phase verification must not draw conclusions from it.
+    bool filament_sensor_seen_ = false;
 
     // Track box.filament_useup transitions. Read-only firmware flag (no BOX_*
     // setter). Decoded from a live runout->reload cycle on the K2 Plus
@@ -561,6 +684,12 @@ class AmsBackendCfs : public AmsSubscriptionBackend {
 
     // Reset phase tracker on op completion. Caller must hold mutex_.
     void end_phase_tracking();
+
+    // Body of dispatch_action_script's success callback: verify the operation
+    // achieved what it was asked to, then settle to IDLE (or ERROR when it did
+    // not). Takes mutex_ itself. Named rather than inline so tests drive the
+    // real completion path instead of a copy of it.
+    void finish_action();
 
     // Drive phase machine on signal changes. Caller must hold mutex_.
     void on_filament_transition_locked(bool new_detected);

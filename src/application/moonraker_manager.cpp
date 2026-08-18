@@ -283,7 +283,19 @@ void MoonrakerManager::process_notifications() {
                     method_str.get<std::string>() == "notify_status_update") {
                     auto& params = notification["params"];
                     if (params.is_array() && !params.empty()) {
-                        get_printer_state().update_from_status(params[0]);
+                        // params[1] is Klipper's eventtime, and the marker says
+                        // whether this is a replay of an earlier snapshot rather
+                        // than current traffic. PrinterState needs both to keep a
+                        // stale klippy state from overwriting a live one; this is
+                        // the production status path (PrinterState::
+                        // update_from_notification is not wired up here).
+                        const double eventtime = (params.size() > 1 && params[1].is_number())
+                                                     ? params[1].get<double>()
+                                                     : 0.0;
+                        const bool from_cached_snapshot =
+                            notification.value(helix::CACHED_SNAPSHOT_MARKER, false);
+                        get_printer_state().update_from_status(params[0], eventtime,
+                                                               from_cached_snapshot);
                         helix::ToolState::instance().update_from_status(params[0]);
                     }
                 }

@@ -1155,8 +1155,13 @@ void PrintSelectDetailView::recompute_preflight() {
     // result); for U1/ACE the card is hidden and mappings_ is empty, so
     // effective_mappings() resolves the toggle-aware (auto color+type) match —
     // the SAME mapping the color swatches and live render use.
+    // Bypass short-circuits all of the above: the filament comes from the external
+    // spool, not from any slot, so no mapping can satisfy a tool and every check
+    // would report EmptySlot. Backend-agnostic — AFC and Happy Hare both report it.
+    const bool bypass_active = AmsState::instance().any_bypass_active();
+
     auto mapping = effective_mappings();
-    preflight_result_ = helix::PreflightValidator::validate(tools, slots, mapping);
+    preflight_result_ = helix::PreflightValidator::validate(tools, slots, mapping, bypass_active);
 
     bool any_mismatch = false;
     for (const auto& check : preflight_result_.checks) {
@@ -1168,9 +1173,10 @@ void PrintSelectDetailView::recompute_preflight() {
     lv_subject_set_int(&filament_mismatch_, any_mismatch ? 1 : 0);
     lv_subject_set_int(&empty_tools_warning_, preflight_result_.has_block() ? 1 : 0);
 
-    spdlog::debug("[DetailView] Preflight: {} tools, {} slots, {} checks, mismatch={}, block={}",
-                  tools.size(), slots.size(), preflight_result_.checks.size(), any_mismatch,
-                  preflight_result_.has_block());
+    spdlog::debug(
+        "[DetailView] Preflight: {} tools, {} slots, {} checks, mismatch={}, block={}, bypass={}",
+        tools.size(), slots.size(), preflight_result_.checks.size(), any_mismatch,
+        preflight_result_.has_block(), bypass_active);
 }
 
 std::set<int> PrintSelectDetailView::tools_used_effective() const {

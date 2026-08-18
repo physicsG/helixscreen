@@ -103,6 +103,7 @@ void PrintStartCollector::start() {
         std::lock_guard<std::mutex> lock(state_mutex_);
         // Record start time for timeout fallback
         printing_state_start_ = std::chrono::steady_clock::now();
+        last_activity_time_ = printing_state_start_;
         detected_phases_.clear();
         current_phase_ = PrintStartPhase::INITIALIZING;
         print_start_detected_ = false;
@@ -111,12 +112,11 @@ void PrintStartCollector::start() {
         // Reset mesh probe tracking
         mesh_probe_current_ = 0;
         mesh_probe_total_ = 0;
-        mesh_probe_fallback_count_ = 0;
+        mesh_points_.reset();
         mesh_first_probe_time_ = {};
         mesh_last_probe_time_ = {};
         mesh_seconds_per_probe_ = 0.0f;
-        mesh_has_last_probe_pos_ = false;
-        pre_mesh_probe_count_ = 0;
+        pre_mesh_points_.reset();
         pre_mesh_last_probe_time_ = {};
         current_mesh_message_.clear();
         temps_ready_time_ = {};
@@ -308,15 +308,15 @@ void PrintStartCollector::reset() {
         print_start_detected_ = false;
         max_sequential_progress_ = 0;
         printing_state_start_ = std::chrono::steady_clock::now();
+        last_activity_time_ = printing_state_start_;
         phase_enter_times_.clear();
         mesh_probe_current_ = 0;
         mesh_probe_total_ = 0;
-        mesh_probe_fallback_count_ = 0;
+        mesh_points_.reset();
         mesh_first_probe_time_ = {};
         mesh_last_probe_time_ = {};
         mesh_seconds_per_probe_ = 0.0f;
-        mesh_has_last_probe_pos_ = false;
-        pre_mesh_probe_count_ = 0;
+        pre_mesh_points_.reset();
         pre_mesh_last_probe_time_ = {};
         current_mesh_message_.clear();
         temps_ready_time_ = {};
@@ -584,7 +584,7 @@ void PrintStartCollector::check_fallback_completion() {
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (current_phase_ == PrintStartPhase::BED_MESH &&
-            (mesh_probe_current_ > 0 || mesh_probe_fallback_count_ > 0)) {
+            (mesh_probe_current_ > 0 || mesh_points_.points() > 0)) {
             auto since_last = std::chrono::steady_clock::now() - mesh_last_probe_time_;
             if (since_last < MESH_PROBE_GAP_RESET) {
                 return; // Active probing — don't timeout
@@ -605,8 +605,24 @@ void PrintStartCollector::check_fallback_completion() {
     // target (ext_target=0) means we can't confirm temps are ready
     bool temps_near = nozzle_near && bed_near;
 
-    auto elapsed = std::chrono::steady_clock::now() - start_time;
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = now - start_time;
     auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+
+    // A pre-print that is still narrating itself is not stuck, however long it
+    // runs. Every timeout below therefore requires the printer to have gone
+    // quiet as well as the clock to have run out; only ABSOLUTE_MAX_TIMEOUT
+    // fires unconditionally. Keying purely on elapsed time made the collector
+    // give up mid-sequence on any printer that meshes after heating, and
+    // because a timeout completion skips the prediction save, the too-small
+    // estimate that set the deadline could never grow.
+    std::chrono::steady_clock::duration quiet_for;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        quiet_for = now - last_activity_time_;
+    }
+    const bool quiet = quiet_for >= PREPRINT_QUIET_TIMEOUT;
+    const auto quiet_sec = std::chrono::duration_cast<std::chrono::seconds>(quiet_for).count();
 
     // Determine effective timeout: use prediction data when available,
     // FALLBACK_TIMEOUT only when we have no information at all
@@ -615,10 +631,10 @@ void PrintStartCollector::check_fallback_completion() {
         auto adaptive_timeout =
             std::chrono::seconds(static_cast<int>(predicted_total * ADAPTIVE_TIMEOUT_MARGIN));
 
-        if (elapsed > adaptive_timeout && temps_near) {
+        if (elapsed > adaptive_timeout && temps_near && quiet) {
             spdlog::info("[PrintStartCollector] Fallback: adaptive timeout ({} sec, "
-                         "predicted={:.0f}s)",
-                         elapsed_sec, predicted_total);
+                         "predicted={:.0f}s, quiet={}s)",
+                         elapsed_sec, predicted_total, quiet_sec);
             fallback_completion_ = true;
             update_phase(PrintStartPhase::COMPLETE, lv_tr("Starting Print..."));
             return;
@@ -628,7 +644,7 @@ void PrintStartCollector::check_fallback_completion() {
         auto absolute_timeout =
             std::chrono::seconds(static_cast<int>(predicted_total * ABSOLUTE_TIMEOUT_MARGIN));
         absolute_timeout = std::max(absolute_timeout, ABSOLUTE_MAX_TIMEOUT);
-        if (elapsed > absolute_timeout) {
+        if (elapsed > absolute_timeout && quiet) {
             spdlog::warn("[PrintStartCollector] Fallback: absolute timeout ({} sec, "
                          "predicted={:.0f}s)",
                          elapsed_sec, predicted_total);
@@ -638,7 +654,7 @@ void PrintStartCollector::check_fallback_completion() {
         }
     } else {
         // No prediction data — FALLBACK_TIMEOUT is the last resort
-        if (elapsed > FALLBACK_TIMEOUT && temps_near) {
+        if (elapsed > FALLBACK_TIMEOUT && temps_near && quiet) {
             spdlog::info("[PrintStartCollector] Fallback: timeout ({} sec, no predictions)",
                          elapsed_sec);
             fallback_completion_ = true;
@@ -749,6 +765,14 @@ void PrintStartCollector::on_gcode_response(const json& msg) {
         spdlog::info("[PrintStartCollector] Adapted probe count from gcode: {}", *adapt_total);
     }
 
+    // Any probe line proves the pre-print is still working, whether or not we
+    // have entered BED_MESH yet. Mesh probing is the longest stretch that
+    // matches no profile pattern, so without this the quiet gate would expire
+    // mid-sweep on exactly the printers that need it most.
+    if (helix::is_probe_result_line(line) || helix::parse_probe_progress(line)) {
+        note_activity();
+    }
+
     // Check for bed mesh probe progress (sub-phase tracking within BED_MESH).
     // Also detects BED_MESH phase entry from probe lines on printers that don't
     // emit a separate BED_MESH_CALIBRATE command line before probing starts.
@@ -776,52 +800,58 @@ void PrintStartCollector::on_gcode_response(const json& msg) {
         // If we see a probe line but aren't in BED_MESH yet, buffer probes
         // before entering the phase. Some printers (e.g. AD5M Klipper mod)
         // emit 1-2 PROBE commands for nozzle wipe before mesh calibration.
-        // Require MESH_PROBE_ENTRY_THRESHOLD consecutive probes to confirm
+        // Require MESH_PROBE_ENTRY_THRESHOLD distinct probe POINTS to confirm
         // this is actual mesh probing, not an isolated operation.
         if (is_probe_line) {
             bool should_enter = false;
+            helix::ProbePointCounter buffered{1};
+            std::chrono::steady_clock::time_point entered_at;
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 auto now = std::chrono::steady_clock::now();
 
                 // Gap reset for pre-mesh buffer
-                if (pre_mesh_probe_count_ > 0 &&
+                if (pre_mesh_points_.points() > 0 &&
                     (now - pre_mesh_last_probe_time_) > MESH_PROBE_GAP_RESET) {
                     spdlog::debug("[PrintStartCollector] Pre-mesh probe gap reset "
                                   "({}s since last probe)",
                                   std::chrono::duration_cast<std::chrono::seconds>(
                                       now - pre_mesh_last_probe_time_)
                                       .count());
-                    pre_mesh_probe_count_ = 0;
+                    pre_mesh_points_.reset();
                 }
 
-                pre_mesh_probe_count_++;
+                pre_mesh_points_.feed(line);
                 pre_mesh_last_probe_time_ = now;
 
-                if (pre_mesh_probe_count_ >= MESH_PROBE_ENTRY_THRESHOLD) {
+                if (pre_mesh_points_.points() >= MESH_PROBE_ENTRY_THRESHOLD) {
                     should_enter = true;
-                    // Seed mesh tracking with buffered count so probes aren't lost
-                    mesh_probe_fallback_count_ = pre_mesh_probe_count_;
-                    mesh_probe_current_ = pre_mesh_probe_count_;
-                    mesh_first_probe_time_ = now;
-                    mesh_last_probe_time_ = now;
+                    // update_phase() resets the mesh counters, so the buffered
+                    // points have to be re-applied AFTER it returns or the
+                    // probes that proved this was a mesh are lost.
+                    buffered = pre_mesh_points_;
+                    entered_at = now;
                 } else {
-                    spdlog::debug("[PrintStartCollector] Pre-mesh probe {}/{} (buffering)",
-                                  pre_mesh_probe_count_, MESH_PROBE_ENTRY_THRESHOLD);
+                    spdlog::debug("[PrintStartCollector] Pre-mesh probe point {}/{} (buffering)",
+                                  pre_mesh_points_.points(), MESH_PROBE_ENTRY_THRESHOLD);
                 }
             }
 
             if (should_enter) {
                 update_phase(PrintStartPhase::BED_MESH, lv_tr("Bed Mesh..."));
                 in_mesh = true;
-                // This probe line was already counted in the buffer transfer above,
-                // so skip the per-probe counting below and return.
+                // The buffered probe lines are already counted, so skip the
+                // per-probe counting below and return.
                 char msg_buf[64];
                 int count, total;
                 std::string label;
                 {
                     std::lock_guard<std::mutex> lock(state_mutex_);
-                    count = mesh_probe_fallback_count_;
+                    mesh_points_ = buffered;
+                    mesh_probe_current_ = mesh_points_.points();
+                    mesh_first_probe_time_ = entered_at;
+                    mesh_last_probe_time_ = entered_at;
+                    count = mesh_probe_current_;
                     total = mesh_probe_total_;
                     label = current_mesh_message_.empty()
                                 ? lv_tr("Bed Mesh")
@@ -894,7 +924,6 @@ void PrintStartCollector::on_gcode_response(const json& msg) {
                 // "probe at X,Y is z=Z" fallback — no total from firmware.
                 // Dedupe by (x,y): Klipper's `samples: N` config emits N consecutive
                 // probes at the same position; we count unique points, not samples.
-                auto pos = helix::parse_probe_position(line);
                 int count;
                 int total;
                 int progress;
@@ -906,38 +935,27 @@ void PrintStartCollector::on_gcode_response(const json& msg) {
 
                     // Gap reset: if >30s since last probe, earlier probes were
                     // from a different operation (e.g. nozzle wipe on AD5M)
-                    if (mesh_probe_fallback_count_ > 0 &&
+                    if (mesh_points_.points() > 0 &&
                         (now - mesh_last_probe_time_) > MESH_PROBE_GAP_RESET) {
                         spdlog::info("[PrintStartCollector] Mesh probe gap reset "
                                      "({}s since last probe)",
                                      std::chrono::duration_cast<std::chrono::seconds>(
                                          now - mesh_last_probe_time_)
                                          .count());
-                        mesh_probe_fallback_count_ = 0;
+                        mesh_points_.reset();
                         mesh_probe_current_ = 0;
                         mesh_seconds_per_probe_ = 0.0f;
-                        mesh_has_last_probe_pos_ = false;
                     }
 
-                    // Position-based dedupe. When we can't parse a position, fall back
-                    // to counting each line (preserves prior behavior for malformed input).
-                    constexpr double POS_TOL = 0.05; // mm — samples at same point are exact
-                    if (pos) {
-                        if (!mesh_has_last_probe_pos_ ||
-                            std::abs(pos->x - mesh_last_probe_x_) > POS_TOL ||
-                            std::abs(pos->y - mesh_last_probe_y_) > POS_TOL) {
-                            is_new_point = true;
-                            mesh_last_probe_x_ = pos->x;
-                            mesh_last_probe_y_ = pos->y;
-                            mesh_has_last_probe_pos_ = true;
-                        }
-                    } else {
-                        is_new_point = true;
-                    }
+                    // Position dedupe (and the sample-divisor fallback for lines
+                    // whose coordinates don't parse) lives in ProbePointCounter,
+                    // shared with the bed mesh panel's live probe readout.
+                    const int before = mesh_points_.points();
+                    mesh_points_.feed(line);
+                    is_new_point = (mesh_points_.points() != before);
 
                     if (is_new_point) {
-                        mesh_probe_fallback_count_++;
-                        if (mesh_probe_fallback_count_ == 1) {
+                        if (mesh_points_.points() == 1) {
                             mesh_first_probe_time_ = now;
                         } else {
                             float elapsed =
@@ -947,13 +965,13 @@ void PrintStartCollector::on_gcode_response(const json& msg) {
                                         .count()) /
                                 1000.0f;
                             mesh_seconds_per_probe_ =
-                                elapsed / static_cast<float>(mesh_probe_fallback_count_ - 1);
+                                elapsed / static_cast<float>(mesh_points_.points() - 1);
                         }
                     }
                     mesh_last_probe_time_ = now;
 
-                    mesh_probe_current_ = mesh_probe_fallback_count_;
-                    count = mesh_probe_fallback_count_;
+                    mesh_probe_current_ = mesh_points_.points();
+                    count = mesh_probe_current_;
                     total = mesh_probe_total_;
                     progress = calculate_progress_locked();
                     label = current_mesh_message_.empty()
@@ -980,6 +998,11 @@ void PrintStartCollector::on_gcode_response(const json& msg) {
     check_phase_patterns(line);
 }
 
+void PrintStartCollector::note_activity() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    last_activity_time_ = std::chrono::steady_clock::now();
+}
+
 void PrintStartCollector::check_phase_patterns(const std::string& line) {
     if (!profile_) {
         return;
@@ -988,6 +1011,7 @@ void PrintStartCollector::check_phase_patterns(const std::string& line) {
     PrintStartProfile::MatchResult match;
     if (profile_->try_match_pattern(line, match)) {
         real_signal_seen_.store(true, std::memory_order_relaxed);
+        note_activity();
         // Update when this is a NEW phase, OR when it's a BED_MESH sub-phase
         // *message* change while already in BED_MESH. The latter is what lets a
         // mesh-start signal (Snapmaker U1 "// z offset:") relabel the display
@@ -1166,12 +1190,11 @@ void PrintStartCollector::maybe_reset_for_mesh_subphase_locked(PrintStartPhase n
     current_mesh_message_ = next_message;
     mesh_probe_current_ = 0;
     mesh_probe_total_ = 0;
-    mesh_probe_fallback_count_ = 0;
+    mesh_points_.reset();
     mesh_first_probe_time_ = {};
     mesh_last_probe_time_ = {};
     mesh_seconds_per_probe_ = 0.0f;
-    mesh_has_last_probe_pos_ = false;
-    pre_mesh_probe_count_ = 0;
+    pre_mesh_points_.reset();
     if (message_changed) {
         spdlog::debug("[PrintStartCollector] BED_MESH sub-phase change → '{}' (counters reset)",
                       next_message);
@@ -1195,7 +1218,7 @@ void PrintStartCollector::update_phase(PrintStartPhase phase, const char* messag
         // echo) shouldn't carry into the eventual BED_MESH count.
         if ((phase == PrintStartPhase::QGL || phase == PrintStartPhase::Z_TILT) &&
             current_phase_ != phase) {
-            pre_mesh_probe_count_ = 0;
+            pre_mesh_points_.reset();
         }
         maybe_reset_for_mesh_subphase_locked(phase, message ? message : "");
         current_phase_ = phase;
@@ -1253,7 +1276,7 @@ void PrintStartCollector::update_phase(PrintStartPhase phase, const std::string&
             (phase == PrintStartPhase::BED_MESH && current_phase_ != PrintStartPhase::BED_MESH);
         if ((phase == PrintStartPhase::QGL || phase == PrintStartPhase::Z_TILT) &&
             current_phase_ != phase) {
-            pre_mesh_probe_count_ = 0;
+            pre_mesh_points_.reset();
         }
         maybe_reset_for_mesh_subphase_locked(phase, message);
         current_phase_ = phase;

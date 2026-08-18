@@ -175,7 +175,7 @@ specific behavior lives.
 
 ### Element tree
 
-For `ui_xml/components/foo.xml`:
+For ui_xml/components/foo.xml:
 
 ```xml
 <component>
@@ -338,7 +338,7 @@ committed. Regeneration is driven by mtime like any other target.
 **ESP-IDF (`firmware/helixscreen-esp32`):** the `helixcore` component already globs
 `${REPO_ROOT}/lib/helix-xml/src/xml/*.c` (`components/helixcore/CMakeLists.txt:27`), so
 this adds an `add_custom_command` for the generator plus the generated directory in
-`SRCS`. When codegen is on, `stage_assets.py` drops `ui_xml/` from the frogfs image
+`SRCS`. When codegen is on, `scripts/esp32_stage_assets.py` drops `ui_xml/` from the frogfs image
 entirely.
 
 **Selecting the path:** `LV_USE_XML_RUNTIME_PARSER` in `lv_conf.h`. Off means expat,

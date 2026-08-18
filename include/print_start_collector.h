@@ -226,6 +226,11 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
      */
     void check_phase_patterns(const std::string& line);
 
+    /// Record that the printer said something about its pre-print. Feeds the
+    /// quiet gate on every timeout branch. Takes state_mutex_ itself, so do not
+    /// call it while already holding the lock.
+    void note_activity();
+
     /**
      * @brief Check for HELIX:PHASE:* signals from plugin/macros
      *
@@ -339,6 +344,16 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     int max_sequential_progress_ = 0; // Monotonic progress guard for sequential mode
     std::chrono::steady_clock::time_point printing_state_start_;
 
+    /// When the printer last said anything about its pre-print: a profile
+    /// pattern matched, a probe line arrived, or the phase advanced.
+    ///
+    /// The timeouts key off THIS, not off elapsed-since-start. A pre-print that
+    /// is still narrating itself is not stuck however long it runs, and keying
+    /// off elapsed time made the collector give up mid-sequence on any printer
+    /// that meshes after heating — which then skipped the prediction save and
+    /// froze the estimate that set the deadline in the first place.
+    std::chrono::steady_clock::time_point last_activity_time_;
+
     // Profile for signal/pattern matching (set via set_profile() or loaded by start())
     std::shared_ptr<PrintStartProfile> profile_;
 
@@ -350,8 +365,18 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     // Fallback detection constants
     static constexpr auto FALLBACK_TIMEOUT =
         std::chrono::seconds(300); ///< Last resort when no predictions
+    /// Ungated final backstop. Every other timeout also requires the printer to
+    /// have gone quiet; this one fires regardless, so a firmware that chatters
+    /// forever still leaves Preparing. Must therefore sit above the longest
+    /// legitimate pre-print: the K2 Plus runs ~1140s (heat, ~390s mesh, purge),
+    /// and a cold-start ASA soak pushes that further.
     static constexpr auto ABSOLUTE_MAX_TIMEOUT =
-        std::chrono::seconds(900); ///< Hard ceiling (stuck detection)
+        std::chrono::seconds(1800); ///< Hard ceiling (stuck detection)
+    /// How long the printer must say nothing before a timeout may complete the
+    /// pre-print. Longer than the gap between mesh probe points on a slow bed
+    /// (the K2 spends ~5s per point, ~3s on a manual sweep) with margin for a
+    /// heat-soak step that emits nothing at all.
+    static constexpr auto PREPRINT_QUIET_TIMEOUT = std::chrono::seconds(90);
     static constexpr float ADAPTIVE_TIMEOUT_MARGIN =
         1.5f; ///< Multiply predicted total for adaptive timeout
     static constexpr float ABSOLUTE_TIMEOUT_MARGIN =
@@ -390,18 +415,14 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     // progress and per-probe time extrapolation for ETA.
     int mesh_probe_current_ = 0;
     int mesh_probe_total_ = 0;
-    int mesh_probe_fallback_count_ = 0; ///< Unique probe POINTS (not samples) counted from fallback
     std::chrono::steady_clock::time_point mesh_first_probe_time_;
     std::chrono::steady_clock::time_point mesh_last_probe_time_;
     float mesh_seconds_per_probe_ = 0.0f; ///< Running average from observed probe intervals
 
-    // Dedupe state: Klipper's `samples: N` config emits N consecutive "probe at X,Y"
-    // lines at the same position. We count unique (x,y) positions as "points", which
-    // matches what the user expects (# points that will be probed, not raw sample
-    // count). Reset on gap-detection and in reset().
-    double mesh_last_probe_x_ = 0.0;
-    double mesh_last_probe_y_ = 0.0;
-    bool mesh_has_last_probe_pos_ = false;
+    /// Unique probe POINTS (not sample lines) counted from the "probe at X,Y"
+    /// fallback, for firmware that emits no "Probing point N/M". Reset on
+    /// gap-detection, on mesh sub-phase change, and in reset().
+    helix::ProbePointCounter mesh_points_;
 
     // Sub-phase tracking within BED_MESH. Some firmwares (Snapmaker U1) route
     // multiple distinct probe operations through one phase enum but vary the
@@ -419,11 +440,20 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     static constexpr auto MESH_PROBE_GAP_RESET = std::chrono::seconds(30);
 
     // Pre-mesh probe buffering: don't auto-enter BED_MESH from probe lines
-    // until we've seen enough consecutive probes to distinguish mesh calibration
-    // from isolated PROBE commands (e.g. nozzle wipe on AD5M Klipper mod).
-    int pre_mesh_probe_count_ = 0;
+    // until we've seen enough distinct probe POINTS to distinguish mesh
+    // calibration from isolated PROBE commands (e.g. nozzle wipe on AD5M
+    // Klipper mod). Counting points rather than lines matters because Klipper
+    // emits two lines per touch on firmware that reports z_compensation
+    // separately, which halved the effective threshold.
+    helix::ProbePointCounter pre_mesh_points_;
     std::chrono::steady_clock::time_point pre_mesh_last_probe_time_;
-    static constexpr int MESH_PROBE_ENTRY_THRESHOLD = 3;
+
+    /// Distinct pre-mesh probe points required before auto-entering BED_MESH.
+    /// Must clear the largest non-mesh probe burst any firmware emits: K2 Plus
+    /// BOX_NOZZLE_CLEAN touches 3 points on the wipe strip, Voron 2.4 QGL
+    /// touches 4 corner pads, AD5M nozzle wipe touches 1-2. Every real mesh is
+    /// far larger, so 5 costs nothing on the firmwares that need this path.
+    static constexpr int MESH_PROBE_ENTRY_THRESHOLD = 5;
 
     // Targets used in last compute_predicted_weights() call — used to detect
     // when heater targets change (e.g. macro issues M109 after bed-first heating)

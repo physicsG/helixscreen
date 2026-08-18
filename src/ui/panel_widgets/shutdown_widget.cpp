@@ -11,6 +11,7 @@
 
 #include "config.h"
 #include "host_identity.h"
+#include "platform_info.h"
 #include "i_moonraker_api.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
@@ -369,6 +370,14 @@ bool handle_machine_power_failure(const std::string& err_message, bool is_reboot
 
 void show_shutdown_dialog(IMoonrakerAPI* api, ShutdownModal& modal, AsyncLifetimeGuard& lifetime,
                           lv_obj_t* parent_screen) {
+    // Backstop behind the UI gating (home-grid widget + Advanced POWER rows):
+    // platforms without host power controls (Android) must never reach the
+    // machine.reboot/shutdown RPCs, whatever entry point wires this up next.
+    if (!helix::platform_host_power_supported()) {
+        spdlog::info("[ShutdownDialog] Platform without host power support — ignoring request");
+        return;
+    }
+
     if (!api) {
         spdlog::warn("[ShutdownDialog] No API available");
         return;

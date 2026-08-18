@@ -180,9 +180,11 @@ class MockInputShaperCalibrator {
         }
     }
 
-    void trigger_calibration_progress(int percent) {
+    void
+    trigger_calibration_progress(int percent,
+                                 ShaperCalibrationPhase phase = ShaperCalibrationPhase::Sweeping) {
         if (last_progress_cb) {
-            last_progress_cb(percent);
+            last_progress_cb(percent, phase);
         }
     }
 

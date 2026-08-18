@@ -541,6 +541,7 @@ class AmsBackendAfcTestHelper : public AmsBackendAfc {
         const std::unordered_map<std::string, std::string>& section_to_klipper) {
         std::lock_guard<std::mutex> lock(mutex_);
         extruder_klipper_names_ = section_to_klipper;
+        configfile_answered_ = true; // stands in for the query having landed
         extruder_tool_index_warned_.clear();
     }
 
@@ -1331,6 +1332,71 @@ TEST_CASE("AFC persistence: skips SET_COLOR for zero", "[ams][afc][persistence]"
     REQUIRE_FALSE(helper.has_gcode_starting_with("SET_COLOR"));
 }
 
+TEST_CASE("AFC persistence: SET_MATERIAL carries material names with punctuation",
+          "[ams][afc][persistence]") {
+    // Bundle XGVDYEB5: "Skipping SET_MATERIAL - unsafe characters in: PLA+".
+    // The gate was is_safe_gcode_param() -> is_safe_identifier(), charset
+    // [A-Za-z0-9_ ] — so `PLA+`, which HelixScreen offers from its own
+    // filament_database.h, could never be persisted. The other four G-codes went
+    // out and set_slot_info() still returned success: a silent partial write.
+    AmsBackendAfcTestHelper helper;
+
+    helper.set_afc_version("1.0.20");
+    helper.initialize_test_lanes_with_slots(4);
+
+    SlotInfo info;
+    info.material = "PLA+";
+
+    AmsError err = helper.set_slot_info(0, info);
+
+    REQUIRE(helper.gcode_index_of("SET_MATERIAL LANE=lane1") >= 0);
+    REQUIRE(helper.has_gcode("SET_MATERIAL LANE=lane1 MATERIAL=PLA+"));
+    REQUIRE(err.success());
+}
+
+TEST_CASE("AFC persistence: SET_MATERIAL quotes multi-word material names",
+          "[ams][afc][persistence]") {
+    // `Silk PLA` and `Matte PLA` ship in filament_database.h too. They passed the
+    // old identifier check (which allows space) and were sent raw — Klipper
+    // tokenizes extended-command args on whitespace, so `MATERIAL=Silk PLA`
+    // arrives as two tokens and the command is rejected as malformed. Quote it.
+    AmsBackendAfcTestHelper helper;
+
+    helper.set_afc_version("1.0.20");
+    helper.initialize_test_lanes_with_slots(4);
+
+    SlotInfo info;
+    info.material = "Silk PLA";
+
+    AmsError err = helper.set_slot_info(0, info);
+
+    REQUIRE(helper.has_gcode("SET_MATERIAL LANE=lane1 MATERIAL=\"Silk PLA\""));
+    REQUIRE(err.success());
+}
+
+TEST_CASE("AFC persistence: an unsendable material is reported, not swallowed",
+          "[ams][afc][persistence]") {
+    // A material that genuinely cannot be expressed as a G-code parameter still
+    // must not be dropped in silence: the rest of the save goes out, and the
+    // caller is told which part did not.
+    AmsBackendAfcTestHelper helper;
+
+    helper.set_afc_version("1.0.20");
+    helper.initialize_test_lanes_with_slots(4);
+
+    SlotInfo info;
+    info.material = "PLA;G28";
+    info.remaining_weight_g = 750.0f;
+
+    AmsError err = helper.set_slot_info(0, info);
+
+    REQUIRE_FALSE(helper.has_gcode_starting_with("SET_MATERIAL"));
+    // The rest of the write is unaffected.
+    REQUIRE(helper.has_gcode("SET_WEIGHT LANE=lane1 WEIGHT=750"));
+    REQUIRE_FALSE(err.success());
+    REQUIRE(err.result == AmsResult::COMMAND_FAILED);
+}
+
 TEST_CASE("AFC persistence: skips SET_MATERIAL for empty string", "[ams][afc][persistence]") {
     AmsBackendAfcTestHelper helper;
 
@@ -1520,6 +1586,42 @@ TEST_CASE("AFC reset_tool_mappings sends single command regardless of lane count
     // Should send exactly one command, not one per lane
     REQUIRE(helper.captured_gcodes.size() == 1);
     REQUIRE(helper.has_gcode("RESET_AFC_MAPPING RUNOUT=no"));
+}
+
+// AFC dev/1.3 (Klipper-Add-On #832) deregistered RESET_AFC_MAPPING in favour of
+// AFC_RESET_MAPPING. The new firmware is recognisable by the multiple_tool_mapping
+// flag its get_status publishes alongside the rename — the flag's VALUE is the
+// opt-in to virtual tools and defaults false, so key presence is the version
+// signal, never the value.
+TEST_CASE("AFC reset_tool_mappings uses AFC_RESET_MAPPING once multiple_tool_mapping is reported",
+          "[ams][afc][tool_mapping][reset]") {
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    // Flag present but FALSE — virtual tools disabled, renamed firmware.
+    helper.feed_afc_state({{"multiple_tool_mapping", false}});
+
+    auto result = helper.reset_tool_mappings();
+
+    REQUIRE(result.success());
+    REQUIRE(helper.has_gcode("AFC_RESET_MAPPING RUNOUT=no"));
+    REQUIRE(helper.captured_gcodes.size() == 1);
+}
+
+TEST_CASE("AFC reset_tool_mappings keeps the old name until the firmware reports the flag",
+          "[ams][afc][tool_mapping][reset]") {
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+
+    // A status frame from firmware predating the rename carries no flag; the
+    // old macro name must survive — the new name is an unknown command there.
+    helper.feed_afc_state({{"led_state", true}});
+
+    auto result = helper.reset_tool_mappings();
+
+    REQUIRE(result.success());
+    REQUIRE(helper.has_gcode("RESET_AFC_MAPPING RUNOUT=no"));
+    REQUIRE(helper.captured_gcodes.size() == 1);
 }
 
 // ============================================================================
@@ -6767,6 +6869,175 @@ TEST_CASE("AFC buffer delta omitting fields leaves the prior health intact",
     REQUIRE(bh.distance_to_fault == Catch::Approx(25.5f));
     REQUIRE(bh.error_sensitivity == Catch::Approx(7.0f));
     REQUIRE(bh.fault_detection_enabled == true);
+}
+
+// ----------------------------------------------------------------------------
+// Multi-unit buffer attribution (bundle XGVDYEB5)
+//
+// Every buffer assertion above is single-unit units[0], which is why two
+// separate defects hid here on a five-unit rig:
+//   (a) handle_status_update parsed AFC_buffer objects BEFORE the unit-level
+//       objects that build the multi-unit layout, so every lane resolved against
+//       the synthetic single unit initialize_slots() creates and all five buffers
+//       landed on unit 0, overwriting each other;
+//   (b) reorganize_slots() rebuilds every AmsUnit from scratch, and buffer_health
+//       had no writer other than the AFC_buffer parser — which Moonraker will not
+//       run again until a buffer field changes. The rig went blank for three
+//       minutes until a FIRMWARE_RESTART forced a full state push.
+// ----------------------------------------------------------------------------
+
+namespace {
+
+/// Two BoxTurtles, lane1-4 and lane5-8, one buffer each. Returns a helper with
+/// the lanes discovered and AFC's flat state fed, but with the unit objects NOT
+/// yet sent — so system_info_ still holds the synthetic single unit.
+nlohmann::json two_unit_afc_state() {
+    nlohmann::json afc_state;
+    afc_state["units"] = nlohmann::json::array({"Box_Turtle Turtle_1", "Box_Turtle Turtle_2"});
+    afc_state["lanes"] = nlohmann::json::array(
+        {"lane1", "lane2", "lane3", "lane4", "lane5", "lane6", "lane7", "lane8"});
+    afc_state["extruders"] = nlohmann::json::array({"extruder"});
+    afc_state["buffers"] = nlohmann::json::array({"TN1", "TN2"});
+    return afc_state;
+}
+
+/// The two AFC_BoxTurtle unit objects, which are what drive reorganize_slots().
+nlohmann::json two_unit_objects() {
+    nlohmann::json bt1;
+    bt1["lanes"] = nlohmann::json::array({"lane1", "lane2", "lane3", "lane4"});
+    bt1["extruders"] = nlohmann::json::array({"extruder"});
+    bt1["hubs"] = nlohmann::json::array({"Turtle_1"});
+    bt1["buffers"] = nlohmann::json::array({"TN1"});
+
+    nlohmann::json bt2;
+    bt2["lanes"] = nlohmann::json::array({"lane5", "lane6", "lane7", "lane8"});
+    bt2["extruders"] = nlohmann::json::array({"extruder"});
+    bt2["hubs"] = nlohmann::json::array({"Turtle_2"});
+    bt2["buffers"] = nlohmann::json::array({"TN2"});
+
+    nlohmann::json params;
+    params["AFC_BoxTurtle Turtle_1"] = bt1;
+    params["AFC_BoxTurtle Turtle_2"] = bt2;
+    return params;
+}
+
+/// The two AFC_buffer objects, distinguishable by state and sensitivity.
+nlohmann::json two_buffer_objects() {
+    nlohmann::json params;
+    params["AFC_buffer TN1"] = nlohmann::json{{"state", "Advancing"},
+                                              {"lanes", {"lane1", "lane2", "lane3", "lane4"}},
+                                              {"error_sensitivity", 3},
+                                              {"distance_to_fault", 11.0}};
+    params["AFC_buffer TN2"] = nlohmann::json{{"state", "Trailing"},
+                                              {"lanes", {"lane5", "lane6", "lane7", "lane8"}},
+                                              {"error_sensitivity", 7},
+                                              {"distance_to_fault", 22.0}};
+    return params;
+}
+
+void discover_two_units(AmsBackendAfcTestHelper& helper) {
+    helper.set_discovered_lanes(
+        {"lane1", "lane2", "lane3", "lane4", "lane5", "lane6", "lane7", "lane8"},
+        {"Turtle_1", "Turtle_2"});
+    helper.initialize_slots_from_discovery();
+    helper.feed_afc_state(two_unit_afc_state());
+}
+
+} // namespace
+
+TEST_CASE("AFC buffers in the layout-building frame land on their own units",
+          "[ams][afc][status_fields][buffer][multiunit]") {
+    // Defect (a). The connect frame carries the AFC_buffer objects and the
+    // AFC_BoxTurtle objects together. Buffers must be resolved against the units
+    // that frame builds, not against the synthetic pre-reorganize unit 0.
+    AmsBackendAfcTestHelper helper;
+    discover_two_units(helper);
+
+    nlohmann::json params = two_unit_objects();
+    const nlohmann::json buffers = two_buffer_objects();
+    for (auto it = buffers.begin(); it != buffers.end(); ++it) {
+        params[it.key()] = it.value();
+    }
+    helper.feed_status_update(params);
+
+    auto info = helper.get_system_info();
+    REQUIRE(info.units.size() == 2);
+    REQUIRE(info.units[0].buffer_health.has_value());
+    REQUIRE(info.units[1].buffer_health.has_value());
+
+    CHECK(info.units[0].buffer_health->state == "Advancing");
+    CHECK(info.units[0].buffer_health->error_sensitivity == Catch::Approx(3.0f));
+    CHECK(info.units[0].buffer_health->distance_to_fault == Catch::Approx(11.0f));
+
+    CHECK(info.units[1].buffer_health->state == "Trailing");
+    CHECK(info.units[1].buffer_health->error_sensitivity == Catch::Approx(7.0f));
+    CHECK(info.units[1].buffer_health->distance_to_fault == Catch::Approx(22.0f));
+}
+
+TEST_CASE("AFC buffer health survives a later frame that rebuilds the units",
+          "[ams][afc][status_fields][buffer][multiunit]") {
+    // Defect (b), isolated: the units already exist when the buffers arrive, so
+    // the attribution is correct no matter what order the dispatcher uses. What
+    // this asserts is that a subsequent unit-object frame — which re-runs
+    // reorganize_slots() and default-constructs every AmsUnit — does not blank it.
+    AmsBackendAfcTestHelper helper;
+    discover_two_units(helper);
+
+    helper.feed_status_update(two_unit_objects());
+    helper.feed_status_update(two_buffer_objects());
+
+    auto before = helper.get_system_info();
+    REQUIRE(before.units.size() == 2);
+    REQUIRE(before.units[0].buffer_health.has_value());
+    REQUIRE(before.units[1].buffer_health.has_value());
+
+    // AFC re-sends the unit objects and nothing else. Moonraker forwards only
+    // changed keys, so the buffer parser will not run again for as long as the
+    // buffers hold still.
+    helper.feed_status_update(two_unit_objects());
+
+    auto after = helper.get_system_info();
+    REQUIRE(after.units.size() == 2);
+    REQUIRE(after.units[0].buffer_health.has_value());
+    REQUIRE(after.units[1].buffer_health.has_value());
+    CHECK(after.units[0].buffer_health->state == "Advancing");
+    CHECK(after.units[0].buffer_health->error_sensitivity == Catch::Approx(3.0f));
+    CHECK(after.units[1].buffer_health->state == "Trailing");
+    CHECK(after.units[1].buffer_health->error_sensitivity == Catch::Approx(7.0f));
+}
+
+TEST_CASE("AFC one buffer's fields do not bleed into another buffer's health",
+          "[ams][afc][status_fields][buffer][multiunit]") {
+    // The old read-modify-write seeded each buffer's update from the OWNING UNIT's
+    // current health, which is only the same thing as "this buffer's last reading"
+    // when one buffer owns the unit. In the connect frame, before the layout
+    // exists, both buffers resolve to the same unit — so TN2 inherited TN1's value
+    // for every field TN2's own frame omitted.
+    AmsBackendAfcTestHelper helper;
+    discover_two_units(helper);
+
+    nlohmann::json params = two_unit_objects();
+    params["AFC_buffer TN1"] = nlohmann::json{{"state", "Advancing"},
+                                              {"lanes", {"lane1", "lane2", "lane3", "lane4"}},
+                                              {"error_sensitivity", 3},
+                                              {"distance_to_fault", 11.0}};
+    // TN2 reports no distance_to_fault at all — fault detection is off on this one.
+    params["AFC_buffer TN2"] = nlohmann::json{{"state", "Trailing"},
+                                              {"lanes", {"lane5", "lane6", "lane7", "lane8"}},
+                                              {"error_sensitivity", 7}};
+    helper.feed_status_update(params);
+
+    auto info = helper.get_system_info();
+    REQUIRE(info.units.size() == 2);
+    REQUIRE(info.units[1].buffer_health.has_value());
+    CHECK(info.units[1].buffer_health->state == "Trailing");
+    CHECK(info.units[1].buffer_health->error_sensitivity == Catch::Approx(7.0f));
+    // The "not reported" sentinel, NOT TN1's 11mm.
+    CHECK(info.units[1].buffer_health->distance_to_fault == Catch::Approx(-1.0f));
+
+    REQUIRE(info.units[0].buffer_health.has_value());
+    CHECK(info.units[0].buffer_health->error_sensitivity == Catch::Approx(3.0f));
+    CHECK(info.units[0].buffer_health->distance_to_fault == Catch::Approx(11.0f));
 }
 
 TEST_CASE("AFC full multi-lane v1.2.0 frame lands on every slot",

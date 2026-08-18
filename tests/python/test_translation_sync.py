@@ -1031,34 +1031,34 @@ class TestObsoleteDetection:
     def test_indirect_tag_in_struct_initializer_is_not_obsolete(self, tmp_path):
         """A key named as a bare literal (resolved later via lv_tr(var)) is in use.
 
-        Mirrors src/ui/tour/tour_steps.cpp, whose tour.step.* tags the
+        Mirrors src/ui/tour/tour_steps.cpp, whose English-text tags the
         lv_tr("literal") extractor pattern cannot see.
         """
-        xml_dir, yaml_dir = self._repo(tmp_path, ["Used Key", "tour.step.welcome.title"])
+        xml_dir, yaml_dir = self._repo(tmp_path, ["Used Key", "Welcome to HelixScreen"])
         (tmp_path / "src" / "tour_steps.cpp").write_text(
-            'steps.push_back({"", "tour.step.welcome.title", Anchor::Center});\n'
+            'steps.push_back({"", "Welcome to HelixScreen", Anchor::Center});\n'
         )
 
         from translations.obsolete import find_obsolete_keys
 
         result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dir=tmp_path / "src",
                                     repo_root=tmp_path)
-        assert "tour.step.welcome.title" not in result
+        assert "Welcome to HelixScreen" not in result
 
     def test_tag_stored_as_json_data_is_not_obsolete(self, tmp_path):
         """Tags living in assets/config/printer_database.json are in use."""
         xml_dir, yaml_dir = self._repo(
-            tmp_path, ["Used Key", "pre_print_option.ai_detect.label"]
+            tmp_path, ["Used Key", "AI detection"]
         )
         (tmp_path / "assets" / "printer_database.json").write_text(
-            '{"label_tag": "pre_print_option.ai_detect.label"}\n'
+            '{"label_tag": "AI detection"}\n'
         )
 
         from translations.obsolete import find_obsolete_keys
 
         result = find_obsolete_keys(xml_dir, yaml_dir, cpp_dir=tmp_path / "src",
                                     repo_root=tmp_path)
-        assert "pre_print_option.ai_detect.label" not in result
+        assert "AI detection" not in result
 
     def test_label_text_in_header_is_not_obsolete(self, tmp_path):
         """include/ is scanned — cpp_dir only ever pointed at src/."""

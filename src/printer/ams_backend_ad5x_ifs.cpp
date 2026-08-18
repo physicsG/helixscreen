@@ -19,6 +19,7 @@
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "post_op_cooldown_manager.h"
 #include "printer_state.h"
+#include "settings_manager.h"
 #include "static_subject_registry.h"
 
 #include <spdlog/fmt/fmt.h>
@@ -63,6 +64,45 @@ namespace {
 /// AD5X down mid-job (see build_recovery_actions()).
 constexpr int RUNOUT_PURGE_MM = 50;
 constexpr int RUNOUT_PURGE_FEEDRATE_MM_MIN = 10 * 60;
+
+/// The ffmColor / ffmType pair to persist into Adventurer5M.json for one slot.
+struct FfmSlotFields {
+    std::string color; ///< ffmColorN value ("" or "#RRGGBB")
+    std::string type;  ///< ffmTypeN value ("?" or a material name)
+};
+
+/// zmod's own fallback colour, from `gcmd.get('HEX', '161616')` in
+/// zmod_color.py's cmd_RUN_ZCOLOR.
+constexpr const char* ZMOD_DEFAULT_HEX = "161616";
+
+/// Map an in-memory slot (hex colour, material) onto the ffmColor/ffmType pair
+/// stock ZMOD expects in Adventurer5M.json.
+///
+/// An unset entry keeps the firmware-native sentinels: live stock ZMOD FFMInfo
+/// uses ffmColor='' and ffmType='?' for "no filament". Our in-memory "no colour"
+/// placeholder is 808080 (parse_adventurer_json maps an empty ffmColor to it),
+/// so both an empty hex and the placeholder mean "no colour".
+///
+/// A slot that HAS a material never gets an empty ffmColor, because zmod's
+/// cmd_RUN_ZCOLOR (zmod_color.py) builds its "Change type" prompt button as
+/// `CHANGE_ZCOLOR SLOT=n HEX={ffmColor}` with no TYPE= param. An empty ffmColor
+/// makes that literal gcode `CHANGE_ZCOLOR SLOT=n HEX=`, and cmd_CHANGE_ZCOLOR
+/// emits `action:prompt_end` BEFORE it validates, then raises because HEX and
+/// TYPE are both empty - so the dialog closes and nothing reopens. Writing
+/// zmod's own default colour instead of "" sidesteps it. Drop this branch if
+/// zmod ever validates before closing the prompt.
+[[nodiscard]] FfmSlotFields ffm_fields_for_slot(const std::string& hex,
+                                                const std::string& material) {
+    const bool no_color = hex.empty() || hex == "808080";
+    const bool no_material = material.empty();
+    std::string color;
+    if (!no_color) {
+        color = "#" + hex;
+    } else if (!no_material) {
+        color = std::string{"#"} + ZMOD_DEFAULT_HEX;
+    }
+    return {std::move(color), no_material ? std::string{"?"} : material};
+}
 
 } // namespace
 
@@ -545,7 +585,16 @@ void AmsBackendAd5xIfs::handle_status_update(const json& notification) {
     // flip to ERROR with no EVENT_STATE_CHANGED to carry it to the UI.
     const bool runout_changed = evaluate_runout_locked();
 
+    // Consume the #1247 repair request under the same lock hold that staged
+    // it; dispatch below with the lock released (execute_gcode blocks).
+    const bool repair_staged = ifs_vars_repair_staged_;
+    ifs_vars_repair_staged_ = false;
+
     lock.unlock();
+
+    if (repair_staged) {
+        dispatch_ifs_vars_repair();
+    }
 
     // No AD5X-specific plugin subjects to publish: the auto-switchover state is
     // now carried by the backend-neutral `ams_endless_state` / `ams_endless_text`
@@ -731,6 +780,31 @@ void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
             }
         }
 
+        // #1247 shape guard: lessWaste's `_colors`/`_types` arrays are
+        // TOOL_MAP_SIZE-entry tool-indexed state, but our mirror bug pushed
+        // 4-entry port-indexed lists — and `_IFS_VARS` replaces the arrays
+        // wholesale, so every push truncated them (after which `_RUNOUT_HEAD`'s
+        // scan of tools 4..15 could never find a backup lane). SAVE_VARIABLE
+        // persists the damage across reboots, and lessWaste's own start dialog
+        // only re-heals it until our next push. Detect the truncated shape and
+        // stage a repair; handle_status_update() dispatches it with mutex_
+        // released. bambufy arrays legitimately hold 4 entries, so the check is
+        // lessWaste-only. Not an array (string/absent) means the plugin never
+        // wrote the row or uses another form — leave it alone.
+        if (p == "less_waste" && !ifs_vars_repair_staged_) {
+            for (const std::string key : {p + "_colors", p + "_types"}) {
+                const auto it = vars.find(key);
+                if (it != vars.end() && it->is_array() &&
+                    it->size() < static_cast<size_t>(TOOL_MAP_SIZE)) {
+                    spdlog::warn("{} {} carries {} entries; lessWaste expects {} "
+                                 "tool-indexed — staging _IFS_VARS repair (#1247)",
+                                 backend_log_tag(), key, it->size(), TOOL_MAP_SIZE);
+                    ifs_vars_repair_staged_ = true;
+                    break;
+                }
+            }
+        }
+
         // Current tool (-1 = none, 0-15 = tool number)
         if (vars.contains(p + "_current_tool") && vars[p + "_current_tool"].is_number_integer()) {
             active_tool_ = vars[p + "_current_tool"].get<int>();
@@ -894,47 +968,43 @@ void AmsBackendAd5xIfs::apply_overrides(SlotInfo& slot, int slot_index) {
     // apply_overrides runs inside update_slot_from_state() under mutex_ — so
     // the map is implicitly lock-protected here. If a slot has no override
     // entry, this is a zero-cost hash lookup followed by early return — safe
-    // to call inside the hot parse path.
+    // to call inside the hot parse path. The whole spec §5 policy + the
+    // re-bind/eject rules live in helix::ams::merge_override — the single
+    // implementation every backend shares. Rule 1 (re-bind) is NOT gated by
+    // the capability: it can fire on any backend whose firmware reports a
+    // positive spool id disagreeing with the override (AFC, Happy Hare,
+    // flat-schema CFS). IFS firmware never reports one, so Rule 1 cannot
+    // fire here today — but that is a fact about this firmware, not what
+    // the capability gates. Rule 2 (eject) IS what
+    // firmware_reports_spool_ids() gates (base false here: 0 is IFS's
+    // everyday reading, never an eject), and the erase branch is correct
+    // tomorrow if a firmware ever starts reporting ids.
     auto it = overrides_.find(slot_index);
     if (it == overrides_.end())
         return;
-    const auto& o = it->second;
-    // Merge policy: override wins when the override field carries a real value.
-    // - Strings: non-empty means "user set this", empty means "don't override".
-    // - spoolman_id / spoolman_vendor_id: >0 means a real Spoolman record;
-    //   0 is the "not linked" sentinel and must fall through.
-    // - weights: -1.0 is "unknown" and must fall through; 0 is a legitimate
-    //   empty-spool reading and should override.
-    // - color_rgb: 0 is treated as "no override" (matches to_lane_data_record's
-    //   omission rule and keeps black-but-unset indistinguishable from unset
-    //   per the store's on-disk schema; callers who truly mean pure black
-    //   #000000 should instead use 0x000001-equivalent color_name).
-    if (!o.brand.empty())
-        slot.brand = o.brand;
-    if (!o.spool_name.empty())
-        slot.spool_name = o.spool_name;
-    if (o.spoolman_id > 0)
-        slot.spoolman_id = o.spoolman_id;
-    if (o.spoolman_vendor_id > 0)
-        slot.spoolman_vendor_id = o.spoolman_vendor_id;
-    if (o.remaining_weight_g >= 0.0f)
-        slot.remaining_weight_g = o.remaining_weight_g;
-    if (o.total_weight_g >= 0.0f)
-        slot.total_weight_g = o.total_weight_g;
-    if (o.color_set)
-        slot.color_rgb = o.color_rgb;
-    if (!o.color_name.empty())
-        slot.color_name = o.color_name;
-    if (!o.material.empty())
-        slot.material = o.material;
-    // Catalog product identity — same "override wins only when it carries a
-    // real value" rule as the strings above. Firmware never populates these
-    // (no AMS protocol has a notion of a branded product id), so a non-empty
-    // value here is always a user pick and always wins.
-    if (!o.catalog_id.empty())
-        slot.catalog_id = o.catalog_id;
-    if (!o.product_name.empty())
-        slot.product_name = o.product_name;
+    helix::ams::MergeOptions opts;
+    opts.firmware_reports_spool_ids = firmware_reports_spool_ids();
+    opts.keep_spool_info_on_eject =
+        helix::SettingsManager::instance().get_ams_keep_spool_info_on_eject();
+    // Own-write echo suppression (SlotFingerprintTracker::expect()
+    // semantics): Rule 1 must not read an in-flight stale firmware id as an
+    // external re-bind. IFS never writes firmware ids, so this is always
+    // {0, 0} today — the call keeps one shape across backends.
+    const auto [own_old_id, own_new_id] = own_write_expectation(slot_index, slot.spoolman_id);
+    opts.suppress_rebind_firmware_old_id = own_old_id;
+    opts.suppress_rebind_firmware_new_id = own_new_id;
+    const auto result = helix::ams::merge_override(slot, it->second, opts);
+    if (result.cleared_rebind || result.cleared_eject) {
+        overrides_.erase(it);
+        if (override_store_) {
+            const std::string tag = backend_log_tag();
+            override_store_->clear_async(slot_index, [tag, slot_index](bool ok, std::string err) {
+                if (!ok) {
+                    spdlog::warn("{} clear_async failed for slot {}: {}", tag, slot_index, err);
+                }
+            });
+        }
+    }
 }
 
 bool AmsBackendAd5xIfs::check_external_color_change(int slot_index,
@@ -2055,6 +2125,19 @@ std::optional<helix::ErrorEvent> AmsBackendAd5xIfs::current_error() const {
                                        build_recovery_actions());
 }
 
+std::optional<bool> AmsBackendAd5xIfs::toolhead_filament_unaccounted() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // The SWITCH pair is the authority (head_switch_seen_ latches only on a
+    // real filament_switch_sensor publish); head_filament_ is conflated with
+    // the motion sensor, which reads false on a loaded-but-idle lane — gating
+    // on it would misreport a healthy seated lane as unaccounted. Until the
+    // switch has ever been seen there is no observation, so no verdict.
+    if (!head_switch_seen_) {
+        return std::nullopt;
+    }
+    return head_switch_present_ && system_info_.current_slot < 0;
+}
+
 // --- Plugin visibility (lessWaste / bambufy auto switchover) ---
 
 AmsBackendAd5xIfs::IfsPlugin AmsBackendAd5xIfs::get_plugin() const {
@@ -2094,30 +2177,57 @@ bool AmsBackendAd5xIfs::parse_ifs_vars_macro_locked(const json& macro_status) {
     if (!macro_status.is_object() || macro_status.empty()) {
         return false;
     }
+
+    const auto parse_boolish = [](const json& v) -> std::optional<bool> {
+        if (v.is_boolean()) {
+            return v.get<bool>();
+        }
+        if (v.is_number_integer()) {
+            return v.get<int>() != 0;
+        }
+        return std::nullopt;
+    };
+
+    bool changed = false;
+
     // lessWaste's runout backup toggle. Accepts the jinja int form the variable
     // dump shows (`variable_backup: 0`) and a bool, since neither plugin's schema
     // is pinned by anything we control.
-    const auto it = macro_status.find("variable_backup");
-    if (it == macro_status.end()) {
-        return false;
+    const auto backup_it = macro_status.find("variable_backup");
+    if (backup_it != macro_status.end()) {
+        std::optional<bool> parsed = parse_boolish(*backup_it);
+        if (parsed.has_value() && parsed != ifs_backup_variable_) {
+            ifs_backup_variable_ = parsed;
+            // Mirror into the snapshot so get_system_info() agrees with the capabilities.
+            // ifs_backup_variable_ stays the source of truth - it can be nullopt, which
+            // the bool cannot express and which caps.enabled reports as Unknown.
+            system_info_.endless_spool_enabled = *parsed;
+            spdlog::info(
+                "{} _IFS_VARS variable_backup = {} (automatic backup-spool switching on runout)",
+                backend_log_tag(), *parsed ? "on" : "off");
+            changed = true;
+        }
     }
-    std::optional<bool> parsed;
-    if (it->is_boolean()) {
-        parsed = it->get<bool>();
-    } else if (it->is_number_integer()) {
-        parsed = it->get<int>() != 0;
+
+    // lessWaste's own post-boot IFS-unlock workaround (`_UNLOCK_IFS` ->
+    // IFS_F18 after display_off_timeout). Log-only visibility, no state
+    // subjects consume it: when a runout investigation lands on a device where
+    // this is off, the bundle must show it, because a plain reboot may itself
+    // change IFS behavior (clamped lanes) and confound a screen A/B (#1247).
+    // The plugin owns the unlock; HelixScreen does not send hardware motion
+    // unprompted.
+    const auto unlock_it = macro_status.find("variable_ifs_unlock_after_boot");
+    if (unlock_it != macro_status.end()) {
+        std::optional<bool> parsed = parse_boolish(*unlock_it);
+        if (parsed.has_value() && parsed != ifs_unlock_after_boot_) {
+            ifs_unlock_after_boot_ = parsed;
+            spdlog::info("{} _IFS_VARS ifs_unlock_after_boot = {} (plugin's own post-boot "
+                         "IFS-unlock workaround)",
+                         backend_log_tag(), *parsed ? "on" : "off");
+        }
     }
-    if (!parsed.has_value() || parsed == ifs_backup_variable_) {
-        return false;
-    }
-    ifs_backup_variable_ = parsed;
-    // Mirror into the snapshot so get_system_info() agrees with the capabilities.
-    // ifs_backup_variable_ stays the source of truth - it can be nullopt, which
-    // the bool cannot express and which caps.enabled reports as Unknown.
-    system_info_.endless_spool_enabled = *parsed;
-    spdlog::info("{} _IFS_VARS variable_backup = {} (automatic backup-spool switching on runout)",
-                 backend_log_tag(), *parsed ? "on" : "off");
-    return true;
+
+    return changed;
 }
 
 // --- Backend-driven operation step model ---
@@ -2500,12 +2610,24 @@ std::vector<int> AmsBackendAd5xIfs::get_tool_mapping() const {
         return {};
     }
     std::vector<int> result(TOOL_MAP_SIZE, -1);
+    int highest_mapped = -1;
     for (size_t t = 0; t < TOOL_MAP_SIZE; ++t) {
         int port = tool_map_[t];
         if (port >= 1 && port <= NUM_PORTS) {
             result[t] = port - 1;
+            highest_mapped = static_cast<int>(t);
         }
     }
+    // Stop at the highest tool the firmware actually maps. AmsState's
+    // build_ams_topology() takes ToolTopology::tool_count straight from this
+    // vector's length, so returning all 16 addressable T-numbers made a 4-port,
+    // single-hotend AD5X advertise a 16-tool machine. Trailing -1 padding is the
+    // only thing dropped: entries below the cut keep their index, so an unmapped
+    // T1 stays a -1 hole rather than sliding T2 down into its place. An entirely
+    // unmapped register yields an empty vector, which is what the !has_ifs_vars_
+    // path above already returns and what build_ams_topology() reads as "fall
+    // back to a 1:1 map from the slot count".
+    result.resize(static_cast<size_t>(highest_mapped + 1));
     return result;
 }
 
@@ -2576,29 +2698,72 @@ AmsError AmsBackendAd5xIfs::disable_bypass() {
 // --- Private helpers ---
 
 std::string AmsBackendAd5xIfs::build_color_list_value() const {
-    // Build Python list literal for _IFS_VARS macro.
-    // Outer double quotes delimit the G-code parameter value (Klipper strips them).
-    // _IFS_VARS passes the inner content to SAVE_VARIABLE, adding its own quoting.
-    // Single quotes for string elements inside the list.
-    // Example: "['FF0000', '00FF00', '0000FF', 'FFFFFF']"
-    std::ostringstream ss;
-    ss << "\"[";
-    for (int i = 0; i < NUM_PORTS; ++i) {
-        if (i > 0)
-            ss << ", ";
-        ss << "'" << colors_[static_cast<size_t>(i)] << "'";
-    }
-    ss << "]\"";
-    return ss.str();
+    return build_ifs_list_value(/*colors=*/true);
 }
 
 std::string AmsBackendAd5xIfs::build_type_list_value() const {
+    return build_ifs_list_value(/*colors=*/false);
+}
+
+std::string AmsBackendAd5xIfs::build_ifs_list_value(bool colors) const {
+    // Shape is plugin-specific (#1247):
+    //
+    //   * bambufy: 4-entry, PORT-indexed. `_RUNOUT_HEAD` iterates `ifs.types`
+    //     (4 entries) and indexes `ifs.colors[port-1]` — the port-indexed
+    //     payload this builder always produced.
+    //   * lessWaste: 16-entry, TOOL-indexed. `variable_tools` maps tool->port
+    //     (`[1,2,3,4,5,5,...]`) and `_RUNOUT_HEAD` scans ALL 16 tool slots
+    //     comparing `ifs.colors[ifs.current_tool] == ifs.colors[index]` (plus
+    //     type + the candidate's own port sensor) to find a backup lane. Our
+    //     old 4-entry port-indexed payload was a wholesale replacement
+    //     (`_IFS_VARS` does SET_GCODE_VARIABLE + SAVE_VARIABLE), so one push
+    //     truncated the arrays to 4 — after which the scan of tools 4..15 read
+    //     out of range and no backup could ever match, and the runout fell
+    //     through to a plain pause with an empty toolhead.
+    //
+    // `_IFS_VARS` passes the value straight to SET_GCODE_VARIABLE, which evals
+    // it as a Python literal; both shapes ride that unchanged.
     std::ostringstream ss;
     ss << "\"[";
-    for (int i = 0; i < NUM_PORTS; ++i) {
-        if (i > 0)
+    if (var_prefix_ != "less_waste") {
+        for (int i = 0; i < NUM_PORTS; ++i) {
+            if (i > 0)
+                ss << ", ";
+            ss << "'"
+               << (colors ? colors_[static_cast<size_t>(i)] : materials_[static_cast<size_t>(i)])
+               << "'";
+        }
+        ss << "]\"";
+        return ss.str();
+    }
+
+    // Tool-indexed projection. Until the plugin's `<prefix>_tools` array has
+    // been parsed, tool_map_ is all-UNMAPPED; lessWaste's own default mapping
+    // there is identity (T0..T3 -> ports 1..4), so fall back to that rather
+    // than overwrite a fresh plugin's defaults with 16 empty entries.
+    bool any_mapped = false;
+    for (int port : tool_map_) {
+        if (port >= 1 && port <= NUM_PORTS) {
+            any_mapped = true;
+            break;
+        }
+    }
+    for (int t = 0; t < TOOL_MAP_SIZE; ++t) {
+        if (t > 0)
             ss << ", ";
-        ss << "'" << materials_[static_cast<size_t>(i)] << "'";
+        int port = tool_map_[static_cast<size_t>(t)];
+        if (!any_mapped) {
+            port = (t < NUM_PORTS) ? t + 1 : UNMAPPED_PORT;
+        }
+        if (port >= 1 && port <= NUM_PORTS) {
+            const auto idx = static_cast<size_t>(port - 1);
+            ss << "'" << (colors ? colors_[idx] : materials_[idx]) << "'";
+        } else {
+            // Unmapped tool: no lane, no colour. A candidate on an unmapped
+            // tool can never pass lessWaste's port-sensor check, so the empty
+            // entry is inert in `_RUNOUT_HEAD`'s comparisons.
+            ss << "''";
+        }
     }
     ss << "]\"";
     return ss.str();
@@ -2631,6 +2796,33 @@ AmsError AmsBackendAd5xIfs::write_ifs_var(const std::string& key, const std::str
     return execute_gcode(gcode);
 }
 
+void AmsBackendAd5xIfs::dispatch_ifs_vars_repair() {
+    // lessWaste-only by construction (only parse_save_variables' lessWaste
+    // branch stages it). Re-check the gate under the lock so a macro that went
+    // missing between staging and dispatch (FIRMWARE_RESTART mid-frame) can't
+    // get an _IFS_VARS write — the Unknown-command self-heal path relies on us
+    // not prodding a dead macro.
+    std::string colors_val, types_val;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!has_ifs_vars_) {
+            return;
+        }
+        colors_val = build_color_list_value();
+        types_val = build_type_list_value();
+    }
+    spdlog::info("{} Repairing truncated lessWaste colors/types arrays "
+                 "(_IFS_VARS mirror, #1247)",
+                 backend_log_tag());
+    // No SHOW=0 suffix — lessWaste's _IFS_VARS has no SHOW param (bambufy-only).
+    if (auto err = execute_gcode("_IFS_VARS colors=" + colors_val); !err.success()) {
+        spdlog::warn("{} repair colors write failed: {}", backend_log_tag(), err.technical_msg);
+    }
+    if (auto err = execute_gcode("_IFS_VARS types=" + types_val); !err.success()) {
+        spdlog::warn("{} repair types write failed: {}", backend_log_tag(), err.technical_msg);
+    }
+}
+
 AmsError AmsBackendAd5xIfs::write_adventurer_json(int slot_index) {
     // Same-host fast path: write the file via direct filesystem access.
     // Avoids Moonraker's HTTP upload, which on AD5X stock-ZMOD does an
@@ -2656,12 +2848,9 @@ AmsError AmsBackendAd5xIfs::write_adventurer_json(int slot_index) {
         material = materials_[idx];
     }
 
-    // Persist firmware-native sentinels for an unset entry: live stock ZMOD
-    // FFMInfo uses ffmColor='' and ffmType='?' for "no filament". Our in-memory
-    // "no colour" placeholder is 808080 (parse_adventurer_json maps empty
-    // ffmColor -> 808080), so collapse both empty and the placeholder to "".
-    const std::string color_field = (hex.empty() || hex == "808080") ? std::string{} : ("#" + hex);
-    const std::string type_field = material.empty() ? std::string{"?"} : material;
+    auto fields = ffm_fields_for_slot(hex, material);
+    const std::string color_field = std::move(fields.color);
+    const std::string type_field = std::move(fields.type);
 
     spdlog::info("{} Writing slot {} to Adventurer5M.json (native ZMOD)", backend_log_tag(), port);
 
@@ -2754,11 +2943,9 @@ AmsError AmsBackendAd5xIfs::write_adventurer_json_local(int slot_index) {
         hex = colors_[idx];
         material = materials_[idx];
     }
-    // Persist firmware-native sentinels for an unset entry (see
-    // write_adventurer_json): ffmColor='' and ffmType='?'. The 808080 placeholder
-    // is our in-memory "no colour" sentinel and must also collapse to "".
-    const std::string color_field = (hex.empty() || hex == "808080") ? std::string{} : ("#" + hex);
-    const std::string type_field = material.empty() ? std::string{"?"} : material;
+    auto fields = ffm_fields_for_slot(hex, material);
+    const std::string color_field = std::move(fields.color);
+    const std::string type_field = std::move(fields.type);
 
     // Read-modify-write. An empty / unparseable existing file is treated as
     // "fresh start with empty FFMInfo" so we auto-repair the bricked-printer
@@ -3979,7 +4166,11 @@ void AmsBackendAd5xIfs::query_zcolor_silent() {
                 zcolor_query_active_.store(false);
             });
         },
-        /*timeout_ms=*/0, /*silent=*/true);
+        /*timeout_ms=*/0, /*silent=*/true, /*on_queued=*/nullptr,
+        // The error callback logs and re-arms the poll; it shows the user
+        // nothing. Recording it for dedup would mute GcodeErrorRouter's `!!`
+        // copy of a real GET_ZCOLOR rejection. See include/rpc_error_policy.h.
+        /*caller_surfaces_errors=*/false);
 }
 
 void AmsBackendAd5xIfs::finalize_zcolor_response() {
@@ -4971,13 +5162,12 @@ void AmsBackendAd5xIfs::begin_phase_tracking_locked(bool is_unload) {
     last_progress_temp_deci_ = 0;
     note_phase_progress_locked();
     // Seed the heat target from the last-known extruder target if we have one;
-    // a RESPOND "Heating the nozzle to N degrees" line or an extruder frame can
-    // refine it. Fall back to the IFS firmware default (230°C) so the very
-    // first detail string has a sensible number before any signal arrives.
+    // a RESPOND "Heating the nozzle to N degrees" line or an extruder frame
+    // refines it later. With no signal the target stays 0 ("unknown") and the
+    // detail string simply omits it - guessing a number here would have the UI
+    // assert a target the printer never had.
     if (last_extruder_target_deci_ > 0) {
         phase_tracker_.target_deci = last_extruder_target_deci_;
-    } else {
-        phase_tracker_.target_deci = 2300; // 230.0°C in deci-degrees
     }
 }
 
@@ -5118,15 +5308,25 @@ bool AmsBackendAd5xIfs::apply_phase_action_locked() {
     char buf[64];
     switch (synth) {
     case AmsAction::HEATING:
-        if (last_extruder_temp_deci_ > 0) {
+        // Both the target and the current temp are independently optional: the
+        // target is 0 until an extruder frame or a RESPOND line reports one, and
+        // the current temp is 0 until the first extruder frame. Name only what
+        // is actually known rather than printing a placeholder number.
+        if (tgt > 0 && last_extruder_temp_deci_ > 0) {
             std::snprintf(buf, sizeof(buf), "Heating nozzle to %d°C (%d°C)",
                           helix::ui::temperature::deci_to_degrees(tgt),
                           helix::ui::temperature::deci_to_degrees(last_extruder_temp_deci_));
             detail = buf;
-        } else {
+        } else if (tgt > 0) {
             std::snprintf(buf, sizeof(buf), "Heating nozzle to %d°C",
                           helix::ui::temperature::deci_to_degrees(tgt));
             detail = buf;
+        } else if (last_extruder_temp_deci_ > 0) {
+            std::snprintf(buf, sizeof(buf), "Heating nozzle (%d°C)",
+                          helix::ui::temperature::deci_to_degrees(last_extruder_temp_deci_));
+            detail = buf;
+        } else {
+            detail = "Heating nozzle";
         }
         break;
     case AmsAction::CUTTING:

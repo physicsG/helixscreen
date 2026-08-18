@@ -283,8 +283,6 @@ class PrintStatusPanel : public OverlayBase {
     lv_subject_t elapsed_subject_;
     lv_subject_t remaining_subject_;
     lv_subject_t eta_subject_;
-    lv_subject_t nozzle_temp_subject_;
-    lv_subject_t bed_temp_subject_;
     lv_subject_t nozzle_status_subject_;
     lv_subject_t bed_status_subject_;
     lv_subject_t chamber_status_subject_;
@@ -385,8 +383,6 @@ class PrintStatusPanel : public OverlayBase {
     char elapsed_buf_[32] = "0h 00m";
     char remaining_buf_[32] = "0h 00m";
     char eta_buf_[32] = "";
-    char nozzle_temp_buf_[32] = "0 / 0°C";
-    char bed_temp_buf_[32] = "0 / 0°C";
     char nozzle_status_buf_[16] = "Off";
     char bed_status_buf_[16] = "Off";
     char chamber_status_buf_[16] = "";

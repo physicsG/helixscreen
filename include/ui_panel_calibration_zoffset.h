@@ -243,6 +243,8 @@ class ZOffsetCalibrationPanel : public OverlayBase {
     /// exit from State::SAVING so repeated saves in one session start clean.
     helix::zoffset::SaveRestartLatch save_restart_latch_;
 
+    friend class ZOffsetCalibrationTestAccess;
+
     /// Watches klippy state while saving, to feed save_restart_latch_.
     /// No paired SubjectLifetime: PrinterState::get_klippy_state_subject() is a
     /// static singleton-lifetime subject (no lifetime-token overload), unlike the

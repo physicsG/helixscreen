@@ -152,9 +152,10 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
     lv_obj_set_style_pad_row(container, gutter, 0);
 
     // Dragged widget: 2x2 cells at the origin. Big enough (2*30+gutter ~= 65px
-    // per side) that its center sits comfortably outside the 18px resize-edge
-    // margin (EDGE_HIT_INWARD/EDGE_HIT_MARGIN in grid_edit_mode.cpp) — this
-    // test wants a plain move, not a resize.
+    // per side) that its center sits comfortably outside the resize-edge grab
+    // band (edge_hit_band() in grid_edit_mode.cpp, which derives it from the
+    // cell size and floors it at 14px) — this test wants a plain move, not a
+    // resize.
     constexpr int COLSPAN = 2;
     constexpr int ROWSPAN = 2;
     lv_obj_t* widget = lv_obj_create(container);
@@ -420,4 +421,205 @@ TEST_CASE_METHOD(XMLTestFixture,
 
     em.exit();
     mgr.clear_panel_config(panel_id);
+}
+
+// ===========================================================================
+// handle_drag_start's ownership guard is anchored at the press origin (#1169)
+// ===========================================================================
+//
+// A unit test of press_owns_widget() proves the predicate but cannot prove
+// which point handle_drag_start() feeds it — verified empirically: reverting
+// the call site to the live pointer left the whole [1169] pure-function set
+// green. Only a gesture driven through the real indev reaches that call site,
+// so these two tests live here, next to the harness that can do it.
+
+namespace {
+
+/// Shared setup for the two guard tests below: a container with a real grid
+/// descriptor and one 2x2 "temperature" widget on a private page.
+///
+/// Mirrors the first test's setup because that is this file's convention
+/// (each test owns its geometry — the second test deliberately builds a
+/// single-row container), but the parts that actually matter here are pulled
+/// out as named fields so both guard tests share one copy rather than two.
+struct GuardFixture {
+    lv_obj_t* container = nullptr;
+    lv_obj_t* widget = nullptr;
+    PanelWidgetConfig* config = nullptr;
+    std::string panel_id;
+    int page_index = 1;
+    // lv_obj_set_grid_dsc_array() stores the RAW pointers — LVGL does not copy
+    // the arrays — so they must outlive the container exactly like
+    // PanelWidgetManager's grid_descriptors_ member does in production. As
+    // locals in make_guard_fixture() they died at return while the container
+    // kept using them (nightly ASAN: heap-use-after-free in
+    // grid_count_tracks via GridEditMode::current_metrics).
+    std::vector<int32_t> col_dsc;
+    std::vector<int32_t> row_dsc;
+};
+
+GuardFixture make_guard_fixture(lv_obj_t* parent, const std::string& panel_id) {
+    const int gutter = theme_manager_get_spacing("space_xs");
+    REQUIRE(gutter > 0); // see the cwd note on the first test
+
+    const int ncols = GridLayout::get_cols(UiBreakpoint::Medium);
+    const int nrows = GridLayout::get_rows(UiBreakpoint::Medium);
+    REQUIRE(ncols >= 2);
+    REQUIRE(nrows >= 2);
+
+    // 80px cells: the 2x2 widget is then ~160px per side, so its vertical
+    // centre sits ~80px from the top and bottom edges — far outside the grab
+    // band, which keeps the right-edge press below unambiguous rather than a
+    // corner that detect_resize_edge() could resolve to Top or Bottom.
+    constexpr int CELL_PX = 80;
+    const int content_w = ncols * CELL_PX + (ncols - 1) * gutter;
+    const int content_h = nrows * CELL_PX + (nrows - 1) * gutter;
+
+    GuardFixture f;
+    f.panel_id = panel_id;
+
+    f.container = lv_obj_create(parent);
+    lv_obj_remove_flag(f.container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(f.container, 0, 0);
+    lv_obj_set_style_border_width(f.container, 0, 0);
+    lv_obj_set_size(f.container, content_w, content_h);
+
+    f.col_dsc = GridLayout::make_col_dsc(UiBreakpoint::Medium);
+    f.row_dsc = GridLayout::make_row_dsc(UiBreakpoint::Medium);
+    lv_obj_set_grid_dsc_array(f.container, f.col_dsc.data(), f.row_dsc.data());
+    lv_obj_set_style_pad_column(f.container, gutter, 0);
+    lv_obj_set_style_pad_row(f.container, gutter, 0);
+
+    constexpr int COLSPAN = 2;
+    constexpr int ROWSPAN = 2;
+    f.widget = lv_obj_create(f.container);
+    lv_obj_set_name(f.widget, "temperature");
+    lv_obj_remove_flag(f.widget, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_grid_cell(f.widget, LV_GRID_ALIGN_STRETCH, 0, COLSPAN, LV_GRID_ALIGN_STRETCH, 0,
+                         ROWSPAN);
+    lv_obj_update_layout(f.container);
+
+    auto* cfg = Config::get_instance();
+    cfg->set<nlohmann::json>(
+        cfg->df() + "panel_widgets/" + panel_id,
+        nlohmann::json{{"main_page_index", 0},
+                       {"next_page_id", 2},
+                       {"pages",
+                        {{{"id", "main"}, {"widgets", nlohmann::json::array()}},
+                         {{"id", "spy"},
+                          {"widgets",
+                           {{{"id", "temperature"},
+                             {"enabled", true},
+                             {"col", 0},
+                             {"row", 0},
+                             {"colspan", COLSPAN},
+                             {"rowspan", ROWSPAN}}}}}}}});
+
+    auto& mgr = PanelWidgetManager::instance();
+    mgr.get_widget_config(panel_id).mark_dirty();
+    mgr.clear_panel_config(panel_id);
+    f.config = &mgr.get_widget_config(panel_id);
+
+    const auto& entries = f.config->page_entries(static_cast<size_t>(f.page_index));
+    REQUIRE(entries.size() == 1);
+    REQUIRE(entries[0].id == "temperature");
+    return f;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(XMLTestFixture,
+                 "GridEditMode: a grow-resize whose pointer leaves the widget still resizes",
+                 "[grid_edit][grid_edit_drag][resize][1169]") {
+    // Growing a widget drags AWAY from it: the finger starts on the edge and
+    // travels outward. By the time DRAG_THRESHOLD_PX is crossed the live
+    // pointer is legitimately off-widget, so a guard that tests the live
+    // pointer drops exactly the gestures that should have become resizes —
+    // shrinking (which drags inward) worked, growing never did.
+    GuardFixture f = make_guard_fixture(test_screen(), "test_grid_edit_guard_grow");
+
+    GridEditMode em;
+    em.enter(f.container, f.config, f.page_index);
+    em.select_widget(f.widget);
+    REQUIRE(em.selected_widget() == f.widget);
+
+    lv_obj_add_event_cb(f.container, forward_pressing, LV_EVENT_PRESSING, &em);
+
+    ScopedTestIndev indev;
+    lv_area_t sel_area;
+    lv_obj_get_coords(f.widget, &sel_area);
+
+    // Press 5px inside the right edge, vertically centred.
+    const lv_point_t origin{sel_area.x2 - 5, (sel_area.y1 + sel_area.y2) / 2};
+
+    // Preconditions, asserted so a geometry or registry change fails loudly
+    // instead of making the assertion below vacuous.
+    //  - the origin must classify as Right, not a corner;
+    //  - "temperature" must still be scalable, or handle_drag_start() takes
+    //    the move path and resizing_ stays false for an unrelated reason.
+    REQUIRE(em.detect_resize_edge(origin.x, origin.y, sel_area) == GridEditMode::ResizeEdge::Right);
+
+    // Frame 1: finger lands. handle_pressing() records press_origin_ here.
+    indev.send(origin.x, origin.y, LV_INDEV_STATE_PRESSED);
+
+    // Frame 2: drag outward to grow — 40px past the right edge, well beyond
+    // the grab band, and >12px of travel so DRAG_THRESHOLD_PX is crossed and
+    // handle_drag_start() runs on this frame.
+    const int far_x = sel_area.x2 + 40;
+    REQUIRE(far_x - origin.x > 12);
+    indev.send(far_x, origin.y, LV_INDEV_STATE_PRESSED);
+
+    // resizing_ + resize_edge_ are the direct witness: together they prove the
+    // gesture was admitted by the guard AND classified as the right-hand edge.
+    // resize_preview_ alone would only prove the branch ran; dragging_ tells a
+    // gesture dropped at the guard apart from one that fell through to a move.
+    CHECK(GridEditModeTestAccess::resizing(em));
+    CHECK(GridEditModeTestAccess::resize_edge(em) == GridEditMode::ResizeEdge::Right);
+    CHECK_FALSE(GridEditModeTestAccess::dragging(em));
+    CHECK(GridEditModeTestAccess::resize_preview(em) != nullptr);
+
+    indev.send(far_x, origin.y, LV_INDEV_STATE_RELEASED);
+    em.exit();
+    PanelWidgetManager::instance().clear_panel_config(f.panel_id);
+}
+
+TEST_CASE_METHOD(XMLTestFixture,
+                 "GridEditMode: a press in the widget interior drags rather than resizes",
+                 "[grid_edit][grid_edit_drag][resize][1169]") {
+    // The counterpart to the test above: the guard is anchored at the press
+    // origin, not disabled. An origin nowhere near an edge must still produce a
+    // MOVE even though the pointer ends up in the same off-widget place, so a
+    // change that made every gesture a resize — or one that let the grab band
+    // grow until it swallowed the widget interior (the clamp in
+    // edge_hit_band_for_cell) — goes red here.
+    GuardFixture f = make_guard_fixture(test_screen(), "test_grid_edit_guard_interior");
+
+    GridEditMode em;
+    em.enter(f.container, f.config, f.page_index);
+    em.select_widget(f.widget);
+    REQUIRE(em.selected_widget() == f.widget);
+
+    lv_obj_add_event_cb(f.container, forward_pressing, LV_EVENT_PRESSING, &em);
+
+    ScopedTestIndev indev;
+    lv_area_t sel_area;
+    lv_obj_get_coords(f.widget, &sel_area);
+
+    const lv_point_t centre{(sel_area.x1 + sel_area.x2) / 2, (sel_area.y1 + sel_area.y2) / 2};
+    REQUIRE(em.detect_resize_edge(centre.x, centre.y, sel_area) == GridEditMode::ResizeEdge::None);
+
+    indev.send(centre.x, centre.y, LV_INDEV_STATE_PRESSED);
+
+    // Same destination as the grow test — only the origin differs.
+    const int far_x = sel_area.x2 + 40;
+    REQUIRE(far_x - centre.x > 12);
+    indev.send(far_x, centre.y, LV_INDEV_STATE_PRESSED);
+
+    CHECK_FALSE(GridEditModeTestAccess::resizing(em));
+    CHECK(GridEditModeTestAccess::resize_edge(em) == GridEditMode::ResizeEdge::None);
+    CHECK(GridEditModeTestAccess::dragging(em)); // admitted, as a move
+
+    indev.send(far_x, centre.y, LV_INDEV_STATE_RELEASED);
+    em.exit();
+    PanelWidgetManager::instance().clear_panel_config(f.panel_id);
 }

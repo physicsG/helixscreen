@@ -253,8 +253,8 @@
           "type": "led_match",
           "field": "leds",
           "pattern": "chamber_l",
-          "confidence": 100,
-          "reason": "LED chamber light/led (AD5M Pro exclusive)"
+          "confidence": 55,
+          "reason": "Chamber light LED (corroborating only - 'chamber_light' is a generic name custom rigs use too; with max bonus it stays under the 70% high-confidence bar)"
         },
         {
           "type": "sensor_match",
@@ -360,8 +360,8 @@
           "type": "led_match",
           "field": "leds",
           "pattern": "chamber_l",
-          "confidence": 100,
-          "reason": "LED chamber light/led (AD5M Pro exclusive - matches stock 'chamber_light' and ForgeX 'chamber_led')"
+          "confidence": 55,
+          "reason": "Chamber light LED (corroborating only - matches stock 'chamber_light' and ForgeX 'chamber_led', but custom rigs use those names too; with max bonus it stays under the 70% high-confidence bar)"
         },
         {
           "type": "macro_match",
@@ -1283,19 +1283,17 @@
             "category": "mechanical",
             "order": 10,
             "default_enabled": true,
-            "strategy": "macro_param",
-            "param_name": "PREPARE",
-            "enable_value": "0",
-            "skip_value": "1",
-            "default_value": "0"
+            "strategy": "pre_start_gcode",
+            "gcode_template": "BED_MESH_CALIBRATE_START_PRINT GCODE_FILE='{file}' BED_TEMP={bed_temp} EXTRUDER_TEMP={extruder_temp}",
+            "emit_when_disabled": false
           },
           {
             "id": "ai_detect",
             "category": "monitoring",
             "order": 10,
             "default_enabled": false,
-            "label_key": "pre_print_option.ai_detect.label",
-            "description_key": "pre_print_option.ai_detect.description",
+            "label_key": "AI detection",
+            "description_key": "Monitor for print abnormalities (K2 Plus camera-based)",
             "strategy": "pre_start_gcode",
             "gcode_template": "LOAD_AI_RUN SWITCH={value}",
             "requires_macro": "LOAD_AI_RUN"
@@ -1428,19 +1426,17 @@
             "category": "mechanical",
             "order": 10,
             "default_enabled": true,
-            "strategy": "macro_param",
-            "param_name": "PREPARE",
-            "enable_value": "0",
-            "skip_value": "1",
-            "default_value": "0"
+            "strategy": "pre_start_gcode",
+            "gcode_template": "BED_MESH_CALIBRATE_START_PRINT GCODE_FILE='{file}' BED_TEMP={bed_temp} EXTRUDER_TEMP={extruder_temp}",
+            "emit_when_disabled": false
           },
           {
             "id": "ai_detect",
             "category": "monitoring",
             "order": 10,
             "default_enabled": false,
-            "label_key": "pre_print_option.ai_detect.label",
-            "description_key": "pre_print_option.ai_detect.description",
+            "label_key": "AI detection",
+            "description_key": "Monitor for print abnormalities (K2 Plus camera-based)",
             "strategy": "pre_start_gcode",
             "gcode_template": "LOAD_AI_RUN SWITCH={value}",
             "requires_macro": "LOAD_AI_RUN"

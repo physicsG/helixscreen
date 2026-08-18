@@ -17,11 +17,15 @@
  * panel-specific ones are declined so each panel's own switch still sees them.
  */
 
+#include "ui_ams_context_menu.h"
 #include "ui_ams_detail.h"
 
 #include "../lvgl_ui_test_fixture.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
+
+#include <cstddef>
+#include <memory>
 
 #include "../catch_amalgamated.hpp"
 
@@ -107,6 +111,56 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams dispatch: claims actions even with no b
 
     // Panel-specific actions are still declined regardless of backend state.
     CHECK_FALSE(helix::ui::ams_dispatch_backend_action(MenuAction::EDIT, 0, nullptr));
+}
+
+// The menu publishes "ams_slot_is_loaded" / "ams_slot_can_load" into the
+// process-wide XML subject registry, which resolves by name and holds a raw
+// pointer. Those subjects used to be instance members deinited in the
+// destructor, so every destroyed menu left the two names pointing at storage it
+// no longer owned — and three separate owners construct an AmsContextMenu
+// (AmsPanel, AmsOverviewPanel, ExternalSpoolMenu), so the first teardown
+// poisoned the names for the others.
+//
+// The nightly ASan run caught the consequence rather than the cause: a later
+// lv_xml_create() binding ams_context_menu.xml called
+// lv_subject_add_observer_obj() through the stale pointer, read a reused
+// allocation's subs_ll.n_size as 0, and memzero'd an observer into a 16-byte
+// heap block. The LV_SUBJECT_TYPE_INVALID guard did not catch it precisely
+// because the storage was live garbage rather than zeroed.
+//
+// The assertion is deliberately on the ADDRESS, not on the subject's contents.
+// lv_subject_deinit() resets neither `type` nor `subs_ll.n_size` (it only frees
+// the observer nodes), so a deinited subject is indistinguishable from a live
+// one by inspection — the defect was never "deinited", it was "freed". Reading
+// through the stale pointer to prove that would be UB and would only show up
+// under a sanitizer. Comparing pointer values is total and deterministic.
+TEST_CASE_METHOD(LVGLUITestFixture, "ams context menu: subjects outlive every menu instance",
+                 "[ui][ams][context_menu][subjects]") {
+    auto menu = std::make_unique<helix::ui::AmsContextMenu>();
+    const auto* object_lo = reinterpret_cast<const std::byte*>(menu.get());
+    const auto* object_hi = object_lo + sizeof(helix::ui::AmsContextMenu);
+
+    REQUIRE(lv_xml_get_subject(nullptr, "ams_slot_is_loaded") != nullptr);
+    lv_subject_t* can_load_before = lv_xml_get_subject(nullptr, "ams_slot_can_load");
+    REQUIRE(can_load_before != nullptr);
+
+    menu.reset(); // storage freed — the registry still resolves both names
+
+    for (const char* name : {"ams_slot_is_loaded", "ams_slot_can_load"}) {
+        lv_subject_t* subject = lv_xml_get_subject(nullptr, name);
+        INFO("subject: " << name);
+        REQUIRE(subject != nullptr);
+        const auto* addr = reinterpret_cast<const std::byte*>(subject);
+        CHECK_FALSE((addr >= object_lo && addr < object_hi));
+    }
+
+    // A second menu must resolve to the SAME storage, not re-point the shared
+    // names at its own members — three owners construct these menus, and the
+    // survivors keep using whatever the last registration left behind.
+    auto second = std::make_unique<helix::ui::AmsContextMenu>();
+    CHECK(lv_xml_get_subject(nullptr, "ams_slot_can_load") == can_load_before);
+    second.reset();
+    CHECK(lv_xml_get_subject(nullptr, "ams_slot_can_load") == can_load_before);
 }
 
 // ============================================================================

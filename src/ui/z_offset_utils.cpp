@@ -55,6 +55,34 @@ void format_offset_compact(int microns, char* buf, size_t buf_size) {
     }
 }
 
+int displayed_z_offset_microns(int live_microns, std::optional<int> persisted_microns,
+                               bool print_active) {
+    if (print_active || !persisted_microns.has_value()) {
+        return live_microns;
+    }
+    return *persisted_microns;
+}
+
+int displayed_z_offset_microns(helix::PrinterState& state) {
+    return displayed_z_offset_microns(lv_subject_get_int(state.get_gcode_z_offset_subject()),
+                                      state.get_persisted_z_offset_microns(),
+                                      lv_subject_get_int(state.get_print_active_subject()) != 0);
+}
+
+std::string build_z_adjust_gcode(int base_microns, int live_microns, int delta_microns,
+                                 bool all_homed) {
+    // MOVE=1 makes the toolhead take up the new offset immediately, which is what
+    // makes baby stepping usable. Klipper errors on it when an axis is unhomed.
+    const char* move = all_homed ? " MOVE=1" : "";
+
+    if (base_microns == live_microns) {
+        return fmt::format("SET_GCODE_OFFSET Z_ADJUST={:.3f}{}",
+                           static_cast<double>(delta_microns) / 1000.0, move);
+    }
+    return fmt::format("SET_GCODE_OFFSET Z={:.3f}{}",
+                       static_cast<double>(base_microns + delta_microns) / 1000.0, move);
+}
+
 void apply_and_save(IMoonrakerAPI* api, ZOffsetCalibrationStrategy strategy,
                     std::function<void()> on_success,
                     std::function<void(const std::string& error)> on_error) {

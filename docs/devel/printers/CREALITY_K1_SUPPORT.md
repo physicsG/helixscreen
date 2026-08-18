@@ -316,6 +316,12 @@ K1, K1C, and K1 Max can run Creality's **official CFS upgrade**. When installed,
 
 Community open-source K1 firmwares (Guilouz, Simple AF, Guppy Mod) do not bundle the CFS macros — the upgrade firmware ships separately from Creality. Without the upgrade installed, no `box` object is published and the CFS backend stays disabled.
 
+For the firmware side — what each `BOX_*` command actually does, the tn_data.json
+persistence contract, and the deferred-failure/resume traps that make a successful-looking
+gcode sequence do nothing — see
+[CREALITY_CFS_INTERNALS.md](../CREALITY_CFS_INTERNALS.md). **Read it before changing anything
+the CFS backend emits on K1.**
+
 ## Known Limitations
 
 ### Memory

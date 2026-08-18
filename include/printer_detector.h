@@ -196,8 +196,9 @@ class PrinterDetector {
      * @brief Build list options string from database
      *
      * Dynamically builds a newline-separated string of printer names suitable
-     * for LVGL list widget. Only includes entries with `show_in_list: true`
-     * (defaults to true if field is missing). Always appends "Custom/Other"
+     * for LVGL list widget. Includes an entry when `show_in_list` is true or
+     * missing (default true); entries that explicitly set it `false` (the
+     * non-printer addons) are excluded. Always appends "Custom/Other"
      * and "Unknown" at the end.
      *
      * The string is cached after first build for performance.
@@ -503,4 +504,16 @@ class PrinterDetector {
      * @return "cw", "ccw", or empty string if not declared (treat as "cw")
      */
     static std::string screws_tilt_direction_override();
+
+    /**
+     * @brief Decide whether to show the one-time saved-vs-detected type warning.
+     *
+     * True iff detection is high-confidence (>= 70, the wizard's override
+     * threshold), contradicts a meaningful saved type (not Custom/Other,
+     * Unknown, or empty), and the per-printer flag does not already equal the
+     * current saved type (changing the type re-arms the warning once).
+     */
+    static bool should_warn_type_mismatch(const std::string& saved_type,
+                                          const std::string& detected_type, int detected_confidence,
+                                          const std::string& flag_value);
 };

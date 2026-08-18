@@ -23,9 +23,21 @@
 #include <string>
 #include <vector>
 
-// Forward declarations
 namespace helix {
+
+// Forward declaration
 class IMoonrakerClient;
+
+/**
+ * @brief Parse a server.files.roots response into FileRoot entries
+ *
+ * Accepts both the JSON-RPC envelope (`{"result": [...]}`) and a bare array.
+ * Entries missing a usable name or path are dropped rather than half-filled:
+ * a root with no path cannot be compared against anything, and one with no
+ * name cannot be asked for.
+ */
+std::vector<FileRoot> parse_file_roots(const json& response);
+
 } // namespace helix
 
 /**
@@ -72,6 +84,7 @@ class MoonrakerFileAPI : public IFilesAPI {
     using ErrorCallback = std::function<void(const MoonrakerError&)>;
     using FileListCallback = std::function<void(const std::vector<FileInfo>&)>;
     using FileMetadataCallback = std::function<void(const FileMetadata&)>;
+    using FileRootsCallback = std::function<void(const std::vector<FileRoot>&)>;
 
     /**
      * @brief Constructor
@@ -84,6 +97,15 @@ class MoonrakerFileAPI : public IFilesAPI {
     // ========================================================================
     // File Management Operations
     // ========================================================================
+
+    /**
+     * @brief List the file manager's roots (server.files.roots)
+     *
+     * @param on_success Callback with the parsed roots, each carrying its absolute
+     *                   on-disk path and permissions
+     * @param on_error Error callback
+     */
+    void get_file_roots(FileRootsCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief List files in a directory

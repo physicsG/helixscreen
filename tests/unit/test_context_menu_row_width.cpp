@@ -24,6 +24,7 @@
  *    backdrop. The x path always clamped in the safe order; y did not.
  */
 
+#include "ui_ams_context_menu.h"
 #include "ui_context_menu.h"
 
 #include "../test_fixtures.h"
@@ -124,6 +125,7 @@ TEST_CASE_METHOD(XMLTestFixture,
                  "[ui][context_menu]") {
     REQUIRE(register_component("ams_context_menu"));
     AmsState::instance().init_subjects(true);
+    helix::ui::AmsContextMenu::init_subjects();
 
     lv_obj_t* menu = create_component("ams_context_menu");
     REQUIRE(menu != nullptr);
@@ -143,6 +145,7 @@ TEST_CASE_METHOD(XMLTestFixture, "context menu: every tappable row spans its own
                  "[ui][context_menu]") {
     REQUIRE(register_component("ams_context_menu"));
     AmsState::instance().init_subjects(true);
+    helix::ui::AmsContextMenu::init_subjects();
 
     BareContextMenu menu;
     lv_obj_t* card = show_and_get_card(menu, test_screen());
@@ -166,6 +169,7 @@ TEST_CASE_METHOD(XMLTestFixture, "context menu: card fits the screen height budg
                  "[ui][context_menu]") {
     REQUIRE(register_component("ams_context_menu"));
     AmsState::instance().init_subjects(true);
+    helix::ui::AmsContextMenu::init_subjects();
 
     BareContextMenu menu;
     lv_obj_t* card = show_and_get_card(menu, test_screen());
@@ -187,6 +191,7 @@ TEST_CASE_METHOD(XMLTestFixture, "context menu: card is never positioned off the
                  "[ui][context_menu]") {
     REQUIRE(register_component("ams_context_menu"));
     AmsState::instance().init_subjects(true);
+    helix::ui::AmsContextMenu::init_subjects();
 
     ScopedResolution shrink(lv_display_get_default(), 480, 200);
 
@@ -215,6 +220,7 @@ TEST_CASE_METHOD(XMLTestFixture, "context menu: a column with no visible action 
                  "[ui][context_menu]") {
     REQUIRE(register_component("ams_context_menu"));
     AmsState::instance().init_subjects(true);
+    helix::ui::AmsContextMenu::init_subjects();
 
     EmptyFilamentColumnMenu menu;
     lv_obj_t* card = show_and_get_card(menu, test_screen());
@@ -244,6 +250,7 @@ TEST_CASE_METHOD(XMLTestFixture, "context menu: both headings show when both col
                  "[ui][context_menu]") {
     REQUIRE(register_component("ams_context_menu"));
     AmsState::instance().init_subjects(true);
+    helix::ui::AmsContextMenu::init_subjects();
 
     BareContextMenu menu;
     lv_obj_t* card = show_and_get_card(menu, test_screen());

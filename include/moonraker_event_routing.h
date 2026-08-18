@@ -55,7 +55,8 @@ struct MoonrakerEventDecision {
  * @param type               Event type
  * @param is_error           MoonrakerEvent::is_error
  * @param within_grace_period Event arrived inside the startup notification grace period
- * @param wizard_active      Setup wizard is on screen
+ * @param wizard_active      Setup wizard is on screen; suppresses non-error toasts and the
+ *                           connection-failed prompt, never the recovery dialogs
  * @param modal_active       A modal is already open (see the CONNECTION_FAILED note below)
  */
 MoonrakerEventDecision decide_moonraker_event(MoonrakerEventType type, bool is_error,

@@ -381,3 +381,60 @@ TEST_CASE_METHOD(ToolStateFixture, "A real 4-extruder ToolChanger does report mu
     ts.clear_ams_topology();
     UpdateQueue::instance().drain();
 }
+
+// =============================================================================
+// nozzle_label(): "Nozzle" vs "Nozzle T<n>"
+//
+// The label sits directly beside a nozzle temperature readout in both the
+// controls panel and the filament panel, so it answers "which nozzle am I
+// looking at". An AMS's lanes all feed the same hotend, so naming that hotend
+// after the loaded lane says nothing, the same reason the nozzle_icon badge
+// is gated on extruder count.
+// =============================================================================
+
+TEST_CASE_METHOD(ToolStateFixture, "nozzle_label stays plain when AMS lanes share one hotend",
+                 "[tool-state][ams][ams-topology][nozzle-label]") {
+    auto& ts = helix::ToolState::instance();
+    auto disc = make_single_extruder_discovery();
+
+    ts.init_tools(disc);
+    UpdateQueue::instance().drain();
+    REQUIRE(ts.nozzle_label() == "Nozzle");
+
+    helix::ToolTopology topo;
+    topo.tool_count = 4;
+    topo.active_tool = 2;
+    topo.tool_to_slot = {0, 1, 2, 3};
+    topo.tool_name_prefix = "T";
+    ts.set_ams_topology(topo);
+    UpdateQueue::instance().drain();
+
+    // The lane really is selected; this is the value the label used to append.
+    REQUIRE(ts.tool_count() == 4);
+    REQUIRE(ts.active_tool_index() == 2);
+    REQUIRE(ts.extruder_count() == 1);
+
+    REQUIRE(ts.nozzle_label() == "Nozzle");
+
+    ts.clear_ams_topology();
+    UpdateQueue::instance().drain();
+}
+
+TEST_CASE_METHOD(ToolStateFixture, "nozzle_label still names the tool on a real toolchanger",
+                 "[tool-state][ams][ams-topology][nozzle-label]") {
+    // Paired with the case above: a label hardcoded to "Nozzle" would pass that
+    // one, so a machine with real hotends must still get its T<n>.
+    auto& ts = helix::ToolState::instance();
+    auto disc = make_toolchanger_discovery();
+
+    ts.init_tools(disc);
+    UpdateQueue::instance().drain();
+    REQUIRE(ts.extruder_count() == 4);
+
+    // Klipper reports the active extruder moved to the third toolhead.
+    nlohmann::json status = {{"toolhead", {{"extruder", "extruder2"}}}};
+    ts.update_from_status(status);
+    UpdateQueue::instance().drain();
+    REQUIRE(ts.active_tool_index() == 2);
+    REQUIRE(ts.nozzle_label() == "Nozzle T2");
+}

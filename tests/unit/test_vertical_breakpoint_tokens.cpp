@@ -11,7 +11,7 @@
  * everything vertical: a 320x1480 panel classifies from 320 (TINY) and inherits
  * 32px buttons despite having 1480px of height to spend.
  *
- * Seven tokens now resolve from a second, vertical ladder. Both ladders share
+ * Nine tokens now resolve from a second, vertical ladder. Both ladders share
  * breakpoint_for() and theme_manager_get_breakpoint_suffix() verbatim; only the
  * scalar fed in differs. On landscape and square displays min(w,h) == h, so the
  * two ladders agree by construction and nothing moves — the landscape cases here
@@ -35,8 +35,11 @@
 
 namespace {
 
-/// The seven tokens migrated to the vertical ladder in #1209, with their
-/// declared values from ui_xml/globals.xml at the tiers this file exercises.
+/// Height tokens on the vertical ladder: the seven migrated in #1209 plus the
+/// two dialog content-cap siblings (values from ui_xml/globals.xml at the tiers
+/// this file exercises). The pinned/tall ladders are 85%-cap minus measured
+/// chrome (#1277) — both are vertical maxima and were briefly missing here,
+/// which made them resolve from the cramped axis on portrait panels.
 struct HeightToken {
     const char* name;
     const char* tiny;    // narrow axis 273-390
@@ -53,6 +56,8 @@ constexpr HeightToken HEIGHT_TOKENS[] = {
     {"input_height", "48", "52", "56", "64"},
     {"temp_card_height", "48", "72", "80", "112"},
     {"dialog_content_max", "200", "320", "440", "800"},
+    {"dialog_content_pinned_max", "139", "207", "272", "414"},
+    {"dialog_content_tall_chrome_max", "146", "229", "282", "545"},
     // spinner_lg has no _micro/_tiny variant, so TINY falls back inward to
     // spinner_lg_small = 48 — which is exactly why the two tight portrait sizes
     // (240x320, 480x272) are unchanged by putting it on this ladder.
