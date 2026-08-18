@@ -47,6 +47,14 @@ SKIP_DIRS = {'.git', '.worktrees', 'build', 'node_modules', '.venv', 'venv'}
 # Paths that are intentionally absent from a clean checkout.
 EXEMPT_SUBSTRINGS = (
     'superpowers/',        # docs/superpowers/ specs are gitignored, local-only
+    # libhv BUILD PRODUCTS, cited bare by the build and ESP32 docs. libhv tracks
+    # 375 files and not one of them is under include/ — its .gitignore ignores
+    # that whole tree, because its public headers are assembled at build time.
+    # `hv/requests.h`, `hv/hlog.h` and `dns_resolv.c` therefore exist on a
+    # machine that has built once and in no fresh checkout, so the gate cannot
+    # verify them anywhere it runs.
+    'hv/',
+    'dns_resolv.c',
 )
 
 # Tokens that are obviously placeholders rather than real paths.
@@ -132,13 +140,35 @@ def gitignored(paths):
     """
     if not paths:
         return set()
-    try:
-        proc = subprocess.run(['git', 'check-ignore', '--stdin'],
-                              input='\n'.join(sorted(paths)), capture_output=True,
-                              text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return set()  # no git, or it misbehaved: enforce strictly, as before
-    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+    def ask(cwd, candidates):
+        if not candidates:
+            return set()
+        try:
+            proc = subprocess.run(['git', 'check-ignore', '--stdin'],
+                                  input='\n'.join(sorted(candidates)), capture_output=True,
+                                  text=True, timeout=30, cwd=cwd or None)
+        except (OSError, subprocess.SubprocessError):
+            return set()  # no git, or it misbehaved: enforce strictly, as before
+        return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+    hits = ask(None, paths)
+
+    # Then each populated submodule, against its OWN rules. A submodule's build
+    # products are ignored by ITS .gitignore, which the superproject's git knows
+    # nothing about — libhv gitignores its entire generated `include/` tree, so
+    # every `lib/libhv/include/hv/*.h` the docs cite exists only after a build
+    # and never in a CI checkout. Asking the superproject alone marked all of
+    # them stale.
+    for sub in submodule_paths():
+        if not os.path.isdir(sub):
+            continue
+        inside = {p[len(sub) + 1:]: p for p in paths
+                  if p.startswith(sub + '/') and p not in hits}
+        if not inside:
+            continue
+        for rel in ask(sub, set(inside)):
+            hits.add(inside[rel])
+    return hits
 
 
 def submodule_paths():
