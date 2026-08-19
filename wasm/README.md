@@ -109,6 +109,66 @@ Four calls are easy to omit and each fails in a way that does not name itself:
 | `helix::ui::update_queue_init()` | Panels build correctly and stay invisible — the deferred unhide inside `push_overlay()` never runs |
 | `NavigationManager::set_active(PanelId::Home)` | Navbar over an empty content area: panel visibility is an XML binding on `active_panel` |
 
+### Load / unload / swap
+
+`wasm/scripted_u1.cpp` derives from the **real `AmsBackendMultiAce`** and replaces
+only the two ends of the wire: `execute_gcode()` is intercepted instead of
+reaching Moonraker, and the reply arrives as `handle_status_update()` frames on
+an `lv_timer`, in the shape the firmware publishes. Everything between — the
+dispatch rules, the load latch, the phase→step mapping, the ACE-fed vs feeder
+split — is production code.
+
+So the three operations are the app's, not the harness's:
+
+| Gesture | What the backend emits | What you see |
+|---|---|---|
+| **Unload** on an ACE-fed head | `ACE_UNLOAD_HEAD HEAD=0` | 4-step bar, ending at `preload_finish` — the ACE performs the retract, so `unload_finish` never comes |
+| **Load** an ACE bay onto an empty head | `ACE_LOAD_HEAD HEAD=0 ACE=0 SLOT=n` | 5-step bar, Home → Select → Heat → Feed → Purge |
+| **Load** a bay onto a head that already holds one | `ACE_UNLOAD_HEAD` then `ACE_LOAD_HEAD`, back to back | one **6-step** bar carrying both directions (`LOAD_SWAP`) |
+
+That third row is the case the disjoint `LOAD_PHASE_BASE` / `UNLOAD_PHASE_BASE`
+id spaces exist for, and it is worth watching: a swap is one user gesture and
+two firmware sequences.
+
+The frame vocabulary is the firmware's own `channel_state` (39 states, mapped by
+`classify_channel_state()`), and the seed frame is shaped after the live capture
+in `tests/fixtures/snapmaker_u1/`. `publish()` hands each frame to **both** the
+AMS backend and `PrinterState` — one frame, two consumers, as the notify stream
+does; feeding only the backend leaves every temperature in the UI reading 0 °C.
+
+Timings are plausible, not measured, and a full load is about eight seconds.
+Replacing them with a real timestamped capture is the one change a capture
+session would make to this file.
+
+**The heaters are modelled, not scripted.** Frames set a nozzle *target* and
+never a temperature; one owner (`tick_heaters`, 5 Hz) interpolates toward it.
+Two writers on one reading is what made the Heat step's live `nnn / nnn°C`
+readout look like noise:
+
+- **Ramping** — linear and deadline-based, so it lands *on* target at exactly
+  the requested time whatever distance it had to cover.
+- **Held at an active target** — dead steady. A real heater under PID sits on
+  its setpoint; the degree of wander that reads as "live" on an idle nozzle
+  reads as random on one the step bar is asking you to watch.
+- **Cold and unheated** — drifts a degree around ambient, so it is not a frozen
+  number.
+
+`HEAT_MS` (3 s) is quoted for a full ambient-to-working span; a shorter ramp
+takes proportionally less, floored at `MIN_HEAT_DWELL_MS` so the step stays
+legible. That is why a swap's second half does not sit through a heat cycle for
+a temperature its first half already reached — the log reads
+`heater 0: 250 -> 250 C over 0 ms`.
+
+The seeded machine is **mid-print**: head 0 mounted, hot, loaded from ACE 1. That
+is the state a multiACE swap actually happens in, and it is also what lets a load
+dispatch without first sitting through the sidebar's own preheat — see the note
+on `supports_auto_heat_on_load()` under Known issues.
+
+```bash
+./wasm/launch.sh &
+/tmp/pwvenv/bin/python wasm/ops_shot.py http://127.0.0.1:8080/index.html /tmp/ops
+```
+
 ### Driving it — `helix_ctl`
 
 The page exports the **`helix-screen ctl` command surface**: same JSON-RPC
@@ -133,11 +193,13 @@ polling `ccall` before the module initialises trips an Emscripten assertion.
 
 ### Known issues
 
-- **`resolve`/`text`/`geom` by an ambiguous bare name traps the module.**
-  `header_title` exists in every panel; resolving it kills the wasm instance and
-  every later call reports "UI update queue did not drain" (the module is gone,
-  not the queue). Address widgets by full `path` until this is fixed. Names
-  unique to one subtree (`ams_unit_card[0]`, `unit_name[0]`) are fine.
+- **The U1 preheats twice.** `AmsBackendSnapmaker` does not override
+  `supports_auto_heat_on_load()`, so `AmsOperationSidebar` runs its own preheat
+  and waits for the nozzle before dispatching — even though the firmware's load
+  sequence has its own `load_heating` phase, which the backend already models as
+  step 3 of 5. On a cold machine that is a full heat cycle before the command is
+  even sent. Not changed here: it is a device-behaviour call, and the seeded
+  machine is hot so the gate is satisfied either way.
 - **`init_post()` is skipped.** Its USB phase constructs `UsbManager`, whose mock
   backend spawns a `std::thread`; a non-pthread WASM build aborts on the first
   thread creation. Nothing on the AMS pages observes it. Enabling `-pthread`

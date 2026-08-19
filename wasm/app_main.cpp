@@ -27,7 +27,6 @@
 #include "ui_temp_display.h"
 #include "ui_update_queue.h"
 
-#include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "app_globals.h"
 #include "asset_manager.h"
@@ -41,6 +40,7 @@
 #include "printer_state.h"
 #include "remote_control_server.h"
 #include "runtime_config.h"
+#include "scripted_u1.h"
 #include "setting_group.h"
 #include "subject_initializer.h"
 #include "theme_manager.h"
@@ -65,6 +65,7 @@ lv_obj_t* g_screen = nullptr;
 lv_obj_t* g_app_layout = nullptr;
 std::unique_ptr<SubjectInitializer> g_subjects;
 std::unique_ptr<helix::PanelFactory> g_panels;
+helix::wasm::ScriptedU1* g_device = nullptr; // owned by AmsState
 
 void main_loop() {
     lv_timer_handler();
@@ -137,11 +138,15 @@ void init_state() {
     g_subjects->init_core_and_state();
     spdlog::debug("[WASM] phase: core state done");
 
-    auto mock = std::make_unique<AmsBackendMock>(4);
-    mock->set_multiace_mode(true);
-    mock->start();
-    AmsState::instance().set_backend(std::move(mock));
-    spdlog::info("[WASM] AMS backend installed: Snapmaker U1 + 2x ACE");
+    // The REAL multiACE backend, wired to a scripted device instead of a socket.
+    // AmsBackendMock would have been less work and less true: it reimplements the
+    // dispatch rules rather than exercising them, so a load in the browser would
+    // prove nothing about a load on the machine.
+    auto device = std::make_unique<helix::wasm::ScriptedU1>();
+    g_device = device.get();
+    device->begin();
+    AmsState::instance().set_backend(std::move(device));
+    spdlog::info("[WASM] AMS backend installed: Snapmaker U1 + 2x ACE (scripted)");
 
     spdlog::debug("[WASM] phase: init_panels");
     g_subjects->init_panels(nullptr, *get_runtime_config());
@@ -170,10 +175,12 @@ void seed_printer_state() {
         [](lv_timer_t*) {
             static int t = 0;
             ++t;
-            const double nozzle = 214.0 + (t % 3);
+            // Bed only. The nozzles belong to ScriptedU1 — it is the thing that
+            // models heating during a load, and two writers fighting over the
+            // same subject would make the step bar's live readout jitter
+            // between them.
             const double bed = 58.0 + (t % 5);
             nlohmann::json status = {
-                {"extruder", {{"temperature", nozzle}, {"target", 215.0}}},
                 {"heater_bed", {{"temperature", bed}, {"target", 60.0}}},
             };
             get_printer_state().update_from_status(status);

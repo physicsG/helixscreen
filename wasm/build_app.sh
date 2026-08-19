@@ -54,7 +54,7 @@ mapfile -t FONT_SRCS < <(ls assets/fonts/*.c)
 # helix_stubs.c is for the widget-only harnesses: it no-ops the helix_* hooks the
 # patches bake into LVGL. The app build defines them for real (application.cpp),
 # so including it here is a duplicate-symbol link error.
-HARNESS_SRCS=(wasm/app_main.cpp wasm/stubs_app.cpp)
+HARNESS_SRCS=(wasm/app_main.cpp wasm/scripted_u1.cpp wasm/stubs_app.cpp)
 
 # ---- compile -----------------------------------------------------------------
 export DEF
