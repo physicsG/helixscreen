@@ -1287,7 +1287,12 @@ static void collect_by_name(lv_obj_t* parent, const std::string& name,
 // becomes a silent no-op.
 static lv_obj_t* topmost_visible(const std::vector<lv_obj_t*>& matches) {
     lv_obj_t* best = nullptr;
-    long best_key = -1;
+    // int64_t, not long: the ranking packs a field at bit 40, and `long` is 32
+    // bits on every 32-bit target we build for (wasm32, and the armhf/MIPS
+    // devices). A shift wider than the type is undefined behaviour, which clang
+    // compiles to an unconditional trap -- so resolving any name that appears in
+    // more than one panel killed the process rather than picking the visible one.
+    int64_t best_key = -1;
     for (size_t i = 0; i < matches.size(); ++i) {
         lv_obj_t* cur = matches[i];
         lv_obj_t* top_ancestor = cur;
@@ -1298,10 +1303,10 @@ static lv_obj_t* topmost_visible(const std::vector<lv_obj_t*>& matches) {
             top_ancestor = parent;
         }
         lv_obj_t* root = lv_obj_get_parent(top_ancestor);
-        const long layer_rank = (root == lv_layer_top()) ? 1 : 0;
-        const long key = (layer_rank << 40) |
-                         (static_cast<long>(lv_obj_get_index(top_ancestor)) << 20) |
-                         static_cast<long>(i);
+        const int64_t layer_rank = (root == lv_layer_top()) ? 1 : 0;
+        const int64_t key = (layer_rank << 40) |
+                            (static_cast<int64_t>(lv_obj_get_index(top_ancestor)) << 20) |
+                            static_cast<int64_t>(i);
         if (key > best_key) {
             best_key = key;
             best = cur;
