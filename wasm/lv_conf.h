@@ -312,11 +312,23 @@
     *LV_LOG_LEVEL_ERROR       Only critical issue, when the system may fail
     *LV_LOG_LEVEL_USER        Only logs added by the user
     *LV_LOG_LEVEL_NONE        Do not log anything*/
+#ifdef HELIX_WASM_APP
+    /* The app build has no LVGL log callback installed (that lives in the
+       desktop lvgl_init path), so route LVGL's own diagnostics straight to
+       stdout -- which is the browser console. Indispensable during bring-up:
+       XML parse failures surface here and nowhere else. */
     #define LV_LOG_LEVEL LV_LOG_LEVEL_WARN
+#else
+    #define LV_LOG_LEVEL LV_LOG_LEVEL_WARN
+#endif
 
     /*1: Print the log with 'printf';
     *0: User need to register a callback with `lv_log_register_print_cb()`*/
+#ifdef HELIX_WASM_APP
+    #define LV_LOG_PRINTF 1
+#else
     #define LV_LOG_PRINTF 0
+#endif
 
     /*Set callback to print the logs.
      *E.g `my_print`. The prototype should be `void my_print(lv_log_level_t level, const char * buf)`
@@ -362,8 +374,16 @@
 #define LV_USE_ASSERT_OBJ           0   /*Check the object's type and existence (e.g. not deleted). (Slow)*/
 
 /*Add a custom handler when assert happens e.g. to restart the MCU*/
-#define LV_ASSERT_HANDLER_INCLUDE <stdlib.h>  /* WASM: no custom handler */
-#define LV_ASSERT_HANDLER abort();
+#ifdef HELIX_WASM_APP
+    /* The app build links the real handler (header-only static inline), so an
+       LVGL assert logs through spdlog and continues instead of killing the
+       module with no message. */
+    #define LV_ASSERT_HANDLER_INCLUDE "lvgl_assert_handler.h"
+    #define LV_ASSERT_HANDLER helix_lvgl_assert_handler(__FILE__, __LINE__, __func__);
+#else
+    #define LV_ASSERT_HANDLER_INCLUDE <stdlib.h>  /* WASM: no custom handler */
+    #define LV_ASSERT_HANDLER abort();
+#endif
 
 /*-------------
  * Debug
@@ -525,7 +545,11 @@
 #define LV_FONT_MONTSERRAT_8  0
 #define LV_FONT_MONTSERRAT_10 0
 #define LV_FONT_MONTSERRAT_12 0
+#ifdef HELIX_WASM_APP
+#define LV_FONT_MONTSERRAT_14 0   /* app build ships the real Noto faces */
+#else
 #define LV_FONT_MONTSERRAT_14 1
+#endif
 #define LV_FONT_MONTSERRAT_16 0
 #define LV_FONT_MONTSERRAT_18 0
 #define LV_FONT_MONTSERRAT_20 0
@@ -557,10 +581,18 @@
 /*Optionally declare custom fonts here.
  *You can use these fonts as default font too and they will be available globally.
  *E.g. #define LV_FONT_CUSTOM_DECLARE   LV_FONT_DECLARE(my_font_1) LV_FONT_DECLARE(my_font_2)*/
+#ifdef HELIX_WASM_APP
+#define LV_FONT_CUSTOM_DECLARE extern lv_font_t noto_sans_14;
+#else
 #define LV_FONT_CUSTOM_DECLARE /* WASM: no external fonts */
+#endif
 
 /*Always set a default font*/
+#ifdef HELIX_WASM_APP
+#define LV_FONT_DEFAULT &noto_sans_14
+#else
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
+#endif
 
 /*Enable handling large font and/or fonts with a lot of characters.
  *The limit depends on the font size, font face and bpp.

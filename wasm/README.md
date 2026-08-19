@@ -1,12 +1,18 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # HelixScreen browser preview (LVGL → WebAssembly)
 
-Compile **HelixScreen's real LVGL UI widgets to WebAssembly** and run them in a
-browser. This is a developer tool for iterating on widget visuals and layout —
-and for **headless, autonomous screenshotting** — without a device or the full
-app. The widgets you see are the *actual production code* (the LVGL 9.5 software
-renderer, the real `filament_path_canvas`, the helix-xml engine), driven by a
-thin harness `main()` and a small stub layer for the app-side symbols they touch.
+Compile **HelixScreen to WebAssembly** and run it in a browser — for iterating on
+UI without a device, and for **headless, autonomous screenshotting**.
+
+Two tiers live here:
+
+- **`app`** (default) — the **real AMS pages**: production XML, production
+  panels, the real `AmsState` and AMS backends, the real theme and subject
+  graph, booted by `app_main.cpp` the way `Application::run()` boots the
+  desktop. Only the printer is fake.
+- **`widget` / `ace` / `smoke`** — single-widget harnesses that drive one
+  production widget through its C API against a small stub layer. Faster to
+  build, useful when iterating on one canvas.
 
 > This branch (`tooling/lvgl-web-emulator`) carries **only the tooling** — it
 > builds whatever widget code is on the branch it's merged into. Feature branches
@@ -18,15 +24,19 @@ thin harness `main()` and a small stub layer for the app-side symbols they touch
 ## Quick start
 
 ```bash
-# One command: build + serve + open a browser (defaults to the ACE-page demo)
+# One command: build + serve + open a browser (defaults to the real AMS pages)
 ./wasm/launch.sh
 #   → http://localhost:8080   (Ctrl-C to stop)
 
+./wasm/launch.sh ace          # hand-built ACE mockup (widget tier)
 ./wasm/launch.sh widget       # single filament_path_canvas widget
 ./wasm/launch.sh smoke        # bare LVGL smoke test (label + button + arc)
-./wasm/launch.sh ace 9000     # explicit harness + port
+./wasm/launch.sh app 9000     # explicit harness + port
 ./wasm/launch.sh --no-build   # serve the last build without rebuilding
 ```
+
+The first `app` build is ~15 min (600 app TUs + LVGL); after that the object
+cache makes an `app_main.cpp` edit a relink only.
 
 WASM must be served over `http://` — `file://` and sandboxed iframes block it.
 `launch.sh` runs a local `python3 -m http.server` for you.
@@ -42,7 +52,7 @@ git clone --depth 1 https://github.com/emscripten-core/emsdk.git ~/emsdk
 cd ~/emsdk && ./emsdk install latest && ./emsdk activate latest
 ```
 
-`launch.sh` / `build_widget.sh` auto-source `~/emsdk/emsdk_env.sh` if `emcc`
+`launch.sh` / `build_app.sh` / `build_widget.sh` auto-source `~/emsdk/emsdk_env.sh` if `emcc`
 isn't already on `PATH`. (Ubuntu's `apt install emscripten` also works but is
 older.) Tested with Emscripten 6.0.7.
 
@@ -57,11 +67,105 @@ builds a UI, and enters `emscripten_set_main_loop(lv_timer_handler, ...)`:
 |---|---|---|
 | `smoke` | `smoke_main.cpp` | Bare LVGL (label, button, arc). Proves the toolchain. No app code. |
 | `widget` | `widget_main.cpp` | One real `filament_path_canvas` driven by its C API. |
-| `ace` | `ace_main.cpp` | A full **interactive ACE page** mockup — slot bays, the real path canvas, an operation sidebar, and a mocked **Load/Unload run** with a step stepper, sensor chips, and nozzle heat glow. |
+| `ace` | `ace_main.cpp` | A hand-built **ACE page** mockup — slot bays, the real path canvas, an operation sidebar, and a mocked **Load/Unload run** with a step stepper, sensor chips, and nozzle heat glow. Predates the `app` tier; keep for widget-level iteration. |
+| `app` | `app_main.cpp` | **The real thing.** Boots the production app far enough to render the three Snapmaker U1 AMS screens, driven by `AmsBackendMock` in multiACE mode. See below. |
 
 The `ace` harness exports `ace_load()` / `ace_unload()` / `ace_reset()` via
 `EMSCRIPTEN_KEEPALIVE`, so a headless script can drive a run with
 `Module._ace_load()` (the on-screen buttons work too).
+
+---
+
+## The `app` harness — real pages in a browser
+
+### What it renders
+
+Three screens, all modes of one overlay (`AmsOverviewPanel`), reached exactly as
+they are on a device:
+
+| Screen | State | Reached by |
+|---|---|---|
+| Multi-Filament | `detail_unit_index_ = -1` | boot (`navigate_to_ams_panel()`) |
+| SnapSwap | `= 0`, PARALLEL | tap `ams_unit_card[0]` |
+| multiACE | `= 1`, HUB | tap `ams_unit_card[1]` |
+
+### How it boots (`app_main.cpp`)
+
+Mirrors `Application::run()`'s phase order, which is a contract, not a
+suggestion — the subject graph and the theme have to exist before any XML is
+parsed. Modelled on the ESP32 port's `components/helixapp/app_boot.cpp`, which
+solved the same problem for a target with no Linux underneath it.
+
+MEMFS layout: `--preload-file` mounts `ui_xml/` and `assets/` at `/`, which is
+what `helix::set_asset_root("/")` resolves against; `LV_USE_FS_POSIX` maps LVGL
+drive `A` onto the same tree, so `asset_component_uri()` needs no changes.
+
+Four calls are easy to omit and each fails in a way that does not name itself:
+
+| Call | Symptom if missing |
+|---|---|
+| `lv_xml_init()` | Every `lv_xml_register_*` warns "No component found", then the first file registration hangs |
+| `register_widgets()` (Phase 7) | "XML tag 'ui_card' is not a known widget", children re-parent, runaway recursion in `app_layout` |
+| `helix::ui::update_queue_init()` | Panels build correctly and stay invisible — the deferred unhide inside `push_overlay()` never runs |
+| `NavigationManager::set_active(PanelId::Home)` | Navbar over an empty content area: panel visibility is an XML binding on `active_panel` |
+
+### Driving it — `helix_ctl`
+
+The page exports the **`helix-screen ctl` command surface**: same JSON-RPC
+vocabulary, same widget locators, same dispatcher — only the transport differs
+(`RemoteControlServer::serve_inproc()` instead of a Unix socket).
+
+```js
+Module.ccall('helix_ctl', 'string', ['string'],
+  [JSON.stringify({jsonrpc:'2.0', id:1, method:'click',
+                   params:{name:'ams_unit_card[1]'}})])
+```
+
+`wasm/ctl_shot.py` uses it to walk all three screens and screenshot each:
+
+```bash
+./wasm/launch.sh &                                   # serve on :8080
+/tmp/pwvenv/bin/python wasm/ctl_shot.py http://127.0.0.1:8080/index.html /tmp/shots
+```
+
+Scripts should wait on `window.helixReady === true` before the first call —
+polling `ccall` before the module initialises trips an Emscripten assertion.
+
+### Known issues
+
+- **`resolve`/`text`/`geom` by an ambiguous bare name traps the module.**
+  `header_title` exists in every panel; resolving it kills the wasm instance and
+  every later call reports "UI update queue did not drain" (the module is gone,
+  not the queue). Address widgets by full `path` until this is fixed. Names
+  unique to one subtree (`ams_unit_card[0]`, `unit_name[0]`) are fine.
+- **`init_post()` is skipped.** Its USB phase constructs `UsbManager`, whose mock
+  backend spawns a `std::thread`; a non-pthread WASM build aborts on the first
+  thread creation. Nothing on the AMS pages observes it. Enabling `-pthread`
+  would need COOP/COEP headers from the server.
+- **The backend is `AmsBackendMock`, not a recorded device.** Good enough to
+  render the screens; a `ScriptedU1` over the real `AmsBackendMultiAce`, replaying
+  captured status frames, is the next step — see the design notes.
+
+### Build notes that are not optional
+
+- `-include include/lvgl_pch.h` on **C++ TUs only**. The native build force-feeds
+  this PCH to every TU and it is where most files get their `lv_xml_*`
+  declarations and `hv/json.hpp`. A `.c` TU cannot parse it.
+- `-fexceptions` on compile **and** link. Emscripten compiles `try`/`catch` away
+  by default, so a `throw` traps as `unreachable` — and nlohmann::json throws on
+  every type mismatch.
+- `emscripten_set_main_loop(fn, 0, 0)` — the `1` form unwinds `main()` with a JS
+  exception and leaves the wasm stack pointer mid-frame, after which every
+  `ccall` into `helix_ctl` traps on `stackRestore`.
+- `-isystem lib/libhv/cpputil` — where `json.hpp` actually lives.
+
+### The source manifest
+
+`wasm/app_srcs.txt` is ~600 app TUs, **derived rather than curated**: the
+transitive link closure of the AMS panel objects taken from a native build with
+`nm`, filtered to what compiles under `emcc`, plus the boot path. `stubs_app.cpp`
+holds the entire remainder — libhv's synchronous HTTP client and its logger, the
+wpa_supplicant control socket — none of which the AMS pages ever call.
 
 ---
 

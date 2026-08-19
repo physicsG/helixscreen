@@ -1,6 +1,8 @@
 out/
 out_widget/
 out_ace/
+out_app/
 obj/
 obj_app/
+obj_app_lvgl/
 *.o

@@ -5,27 +5,30 @@
 # open it in a browser. WASM needs http:// (file:// is blocked), so this serves
 # over a local HTTP server and prints the URL.
 #
-#   wasm/launch.sh                 # build + serve the filament widget (default)
-#   wasm/launch.sh widget 8080     # explicit harness + port
+#   wasm/launch.sh                 # build + serve the REAL AMS pages (default)
+#   wasm/launch.sh app 8080        # explicit harness + port
+#   wasm/launch.sh ace             # the hand-built ACE mockup (widget-level)
+#   wasm/launch.sh widget          # a single filament_path_canvas
 #   wasm/launch.sh smoke           # the Phase 0 LVGL smoke test
 #   wasm/launch.sh --no-build      # serve the last build without rebuilding
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."   # worktree root
 
-HARNESS="ace"
+HARNESS="app"
 PORT=8080
 BUILD=1
 for arg in "$@"; do
   case "$arg" in
-    ace|widget|smoke)  HARNESS="$arg" ;;
+    app|ace|widget|smoke)  HARNESS="$arg" ;;
     --no-build)        BUILD=0 ;;
     [0-9]*)            PORT="$arg" ;;
-    *) echo "usage: wasm/launch.sh [ace|widget|smoke] [port] [--no-build]"; exit 1 ;;
+    *) echo "usage: wasm/launch.sh [app|ace|widget|smoke] [port] [--no-build]"; exit 1 ;;
   esac
 done
 
 case "$HARNESS" in
+  app)    OUTDIR="wasm/out_app";    BUILDER="wasm/build_app.sh";    BUILD_ARGS="$OUTDIR/index.html" ;;
   ace)    OUTDIR="wasm/out_ace";    BUILDER="wasm/build_widget.sh"; BUILD_ARGS="wasm/ace_main.cpp $OUTDIR/index.html" ;;
   widget) OUTDIR="wasm/out_widget"; BUILDER="wasm/build_widget.sh"; BUILD_ARGS="wasm/widget_main.cpp $OUTDIR/index.html" ;;
   smoke)  OUTDIR="wasm/out";        BUILDER="wasm/build.sh";        BUILD_ARGS="wasm/smoke_main.cpp $OUTDIR/index.html" ;;

@@ -127,6 +127,15 @@ std::string resolve_socket_path(const std::string& override_path) {
     return fallback;
 }
 
+std::string RemoteControlServer::serve_inproc(const std::string& request_line) {
+    if (!running_.load()) {
+        register_builtin_handlers();
+        running_.store(true);
+        spdlog::info("[RemoteControl] In-process command surface ready (no transport)");
+    }
+    return process_request(request_line);
+}
+
 bool RemoteControlServer::start(const RemoteConfig& config) {
     if (running_.load()) {
         spdlog::warn("[RemoteControl] Server already running");
@@ -245,6 +254,39 @@ nlohmann::json RemoteControlServer::dispatch(const std::string& method,
 }
 
 nlohmann::json RemoteControlServer::execute_on_ui_thread(std::function<nlohmann::json()> fn) {
+#ifdef __EMSCRIPTEN__
+    // Single-threaded. Blocking on a future would deadlock -- only this thread
+    // can drain the queue -- but calling fn() inline is also wrong: handlers that
+    // rebuild or delete widget subtrees are written to run inside
+    // process_pending(), and running one outside that batch corrupts LVGL's
+    // event list. So queue it like every other caller and pump the loop until it
+    // has run.
+    auto slot = std::make_shared<std::optional<nlohmann::json>>();
+    auto err = std::make_shared<std::exception_ptr>();
+    helix::ui::queue_update([slot, err, fn = std::move(fn)]() {
+        try {
+            *slot = fn();
+        } catch (...) {
+            *err = std::current_exception();
+        }
+    });
+    // Bound the pump by the CLOCK, not by iteration count: UpdateQueue's drain
+    // timer has a 1 ms period and LVGL's tick here is real time (the SDL driver
+    // installs SDL_GetTicks), so a few hundred iterations of an idle
+    // lv_timer_handler() can complete inside a single millisecond and the timer
+    // never becomes ready.
+    const uint32_t pump_start = lv_tick_get();
+    while (!slot->has_value() && !*err && lv_tick_elaps(pump_start) < 2000) {
+        lv_timer_handler();
+    }
+    if (*err) {
+        std::rethrow_exception(*err);
+    }
+    if (!slot->has_value()) {
+        throw std::runtime_error("UI update queue did not drain");
+    }
+    return **slot;
+#else
     auto promise = std::make_shared<std::promise<nlohmann::json>>();
     auto future = promise->get_future();
 
@@ -271,6 +313,7 @@ nlohmann::json RemoteControlServer::execute_on_ui_thread(std::function<nlohmann:
         }
     }
     throw std::runtime_error("UI thread timeout (10s)");
+#endif
 }
 
 // Forward declaration: the widget-resolution helpers live further down in this
