@@ -2591,15 +2591,51 @@ void AmsBackendMock::set_multiace_mode(bool enabled) {
 
     multiace_seated_ = {{4, 10, -1, -1}}; // ACE 1 bay 0, ACE 2 bay 2
 
-    if (system_info_.units.size() >= 3) {
-        system_info_.units[0].topology = PathTopology::PARALLEL;
-        system_info_.units[0].name = "SnapSwap";
-        system_info_.units[0].display_name = "SnapSwap";
+    // Unit-level metadata, built the way every other multi-unit profile builds
+    // it (cf. set_multi_unit_mode above). This USED to be an in-place edit of
+    // system_info_.units guarded on `size() >= 3` -- but nothing here ever grew
+    // that vector past the single entry the constructor pushes, so the guard was
+    // always false and the whole block dead. get_system_info() overlays
+    // system_info_.units onto the registry-built ones, so unit 0 kept the
+    // constructor's generic "Mock MMU" and the U1 screen captioned itself with a
+    // name that belongs to no product. The per-unit topologies were lost the same
+    // way; only unit_topologies_ below kept the ACE drawing as a combiner.
+    system_info_.units.clear();
+    {
+        // "SnapSwap" names the Snapmaker U1's own toolchanger, so it is correct
+        // ONLY on this profile -- the generic mock keeps "Mock MMU". Same pair of
+        // fields the real backend sets (ams_backend_snapmaker.cpp).
+        AmsUnit u;
+        u.unit_index = 0;
+        u.name = "SnapSwap";
+        u.display_name = "SnapSwap";
+        u.slot_count = 4;
+        u.first_slot_global_index = 0;
+        u.connected = true;
+        u.firmware_version = "mock-u1";
+        u.topology = PathTopology::PARALLEL; // four independent heads
+        u.has_toolhead_sensor = true;
+        u.has_slot_sensors = true;
+        system_info_.units.push_back(u);
+    }
+    for (int a = 0; a < 2; ++a) {
+        // Naming mirrors the real backend (ams_backend_multiace.cpp): internal
+        // name "ACE<n>", display name "ACE <n+1>" whenever more than one unit is
+        // attached. The model name ("ACE 2 Pro") is what a LONE ACE shows -- the
+        // dead block this replaces put it on both, which would have captioned two
+        // cards identically.
+        AmsUnit u;
+        u.unit_index = a + 1;
+        u.name = fmt::format("ACE{}", a);
+        u.display_name = fmt::format("ACE {}", a + 1);
+        u.slot_count = 4;
+        u.first_slot_global_index = 4 + a * 4;
+        u.connected = true;
+        u.firmware_version = "mock-ace";
         // A bound ACE is a combiner, not a fan: all four bays reach one head.
-        system_info_.units[1].topology = PathTopology::HUB;
-        system_info_.units[1].display_name = "ACE 2 Pro";
-        system_info_.units[2].topology = PathTopology::HUB;
-        system_info_.units[2].display_name = "ACE 2 Pro";
+        u.topology = PathTopology::HUB;
+        u.has_slot_sensors = true;
+        system_info_.units.push_back(u);
     }
     topology_ = PathTopology::PARALLEL;
     // Populating AmsUnit::topology is NOT enough: compute_system_tool_layout()

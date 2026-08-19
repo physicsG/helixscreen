@@ -127,6 +127,15 @@ std::string resolve_socket_path(const std::string& override_path) {
     return fallback;
 }
 
+std::string RemoteControlServer::serve_inproc(const std::string& request_line) {
+    if (!running_.load()) {
+        register_builtin_handlers();
+        running_.store(true);
+        spdlog::info("[RemoteControl] In-process command surface ready (no transport)");
+    }
+    return process_request(request_line);
+}
+
 bool RemoteControlServer::start(const RemoteConfig& config) {
     if (running_.load()) {
         spdlog::warn("[RemoteControl] Server already running");
@@ -245,6 +254,39 @@ nlohmann::json RemoteControlServer::dispatch(const std::string& method,
 }
 
 nlohmann::json RemoteControlServer::execute_on_ui_thread(std::function<nlohmann::json()> fn) {
+#ifdef __EMSCRIPTEN__
+    // Single-threaded. Blocking on a future would deadlock -- only this thread
+    // can drain the queue -- but calling fn() inline is also wrong: handlers that
+    // rebuild or delete widget subtrees are written to run inside
+    // process_pending(), and running one outside that batch corrupts LVGL's
+    // event list. So queue it like every other caller and pump the loop until it
+    // has run.
+    auto slot = std::make_shared<std::optional<nlohmann::json>>();
+    auto err = std::make_shared<std::exception_ptr>();
+    helix::ui::queue_update([slot, err, fn = std::move(fn)]() {
+        try {
+            *slot = fn();
+        } catch (...) {
+            *err = std::current_exception();
+        }
+    });
+    // Bound the pump by the CLOCK, not by iteration count: UpdateQueue's drain
+    // timer has a 1 ms period and LVGL's tick here is real time (the SDL driver
+    // installs SDL_GetTicks), so a few hundred iterations of an idle
+    // lv_timer_handler() can complete inside a single millisecond and the timer
+    // never becomes ready.
+    const uint32_t pump_start = lv_tick_get();
+    while (!slot->has_value() && !*err && lv_tick_elaps(pump_start) < 2000) {
+        lv_timer_handler();
+    }
+    if (*err) {
+        std::rethrow_exception(*err);
+    }
+    if (!slot->has_value()) {
+        throw std::runtime_error("UI update queue did not drain");
+    }
+    return **slot;
+#else
     auto promise = std::make_shared<std::promise<nlohmann::json>>();
     auto future = promise->get_future();
 
@@ -271,6 +313,7 @@ nlohmann::json RemoteControlServer::execute_on_ui_thread(std::function<nlohmann:
         }
     }
     throw std::runtime_error("UI thread timeout (10s)");
+#endif
 }
 
 // Forward declaration: the widget-resolution helpers live further down in this
@@ -1244,7 +1287,12 @@ static void collect_by_name(lv_obj_t* parent, const std::string& name,
 // becomes a silent no-op.
 static lv_obj_t* topmost_visible(const std::vector<lv_obj_t*>& matches) {
     lv_obj_t* best = nullptr;
-    long best_key = -1;
+    // int64_t, not long: the ranking packs a field at bit 40, and `long` is 32
+    // bits on every 32-bit target we build for (wasm32, and the armhf/MIPS
+    // devices). A shift wider than the type is undefined behaviour, which clang
+    // compiles to an unconditional trap -- so resolving any name that appears in
+    // more than one panel killed the process rather than picking the visible one.
+    int64_t best_key = -1;
     for (size_t i = 0; i < matches.size(); ++i) {
         lv_obj_t* cur = matches[i];
         lv_obj_t* top_ancestor = cur;
@@ -1255,10 +1303,10 @@ static lv_obj_t* topmost_visible(const std::vector<lv_obj_t*>& matches) {
             top_ancestor = parent;
         }
         lv_obj_t* root = lv_obj_get_parent(top_ancestor);
-        const long layer_rank = (root == lv_layer_top()) ? 1 : 0;
-        const long key = (layer_rank << 40) |
-                         (static_cast<long>(lv_obj_get_index(top_ancestor)) << 20) |
-                         static_cast<long>(i);
+        const int64_t layer_rank = (root == lv_layer_top()) ? 1 : 0;
+        const int64_t key = (layer_rank << 40) |
+                            (static_cast<int64_t>(lv_obj_get_index(top_ancestor)) << 20) |
+                            static_cast<int64_t>(i);
         if (key > best_key) {
             best_key = key;
             best = cur;
