@@ -1,0 +1,6 @@
+out/
+out_widget/
+out_ace/
+obj/
+obj_app/
+*.o

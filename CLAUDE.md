@@ -33,6 +33,8 @@ scripts/setup-worktree.sh feature/my-branch  # Symlinks deps, builds fast
 
 **Screenshots:** Press 'S' in UI, or `./scripts/screenshot.sh helix-screen output-name [token]` (drives a fresh instance via `helix-screen ctl`; token = panel/overlay/`demo` screen from `scripts/screenshot-recipes.sh`).
 
+**Browser preview (WASM emulator):** `./wasm/launch.sh` compiles HelixScreen's **real LVGL widgets to WebAssembly** and serves them in a browser (single-threaded, no backend, stubbed theme) — a fast, headless-screenshotable way to iterate on widget visuals and animation without a device. Harnesses: `smoke` / `widget` / `ace` (a full interactive ACE-page mockup with a mocked load/unload run). Needs Emscripten (emsdk). Full docs, incl. how to add a harness and headless-screenshot: `wasm/README.md`.
+
 **Driving the UI (screenshots, debugging, bringing up any panel/overlay/modal):** `helix-screen ctl` remote-controls a running instance — `navigate`/`click`/`ls`/`text`/`geom`/`set_value`/`scroll`/`demo`/`screenshot`, or a `helix-screen repl` REPL. The server auto-starts in `--test` (or `--remote`). See `docs/devel/HELIXCTL.md`. (Replaces the removed `-p`/`--panel` flags.)
 
 > **Always pin the socket — never run a bare `ctl`.** The default path is per-user and
