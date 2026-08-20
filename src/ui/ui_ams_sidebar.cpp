@@ -434,6 +434,11 @@ void AmsOperationSidebar::cleanup() {
     // Clear active flag FIRST to prevent observer callbacks from using freed widgets
     active_ = false;
 
+    // Whatever we were showing is gone with the widgets. Keeping ownership over
+    // a teardown would make the next externally-started operation look like
+    // ours and go without a step bar.
+    ownership_.on_abandon();
+
     // Delete the stall watchdog before anything else so its main-thread callback
     // can't fire mid-teardown (it never outlives the sidebar this way).
     if (stall_watchdog_timer_) {
@@ -765,17 +770,45 @@ void AmsOperationSidebar::recreate_step_progress_for_operation(StepOperationType
     }
 }
 
-void AmsOperationSidebar::apply_backend_step_index(int index) {
+int AmsOperationSidebar::step_index_for_phase(int phase) const {
+    // A model whose steps declare no phase ids (every phase_id == -1) is the
+    // narration-built kind, where the subject already carries a POSITION. Those
+    // keep the identity mapping they have always had.
+    bool has_ids = false;
+    for (size_t i = 0; i < current_step_model_.steps.size(); ++i) {
+        if (current_step_model_.steps[i].phase_id < 0) {
+            continue;
+        }
+        has_ids = true;
+        if (current_step_model_.steps[i].phase_id == phase) {
+            return static_cast<int>(i);
+        }
+    }
+    if (!has_ids) {
+        return phase;
+    }
+    // A declared-id model that does not claim this phase: the operation is in a
+    // phase this bar does not represent. Hold. That is what lets one bar carry
+    // both halves of a swap -- the load half's Home/Select/Heat ids belong to no
+    // step of the swap model, and holding on the retract step is right where
+    // jumping to whatever sat at that array index was the original bug.
+    return -1;
+}
+
+void AmsOperationSidebar::apply_backend_step_index(int phase) {
     if (!active_ || !step_progress_) {
         return;
     }
-    // index -1 = no active step (firmware idle / narration cleared). The action
+    // phase -1 = no active step (firmware idle / narration cleared). The action
     // observer's show/hide logic handles container visibility at end-of-op; hold
     // the bar here so a transient -1 between steps doesn't flicker the highlight.
+    const int index = step_index_for_phase(phase);
     if (index < 0 || index >= current_step_count_) {
+        spdlog::debug("[AmsSidebar] Backend phase {} not in this bar (op_type={}) — holding",
+                      phase, static_cast<int>(current_operation_type_));
         return;
     }
-    spdlog::debug("[AmsSidebar] Backend step index {} (op_type={})", index,
+    spdlog::debug("[AmsSidebar] Backend phase {} -> step {} (op_type={})", phase, index,
                   static_cast<int>(current_operation_type_));
     ui_step_progress_set_current(step_progress_, index);
 
@@ -898,7 +931,7 @@ void AmsOperationSidebar::start_operation(StepOperationType op_type, int target_
     spdlog::info("[AmsSidebar] Starting operation: type={}, target_slot={}",
                  static_cast<int>(op_type), target_slot);
 
-    target_load_slot_ = target_slot;
+    ownership_.on_start();
 
     // Set pending target slot early for pulse animation
     AmsState::instance().set_pending_target_slot(target_slot);
@@ -922,7 +955,7 @@ void AmsOperationSidebar::fail_started_operation(const AmsError& error) {
     spdlog::warn("[AmsSidebar] Operation dispatch failed: {} ({})", error.user_msg,
                  error.technical_msg);
     helix::ui::notify_ams_error(error, lv_tr("Filament operation failed"));
-    target_load_slot_ = -1;
+    ownership_.on_abandon();
     AmsState::instance().set_pending_target_slot(-1);
     // Backend never left IDLE; pull its truth back into the UI so the action
     // buttons reappear and the step bar hides.
@@ -934,8 +967,17 @@ void AmsOperationSidebar::update_step_progress(AmsAction action) {
         return;
     }
 
+    // One notion of "this operation is visibly running", used for BOTH the
+    // ownership latch and the container visibility below — they were separate
+    // expressions of the same idea, and only one of them updated ownership.
+    const bool action_is_progress =
+        (action == AmsAction::HEATING || action == AmsAction::LOADING ||
+         action == AmsAction::PURGING || action == AmsAction::CUTTING ||
+         action == AmsAction::FORMING_TIP || action == AmsAction::UNLOADING);
+    ownership_.on_action(action_is_progress);
+
     // Heuristic detection for externally-started operations
-    bool is_external = (target_load_slot_ < 0);
+    const bool is_external = ownership_.is_external();
     bool filament_loaded = false;
     if (is_external) {
         AmsBackend* backend = AmsState::instance().get_backend();
@@ -966,16 +1008,13 @@ void AmsOperationSidebar::update_step_progress(AmsAction action) {
         return;
     }
 
-    // Show/hide container based on action
-    bool show_progress = (action == AmsAction::HEATING || action == AmsAction::LOADING ||
-                          action == AmsAction::PURGING || action == AmsAction::CUTTING ||
-                          action == AmsAction::FORMING_TIP || action == AmsAction::UNLOADING);
-
-    if (show_progress) {
+    // Show/hide container based on action. Ownership is NOT cleared here any
+    // more: on_action() above already released it, but only once the operation
+    // had actually been seen running.
+    if (action_is_progress) {
         lv_obj_remove_flag(step_progress_container_, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(step_progress_container_, LV_OBJ_FLAG_HIDDEN);
-        target_load_slot_ = -1;
         if (heat_label_showing_temp_) {
             int reset_idx = (live_temp_step_index_ >= 0) ? live_temp_step_index_ : 0;
             ui_step_progress_set_label(step_progress_, reset_idx, lv_tr("Heat nozzle"));
@@ -1314,13 +1353,14 @@ void AmsOperationSidebar::handle_load_with_preheat(int slot_index) {
         return;
     }
 
-    // Determine operation type BEFORE calling the backend. plan.ams_call carries
+    // Determine operation type BEFORE calling the backend. plan.is_swap carries
     // the load-vs-swap answer (needs_unload_before_load, centralized so the UI
     // and backend agree — K1 CFS reports a preloaded cassette slot with an empty
     // nozzle and a SWAP there would cut nothing and stall at the cut step,
-    // #968).
-    start_operation(plan.ams_call == helix::ui::AmsCall::Load ? StepOperationType::LOAD_FRESH
-                                                              : StepOperationType::LOAD_SWAP,
+    // #968). Reading it off plan.ams_call instead was right only while "needs an
+    // unload" and "dispatched as a tool change" agreed; a multiACE ACE bay is
+    // the case where they do not.
+    start_operation(plan.is_swap ? StepOperationType::LOAD_SWAP : StepOperationType::LOAD_FRESH,
                     slot_index);
 
     // If backend handles heating automatically, just call load directly
@@ -1375,8 +1415,14 @@ void AmsOperationSidebar::handle_load_with_preheat(int slot_index) {
     // G28 still fires later, inside AmsSubscriptionBackend::ensure_homed_then()
     // right before the tier-1 dispatch (unchanged) -- only the confirmation
     // moves earlier, so a decline never wastes a preheat cycle.
-    if (!helix::toolhead_is_homed(printer_state_) &&
-        !(backend && backend->delegates_homing_to_printer())) {
+    //
+    // Only for backends that can actually emit that G28. On a Snapmaker U1 the
+    // load dispatches straight to firmware and never homes, so the prompt asked
+    // consent for something that would not happen -- and declining it returns
+    // here, cancelling the load outright. And not when the printer-side system
+    // homes for itself (AFC with auto_home): there the G28 is redundant, not absent.
+    if (!helix::toolhead_is_homed(printer_state_) && backend->filament_ops_may_home() &&
+        !backend->delegates_homing_to_printer()) {
         spdlog::info("[AmsSidebar] Toolhead not homed -- asking before starting preheat for "
                      "slot {} load",
                      slot_index);
@@ -1464,6 +1510,7 @@ helix::ui::BackendCaps AmsOperationSidebar::read_backend_caps(AmsSystemInfo& inf
     caps.present = true;
     caps.requires_slot_selection_for_load = backend->requires_slot_selection_for_load();
     caps.needs_unload_before_load = backend->needs_unload_before_load(info_out, target_slot);
+    caps.change_tool_completes_load = backend->change_tool_completes_load(target_slot);
     caps.is_tool_changer = backend->get_type() == AmsType::TOOL_CHANGER;
     return caps;
 }
@@ -1475,6 +1522,20 @@ void AmsOperationSidebar::dispatch_backend_load(const helix::ui::FilamentOpPlan&
         spdlog::warn("[AmsSidebar] Backend vanished before load dispatch (slot {})", slot_index);
         return;
     }
+
+    // Re-arm ownership at the moment the command actually goes out.
+    //
+    // start_operation() armed it optimistically, and on the preheat path a long
+    // wait sits between the two: start_operation() writes HEATING itself, the
+    // backend's still-IDLE truth lands on top, and OperationOwnership reads
+    // "running, then not running" as "finished" -- so by dispatch time our own
+    // operation looked foreign. detect_step_operation() then re-derived the bar
+    // from scratch and a LOAD_SWAP became LOAD_FRESH the instant the backend
+    // reported LOADING, replacing the swap bar mid-operation.
+    //
+    // Dispatch is the honest start: nothing has been confirmed yet, so
+    // progress_seen resets to false and the next running action is ours.
+    ownership_.on_start();
 
     AmsError error;
     switch (plan.ams_call) {

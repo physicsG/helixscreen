@@ -1363,8 +1363,15 @@ void AmsEditOverlay::update_ui() {
         snprintf(slot_indicator_buf_, sizeof(slot_indicator_buf_), "%s",
                  lv_tr("External Filament"));
     } else {
+        // The SPOOL number the slot's badge shows, not slot_index + 1. Those
+        // diverge once one slot views another's spool, and the editor opened
+        // from a badge reading "5" was titling itself "Slot 6 Filament" while
+        // showing that badge's spool — right data under the wrong name.
+        auto* number_backend = AmsState::instance().get_backend();
+        const int shown =
+            number_backend ? number_backend->spool_display_number(slot_index_) : slot_index_ + 1;
         snprintf(slot_indicator_buf_, sizeof(slot_indicator_buf_), lv_tr("Slot %d Filament"),
-                 slot_index_ + 1);
+                 shown);
     }
     lv_subject_copy_string(&slot_indicator_subject_, slot_indicator_buf_);
 

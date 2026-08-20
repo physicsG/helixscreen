@@ -226,6 +226,14 @@ class PrePromptBackend : public AmsBackendMock {
     [[nodiscard]] bool delegates_homing_to_printer() const override {
         return delegating;
     }
+    /// AmsBackendMock inherits AmsBackend's false, but the pre-preheat prompt
+    /// this fixture is about is only reachable on a backend that can emit the
+    /// G28 at all -- in production an AmsSubscriptionBackend, which AFC is.
+    /// Answering false here would skip the prompt for the wrong reason and
+    /// make the delegation rule below untestable.
+    [[nodiscard]] bool filament_ops_may_home() const override {
+        return true;
+    }
     void arm_home_preconfirmed() override {
         ++armed;
     }

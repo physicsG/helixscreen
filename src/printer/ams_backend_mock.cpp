@@ -4,7 +4,9 @@
 #include "ams_backend_mock.h"
 
 #include "afc_defaults.h"
+#include "ams_backend_snapmaker.h"
 #include "ams_bypass_policy.h"
+#include "ams_state.h"
 #include "filament_database.h"
 #include "hh_defaults.h"
 #include "runtime_config.h"
@@ -411,6 +413,12 @@ AmsSystemInfo AmsBackendMock::get_system_info() const {
     info.has_hardware_bypass_sensor = system_info_.has_hardware_bypass_sensor;
     info.tip_method = system_info_.tip_method;
     info.supports_purge = system_info_.supports_purge;
+    // The step bar's two inputs. Exactly the hazard the comment above this copy
+    // block describes: set_operation_phase() writes system_info_.operation_phase,
+    // and without these two lines no reader ever sees it -- the simulated U1
+    // operation walked its phases and the bar never moved.
+    info.operation_phase = system_info_.operation_phase;
+    info.operation_indeterminate = system_info_.operation_indeterminate;
 
     // Copy unit-level metadata not managed by registry
     for (size_t u = 0; u < info.units.size() && u < system_info_.units.size(); ++u) {
@@ -2518,6 +2526,224 @@ void AmsBackendMock::set_snapmaker_mode(bool enabled) {
     system_info_.filament_loaded = true;
 }
 
+void AmsBackendMock::set_multiace_mode(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    multiace_mode_ = enabled;
+    if (!enabled) {
+        return;
+    }
+
+    snapmaker_mode_ = false;
+    tool_changer_mode_ = false;
+    afc_mode_ = false;
+    multi_unit_mode_ = false;
+    mixed_topology_mode_ = false;
+    vivid_mixed_mode_ = false;
+    ifs_mode_ = false;
+    htlf_toolchanger_mode_ = false;
+
+    system_info_.type = AmsType::MULTIACE;
+    system_info_.type_name = "Snapmaker U1 + multiACE (Mock)";
+    system_info_.total_slots = 12;
+    system_info_.endless_spool_enabled = false;
+    system_info_.supports_tool_mapping = false;
+    system_info_.supports_bypass = false;
+    system_info_.has_hardware_bypass_sensor = false;
+    system_info_.tip_method = TipMethod::NONE;
+
+    // Unit 0 is the U1's four heads; units 1 and 2 are the ACEs, bound to head
+    // 0 and head 1 respectively. Heads 2 and 3 stay on their stock feeders, so
+    // one screen shows both kinds of position side by side.
+    slots_.clear();
+    slots_.initialize_units({
+        {"SnapSwap", {"1", "2", "3", "4"}},
+        {"ACE 1", {"1", "2", "3", "4"}},
+        {"ACE 2", {"1", "2", "3", "4"}},
+    });
+
+    struct Bay {
+        const char* material;
+        const char* brand;
+        uint32_t color;
+        const char* color_name;
+        SlotStatus status;
+        int spoolman_id;
+        float remaining;
+    };
+    // Heads: 0 and 1 hold what their ACE has seated, 2 and 3 their own spools.
+    const Bay heads[4] = {
+        {"PETG", "Kingroon", 0x83AFFF, "Silver", SlotStatus::LOADED, 15, 502.0f},
+        {"PLA", "Jayo", 0xE72F1D, "Red", SlotStatus::AVAILABLE, 23, 250.0f},
+        {"PLA", "Forshape", 0xF4C032, "Yellow", SlotStatus::AVAILABLE, 31, 800.0f},
+        {"ABS", "Snapmaker", 0x080A0D, "Black", SlotStatus::EMPTY, -1, 0.0f},
+    };
+    // ACE 1 (feeds head 0) — bay 0 is the seated one, matching heads[0].
+    const Bay ace1[4] = {
+        {"PETG", "Kingroon", 0x83AFFF, "Silver", SlotStatus::LOADED, 15, 502.0f},
+        {"PETG", "Kingroon", 0x8FA7C8, "Gray", SlotStatus::AVAILABLE, 10, 1000.0f},
+        {"PETG", "Generic", 0x632C2C, "Brick", SlotStatus::AVAILABLE, 41, 640.0f},
+        {"PETG", "Kingroon", 0xC47053, "Orange", SlotStatus::AVAILABLE, 17, 845.0f},
+    };
+    // ACE 2 (feeds head 1) — bay 2 is the seated one, matching heads[1]. A
+    // different bay on purpose: the seat must not be assumed to be bay 0.
+    const Bay ace2[4] = {
+        {"PLA", "Polymaker", 0x1E9E4A, "Green", SlotStatus::AVAILABLE, 51, 900.0f},
+        {"PLA", "eSUN", 0x19C3D6, "Cyan", SlotStatus::EMPTY, -1, 0.0f},
+        {"PLA", "Jayo", 0xE72F1D, "Red", SlotStatus::LOADED, 23, 250.0f},
+        {"TPU", "Overture", 0xFFFFFF, "White", SlotStatus::AVAILABLE, 62, 480.0f},
+    };
+
+    auto fill = [this](int gi, const Bay& b, int mapped_tool) {
+        auto* entry = slots_.get_mut(gi);
+        if (!entry) {
+            return;
+        }
+        entry->info.slot_index = gi;
+        entry->info.global_index = gi;
+        entry->info.material = b.material;
+        entry->info.brand = b.brand;
+        entry->info.color_rgb = b.color;
+        entry->info.color_name = b.color_name;
+        entry->info.status = b.status;
+        entry->info.spoolman_id = b.spoolman_id;
+        entry->info.remaining_weight_g = b.remaining;
+        entry->info.total_weight_g = b.remaining > 0.0f ? 1000.0f : -1.0f;
+        entry->info.mapped_tool = mapped_tool;
+        if (auto mat = filament::find_material(b.material)) {
+            entry->info.nozzle_temp_min = mat->nozzle_min;
+            entry->info.nozzle_temp_max = mat->nozzle_max;
+            entry->info.bed_temp = mat->bed_temp;
+        }
+    };
+
+    for (int i = 0; i < 4; ++i) {
+        fill(i, heads[i], i);
+        // Every bay of an ACE feeds the single head it is bound to — head mode.
+        fill(4 + i, ace1[i], 0);
+        fill(8 + i, ace2[i], 1);
+    }
+
+    multiace_seated_ = {{4, 10, -1, -1}}; // ACE 1 bay 0, ACE 2 bay 2
+
+    if (system_info_.units.size() >= 3) {
+        system_info_.units[0].topology = PathTopology::PARALLEL;
+        system_info_.units[0].name = "SnapSwap";
+        system_info_.units[0].display_name = "SnapSwap";
+        // A bound ACE is a combiner, not a fan: all four bays reach one head.
+        system_info_.units[1].topology = PathTopology::HUB;
+        system_info_.units[1].display_name = "ACE 2 Pro";
+        system_info_.units[2].topology = PathTopology::HUB;
+        system_info_.units[2].display_name = "ACE 2 Pro";
+    }
+    topology_ = PathTopology::PARALLEL;
+    // Populating AmsUnit::topology is NOT enough: compute_system_tool_layout()
+    // asks the BACKEND, and unit_topologies_ is what answers. Without this each
+    // ACE drew four separate nozzles all labelled with the same tool instead of
+    // the combiner it is — the very trap ams_backend_multiace.h warns about,
+    // walked into here.
+    unit_topologies_ = {PathTopology::PARALLEL, PathTopology::HUB, PathTopology::HUB};
+
+    system_info_.current_tool = 0;
+    system_info_.current_slot = 0;
+    system_info_.filament_loaded = true;
+}
+
+bool AmsBackendMock::change_tool_completes_load(int slot_index) const {
+    if (multiace_mode_) {
+        return slot_index < 4; // the U1's own heads; an ACE bay must be named
+    }
+    return AmsBackend::change_tool_completes_load(slot_index);
+}
+
+bool AmsBackendMock::can_unload_from_toolhead(int slot_index) const {
+    // Snapmaker/multiACE: only the four heads exist at a toolhead. An ACE bay
+    // stages filament for a head; it is never AT one. See the header.
+    if ((snapmaker_mode_ || multiace_mode_) && slot_index >= 4) {
+        return false;
+    }
+    return AmsBackend::can_unload_from_toolhead(slot_index);
+}
+
+AmsBackend::OperationStepModel
+AmsBackendMock::get_operation_step_model(StepOperationType op) const {
+    if (!snapmaker_mode_ && !multiace_mode_) {
+        return AmsBackend::get_operation_step_model(op);
+    }
+    // The U1's per-direction firmware sequence, phase ids and all, kept in step
+    // with AmsBackendSnapmaker::get_operation_step_model(). Reusing the real
+    // constants rather than literals so the two cannot drift apart silently.
+    const bool unload = (op == StepOperationType::UNLOAD);
+    const int base =
+        unload ? AmsBackendSnapmaker::UNLOAD_PHASE_BASE : AmsBackendSnapmaker::LOAD_PHASE_BASE;
+
+    // multiACE: a swap on an ACE-fed head is one operation with two halves. In
+    // this scenario heads 0 and 1 are the ACE-fed ones (set_multiace_mode()).
+    // Heads 0 and 1 are the ACE-fed ones in this scenario (set_multiace_mode()).
+    const bool ace_fed_head = multiace_mode_ && multiace_op_head_ >= 0 && multiace_op_head_ < 2;
+    if (multiace_mode_ && op == StepOperationType::LOAD_SWAP && ace_fed_head) {
+        OperationStepModel model;
+        model.steps.push_back(
+            {lv_tr("Home"), AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 0, false, false});
+        model.steps.push_back(
+            {lv_tr("Select"), AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 1, false, false});
+        model.steps.push_back({lv_tr("Heat nozzle"), AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 2,
+                               false, /*live_temp=*/true});
+        model.steps.push_back(
+            {lv_tr("Retract filament"), AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3, false, false});
+        model.steps.push_back(
+            {lv_tr("Feed filament"), AmsBackendSnapmaker::LOAD_PHASE_BASE + 3, false, false});
+        model.steps.push_back(
+            {lv_tr("Purge"), AmsBackendSnapmaker::LOAD_PHASE_BASE + 4, false, false});
+        return model;
+    }
+
+    OperationStepModel model;
+    model.steps.push_back({lv_tr("Home"), base + 0, false, false});
+    model.steps.push_back({lv_tr("Select"), base + 1, false, false});
+    model.steps.push_back({lv_tr("Heat nozzle"), base + 2, false, /*live_temp=*/true});
+    if (unload) {
+        model.steps.push_back({lv_tr("Retract"), base + 3, false, false});
+    } else {
+        model.steps.push_back({lv_tr("Feed filament"), base + 3, false, false});
+        model.steps.push_back({lv_tr("Purge"), base + 4, false, false});
+    }
+    return model;
+}
+
+lv_subject_t* AmsBackendMock::get_operation_step_index_subject(StepOperationType op) {
+    if (!snapmaker_mode_ && !multiace_mode_) {
+        return AmsBackend::get_operation_step_index_subject(op);
+    }
+    // Same subject the real U1 drives — the mock's simulated operation writes
+    // phases into AmsSystemInfo::operation_phase, which AmsState mirrors here.
+    return AmsState::instance().get_ams_operation_phase_subject();
+}
+
+std::optional<int> AmsBackendMock::slot_identity_owner_unit(int slot_index) const {
+    if (!multiace_mode_ || slot_index < 0 || slot_index >= 4) {
+        return std::nullopt;
+    }
+    // Heads 0 and 1 are ACE-fed; the ACE describes their spool. Wiring, not
+    // contents — it holds whether or not a bay is currently seated, which is
+    // what keeps the head from flipping back to a SnapSwap spool on unload.
+    if (slot_index == 0) {
+        return 1;
+    }
+    if (slot_index == 1) {
+        return 2;
+    }
+    return std::nullopt;
+}
+
+std::optional<int> AmsBackendMock::slot_identity_owner_slot(int slot_index) const {
+    if (!multiace_mode_ || slot_index < 0 ||
+        slot_index >= static_cast<int>(multiace_seated_.size())) {
+        return std::nullopt;
+    }
+    const int seated = multiace_seated_[static_cast<size_t>(slot_index)];
+    return seated >= 0 ? std::optional<int>(seated) : std::nullopt;
+}
+
 void AmsBackendMock::apply_remap_overrides(const std::string& csv) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!slots_.is_initialized()) {
@@ -2963,6 +3189,45 @@ void AmsBackendMock::set_action(AmsAction action, const std::string& detail) {
     system_info_.operation_detail = detail;
 }
 
+void AmsBackendMock::set_operation_phase(int phase) {
+    if (!snapmaker_mode_ && !multiace_mode_) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    system_info_.operation_phase = phase;
+}
+
+bool AmsBackendMock::run_multiace_swap_prologue(InterruptibleSleep interruptible_sleep) {
+    // The half a bay swap runs before the load: retract the seated bay back into
+    // its ACE, then the ACE-side fetch of the new one. Phase ids, not positions
+    // — the sidebar resolves them through the swap model, which is the whole
+    // point of the exercise.
+    const int step_ms = get_effective_delay_ms(HEATING_BASE_MS / 2, HEATING_VARIANCE);
+    struct Phase {
+        int id;
+        AmsAction action;
+        const char* detail;
+    };
+    const Phase prologue[] = {
+        {AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 0, AmsAction::UNLOADING, "Homing"},
+        {AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 1, AmsAction::UNLOADING, "Selecting toolhead"},
+        {AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 2, AmsAction::HEATING, "Heating nozzle"},
+        {AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3, AmsAction::UNLOADING, "Retracting filament"},
+    };
+    for (const auto& p : prologue) {
+        if (shutdown_requested_ || cancel_requested_) {
+            return false;
+        }
+        set_action(p.action, p.detail);
+        set_operation_phase(p.id);
+        emit_event(EVENT_STATE_CHANGED);
+        if (!interruptible_sleep(step_ms)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void AmsBackendMock::run_load_segment_animation(int slot_index,
                                                 InterruptibleSleep interruptible_sleep) {
     // Calculate per-segment delay
@@ -3050,10 +3315,33 @@ void AmsBackendMock::finalize_unload_state() {
 
 void AmsBackendMock::execute_load_operation(int slot_index,
                                             InterruptibleSleep interruptible_sleep) {
+    // A multiACE bay load onto a head that already holds a different bay is a
+    // SWAP: the backend emits ACE_UNLOAD_HEAD before ACE_LOAD_HEAD, so the
+    // simulation has to run both halves or the swap step bar has nothing to
+    // drive it and the mock cannot show the case it exists for.
+    if (multiace_mode_ && slot_index >= 4) {
+        bool head_occupied = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const int head = slot_index < 8 ? 0 : 1; // ACE 1 feeds head 0, ACE 2 head 1
+            multiace_op_head_ = head;
+            // slots_, NOT system_info_.units: the registry is where slot state
+            // actually lives on this backend (get_system_info() rebuilds the
+            // units from it). Reading the struct found a stale/empty slot, so
+            // the head never looked occupied and the swap prologue was skipped.
+            const auto* entry = slots_.get(head);
+            head_occupied = entry != nullptr && entry->info.status == SlotStatus::LOADED;
+        }
+        if (head_occupied && !run_multiace_swap_prologue(interruptible_sleep)) {
+            return;
+        }
+    }
+
     if (realistic_mode_) {
         // Phase 1: HEATING
         spdlog::debug("[AmsBackendMock] Load phase: HEATING");
         set_action(AmsAction::HEATING, "Heating nozzle for load");
+        set_operation_phase(AmsBackendSnapmaker::LOAD_PHASE_BASE + 2);
         emit_event(EVENT_STATE_CHANGED);
         if (!interruptible_sleep(get_effective_delay_ms(HEATING_BASE_MS, HEATING_VARIANCE)))
             return;
@@ -3067,6 +3355,7 @@ void AmsBackendMock::execute_load_operation(int slot_index,
     }
 
     // Segment animation (same for both modes)
+    set_operation_phase(AmsBackendSnapmaker::LOAD_PHASE_BASE + 3);
     run_load_segment_animation(slot_index, interruptible_sleep);
     if (shutdown_requested_ || cancel_requested_)
         return;
@@ -3075,6 +3364,7 @@ void AmsBackendMock::execute_load_operation(int slot_index,
         // Phase 3: PURGING (only if AMS supports it)
         spdlog::debug("[AmsBackendMock] Load phase: PURGING");
         set_action(AmsAction::PURGING, "Purging filament");
+        set_operation_phase(AmsBackendSnapmaker::LOAD_PHASE_BASE + 4);
         emit_event(EVENT_STATE_CHANGED);
         if (!interruptible_sleep(get_effective_delay_ms(PURGING_BASE_MS, PURGING_VARIANCE)))
             return;
@@ -3083,6 +3373,7 @@ void AmsBackendMock::execute_load_operation(int slot_index,
     }
 
     // Finalize
+    set_operation_phase(-1);
     finalize_load_state(slot_index);
 }
 
@@ -3091,6 +3382,7 @@ void AmsBackendMock::execute_unload_operation(InterruptibleSleep interruptible_s
         // Phase 1: HEATING (shorter - just for clean cut)
         spdlog::debug("[AmsBackendMock] Unload phase: HEATING");
         set_action(AmsAction::HEATING, "Heating for cut");
+        set_operation_phase(AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 2);
         emit_event(EVENT_STATE_CHANGED);
         if (!interruptible_sleep(get_effective_delay_ms(HEATING_BASE_MS / 2, HEATING_VARIANCE)))
             return;
@@ -3113,11 +3405,13 @@ void AmsBackendMock::execute_unload_operation(InterruptibleSleep interruptible_s
     }
 
     // Reverse segment animation
+    set_operation_phase(AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3);
     run_unload_segment_animation(interruptible_sleep);
     if (shutdown_requested_ || cancel_requested_)
         return;
 
     // Finalize
+    set_operation_phase(-1);
     finalize_unload_state();
 }
 

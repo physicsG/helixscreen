@@ -71,6 +71,22 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
 
     ~AmsBackendSnapmaker() override;
 
+    /// The U1's four heads are independent toolheads, each drawn and labelled
+    /// below its slot — so a "T3" badge on the spool repeats what the toolhead
+    /// already says, and did it twice on an ACE-fed head whose spool is a range.
+    /// Same reasoning AmsBackendToolChanger gives; the U1 simply never opted in.
+    [[nodiscard]] bool should_hide_slot_tool_badge() const override {
+        return true;
+    }
+
+    /// `print_task_config` carries filament_type and filament_vendor per head,
+    /// so the printer states what is loaded even though it stores no Spoolman
+    /// id (has_firmware_spool_persistence() is separately false). Inherited by
+    /// AmsBackendMultiAce, where the ACE's own table covers its bays.
+    [[nodiscard]] bool has_firmware_filament_identity() const override {
+        return true;
+    }
+
     [[nodiscard]] AmsType get_type() const override {
         return AmsType::SNAPMAKER;
     }
@@ -79,6 +95,21 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     [[nodiscard]] AmsSystemInfo get_system_info() const override;
     [[nodiscard]] SlotInfo get_slot_info(int slot_index) const override;
 
+    /// Phase-id space for the UNLOAD direction: 0=Home 1=Select 2=Heat 3=Retract.
+    static constexpr int UNLOAD_PHASE_BASE = 0;
+    /// Phase-id space for the LOAD direction (load / preload / manual_sta):
+    /// 10=Home 11=Select 12=Heat 13=Feed 14=Purge.
+    ///
+    /// Disjoint from the unload space ON PURPOSE. The two used to share 0..4,
+    /// justified by "only one operation is live at a time" -- true for a plain
+    /// load or a plain unload, and false for a SWAP, which runs both directions
+    /// inside one user-initiated operation. An unload phase then indexed
+    /// whatever bar happened to be on screen: on a multiACE bay swap,
+    /// `unload_doing` (3) highlighted the load model's "Feed filament" for the
+    /// length of the retract. Separate spaces make an index unambiguous, so one
+    /// bar can carry both halves and a mismatched phase is *recognisably*
+    /// foreign rather than silently plausible.
+    static constexpr int LOAD_PHASE_BASE = 10;
     // Operation step bar. The U1 firmware reports a granular channel_state that
     // classify_channel_state maps to a per-direction step index published via the
     // ams_operation_phase subject, so the step model and its driving index live in
@@ -141,18 +172,50 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     }
 
   public:
+    /// See AmsBackend::filament_ops_may_home(). do_load_filament() dispatches
+    /// `AUTO_FEEDING ... LOAD=1` (firmware's FEED_AUTO) and do_unload_filament()
+    /// its UNLOAD counterpart, both straight to firmware — neither routes
+    /// through ensure_homed_then(), and FEED_AUTO feeds without moving the
+    /// toolhead, so there is no unhomed axis for it to trip over. Inherited by
+    /// AmsBackendMultiAce, whose ACE-fed heads dispatch `ACE_LOAD_HEAD` the
+    /// same way.
+    [[nodiscard]] bool filament_ops_may_home() const override {
+        return false;
+    }
     // The base PARALLEL gate offers Unload for any tool with filament in its
     // buffer (is_present()). On the U1 that keeps offering Unload after a tool
     // is already unloaded — the firmware retracts the filament to the buffer
     // (channel_state preload_finish/unload_finish) but filament_exist stays
-    // true, so the slot remains AVAILABLE. Override to additionally require the
-    // channel_state load latch (loaded_at_toolhead_), which is true only while
-    // filament is loaded at the toolhead (between load_finish and the next
-    // unload_finish). The motion sensor was tried first but fails to clear after
-    // an unload on current firmware; channel_state is the authoritative signal
-    // (u1_channel_state_reference.md). Still offers Unload for every toolhead
-    // physically loaded (active or parked), preserving the per-tool unload fix.
+    // true, so the slot remains AVAILABLE. Override to ask three signals in
+    // turn, any one of which says "filament is AT this toolhead"
+    // (filament_present_at_tool_locked()):
+    //   1. the channel_state load latch (loaded_at_toolhead_) — sufficient, but
+    //      derived from a transition, so a restart leaves it false with filament
+    //      sitting in the head; gating on it alone made that filament
+    //      unremovable from the panel;
+    //   2. motion AND port sensor both present, unless a retraction has been
+    //      witnessed since (retraction_seen_ — the 20260608 firmware left the
+    //      motion sensor true after an unload; newer firmware clears it);
+    //   3. the MOUNTED head only: a spool in its channel (filament_exist), again
+    //      unless a retraction has been witnessed.
+    // Signals 2 and 3 are what let filament be removed after a restart. The
+    // cost, accepted knowingly: on 20260608 firmware a head unloaded BEFORE a
+    // restart still reads loaded (both sensors stay true, retraction_seen_ is
+    // process-local), so Unload is offered once for a head with nothing at the
+    // nozzle — a pointless heat-and-retract, not a wedge. Still offers Unload
+    // for every toolhead physically loaded (active or parked), preserving the
+    // per-tool unload fix.
     [[nodiscard]] bool can_unload_from_toolhead(int slot_index) const override;
+
+    // The U1 is a toolchanger: `PARK_EXTRUDER` returns the mounted head to its
+    // dock and leaves the filament where it is. It is firmware-native and ships
+    // with no description, so it does NOT appear in `gcode/help` — verified
+    // instead by its use in the machine's own `print_end` macro, bare and
+    // parameterless, right after the auto-unload.
+    [[nodiscard]] bool supports_toolhead_park() const override {
+        return true;
+    }
+    AmsError do_park_toolhead() override;
 
     // Recovery (not supported)
     AmsError recover() override;
@@ -238,7 +301,18 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
                                                    const std::map<int, int>& remap) const override;
 
     // Static parsers (public for testing)
-    static ExtruderToolState parse_extruder_state(const nlohmann::json& json);
+    /// Parse one extruder object into tool state.
+    ///
+    /// @param json  The (possibly PARTIAL) extruder object from a status frame.
+    /// @param prev  State to start from. Moonraker sends deltas, and an extruder
+    ///              emits `temperature` constantly, so most frames carry ONLY
+    ///              that — with a default-constructed start those frames erased
+    ///              state/park_pin/active_pin a fraction of a second after a
+    ///              toolchange set them, and the mounted tool stopped being
+    ///              elected. Seed with the previous state so absent keys are
+    ///              preserved rather than reset.
+    static ExtruderToolState parse_extruder_state(const nlohmann::json& json,
+                                                  ExtruderToolState prev = {});
     static SnapmakerRfidInfo parse_rfid_info(const nlohmann::json& json);
 
   protected:
@@ -248,12 +322,63 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
         return "[AMS Snapmaker]";
     }
 
+    /// Is `preload_finish` the LAST channel_state an unload of head @p head
+    /// will produce?
+    ///
+    /// On a stock feeder head it is not: an unload passes through
+    /// preload_finish (lane staged in the buffer) while the nozzle is still
+    /// heating, and resolving the action to IDLE there killed the step display
+    /// mid-heat (#u1-unload-steps). Only `unload_finish` ends it, so the parse
+    /// deliberately excludes preload_finish from the terminal branch.
+    ///
+    /// On an ACE-fed head there is no `unload_finish` to wait for. The ACE
+    /// performs the retract, the U1's own sequence runs
+    /// unload_picking → unload_heating → unload_doing → preload_finish and
+    /// stops, and the action stayed UNLOADING forever — which reads as "system
+    /// busy" and greys out Load/Unload on every slot of every unit, including
+    /// the ACE's own bays. Observed on hardware: `ACE_UNLOAD_HEAD HEAD=3`
+    /// dispatched correctly, the ACE came back `status: ready` with the bay
+    /// empty, and the UI sat on Unloading for 20 minutes.
+    ///
+    /// Default false — the stock behaviour, unchanged. AmsBackendMultiAce
+    /// answers true for heads it knows are ACE-fed.
+    ///
+    /// @warning CALLED WITH mutex_ HELD, from inside the channel_state parse.
+    /// An override MUST read state directly and MUST NOT call a public accessor
+    /// that locks — mutex_ is a plain std::mutex, so re-entering it deadlocks
+    /// the calling thread outright. That thread is the main one (the parse runs
+    /// from UpdateQueue::process_pending), so the whole UI freezes. This hook
+    /// only fires when a head reports preload_finish, which is the end of a
+    /// real unload — so the first override to get it wrong froze on hardware
+    /// and in no test.
+    [[nodiscard]] virtual bool preload_finish_ends_unload(int head) const {
+        (void)head;
+        return false;
+    }
+
+    /// The U1's fixed head count. Protected rather than private because
+    /// AmsBackendMultiAce derives from this backend and indexes the same four
+    /// heads; it is a compile-time constant of the hardware, not mutable state.
+    static constexpr int NUM_TOOLS = 4;
+
+    /// Validate slot index is within range. Protected for the same reason as
+    /// NUM_TOOLS — AmsBackendMultiAce overrides do_load_filament/
+    /// do_unload_filament and must apply the identical bounds check before
+    /// deciding whether the ACE or the native path owns the head.
+    AmsError validate_slot_index(int slot_index) const;
+
+    /// Layer the user's configured override over a slot. Protected because
+    /// AmsBackendMultiAce builds its ACE units AFTER this class's convergence
+    /// point has run, so those slots would otherwise never see the override
+    /// layer — a spool assigned to an ACE bay was written and then discarded.
+    void apply_overrides_for(SlotInfo& slot, int slot_index) {
+        apply_overrides(slot, slot_index);
+    }
+
   private:
     friend class ::SnapmakerTestAccess;
     friend class ::SnapmakerRealtimeTestAccess;
     friend class ::RunoutScopeTestAccess;
-
-    static constexpr int NUM_TOOLS = 4;
 
     /// Per-extruder cached state
     std::array<ExtruderToolState, NUM_TOOLS> extruder_states_;
@@ -268,6 +393,19 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// by get_filament_segment() / get_slot_filament_segment() to break the
     /// spool→toolhead line when the active tool has run out.
     std::array<bool, NUM_TOOLS> sensor_filament_present_{{true, true, true, true}};
+
+    /// What `print_task_config.filament_type` last said for each head.
+    ///
+    /// Needed to tell a real material EDIT from a side effect of binding a
+    /// Spoolman spool: apply_spool_to_slot() writes the spool's material into
+    /// SlotInfo, and set_slot_info(persist=true) then stamped
+    /// user_locked_material from "is the material non-empty", so simply linking
+    /// a spool silently locked a material against the printer's own report —
+    /// which apply_overrides then replayed forever. Compared against here so a
+    /// bind that agrees with firmware locks nothing. Mirrors the AD5X IFS
+    /// backend's last_firmware_color_ guard for the same class of self-inflicted
+    /// lock (#965).
+    std::array<std::string, NUM_TOOLS> last_firmware_material_{};
 
     /// Per-slot port/buffer sensor state — the filament_feed left/right
     /// .extruder{N}.filament_detected flag. Reads the physical-presence
@@ -302,10 +440,24 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// slot_has_filament_at_toolhead() and can_unload_from_toolhead(). The
     /// motion sensor (sensor_filament_present_) still owns mid-print runout —
     /// a different question ("did the ACTIVE lane run out during extrusion").
-    std::array<bool, NUM_TOOLS> loaded_at_toolhead_{{false, false, false, false}};
+    /// Set when the firmware POSITIVELY reported a retraction for this tool --
+    /// the terminal `unload_finish` / `preload_finish` states, never the idle
+    /// `wait_insert`. Cleared on load_finish and when the port sensor drops.
+    ///
+    /// Exists so the presence sensors can be believed by default while still
+    /// suppressing the old-firmware quirk (captured on U1 20260608) where the
+    /// motion sensor stayed true after an unload. On 20260722+ the sensors clear
+    /// themselves, so this is normally inert.
+    std::array<bool, NUM_TOOLS> retraction_seen_{{false, false, false, false}};
 
-    /// Validate slot index is within range
-    AmsError validate_slot_index(int slot_index) const;
+    /// "Filament is in this toolhead" -- the gate for Unload being offered and
+    /// for a slot reading LOADED. Any of three signals, in descending strength:
+    /// the witnessed-load latch; both presence sensors agreeing; or, for the
+    /// MOUNTED tool only, a spool in its channel (filament_exist). The last two
+    /// yield to a witnessed retraction. Caller must hold mutex_.
+    [[nodiscard]] bool filament_present_at_tool_locked(int slot_index) const;
+
+    std::array<bool, NUM_TOOLS> loaded_at_toolhead_{{false, false, false, false}};
 
     /// Layer a configured FilamentSlotOverride for `slot_index` over `slot`,
     /// mutating `slot` in place. Override wins for every non-default field.

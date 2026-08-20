@@ -224,6 +224,10 @@ translations:
   Auto-Detect: Auto-Detect
   Auto-Heat on Load: Auto-Heat on Load
   Auto-detect: Auto-detect
+  Auto-dry: Auto-dry
+  Auto-dry off: Auto-dry off
+  Auto-dry on: Auto-dry on
+  Auto-dry unchanged: Auto-dry unchanged
   Auto-install only works on local Moonraker: Auto-install only works on local Moonraker
   Auto-lock: Auto-lock
   Auto-poll for weight updates: Auto-poll for weight updates
@@ -630,6 +634,7 @@ translations:
   Could not save filament: Could not save filament
   Could not start Bluetooth discovery: Could not start Bluetooth discovery
   Could not update filaments: Could not update filaments
+  Could not update slot: Could not update slot
   Could not verify Spoolman status. Moonraker may still be restarting.: Could not
     verify Spoolman status. Moonraker may still be restarting.
   Couldn't update Spoolman — saved locally: Couldn't update Spoolman — saved locally
@@ -756,6 +761,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Downloading... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: Draw a ripple at each touch
     — helps diagnose offsets
+  Dries above %d%%, stops below %d%%: Dries above %d%%, stops below %d%%
   Drive Cal: Drive Cal
   Drop shadow strength (0 = disabled): Drop shadow strength (0 = disabled)
   Drying: Drying
@@ -1085,6 +1091,7 @@ translations:
   Flowguard: Flowguard
   Flying Toasters: Flying Toasters
   Follow active tool: Follow active tool
+  Follows unit %d: Follows unit %d
   Follow graph screen: Follow graph screen
   Forget: Forget
   Forget Network?: Forget Network?
@@ -1750,6 +1757,7 @@ translations:
   Open G-code command console: Open G-code command console
   Open LED color and brightness controls: Open LED color and brightness controls
   Open Source Licenses: Open Source Licenses
+  Open in ACE: Open in ACE
   Operation already in progress: Operation already in progress
   Operations: Operations
   Optimize Your Printing: Optimize Your Printing
@@ -2758,6 +2766,7 @@ translations:
   Toolhead: Toolhead
   Toolhead LED: Toolhead LED
   Toolhead Style: Toolhead Style
+  Toolhead command failed: Toolhead command failed
   Toolhead jam: Toolhead jam
   Toolhead, G-code, limits, and materials: Toolhead, G-code, limits, and materials
   Tools Used: Tools Used

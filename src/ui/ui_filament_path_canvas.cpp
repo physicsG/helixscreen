@@ -171,15 +171,33 @@ static void filament_path_click_cb(lv_event_t* e) {
         int32_t sensor_y = y_off + (int32_t)(height * PARALLEL_SENSOR_Y_RATIO);
         int32_t tool_scale = LV_MAX(6, data->theme.extruder_scale * 2 / 3);
 
-        // Toolhead click area (bottom half)
+        // Toolhead click area (bottom half). On a toolchanger the nozzle asks a
+        // different question from the spool above it — mount/park this head, vs
+        // what filament is in this lane — so it reports to toolhead_callback
+        // when one is registered. Panels that never set one keep the original
+        // behaviour: both regions go to slot_callback.
         int32_t hit_radius_y = tool_scale * 4;
         if (abs(point.y - toolhead_y) < hit_radius_y) {
             for (int i = 0; i < data->slot_count; i++) {
                 int32_t slot_x = x_off + get_slot_x(data, i, x_off);
                 int32_t hit_radius_x = LV_MAX(20, tool_scale * 3);
                 if (abs(point.x - slot_x) < hit_radius_x) {
-                    spdlog::debug("[FilamentPath] Toolhead {} clicked (parallel topology)", i);
-                    data->slot_callback(i, data->slot_user_data);
+                    if (data->toolhead_callback) {
+                        // Report the tool number ON THE BADGE, by the badge's own
+                        // rule (draw_slot_toolhead: mapped_tool when the canvas was
+                        // given one, else the lane) -- the same contract as the
+                        // system-path canvas. Reporting the raw lane while the
+                        // menu read it as a tool number acted on a different
+                        // head than the one tapped under ASSIGN_TOOL remapping.
+                        const int tool = (data->mapped_tool[i] >= 0) ? data->mapped_tool[i] : i;
+                        spdlog::debug("[FilamentPath] Toolhead T{} clicked (lane {}, parallel "
+                                      "topology)",
+                                      tool, i);
+                        data->toolhead_callback(tool, data->toolhead_user_data);
+                    } else {
+                        spdlog::debug("[FilamentPath] Toolhead {} clicked (parallel topology)", i);
+                        data->slot_callback(i, data->slot_user_data);
+                    }
                     return;
                 }
             }
@@ -610,6 +628,24 @@ void ui_filament_path_canvas_set_slot_callback(lv_obj_t* obj, filament_path_slot
     }
 }
 
+void ui_filament_path_canvas_set_mounted_tool(lv_obj_t* obj, int tool_index) {
+    auto* data = get_data(obj);
+    if (!data || data->mounted_tool == tool_index) {
+        return;
+    }
+    data->mounted_tool = tool_index;
+    layered_mark_dirty(obj, true, true);
+}
+
+void ui_filament_path_canvas_set_toolhead_callback(lv_obj_t* obj, filament_path_slot_cb_t cb,
+                                                   void* user_data) {
+    auto* data = get_data(obj);
+    if (data) {
+        data->toolhead_callback = cb;
+        data->toolhead_user_data = user_data;
+    }
+}
+
 void ui_filament_path_canvas_set_hub_callback(lv_obj_t* obj, hub_callback_t cb, void* user_data) {
     auto* data = get_data(obj);
     if (data) {
@@ -704,9 +740,18 @@ namespace helix::ui::fpath {
 
 void format_tool_badge_label(const FilamentPathData* data, int lane, int fallback_tool, char* out,
                              size_t out_size) {
+    // Always "T<n>" — a toolhead is what this labels, and T is what every
+    // surface that talks about one calls it (the U1's own UI, ACE_LOAD_HEAD
+    // HEAD=n, print_task_config's per-tool arrays). "E<n>" said extruder while
+    // pointing at a toolhead, and sat next to spool badges that said T, so the
+    // two letters read as two different numbering schemes for one thing.
+    //
+    // The extruder-derived NUMBER is still preferred, which is the half of
+    // #1229 that mattered: AFC's mapped_tool is a *virtual* lane alias and can
+    // disagree with the physical toolhead, while the extruder name cannot.
     if (data && data->use_extruder_identity && lane >= 0 && lane < FilamentPathData::MAX_SLOTS &&
         data->extruder_tool[lane] >= 0) {
-        snprintf(out, out_size, "E%d", data->extruder_tool[lane]);
+        snprintf(out, out_size, "T%d", data->extruder_tool[lane]);
         return;
     }
     snprintf(out, out_size, "T%d", fallback_tool);

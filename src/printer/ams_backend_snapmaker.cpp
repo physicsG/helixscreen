@@ -86,14 +86,18 @@ constexpr std::array<std::string_view, 8> KNOWN_SUB_TYPES = {
 //                   LOAD/UNLOAD/ERROR/IDLE status). LOADING covers preload/load/
 //                   manual feed; UNLOADING covers unload; ERROR covers *_fail;
 //                   IDLE covers none/inited/wait_insert/test and every *_finish.
-//  - phase:         step-bar step index into get_operation_step_model(op).
-//                   Per-direction (a state is unambiguously load/unload/manual by
-//                   prefix, so indices never collide across directions):
-//                     LOAD/manual/preload model (5 steps):
-//                       0=Home 1=Select 2=Heat 3=Feed 4=Purge
-//                     UNLOAD model (4 steps):
+//  - phase:         phase id matched against OperationStep::phase_id in
+//                   get_operation_step_model(op). Two DISJOINT spaces, one per
+//                   direction (a state is unambiguously load/unload/manual by
+//                   prefix), so one bar can carry both halves of a swap:
+//                     LOAD/manual/preload (LOAD_PHASE_BASE + n):
+//                       10=Home 11=Select 12=Heat 13=Feed 14=Purge
+//                     UNLOAD (UNLOAD_PHASE_BASE + n):
 //                       0=Home 1=Select 2=Heat 3=Retract
 //                   -1 = "no active step" (idle / *_finish / *_fail).
+//                   These are ids, NOT positions: the sidebar resolves them
+//                   through the model, so a phase the current model does not
+//                   declare holds the bar instead of jumping it somewhere wrong.
 //  - is_terminal:   a *_finish that ENDS the operation (resolves action → IDLE).
 //                   preload_finish is terminal-for-latch but does NOT end the op
 //                   (the nozzle may still be heating on a re-unload); the parse
@@ -124,6 +128,17 @@ struct ChannelStateInfo {
         constexpr auto UNLOAD = AmsAction::UNLOADING;
         constexpr auto IDLE = AmsAction::IDLE;
         constexpr auto ERR = AmsAction::ERROR;
+        // Phase ids, per direction. Spelled out rather than written as bare
+        // 0..4 twice so the two spaces cannot silently re-converge.
+        constexpr int U0 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 0; // Home
+        constexpr int U1 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 1; // Select
+        constexpr int U2 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 2; // Heat
+        constexpr int U3 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3; // Retract
+        constexpr int L0 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 0;   // Home
+        constexpr int L1 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 1;   // Select
+        constexpr int L2 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 2;   // Heat
+        constexpr int L3 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 3;   // Feed
+        constexpr int L4 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 4;   // Purge
         // {action, phase, is_terminal, is_fail, sets_loaded, clears_loaded, ignore}
         // --- idle / init ---
         add("none", {IDLE, -1, false, false, false, false, false});
@@ -131,41 +146,41 @@ struct ChannelStateInfo {
         add("wait_insert", {IDLE, -1, false, false, false, /*clear=*/true, false});
         add("test", {IDLE, -1, false, false, false, false, /*ignore=*/true});
         // --- preload (stage insert -> gear, NOT to nozzle) ---
-        add("preload_prepare", {LOAD, 0, false, false, false, false, false});
-        add("preload_feeding", {LOAD, 3, false, false, false, false, false});
+        add("preload_prepare", {LOAD, L0, false, false, false, false, false});
+        add("preload_feeding", {LOAD, L3, false, false, false, false, false});
         add("preload_finish", {IDLE, -1, /*terminal=*/true, false, false, /*clear=*/true, false});
         add("preload_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
         // --- load (feed to nozzle) ---
-        add("load_prepare", {LOAD, 0, false, false, false, false, false});
-        add("load_homing", {LOAD, 0, false, false, false, false, false});
-        add("load_picking", {LOAD, 1, false, false, false, false, false});
-        add("load_heating", {LOAD, 2, false, false, false, false, false});
-        add("load_feeding", {LOAD, 3, false, false, false, false, false});
-        add("load_extruding", {LOAD, 3, false, false, false, false, false});
-        add("load_flushing", {LOAD, 4, false, false, false, false, false});
+        add("load_prepare", {LOAD, L0, false, false, false, false, false});
+        add("load_homing", {LOAD, L0, false, false, false, false, false});
+        add("load_picking", {LOAD, L1, false, false, false, false, false});
+        add("load_heating", {LOAD, L2, false, false, false, false, false});
+        add("load_feeding", {LOAD, L3, false, false, false, false, false});
+        add("load_extruding", {LOAD, L3, false, false, false, false, false});
+        add("load_flushing", {LOAD, L4, false, false, false, false, false});
         add("load_finish", {IDLE, -1, /*terminal=*/true, false, /*set=*/true, false, false});
         add("load_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
         // --- unload (retract from nozzle) ---
-        add("unload_prepare", {UNLOAD, 0, false, false, false, false, false});
-        add("unload_homing", {UNLOAD, 0, false, false, false, false, false});
-        add("unload_picking", {UNLOAD, 1, false, false, false, false, false});
-        add("unload_heating", {UNLOAD, 2, false, false, false, false, false});
-        add("unload_heat_finish", {UNLOAD, 2, false, false, false, false, false});
-        add("unload_doing", {UNLOAD, 3, false, false, false, false, false});
+        add("unload_prepare", {UNLOAD, U0, false, false, false, false, false});
+        add("unload_homing", {UNLOAD, U0, false, false, false, false, false});
+        add("unload_picking", {UNLOAD, U1, false, false, false, false, false});
+        add("unload_heating", {UNLOAD, U2, false, false, false, false, false});
+        add("unload_heat_finish", {UNLOAD, U2, false, false, false, false, false});
+        add("unload_doing", {UNLOAD, U3, false, false, false, false, false});
         add("unload_finish", {IDLE, -1, /*terminal=*/true, false, false, /*clear=*/true, false});
         add("unload_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
         // --- manual feed (MANUAL_FEEDING) ---
-        add("manual_sta_prepare", {LOAD, 0, false, false, false, false, false});
-        add("manual_sta_homing", {LOAD, 0, false, false, false, false, false});
-        add("manual_sta_picking", {LOAD, 1, false, false, false, false, false});
-        add("manual_sta_prepare_finish", {LOAD, 1, false, false, false, false, false});
+        add("manual_sta_prepare", {LOAD, L0, false, false, false, false, false});
+        add("manual_sta_homing", {LOAD, L0, false, false, false, false, false});
+        add("manual_sta_picking", {LOAD, L1, false, false, false, false, false});
+        add("manual_sta_prepare_finish", {LOAD, L1, false, false, false, false, false});
         add("manual_sta_prepare_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
-        add("manual_sta_heating", {LOAD, 2, false, false, false, false, false});
-        add("manual_sta_extruding", {LOAD, 3, false, false, false, false, false});
-        add("manual_sta_extrude_finish", {LOAD, 3, false, false, false, false, false});
+        add("manual_sta_heating", {LOAD, L2, false, false, false, false, false});
+        add("manual_sta_extruding", {LOAD, L3, false, false, false, false, false});
+        add("manual_sta_extrude_finish", {LOAD, L3, false, false, false, false, false});
         add("manual_sta_extrude_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
-        add("manual_sta_flushing", {LOAD, 4, false, false, false, false, false});
-        add("manual_sta_flush_finish", {LOAD, 4, false, false, false, false, false});
+        add("manual_sta_flushing", {LOAD, L4, false, false, false, false, false});
+        add("manual_sta_flush_finish", {LOAD, L4, false, false, false, false, false});
         add("manual_sta_flush_fail", {ERR, -1, false, /*fail=*/true, false, false, false});
         // manual_sta_finish is a completed manual EXTRUDE, not a load — it ends
         // the op (IDLE) but does NOT set the loaded latch.
@@ -207,17 +222,21 @@ struct ChannelStateInfo {
     if (info.action == AmsAction::LOADING || info.action == AmsAction::UNLOADING) {
         // Mirrors the per-direction step models: load/manual/preload reach Feed(3)
         // then Purge(4); unload has no Purge step so its Move phase is Retract(3).
+        // The base is what keeps an unrecognised state in ITS OWN direction's
+        // phase space, the same as every state in the table above.
+        const int base = is_unload ? AmsBackendSnapmaker::UNLOAD_PHASE_BASE
+                                   : AmsBackendSnapmaker::LOAD_PHASE_BASE;
         if (ends_with("_homing") || ends_with("_prepare"))
-            info.phase = 0;
+            info.phase = base + 0;
         else if (ends_with("_picking"))
-            info.phase = 1;
+            info.phase = base + 1;
         else if (ends_with("_heating"))
-            info.phase = 2;
+            info.phase = base + 2;
         else if (ends_with("_flushing") && !is_unload)
-            info.phase = 4;
+            info.phase = base + 4;
         else if (ends_with("_doing") || ends_with("_feeding") || ends_with("_extruding") ||
                  ends_with("_flushing"))
-            info.phase = 3;
+            info.phase = base + 3;
     }
     spdlog::debug("[AmsBackendSnapmaker] unrecognized channel_state '{}' -> fallback action={} "
                   "phase={}",
@@ -331,15 +350,13 @@ SlotInfo AmsBackendSnapmaker::get_slot_info(int slot_index) const {
 
 AmsBackend::OperationStepModel
 AmsBackendSnapmaker::get_operation_step_model(StepOperationType op) const {
-    // Per-direction firmware step sequence. Each step's phase_id is the index the
-    // classifier (classify_channel_state) emits into system_info_.operation_phase,
-    // which the sidebar consumes directly as the current step index via the
-    // ams_operation_phase subject. Load and unload use different-length step lists;
-    // that is safe because only one backend + one operation is live at a time, so
-    // Snapmaker owns the whole index space (classify_channel_state maps load/manual/
-    // preload states into the LOAD indices and unload states into the UNLOAD ones).
+    // Per-direction firmware step sequence. Each step's phase_id is the id the
+    // classifier (classify_channel_state) emits into system_info_.operation_phase;
+    // the sidebar RESOLVES it through this model rather than using it as a
+    // position, so the two directions can carry disjoint id spaces (see
+    // LOAD_PHASE_BASE) and a foreign id holds the bar instead of moving it.
     //
-    //   LOAD  (5 steps): Home 0 -> Select 1 -> Heat 2 (live) -> Feed 3 -> Purge 4
+    //   LOAD  (5 steps): Home 10 -> Select 11 -> Heat 12 (live) -> Feed 13 -> Purge 14
     //     load_prepare/homing -> Home; load_picking -> Select; load_heating -> Heat;
     //     load_feeding/extruding -> Feed; load_flushing -> Purge.
     //     (preload and the manual_sta_* family reuse this load-direction model.)
@@ -347,18 +364,23 @@ AmsBackendSnapmaker::get_operation_step_model(StepOperationType op) const {
     //     unload_prepare/homing -> Home; unload_picking -> Select;
     //     unload_heating/heat_finish -> Heat; unload_doing -> Retract.
     //
-    // The Heat step (phase 2) shows a live nozzle temperature. All labels are
-    // wrapped in lv_tr() so they are translated and picked up by the string tooling.
+    // A plain U1 has no swap of its own -- every lane is PARALLEL and feeds its
+    // own nozzle -- so LOAD_SWAP is the load model here. AmsBackendMultiAce
+    // overrides that arm, where an ACE bay genuinely swaps.
+    //
+    // The Heat step shows a live nozzle temperature. All labels are wrapped in
+    // lv_tr() so they are translated and picked up by the string tooling.
     const bool unload = (op == StepOperationType::UNLOAD);
+    const int base = unload ? UNLOAD_PHASE_BASE : LOAD_PHASE_BASE;
     OperationStepModel model;
-    model.steps.push_back({lv_tr("Home"), 0, false, false});
-    model.steps.push_back({lv_tr("Select"), 1, false, false});
-    model.steps.push_back({lv_tr("Heat nozzle"), 2, false, /*live_temp=*/true});
+    model.steps.push_back({lv_tr("Home"), base + 0, false, false});
+    model.steps.push_back({lv_tr("Select"), base + 1, false, false});
+    model.steps.push_back({lv_tr("Heat nozzle"), base + 2, false, /*live_temp=*/true});
     if (unload) {
-        model.steps.push_back({lv_tr("Retract"), 3, false, false});
+        model.steps.push_back({lv_tr("Retract"), base + 3, false, false});
     } else {
-        model.steps.push_back({lv_tr("Feed filament"), 3, false, false});
-        model.steps.push_back({lv_tr("Purge"), 4, false, false});
+        model.steps.push_back({lv_tr("Feed filament"), base + 3, false, false});
+        model.steps.push_back({lv_tr("Purge"), base + 4, false, false});
     }
     return model;
 }
@@ -497,14 +519,51 @@ bool AmsBackendSnapmaker::can_unload_from_toolhead(int slot_index) const {
     if (!slot || !slot->is_present()) {
         return false;
     }
-    // Filament must be AT this toolhead, not merely parked in the buffer. The
-    // channel_state latch reads true only between load_finish and the next
-    // unload_finish/wait_insert/preload_finish. The per-tool motion sensor
-    // (e{N}_filament) is NOT a reliable load signal on current firmware — it
-    // stays true after an unload — so it must not gate Unload. Without the
-    // latch the menu kept offering Unload for an already-unloaded tool. See the
-    // header note + the u1_channel_state_reference.md live capture.
-    return loaded_at_toolhead_[slot_index];
+    return filament_present_at_tool_locked(slot_index);
+}
+
+bool AmsBackendSnapmaker::filament_present_at_tool_locked(int slot_index) const {
+    if (slot_index < 0 || slot_index >= NUM_TOOLS) {
+        return false;
+    }
+    // The witnessed-load latch is sufficient but NOT necessary. It is derived
+    // from a transition, so it only knows about loads this process saw happen:
+    // a Klipper restart, or starting the UI against an already-loaded machine,
+    // leaves it false with filament sitting in the toolhead. Gating Unload on it
+    // alone meant that filament could not be removed from the panel at all.
+    if (loaded_at_toolhead_[slot_index]) {
+        return true;
+    }
+    // Otherwise believe the hardware, but only when BOTH sensors agree. The
+    // motion sensor sits at the toolhead and answers the right question;
+    // requiring the port sensor too neutralises its default-true initialisation
+    // for slots that have no sensor configured.
+    //
+    // retraction_seen_ is the exception that keeps the old-firmware quirk
+    // handled: on U1 20260608 the motion sensor stayed true after an unload, so
+    // a positive unload_finish/preload_finish suppresses the sensors until the
+    // filament is reloaded or physically removed. Newer firmware clears the
+    // sensors itself, making this inert rather than version-gated.
+    if (sensor_filament_present_[slot_index] && port_sensor_filament_present_[slot_index] &&
+        !retraction_seen_[slot_index]) {
+        return true;
+    }
+    // Third signal: the MOUNTED head with a spool in its channel. The port
+    // sensor starts false and stays false until a filament_feed frame mentions
+    // this tool, so a machine that reports print_task_config but has not yet
+    // published filament_feed answers "nothing loaded" on the two sensor terms
+    // alone — the same false negative the latch had, one layer down.
+    //
+    // filament_exist (slot->is_present()) is a channel-level claim, not a
+    // nozzle-level one, so it is deliberately restricted to the tool actually on
+    // the carriage and still yields to a witnessed retraction. That keeps the
+    // case this whole chain exists to fix — a mounted but EMPTY head, where
+    // filament_exist is false — reading empty rather than as a full spool.
+    if (slot_index != system_info_.current_tool || retraction_seen_[slot_index]) {
+        return false;
+    }
+    const auto* slot = system_info_.get_slot_global(slot_index);
+    return slot != nullptr && slot->is_present();
 }
 
 bool AmsBackendSnapmaker::slot_has_filament_at_toolhead(int slot_index) const {
@@ -512,8 +571,9 @@ bool AmsBackendSnapmaker::slot_has_filament_at_toolhead(int slot_index) const {
     if (slot_index < 0 || slot_index >= NUM_TOOLS) {
         return false;
     }
-    // channel_state latch, NOT the motion sensor — see can_unload_from_toolhead.
-    return loaded_at_toolhead_[slot_index];
+    // The base contract is "filament present at this slot's toolhead" — see
+    // filament_present_at_tool_locked().
+    return filament_present_at_tool_locked(slot_index);
 }
 
 bool AmsBackendSnapmaker::slot_is_actively_loaded(int slot_index) const {
@@ -535,6 +595,14 @@ AmsError AmsBackendSnapmaker::do_change_tool(int tool_number) {
         return err;
 
     return execute_gcode(fmt::format("T{}", tool_number));
+}
+
+AmsError AmsBackendSnapmaker::do_park_toolhead() {
+    // No gate here: run_filament_op() has already refused a printing job and
+    // claimed the single in-flight slot, the same way it does for load/unload.
+    // Bare and parameterless — the firmware parks whichever head is on the
+    // carriage. Nothing to unload: a docked head keeps its filament.
+    return execute_gcode("PARK_EXTRUDER");
 }
 
 // ============================================================================
@@ -730,15 +798,20 @@ void AmsBackendSnapmaker::prepare_for_resume(int slot_index, ResumeReadyCallback
 // ============================================================================
 
 AmsError AmsBackendSnapmaker::set_slot_info(int slot_index, const SlotInfo& info, bool persist) {
-    auto err = validate_slot_index(slot_index);
-    if (err.result != AmsResult::SUCCESS)
-        return err;
-
+    // Deliberately NOT validate_slot_index(): that one bounds against NUM_TOOLS
+    // because the ops it guards (load, unload, select) address a U1 TOOLHEAD.
+    // Editing a spool addresses a SLOT, and a subclass can have more of them --
+    // multiACE's ACE bays are global slots 4..7. Rejecting them here is why
+    // assigning a spool to an ACE bay did nothing while still reporting
+    // "Slot 5 updated": this returned invalid_slot and both call sites ignored
+    // the error. Bound against the real slot count and resolve across units.
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto* slot = system_info_.units[0].get_slot(slot_index);
-        if (!slot)
-            return AmsErrorHelper::invalid_slot(slot_index, NUM_TOOLS - 1);
+        auto* slot = system_info_.get_slot_global(slot_index);
+        if (!slot) {
+            return AmsErrorHelper::invalid_slot(slot_index,
+                                                LV_MAX(0, system_info_.total_slots - 1));
+        }
 
         // Update the in-memory slot directly. Covers every SlotInfo field the
         // caller may set — a persist=false preview must not silently drop
@@ -806,7 +879,15 @@ AmsError AmsBackendSnapmaker::set_slot_info(int slot_index, const SlotInfo& info
             // when the user provided one; an explicit empty material means
             // "let bootstrap fill it on next firmware report."
             ovr.user_locked_color = true;
-            ovr.user_locked_material = !info.material.empty();
+            // Only a material that DISAGREES with firmware is a user choice.
+            // Binding a Spoolman spool routes through here with the spool's
+            // material in SlotInfo, so locking on "non-empty" alone made every
+            // spool link a permanent material override — the printer would
+            // report PLA at a head and the panel kept showing the bound spool's
+            // PETG. A bind that matches firmware now locks nothing.
+            ovr.user_locked_material =
+                !info.material.empty() && (slot_index < 0 || slot_index >= NUM_TOOLS ||
+                                           info.material != last_firmware_material_[slot_index]);
             // SlotInfo carries the user's edit OR the bound Spoolman spool's
             // filament profile; the material-DB fallback for fields left at 0
             // is applied at emit time inside resolved_temps(). Centralized in
@@ -951,8 +1032,11 @@ AmsError AmsBackendSnapmaker::disable_bypass() {
 // Static Parsers
 // ============================================================================
 
-ExtruderToolState AmsBackendSnapmaker::parse_extruder_state(const nlohmann::json& json) {
-    ExtruderToolState state;
+ExtruderToolState AmsBackendSnapmaker::parse_extruder_state(const nlohmann::json& json,
+                                                            ExtruderToolState prev) {
+    // Seeded with the previous state: every field below is written only when the
+    // key is present, so a partial delta leaves the rest intact. See the header.
+    ExtruderToolState state = std::move(prev);
 
     if (json.contains("state") && json["state"].is_string()) {
         state.state = json["state"].get<std::string>();
@@ -1049,16 +1133,12 @@ SnapmakerRfidInfo AmsBackendSnapmaker::parse_rfid_info(const nlohmann::json& jso
 // ============================================================================
 
 void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notification) {
-    // notify_status_update format: {"method":"notify_status_update","params":[{...}, timestamp]}
-    // Initial query responses send unwrapped status directly — handle both.
-    const nlohmann::json* status_ptr = &notification;
-    if (notification.contains("params") && notification["params"].is_array() &&
-        !notification["params"].empty()) {
-        status_ptr = &notification["params"][0];
-    }
-    const auto& status = *status_ptr;
-    if (!status.is_object())
+    // Wrapped notification or bare initial-query status: unwrap_status_notification()
+    // handles both, for this class and its multiACE subclass alike.
+    const nlohmann::json* status_ptr = unwrap_status_notification(notification);
+    if (!status_ptr)
         return;
+    const auto& status = *status_ptr;
 
     bool changed = false;
     // Set when the active-tool port-present flag changed this parse (#991), so
@@ -1089,20 +1169,16 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
         for (int i = 0; i < NUM_TOOLS; i++) {
             const auto& key = extruder_keys[i];
             if (status.contains(key) && status[key].is_object()) {
-                auto new_state = parse_extruder_state(status[key]);
+                auto new_state = parse_extruder_state(status[key], extruder_states_[i]);
 
-                // Update slot status based on extruder state (only if pin state changed)
-                auto* slot = system_info_.units[0].get_slot(i);
-                if (slot) {
-                    SlotStatus prev = slot->status;
-                    if (new_state.active_pin) {
-                        slot->status = SlotStatus::LOADED;
-                    } else if (new_state.park_pin) {
-                        slot->status = SlotStatus::AVAILABLE;
-                    }
-                    if (slot->status != prev)
-                        changed = true;
-                }
+                // Deliberately does NOT touch slot->status. active_pin/park_pin say
+                // which toolhead is on the carriage, not whether it holds
+                // filament, and conflating the two rendered the mounted tool's
+                // spool as full: T2 mounted and empty drew exactly like T3
+                // mounted and loaded. Slot status is owned by filament presence
+                // (print_task_config.filament_exist, below) and by the
+                // channel_state latch for "loaded at this toolhead"; the mount is
+                // carried separately in mount_state / mounted_tool.
 
                 extruder_states_[i] = std::move(new_state);
             }
@@ -1112,17 +1188,40 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
         // Only update when we have actual evidence — incremental status updates
         // may omit extruder/toolhead keys, so preserve the current value when
         // no relevant data is present (prevents oscillation between valid and -1).
-        bool has_extruder_data = false;
+        // The per-extruder pins are authoritative, and "every one PARKED" is a
+        // real answer, not an absence of one: the carriage is empty. That is
+        // exactly the state MountState::NONE exists to express — on a
+        // toolchanger every parked head may hold filament while the shuttle
+        // carries none.
+        //
+        // toolhead.extruder cannot say that. Klipper always names some extruder
+        // there (it defaults to "extruder"), so consulting it unconditionally
+        // elected T0 whenever nothing was mounted, forced its slot to LOADED,
+        // and set filament_loaded — the panel drew an empty parked tool as the
+        // active, loaded one, and the sidebar's Unload acted on it. Keep it as a
+        // fallback only for a frame that has never carried extruder objects.
+        bool has_pin_data = false;
         int active = -1;
         for (int i = 0; i < NUM_TOOLS; i++) {
-            if (extruder_states_[i].active_pin ||
-                (!extruder_states_[i].state.empty() && extruder_states_[i].state != "PARKED")) {
+            const auto& st = extruder_states_[i];
+            if (st.active_pin || st.park_pin || !st.state.empty()) {
+                has_pin_data = true;
+            }
+            if (st.active_pin || (!st.state.empty() && st.state != "PARKED")) {
                 active = i;
-                has_extruder_data = true;
                 break;
             }
         }
-        if (status.contains("toolhead") && status["toolhead"].is_object()) {
+        if (spdlog::should_log(spdlog::level::trace)) {
+            for (int i = 0; i < NUM_TOOLS; i++) {
+                const auto& st = extruder_states_[i];
+                spdlog::trace("[AmsBackendSnapmaker] T{} state='{}' park={} active={} -> "
+                              "pin_data={} elected={}",
+                              i, st.state, st.park_pin, st.active_pin, has_pin_data, active);
+            }
+        }
+        bool has_extruder_data = has_pin_data;
+        if (!has_pin_data && status.contains("toolhead") && status["toolhead"].is_object()) {
             const auto& th = status["toolhead"];
             if (th.contains("extruder") && th["extruder"].is_string()) {
                 auto ext_name = th["extruder"].get<std::string>();
@@ -1144,12 +1243,24 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
             }
             system_info_.current_tool = active;
             system_info_.current_slot = active; // 1:1 tool-to-slot on Snapmaker
-            system_info_.filament_loaded = (active >= 0);
-            // Mark active tool's slot as LOADED
+            system_info_.mount_state = (active >= 0) ? MountState::MOUNTED : MountState::NONE;
+            system_info_.mounted_tool = active;
+            // Mounted is not loaded. `active >= 0` said "a tool is on the
+            // carriage", which the sidebar and the Unload gate both read as
+            // "filament is at a nozzle" — so an empty mounted tool offered an
+            // Unload that had nothing to retract. The channel_state latch is the
+            // per-tool answer to the actual question.
+            system_info_.filament_loaded =
+                (active >= 0 && active < NUM_TOOLS) && loaded_at_toolhead_[active];
+            // Mounting a tool does not load it. This used to promote the newly
+            // active slot to LOADED, which is how an empty mounted head came to
+            // render as a full spool. LOADED now means "filament reached THIS
+            // toolhead", which only the channel_state latch can attest.
             if (active >= 0 && active < NUM_TOOLS) {
                 auto* slot = system_info_.units[0].get_slot(active);
                 if (slot && slot->status != SlotStatus::EMPTY) {
-                    slot->status = SlotStatus::LOADED;
+                    slot->status =
+                        loaded_at_toolhead_[active] ? SlotStatus::LOADED : SlotStatus::AVAILABLE;
                 }
             }
             changed = true;
@@ -1228,6 +1339,22 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
             }
         }
 
+        // Frame-scoped election for the step-bar phase, applied once after every
+        // channel has been read.
+        //
+        // It used to be assigned inside the loop, so the LAST channel carrying a
+        // channel_state won. That is right only because status frames are
+        // normally DELTAS naming just the channel that moved. On a full query --
+        // the initial objects/query, and every reconnect -- all four channels are
+        // present, and the idle ones that follow the operating head in the loop
+        // overwrote its phase with -1, blanking the step bar mid-operation.
+        //
+        // One head operates at a time, so "the first channel reporting an ACTIVE
+        // phase wins, and -1 survives only when no channel reported one" is the
+        // whole rule.
+        int frame_phase = -1;
+        bool frame_phase_seen = false;
+
         // Parse filament_feed left/right — top-level Klipper objects (not nested in
         // filament_detect) Each contains per-extruder state: filament_detected, channel_state,
         // channel_error
@@ -1258,6 +1385,12 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                             // is orthogonal to the port sensor reading.
                             if (i >= 0 && i < NUM_TOOLS) {
                                 port_sensor_filament_present_[i] = detected;
+                                // Filament physically gone: any earlier
+                                // retraction claim is spent, so a re-insert is
+                                // judged on the sensors again.
+                                if (!detected) {
+                                    retraction_seen_[i] = false;
+                                }
                             }
                             auto* slot = system_info_.units[0].get_slot(i);
                             if (slot) {
@@ -1287,17 +1420,17 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                         auto error = helix::json_util::safe_string(ch, "channel_error", "ok");
                         const ChannelStateInfo info = classify_channel_state(state);
 
-                        // Mirror the granular firmware sub-phase into the system
-                        // info so the sidebar step bar can show the real
+                        // Mirror the granular firmware sub-phase into the frame's
+                        // election so the sidebar step bar can show the real
                         // Home/Select/Heat/Move sequence. -1 for any non-active
-                        // state (idle, *_finish, *_fail, preload_finish). Updated
+                        // state (idle, *_finish, *_fail, preload_finish). Recorded
                         // only when the firmware actually reports a channel_state,
                         // so an incremental status omitting it doesn't clear the
                         // phase spuriously.
                         if (!state.empty()) {
-                            if (system_info_.operation_phase != info.phase) {
-                                system_info_.operation_phase = info.phase;
-                                changed = true;
+                            frame_phase_seen = true;
+                            if (info.phase >= 0 && frame_phase < 0) {
+                                frame_phase = info.phase;
                             }
                         }
 
@@ -1315,6 +1448,17 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                             } else if (info.clears_loaded && loaded_at_toolhead_[i]) {
                                 loaded_at_toolhead_[i] = false;
                                 changed = true;
+                            }
+                            // A POSITIVE retraction is a terminal clear
+                            // (unload_finish / preload_finish). `wait_insert`
+                            // also clears the latch but is merely the idle
+                            // state -- treating it as a retraction claim is
+                            // what made a machine that had simply restarted
+                            // look unloaded.
+                            if (info.sets_loaded) {
+                                retraction_seen_[i] = false;
+                            } else if (info.clears_loaded && info.is_terminal) {
+                                retraction_seen_[i] = true;
                             }
                         }
 
@@ -1419,7 +1563,17 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                                 // killed the unload step display mid-heat
                                 // (#u1-unload-steps). Only the true terminals resolve
                                 // the action to IDLE.
-                                if (state != "preload_finish") {
+                                //
+                                // Unless this head has no unload_finish coming at
+                                // all -- an ACE-fed head ends its unload here,
+                                // because the ACE did the retract. Scoped to
+                                // UNLOADING: a load's pass through preload_finish
+                                // is still mid-sequence and must not resolve, which
+                                // is the very bug the exclusion above exists for.
+                                const bool ace_unload_ends_here =
+                                    system_info_.action == AmsAction::UNLOADING &&
+                                    preload_finish_ends_unload(i);
+                                if (state != "preload_finish" || ace_unload_ends_here) {
                                     if (system_info_.action == AmsAction::LOADING ||
                                         system_info_.action == AmsAction::UNLOADING) {
                                         system_info_.action = AmsAction::IDLE;
@@ -1451,6 +1605,11 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                     }
                 }
             }
+        }
+
+        if (frame_phase_seen && system_info_.operation_phase != frame_phase) {
+            system_info_.operation_phase = frame_phase;
+            changed = true;
         }
 
         // Parse print_task_config — authoritative filament info from Snapmaker's task manager
@@ -1486,6 +1645,9 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
                     auto* slot = system_info_.units[0].get_slot(i);
                     if (slot) {
                         auto type = type_arr[i].get<std::string>();
+                        // Remember firmware's own word before any override layers
+                        // over it — see last_firmware_material_.
+                        last_firmware_material_[i] = type;
                         slot->material = type; // Base type only (e.g., "PLA") for compact display
                         changed = true;
                     }
@@ -1587,18 +1749,10 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
             }
         }
 
-        // If the active tool's filament sensor reports runout, the global
-        // filament_loaded flag (used by get_filament_segment) should reflect that.
-        // The pin-state path above sets filament_loaded=(active>=0) — override
-        // here so the canvas's spool→toolhead line breaks on runout even though
-        // the tool itself is still "active".
-        if (system_info_.current_tool >= 0 && system_info_.current_tool < NUM_TOOLS &&
-            !sensor_filament_present_[system_info_.current_tool]) {
-            if (system_info_.filament_loaded) {
-                system_info_.filament_loaded = false;
-                changed = true;
-            }
-        }
+        // The active tool's runout used to clear filament_loaded here. It now
+        // rides in the single per-frame recompute at the tail of this function,
+        // which runs after this block and would otherwise put the flag straight
+        // back on the strength of the loaded latch.
 
         // Per-slot runout demotion: any slot whose motion sensor reports
         // no filament should be AVAILABLE (spool present, ready to feed), not
@@ -1685,6 +1839,52 @@ void AmsBackendSnapmaker::handle_status_update(const nlohmann::json& notificatio
             port_present_changed = true;
         }
 
+        // Recompute "is the mounted tool loaded" from the WHOLE frame.
+        //
+        // This used to live inside the election's `active != current_tool`
+        // guard, so it only ran on a tool CHANGE. Presence arrives from
+        // filament_feed, which is parsed after the extruder objects, so on the
+        // frame that elects a tool the sensors are still from the previous one
+        // -- and with no further tool change the stale answer was never
+        // revisited. A head could hold filament all day and the sidebar would
+        // keep saying nothing was loaded.
+        //
+        // This is the single owner of filament_loaded. It runs at the tail of
+        // every frame, so any earlier site that also wrote the field would be
+        // silently overruled here -- which is exactly how the motion-sensor
+        // runout clear (once its own block, just above the per-slot demotion
+        // loop) came to be undone by the latch. The runout term is folded in
+        // below instead.
+        {
+            const int mounted = system_info_.current_tool;
+            const bool at_toolhead = (mounted >= 0) && filament_present_at_tool_locked(mounted);
+            // A runout breaks the path to the nozzle even though filament is
+            // still AT the toolhead for unload purposes -- which is why the
+            // motion sensor gates filament_loaded here and not
+            // filament_present_at_tool_locked(). Unload must stay offered after
+            // a runout; the canvas's spool->toolhead line must still break.
+            const bool now_loaded = at_toolhead && sensor_filament_present_[mounted];
+            if (system_info_.filament_loaded != now_loaded) {
+                system_info_.filament_loaded = now_loaded;
+                changed = true;
+            }
+            // The mounted slot's status had the identical staleness: the
+            // election wrote it once, on a tool CHANGE, so a load that completed
+            // while the tool stayed put left the slot reading AVAILABLE forever.
+            // EMPTY is preserved -- that is the presence answer from
+            // filament_exist, a different question from where the filament is.
+            if (mounted >= 0 && mounted < NUM_TOOLS) {
+                auto* slot = system_info_.units[0].get_slot(mounted);
+                if (slot && slot->status != SlotStatus::EMPTY) {
+                    const auto want = now_loaded ? SlotStatus::LOADED : SlotStatus::AVAILABLE;
+                    if (slot->status != want) {
+                        slot->status = want;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
     } // Release mutex_ before emitting event
 
     if (port_present_changed) {
@@ -1738,6 +1938,14 @@ void AmsBackendSnapmaker::apply_overrides(SlotInfo& slot, int slot_index) {
     const auto [own_old_id, own_new_id] = own_write_expectation(slot_index, slot.spoolman_id);
     opts.suppress_rebind_firmware_old_id = own_old_id;
     opts.suppress_rebind_firmware_new_id = own_new_id;
+    // print_task_config states filament_type per head, so firmware is the truth
+    // about what is physically loaded there and an override may only replace a
+    // material firmware NAMED when the user explicitly locked one. Without this
+    // a head the printer reported as PLA displayed PETG indefinitely, and an
+    // empty head ("NONE") showed the last spool bound to it. ACE bays are
+    // unaffected: print_task_config covers only the four heads, so their
+    // material arrives empty and the override is the only source.
+    opts.firmware_states_material = has_firmware_filament_identity();
     const auto result = helix::ams::merge_override(slot, it->second, opts);
     if (result.cleared_rebind || result.cleared_eject) {
         overrides_.erase(it);

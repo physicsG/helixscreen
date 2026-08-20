@@ -519,6 +519,10 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
     }
     ui_filament_path_canvas_set_active_slot(canvas, active_slot);
 
+    // Which head is on the carriage. A unit-scoped HUB view draws one nozzle and
+    // cannot otherwise say whether it is the mounted one.
+    ui_filament_path_canvas_set_mounted_tool(canvas, info.mounted_tool);
+
     // Set filament color from active slot
     int global_active = (unit_index >= 0) ? active_slot + slot_offset : active_slot;
     if (global_active >= 0) {
@@ -549,8 +553,17 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
     // Plumb per-slot metadata (mapped_tool, extruder identity, hub routing) to
     // path canvas. The extruder name is what actually names a toolhead; the
     // mapped_tool alias stays as the fallback for backends that publish neither.
-    if (unit_index >= 0 && unit_index < static_cast<int>(info.units.size())) {
-        const auto& unit = info.units[unit_index];
+    //
+    // mapped_tool and the extruder identity go to the WHOLE-SYSTEM view too
+    // (slot_offset 0, every slot): the badges are the same rule there, and the
+    // toolhead menu reads the tapped badge's number back off the canvas, so an
+    // unplumbed whole-system view badged a remapped lane with its lane index
+    // and the menu then acted on the head that number really names. Only hub
+    // routing is a per-unit property and stays unit-scoped.
+    {
+        const AmsUnit* unit = (unit_index >= 0 && unit_index < static_cast<int>(info.units.size()))
+                                  ? &info.units[static_cast<size_t>(unit_index)]
+                                  : nullptr;
         std::vector<int> extruder_tools(static_cast<size_t>(slot_count), -1);
         for (int i = 0; i < slot_count; ++i) {
             int gi = slot_offset + i;
@@ -559,8 +572,8 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
             if (const auto n = helix::tool_number_for_extruder(slot.extruder_name)) {
                 extruder_tools[static_cast<size_t>(i)] = *n;
             }
-            if (i < static_cast<int>(unit.lane_is_hub_routed.size())) {
-                ui_filament_path_canvas_set_slot_hub_routed(canvas, i, unit.lane_is_hub_routed[i]);
+            if (unit && i < static_cast<int>(unit->lane_is_hub_routed.size())) {
+                ui_filament_path_canvas_set_slot_hub_routed(canvas, i, unit->lane_is_hub_routed[i]);
             }
         }
         ui_filament_path_canvas_set_extruder_tools(canvas, extruder_tools.data(), slot_count);
@@ -671,7 +684,14 @@ void ams_detail_pre_show_env_indicator(AmsDetailWidgets& w, int unit_index) {
     lv_obj_set_user_data(w.env_indicator, reinterpret_cast<void*>(static_cast<intptr_t>(u)));
 
     auto* backend = AmsState::instance().get_backend();
-    if (backend && backend->has_environment_sensors()) {
+    // Backend capability alone is not enough once units within one system
+    // differ: on multiACE the ACEs have sensors and the U1 itself does not.
+    // The component already hides itself via bind_flag_if_eq on $visible, so
+    // showing unconditionally here would UNDO that binding for a sensor-less
+    // unit and leave an empty badge until the subject next changed.
+    lv_subject_t* vis = AmsState::instance().get_env_ind_visible_subject(u);
+    const bool unit_has_env = !vis || lv_subject_get_int(vis) != 0;
+    if (backend && backend->has_environment_sensors() && unit_has_env) {
         lv_obj_remove_flag(w.env_indicator, LV_OBJ_FLAG_HIDDEN);
         // Force layout on the root (flex row container) so the indicator's
         // content width is resolved before slot creation reads available_width.
@@ -783,7 +803,9 @@ bool ams_dispatch_backend_action(AmsContextMenu::MenuAction action, int slot,
                 static_cast<helix::printer::AmsBackendCfs*>(backend)->clear_box_slot_profile(slot);
             }
 #endif
-            NOTIFY_INFO(lv_tr("Slot {} spool cleared"), slot + 1);
+            // The badge's spool number, not slot + 1 — see
+            // AmsBackend::spool_display_number().
+            NOTIFY_INFO(lv_tr("Slot {} spool cleared"), backend->spool_display_number(slot));
         } else {
             notify_ams_error(error, lv_tr("Clear failed"));
         }

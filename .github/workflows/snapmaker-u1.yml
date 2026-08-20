@@ -1,0 +1,296 @@
+# Snapmaker U1 — cross-compile, package, and (on a u1-v* tag) publish.
+#
+# Why this exists next to release.yml: release.yml already knows how to build
+# this platform, but it fires only on a `v*` tag and its downstream jobs need
+# secrets a fork does not have (R2_*, Android signing, WEBSITE_DISPATCH_TOKEN).
+# This workflow is the same toolchain + build + package steps with nothing that
+# can fail for lack of a secret, so a fork can produce an installable U1 build
+# from a branch push or a button press.
+#
+# Deliberately NOT triggered by `v*`: that is upstream's release tag, and a fork
+# pushing one would start release.yml too, which then fails on the missing
+# secrets. Fork releases use `u1-v<version>` (e.g. u1-v0.99.114).
+name: Snapmaker U1
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+      - 'fix/**'
+    # A `u1-v*` tag additionally publishes a GitHub Release on this repo (see
+    # the publish job).
+    tags:
+      - 'u1-v*'
+    # No paths-ignore here on purpose: GitHub applies path filters to TAG pushes
+    # too, so a release tag landing on a docs-only commit would silently not
+    # build. Skipping a few docs-push builds is not worth a release that
+    # quietly does nothing. The PR trigger below keeps the filter.
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+concurrency:
+  group: snapmaker-u1-${{ github.ref }}
+  # A tag build ends in a published release — never cancel one of those.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: Build (Snapmaker U1)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+
+      - name: Initialize submodules
+        uses: ./.github/actions/init-submodules
+
+      # The runner ships nearly full of preinstalled SDKs we never use, and the
+      # cross-compile writes assembler temps + ccache to the root partition.
+      - name: Free up disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # The U1 links with -flto, so the final ld is one large process; release.yml
+      # learned the hard way (v0.99.110, exit 137) that the runner's RAM is not
+      # reliably enough for a peak like that. Swap makes it page instead of dying.
+      - name: Add swap for the link peak
+        run: |
+          free -h
+          sudo fallocate -l 16G /swapfile-helix || sudo dd if=/dev/zero of=/swapfile-helix bs=1M count=16384
+          sudo chmod 600 /swapfile-helix
+          sudo mkswap /swapfile-helix
+          sudo swapon /swapfile-helix
+          free -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Unlike release.yml (which runs on a tag ref, whose cache scope is always
+      # empty and must not save), this runs on a branch — so it can both restore
+      # and save, and the second run on a branch is substantially faster.
+      - name: ccache
+        uses: actions/cache@v5
+        with:
+          path: /tmp/.ccache-snapmaker-u1
+          key: ccache-snapmaker-u1-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-snapmaker-u1-${{ github.ref_name }}-
+            ccache-snapmaker-u1-
+
+      - name: Configure ccache
+        run: |
+          mkdir -p /tmp/.ccache-snapmaker-u1
+          printf 'max_size = 2G\ncompression = true\n' > /tmp/.ccache-snapmaker-u1/ccache.conf
+
+      # Debian Trixie + apt crossbuild-essential-arm64. No tarball fetch, no
+      # private registry, no secret — which is why this platform is the one a
+      # fork can build unaided.
+      - name: Build toolchain image
+        run: |
+          docker buildx build \
+            --cache-from type=gha,scope=toolchain-snapmaker-u1 \
+            --cache-to type=gha,mode=max,scope=toolchain-snapmaker-u1 \
+            --load \
+            -t helixscreen/toolchain-snapmaker-u1 \
+            -f docker/Dockerfile.snapmaker-u1 \
+            docker/
+
+      - name: Cross-compile for Snapmaker U1
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}":/src \
+            -v /tmp/.ccache-snapmaker-u1:/root/.cache/ccache \
+            -w /src \
+            helixscreen/toolchain-snapmaker-u1 \
+            make PLATFORM_TARGET=snapmaker-u1 SKIP_OPTIONAL_DEPS=1 -j$(nproc)
+
+      - name: Show ccache stats
+        run: |
+          docker run --rm \
+            -v /tmp/.ccache-snapmaker-u1:/root/.cache/ccache \
+            helixscreen/toolchain-snapmaker-u1 \
+            ccache -s
+
+      # The container runs as root; everything after this is host-side.
+      - name: Fix build directory ownership
+        run: sudo chown -R $(id -u):$(id -g) build/
+
+      # The device's own CA bundle is not guaranteed to be current, so the local
+      # `make snapmaker-u1-docker` target extracts the image's. release.yml has
+      # no equivalent, so CI tarballs have been shipping without certs/ — and
+      # release-snapmaker-u1 only includes the file if it is already there.
+      - name: Extract CA certificates for HTTPS on device
+        run: |
+          mkdir -p build/snapmaker-u1/certs
+          docker run --rm helixscreen/toolchain-snapmaker-u1 \
+            cat /etc/ssl/certs/ca-certificates.crt > build/snapmaker-u1/certs/ca-certificates.crt
+          test -s build/snapmaker-u1/certs/ca-certificates.crt
+
+      - name: Verify the binary is a U1 binary
+        run: |
+          set -e
+          bin=build/snapmaker-u1/bin/helix-screen
+          test -f "$bin"
+          file "$bin"
+          # aarch64, and dynamically linked against glibc (the U1 target is
+          # hybrid: static libstdc++/libgcc, dynamic libc/libdrm).
+          file "$bin" | grep -q 'ARM aarch64'
+          ls -lh "$bin"
+
+      - name: Generate pre-rendered images
+        run: make venv-setup && make gen-all-images
+
+      - name: Package release
+        run: make release-snapmaker-u1
+
+      # The zip is the important one: its name is version-less by design
+      # (helixscreen-snapmaker-u1.zip), which is what the installer looks for
+      # first at every transport and what Moonraker's update manager needs.
+      - name: Show packaged contents
+        run: |
+          ls -lh releases/
+          unzip -l releases/helixscreen-snapmaker-u1.zip | head -30
+
+      - name: Upload U1 build
+        uses: actions/upload-artifact@v7
+        with:
+          name: helixscreen-snapmaker-u1
+          path: |
+            releases/helixscreen-snapmaker-u1.zip
+            releases/helixscreen-snapmaker-u1-*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload symbol map
+        uses: actions/upload-artifact@v7
+        with:
+          name: symbols-snapmaker-u1
+          path: |
+            build/snapmaker-u1/bin/helix-screen.sym
+            build/snapmaker-u1/bin/helix-screen.debug
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ==========================================================================
+  # Publish a GitHub Release on THIS repo, so scripts/install-fork.sh (and the
+  # printer's Moonraker update manager) have something to download.
+  #
+  # Only on a `u1-v*` tag. Uses the automatic GITHUB_TOKEN — no configured
+  # secret — so it works on a fork out of the box.
+  # ==========================================================================
+  publish:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/u1-v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+
+      - name: Download build
+        uses: actions/download-artifact@v8
+        with:
+          name: helixscreen-snapmaker-u1
+          path: release-files
+
+      # The installer resolves a version to
+      #   .../releases/download/<tag>/helixscreen-snapmaker-u1-<tag>.tar.gz
+      # (and the version-less .zip, which it tries FIRST and which therefore
+      # works whatever the tag is called). `make release-snapmaker-u1` names the
+      # tarball from VERSION.txt, so unless the tag matches that exactly, the
+      # tar URL 404s and only the zip resolves. Add a correctly-named copy so
+      # both do — belt and braces, and it costs one hardlink.
+      - name: Name the tarball after the tag
+        run: |
+          set -eu
+          cd release-files
+          tag="${GITHUB_REF_NAME}"
+          want="helixscreen-snapmaker-u1-${tag}.tar.gz"
+          have=$(ls helixscreen-snapmaker-u1-*.tar.gz | head -1)
+          if [ "$have" != "$want" ]; then
+            cp "$have" "$want"
+            echo "Added $want (built as $have)"
+          fi
+          ls -lh
+
+      # Ship BOTH installers with the build, exactly as upstream ships install.sh
+      # with its releases. install-fork.sh fetches install.sh from
+      # releases/latest/download/ first, so the installer that runs is the one
+      # that built the binary it installs — and it exists exactly when there is
+      # something to install, unlike a branch's raw file.
+      - name: Stage the installers
+        run: cp scripts/install-fork.sh scripts/install.sh release-files/
+
+      - name: Checksums
+        run: |
+          cd release-files
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Write release notes
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          cat > release-notes.md <<EOF
+          Snapmaker U1 build from \`${GITHUB_REPOSITORY}\` @ \`${GITHUB_SHA}\`.
+
+          Unofficial fork build — not an upstream HelixScreen release.
+
+          ## Install (on the printer)
+
+          \`\`\`sh
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-fork.sh | sh
+          \`\`\`
+
+          Or, with the archive already copied to the printer:
+
+          \`\`\`sh
+          sh install-fork.sh --local helixscreen-snapmaker-u1.zip
+          \`\`\`
+
+          ## Checksums
+
+          \`\`\`
+          $(cat release-files/SHA256SUMS)
+          \`\`\`
+          EOF
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          draft: false
+          # NOT a prerelease, deliberately. GitHub's /releases/latest (both the
+          # API the installer discovers versions through and the
+          # releases/latest/download/ URLs above) resolves to the newest
+          # NON-prerelease — a prerelease-only repo has no "latest" at all, and
+          # a fork install would fail to find any version. The notes already say
+          # this is an unofficial fork build.
+          prerelease: false
+          files: |
+            release-files/helixscreen-snapmaker-u1.zip
+            release-files/helixscreen-snapmaker-u1-*.tar.gz
+            release-files/install-fork.sh
+            release-files/install.sh
+            release-files/SHA256SUMS
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

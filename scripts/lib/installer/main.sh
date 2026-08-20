@@ -342,7 +342,7 @@ main() {
     # "--uninstall reinstalled HelixScreen".
     if [ "$uninstall_mode" = true ]; then
         log_error "internal error: install path entered with uninstall_mode=true"
-        log_error "please report at https://github.com/prestonbrown/helixscreen/issues"
+        log_error "please report at https://github.com/${GITHUB_REPO}/issues"
         exit 99
     fi
 

@@ -139,31 +139,9 @@ const KeyboardManager::AltCharMapping KeyboardManager::alt_char_map_[] = {
 };
 
 // Improved numeric keyboard with PERIOD
-static const char* const kb_map_num_improved[] = {
-    "1",   "2", "3", ICON_KEYBOARD_CLOSE, "\n",
-    "4",   "5", "6", ICON_CHECK,          "\n",
-    "7",   "8", "9", ICON_BACKSPACE,      "\n",
-    "+/-", "0", ".", ICON_CHEVRON_LEFT,   ICON_CHEVRON_RIGHT,
-    ""};
-
-static const lv_buttonmatrix_ctrl_t kb_ctrl_num_improved[] = {
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(2),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_CHECKED | 1),
-    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_CHECKED | 1)};
+// The numeric keypad lives in keyboard_layout_provider.cpp with every other
+// layout — it used to be duplicated here, registered against
+// LV_KEYBOARD_MODE_NUMBER and never displayed.
 
 // ============================================================================
 // SINGLETON INSTANCE
@@ -386,6 +364,10 @@ void KeyboardManager::apply_keyboard_mode() {
     case MODE_ALT_SYMBOLS:
         layout_mode = KEYBOARD_LAYOUT_ALT_SYMBOLS;
         mode_name = "alternative symbols (#+= mode)";
+        break;
+    case MODE_NUMERIC:
+        layout_mode = KEYBOARD_LAYOUT_NUMERIC;
+        mode_name = "numeric";
         break;
     default:
         layout_mode = KEYBOARD_LAYOUT_ALPHA_LC;
@@ -770,6 +752,56 @@ void KeyboardManager::keyboard_event_cb(lv_event_t* e) {
                     lv_textarea_delete_char(mgr.context_textarea_);
                 }
                 spdlog::trace("[KeyboardManager] Backspace");
+
+                // The numeric keypad's four extra keys. They had no handler at
+                // all while that layout was unreachable, so any of them would
+                // have fallen through and typed its own icon bytes.
+            } else if (btn_text && strcmp(btn_text, ICON_CHECK) == 0) {
+                // Confirm — the keypad's stand-in for Enter, which it has no
+                // room for. Fire READY so forms treat it as accepting the field.
+                if (mgr.context_textarea_) {
+                    lv_obj_send_event(mgr.context_textarea_, LV_EVENT_READY, nullptr);
+                }
+                spdlog::debug("[KeyboardManager] Numeric confirm");
+                mgr.hide();
+
+            } else if (btn_text && strcmp(btn_text, ICON_CHEVRON_LEFT) == 0) {
+                if (mgr.context_textarea_) {
+                    lv_textarea_cursor_left(mgr.context_textarea_);
+                }
+                spdlog::trace("[KeyboardManager] Cursor left");
+
+            } else if (btn_text && strcmp(btn_text, ICON_CHEVRON_RIGHT) == 0) {
+                if (mgr.context_textarea_) {
+                    lv_textarea_cursor_right(mgr.context_textarea_);
+                }
+                spdlog::trace("[KeyboardManager] Cursor right");
+
+            } else if (btn_text && strcmp(btn_text, "+/-") == 0) {
+                // Toggle a leading minus. Done by rewriting the text rather than
+                // inserting a character, so it works wherever the cursor happens
+                // to be and can never produce "1-2".
+                if (mgr.context_textarea_) {
+                    const char* cur = lv_textarea_get_text(mgr.context_textarea_);
+                    if (cur != nullptr) {
+                        // Everything read off `cur` happens BEFORE set_text:
+                        // lv_textarea_get_text() returns the label's live
+                        // buffer, and lv_textarea_set_text() frees and
+                        // reallocates it. Reading cur[0] after the set was a
+                        // use-after-free that decided the cursor position.
+                        const bool had_minus = (cur[0] == '-');
+                        std::string next =
+                            had_minus ? std::string(cur + 1) : ("-" + std::string(cur));
+                        // Cursor position is in characters, so dropping or adding
+                        // the sign shifts it by exactly one either way.
+                        const uint32_t pos = lv_textarea_get_cursor_pos(mgr.context_textarea_);
+                        lv_textarea_set_text(mgr.context_textarea_, next.c_str());
+                        lv_textarea_set_cursor_pos(
+                            mgr.context_textarea_,
+                            static_cast<int32_t>(had_minus ? (pos > 0 ? pos - 1 : 0) : pos + 1));
+                    }
+                }
+                spdlog::trace("[KeyboardManager] Sign toggle");
             }
         } else {
             // Regular printing key — insert text into textarea
@@ -1080,8 +1112,13 @@ void KeyboardManager::init(lv_obj_t* parent) {
     lv_obj_remove_style(keyboard_, nullptr, LV_PART_ITEMS | LV_STATE_EDITED);
 #endif
 
-    lv_keyboard_set_map(keyboard_, LV_KEYBOARD_MODE_NUMBER, kb_map_num_improved,
-                        kb_ctrl_num_improved);
+    // No lv_keyboard_set_map(LV_KEYBOARD_MODE_NUMBER, ...) here on purpose. The
+    // manager never drives LVGL's own mode table: every layout, the numeric one
+    // included, is applied straight to the button matrix by
+    // apply_keyboard_mode() (MODE_NUMERIC <- keyboard_hint="numeric"), and
+    // nothing ever switches the widget into MODE_NUMBER -- lv_keyboard_def_event_cb
+    // is removed above and only ever toggles TEXT/SPECIAL anyway. A registration
+    // here looked like a second live route to the keypad and was not.
 
     spdlog::debug("[KeyboardManager] Using keyboard with long-press alternatives");
     mode_ = MODE_ALPHA_LC;
@@ -1240,7 +1277,10 @@ void KeyboardManager::show(lv_obj_t* textarea) {
     KeyboardHint hint = ui_text_input_get_keyboard_hint(textarea);
 
     if (hint == KeyboardHint::NUMERIC) {
-        mode_ = MODE_NUMBERS_SYMBOLS;
+        // The digits-only layout, NOT the ?123 page: a field that can only hold
+        // a number has no use for a full symbol set, and offering one invites
+        // input the field then has to reject.
+        mode_ = MODE_NUMERIC;
         spdlog::debug("[KeyboardManager] Using NUMERIC keyboard hint");
     } else {
         mode_ = MODE_ALPHA_LC;

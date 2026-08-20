@@ -208,6 +208,10 @@
   <translation tag="Auto-Detect" en="Auto-Detect"/>
   <translation tag="Auto-Heat on Load" en="Auto-Heat on Load"/>
   <translation tag="Auto-detect" en="Auto-detect"/>
+  <translation tag="Auto-dry" en="Auto-dry"/>
+  <translation tag="Auto-dry off" en="Auto-dry off"/>
+  <translation tag="Auto-dry on" en="Auto-dry on"/>
+  <translation tag="Auto-dry unchanged" en="Auto-dry unchanged"/>
   <translation tag="Auto-install only works on local Moonraker" en="Auto-install only works on local Moonraker"/>
   <translation tag="Auto-lock" en="Auto-lock"/>
   <translation tag="Auto-poll for weight updates" en="Auto-poll for weight updates"/>
@@ -571,6 +575,7 @@
   <translation tag="Could not save filament" en="Could not save filament"/>
   <translation tag="Could not start Bluetooth discovery" en="Could not start Bluetooth discovery"/>
   <translation tag="Could not update filaments" en="Could not update filaments"/>
+  <translation tag="Could not update slot" en="Could not update slot"/>
   <translation tag="Could not verify Spoolman status. Moonraker may still be restarting." en="Could not verify Spoolman status. Moonraker may still be restarting."/>
   <translation tag="Couldn&apos;t update Spoolman — saved locally" en="Couldn&apos;t update Spoolman — saved locally"/>
   <translation tag="Cover open" en="Cover open"/>
@@ -692,6 +697,7 @@
   <translation tag="Downloading..." en="Downloading..."/>
   <translation tag="Downloading... {:.1f}/{:.1f} MB" en="Downloading... {:.1f}/{:.1f} MB"/>
   <translation tag="Draw a ripple at each touch — helps diagnose offsets" en="Draw a ripple at each touch — helps diagnose offsets"/>
+  <translation tag="Dries above %d%%, stops below %d%%" en="Dries above %d%%, stops below %d%%"/>
   <translation tag="Drive Cal" en="Drive Cal"/>
   <translation tag="Drop shadow strength (0 = disabled)" en="Drop shadow strength (0 = disabled)"/>
   <translation tag="Drying" en="Drying"/>
@@ -1001,6 +1007,7 @@
   <translation tag="Flying Toasters" en="Flying Toasters"/>
   <translation tag="Follow active tool" en="Follow active tool"/>
   <translation tag="Follow graph screen" en="Follow graph screen"/>
+  <translation tag="Follows unit %d" en="Follows unit %d"/>
   <translation tag="Forget" en="Forget"/>
   <translation tag="Forget Network?" en="Forget Network?"/>
   <translation tag="Forget network &apos;{}&apos;? You will need the password to reconnect." en="Forget network &apos;{}&apos;? You will need the password to reconnect."/>
@@ -1605,6 +1612,7 @@
   <translation tag="Open G-code command console" en="Open G-code command console"/>
   <translation tag="Open LED color and brightness controls" en="Open LED color and brightness controls"/>
   <translation tag="Open Source Licenses" en="Open Source Licenses"/>
+  <translation tag="Open in ACE" en="Open in ACE"/>
   <translation tag="Operation already in progress" en="Operation already in progress"/>
   <translation tag="Operations" en="Operations"/>
   <translation tag="Optimize Your Printing" en="Optimize Your Printing"/>
@@ -2480,6 +2488,7 @@
   <translation tag="Toolhead" en="Toolhead"/>
   <translation tag="Toolhead LED" en="Toolhead LED"/>
   <translation tag="Toolhead Style" en="Toolhead Style"/>
+  <translation tag="Toolhead command failed" en="Toolhead command failed"/>
   <translation tag="Toolhead jam" en="Toolhead jam"/>
   <translation tag="Toolhead, G-code, limits, and materials" en="Toolhead, G-code, limits, and materials"/>
   <translation tag="Tools Used" en="Tools Used"/>

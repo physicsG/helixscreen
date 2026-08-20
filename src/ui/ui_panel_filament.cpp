@@ -1272,9 +1272,17 @@ void FilamentPanel::handle_load_button() {
         // AmsSubscriptionBackend::ensure_homed_then() right before the tier-1
         // dispatch (unchanged) -- only the confirmation moves earlier, so a
         // decline never wastes a preheat cycle (#1235-adjacent).
-        AmsBackend* delegating_backend = AmsState::instance().get_backend();
-        if (!helix::toolhead_is_homed(printer_state_) &&
-            !(delegating_backend && delegating_backend->delegates_homing_to_printer())) {
+        //
+        // Skipped when a backend positively declares it never emits that G28
+        // (Snapmaker U1, ACE: they dispatch to firmware directly), and when the
+        // printer side homes for itself (AFC with auto_home), where the G28 is
+        // redundant rather than absent. With no AMS backend at all the load runs
+        // the user's own macro, which may well home, so the question stands --
+        // absence of a backend is not evidence.
+        AmsBackend* ams = AmsState::instance().get_backend();
+        const bool load_may_home =
+            !ams || (ams->filament_ops_may_home() && !ams->delegates_homing_to_printer());
+        if (!helix::toolhead_is_homed(printer_state_) && load_may_home) {
             spdlog::info("[{}] Toolhead not homed -- asking before starting preheat for load",
                          get_name());
             // FilamentPanel is an immortal singleton [L012] -- capturing
@@ -2645,6 +2653,7 @@ void FilamentPanel::execute_load() {
         caps.present = true;
         caps.requires_slot_selection_for_load = backend->requires_slot_selection_for_load();
         caps.needs_unload_before_load = backend->needs_unload_before_load(sys, target_slot);
+        caps.change_tool_completes_load = backend->change_tool_completes_load(target_slot);
         caps.is_tool_changer = backend->get_type() == AmsType::TOOL_CHANGER;
     }
 

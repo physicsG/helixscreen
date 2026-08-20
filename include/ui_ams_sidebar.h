@@ -221,7 +221,11 @@ class AmsOperationSidebar {
     // Step progress state
     StepOperationType current_operation_type_ = StepOperationType::LOAD_FRESH;
     int current_step_count_ = 4;
-    int target_load_slot_ = -1;
+    /// Whether the operation on screen is one we started — see
+    /// OperationOwnership. Replaces target_load_slot_, which carried this
+    /// answer as a side effect of holding a slot number nothing ever read (the
+    /// slot itself goes to AmsState::set_pending_target_slot for the pulse).
+    OperationOwnership ownership_;
     bool heat_label_showing_temp_ = false;
     // Index of the step whose label shows a live "<label> cur/target°C" readout
     // (OperationStep::live_temp), or -1 if the active model has none. Set when a
@@ -239,10 +243,23 @@ class AmsOperationSidebar {
     void update_step_progress(AmsAction action);
     int get_step_index_for_action(AmsAction action, StepOperationType op_type);
 
-    // Apply a backend-supplied step index (-1=none, clamped to model size) to the
-    // current step bar and refresh the live-temp step label. Used when the active
-    // backend supplied a step-index subject (firmware phase or narration).
-    void apply_backend_step_index(int index);
+    // Resolve a backend PHASE ID to a position in current_step_model_, or -1 to
+    // hold the bar where it is.
+    //
+    // The subject the backend hands us carries a phase id, not a position, and
+    // the two only coincide when a backend numbers its phases 0..n-1 in bar
+    // order. Snapmaker deliberately does not: its load and unload sequences own
+    // disjoint id spaces so ONE bar can carry both halves of a swap. Treating
+    // the id as an index is what put "Feed filament" under a retract.
+    //
+    // A model whose steps declare no ids at all (narration-built) keeps the
+    // identity mapping.
+    [[nodiscard]] int step_index_for_phase(int phase) const;
+
+    // Apply a backend-supplied step PHASE ID to the current step bar and refresh
+    // the live-temp step label. Used when the active backend supplied a
+    // step-index subject (firmware phase or narration).
+    void apply_backend_step_index(int phase);
 
     // Update the live-temp step (live_temp_step_index_) label: a live
     // "<label> X / Y°C" readout while that step is current, reverting to the

@@ -20,6 +20,7 @@
 #include "ui_modal.h"
 #include "ui_nav_manager.h"
 #include "ui_overlay_qr_scanner.h"
+#include "ui_panel_ams_overview.h"
 #include "ui_panel_common.h"
 #include "ui_spool_canvas.h"
 #include "ui_swatch.h"
@@ -132,6 +133,8 @@ static void ensure_ams_widgets_registered() {
         helix::asset_component_uri("ui_xml/ams_context_menu.xml").c_str());
     lv_xml_register_component_from_file(
         helix::asset_component_uri("ui_xml/ams_selector_menu.xml").c_str());
+    // ams_toolhead_menu.xml is registered by AmsToolheadMenu itself — the
+    // overview opens it too and is reachable without this panel ever loading.
     // NOTE: spoolman_spool_item.xml and ams_edit_overlay.xml are registered
     // globally in xml_registration.cpp (needed by FilamentPanel without AMS lazy init)
     lv_xml_register_component_from_file(
@@ -788,6 +791,11 @@ void AmsPanel::setup_path_canvas() {
     ui_filament_path_canvas_set_hub_callback(path_canvas_, &AmsPanel::on_path_hub_clicked_thunk,
                                              this);
 
+    // Nozzle taps get their own menu (Select / Park / Load / Unload). Registered
+    // unconditionally: the canvas only routes here on PARALLEL topology, and the
+    // menu itself declines to show when the head has no action to offer.
+    ui_filament_path_canvas_set_toolhead_callback(path_canvas_, on_path_toolhead_clicked, this);
+
     // Set bypass spool click callback (opens edit modal for external spool)
     ui_filament_path_canvas_set_bypass_callback(path_canvas_, on_bypass_spool_clicked, this);
     ui_filament_path_canvas_set_buffer_callback(path_canvas_, on_buffer_clicked, this);
@@ -1200,6 +1208,18 @@ void AmsPanel::on_path_slot_clicked(int slot_index, void* user_data) {
     self->show_context_menu(slot_index, self->path_canvas_, click_pt);
 }
 
+void AmsPanel::on_path_toolhead_clicked(int tool_index, void* user_data) {
+    auto* self = static_cast<AmsPanel*>(user_data);
+    if (!self) {
+        return;
+    }
+    // Range check, touch point, lazy menu, shared dispatch -- all in the helper,
+    // which the overview calls too. The two panels each had a copy of it once,
+    // and the range check went missing from one of them.
+    helix::ui::show_toolhead_menu_at_touch(self->toolhead_menu_, self->parent_screen_,
+                                           self->path_canvas_, tool_index);
+}
+
 void AmsPanel::on_path_hub_clicked_thunk(lv_point_t click_pt, void* user_data) {
     auto* self = static_cast<AmsPanel*>(user_data);
     if (!self) {
@@ -1404,6 +1424,14 @@ void AmsPanel::show_context_menu(int slot_index, lv_obj_t* near_widget, lv_point
             show_edit_modal(slot, /*open_on_picker=*/true);
             break;
 
+        case helix::ui::AmsContextMenu::MenuAction::OPEN_SOURCE_UNIT:
+            // This panel is one unit's view and cannot show another unit's
+            // detail. navigate_to_ams_panel() routes to the multi-unit overview
+            // whenever there is more than one unit, which is exactly the case
+            // that produces this action at all.
+            navigate_to_ams_panel();
+            break;
+
         case helix::ui::AmsContextMenu::MenuAction::SCAN_QR: {
 #if HELIX_HAS_CAMERA
             auto& scanner = helix::ui::get_qr_scanner_overlay();
@@ -1504,7 +1532,9 @@ void AmsPanel::show_edit_modal(int slot_index, bool open_on_picker) {
                         helix::ui::notify_ams_error(err);
                         return;
                     }
-                    NOTIFY_INFO(lv_tr("Slot {} updated"), result.slot_index + 1);
+                    // The badge's spool number — see spool_display_number().
+                    NOTIFY_INFO(lv_tr("Slot {} updated"),
+                                backend->spool_display_number(result.slot_index));
                 }
             }
         },

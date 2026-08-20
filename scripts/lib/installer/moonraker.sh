@@ -185,7 +185,7 @@ generate_update_manager_config() {
 [update_manager helixscreen]
 type: web
 channel: stable
-repo: prestonbrown/helixscreen
+repo: ${GITHUB_REPO}
 path: ${INSTALL_DIR}
 EOF
 }
@@ -465,8 +465,13 @@ write_release_info() {
     asset_name="$(helix_self_update_asset "${PLATFORM:-pi}")"
 
     log_info "Writing release_info.json (${version})..."
+    # project_owner has to be whatever repo this install came FROM, or
+    # Moonraker offers the other repo's releases as updates to this install.
+    # GITHUB_REPO is "<owner>/<name>"; take the halves rather than assuming.
+    local project_owner="${GITHUB_REPO%%/*}"
+    local project_name="${GITHUB_REPO##*/}"
     cat > "${release_info}.tmp" << EOF
-{"project_name":"helixscreen","project_owner":"prestonbrown","version":"${version}","asset_name":"${asset_name}"}
+{"project_name":"${project_name}","project_owner":"${project_owner}","version":"${version}","asset_name":"${asset_name}"}
 EOF
     # Try without sudo first (self-update: INSTALL_DIR is user-owned under NoNewPrivileges).
     # Fall back to sudo for fresh installs where the directory may be root-owned.
