@@ -55,6 +55,7 @@ EXEMPT_SUBSTRINGS = (
     # Written at runtime.
     'settings-test.json',  # seeded by --test
     'config/settings.json',
+    'release_info.json',   # written into INSTALL_DIR by the installer
     # Created by `make apply-patches` (patches/libhv-dns-resolver-fallback.patch).
     'dns_resolv.',
     # Build outputs.
