@@ -58,10 +58,25 @@ HARNESS_SRCS=(wasm/app_main.cpp wasm/scripted_u1.cpp wasm/stubs_app.cpp)
 
 # ---- compile -----------------------------------------------------------------
 export DEF
+# Rebuild decisions are made against the DEPFILE, not just the .cpp's mtime.
+# Header-blind caching is not a slow build, it is a crashing one: adding a
+# virtual to ams_backend.h shifts every later vtable slot, and a TU that kept its
+# stale object then calls through the wrong one. That surfaces in the browser as
+# a bare "function signature mismatch" with no file named, minutes after a build
+# that reported success.
 compile() {
   local src="$1" objdir="$2"; shift 2; local inc="$*"
   local obj="$objdir/$(echo "$src" | tr '/' '_').o"
-  [[ -f "$obj" && "$obj" -nt "$src" ]] && return 0
+  local dep="${obj%.o}.d"
+  if [[ -f "$obj" && -f "$dep" ]]; then
+    # Every prerequisite emcc recorded must be older than the object. Objects
+    # from a build before depfiles existed have no .d and always recompile once.
+    local fresh=1 f
+    for f in $(sed -e 's/^[^:]*://' -e 's/\\$//' "$dep"); do
+      [[ -e "$f" && "$f" -nt "$obj" ]] && { fresh=0; break; }
+    done
+    [[ $fresh -eq 1 ]] && return 0
+  fi
   # The PCH is C++-only: it pulls <algorithm>, spdlog and nlohmann, none of which
   # a .c TU (helix-xml, the font tables) can parse.
   local std="-std=gnu11" pch=""
@@ -69,7 +84,8 @@ compile() {
   # -fexceptions is mandatory, not a tuning knob: Emscripten compiles try/catch
   # away by default, so a `throw` traps as `unreachable`. nlohmann::json throws
   # on every type mismatch and the JSON-RPC dispatcher reports errors that way.
-  emcc -c -O1 $std $pch $DEF $inc -fexceptions -sUSE_SDL=2 -sUSE_ZLIB=1 "$src" -o "$obj"
+  emcc -c -O1 $std $pch $DEF $inc -fexceptions -sUSE_SDL=2 -sUSE_ZLIB=1 \
+       -MMD -MF "$dep" "$src" -o "$obj"
 }
 export -f compile
 
@@ -85,6 +101,22 @@ printf '%s\n' "${APP_SRCS[@]}"     | xargs -P "$J" -I{} bash -c 'compile "$1" "'
 # are the files under active edit.
 for s in "${HARNESS_SRCS[@]}"; do rm -f "$AOBJ/$(echo "$s" | tr '/' '_').o"; done
 printf '%s\n' "${HARNESS_SRCS[@]}" | xargs -P "$J" -I{} bash -c 'compile "$1" "'"$AOBJ"'" '"$APP_INC"''   _ {}
+
+# Drop objects the current source set no longer contains. The link below globs
+# "$AOBJ"/*.o, so an object compiled by an EARLIER version of this script (or by
+# a widget-tier harness that once shared this directory) keeps being linked long
+# after its source left the list -- and the way that surfaces is a wall of
+# "duplicate symbol" errors naming a file nobody is building any more.
+{
+  printf '%s\n' "${LVGL_SRCS[@]}" "${HX_SRCS[@]}" "${QUIRC_SRCS[@]}" "${MD_SRCS[@]}" \
+                 "${FONT_SRCS[@]}" "${APP_SRCS[@]}" "${HARNESS_SRCS[@]}" \
+    | tr '/' '_' | sed 's/$/.o/' | sort -u
+} > "$AOBJ/.expected"
+for o in "$AOBJ"/*.o; do
+  grep -qxF "$(basename "$o")" "$AOBJ/.expected" ||
+    { echo "  stale, removing: $(basename "$o")"; rm -f "$o" "${o%.o}.d"; }
+done
+rm -f "$AOBJ/.expected"
 
 # ---- link --------------------------------------------------------------------
 # ui_xml/ and assets/ are preloaded into MEMFS at "/", which is what
