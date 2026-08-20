@@ -108,6 +108,22 @@ _resolve_primary_group() {
     fi
 }
 
+# Print the owning user NAME of a path, or nothing if it cannot be determined.
+#
+# Order matters: `stat -c` is the GNU/BusyBox spelling and every device we ship
+# to (AD5M, K1, K2, CC1, U1, Pi) speaks it, so it stays the first and normally
+# the only thing tried. BSD stat (macOS dev machines) has no -c and spells the
+# same field `-f '%Su'`; that runs only after the GNU form has already failed,
+# so device behaviour is unchanged.
+_file_owner_name() {
+    local _p="$1"
+    [ -n "$_p" ] || return 0
+    local _o
+    _o=$(stat -c '%U' "$_p" 2>/dev/null) || _o=""
+    [ -n "$_o" ] || _o=$(stat -f '%Su' "$_p" 2>/dev/null) || _o=""
+    echo "$_o"
+}
+
 # QIDI-class SBC fingerprint (Q2, and likely Plus 4): the Linaro Debian
 # reference rootfs hostname `linaro-alip` plus the Klipper user home. This is the
 # same signal get_hardware_label() uses to print "QIDI-class SBC". The user is
@@ -650,7 +666,7 @@ detect_pi_install_dir() {
     #    Escalation is not an answer here — the unit sets NoNewPrivileges=true, so
     #    sudo cannot run from the app or from the install.sh it forks.
     if [ "${KLIPPER_USER:-root}" != "root" ] && [ -d "$KLIPPER_HOME" ] && \
-       [ "$(stat -c '%U' "$KLIPPER_HOME" 2>/dev/null)" = "$KLIPPER_USER" ]; then
+       [ "$(_file_owner_name "$KLIPPER_HOME")" = "$KLIPPER_USER" ]; then
         INSTALL_DIR="$KLIPPER_HOME/helixscreen"
         log_info "Install directory (service user home, no ecosystem): $INSTALL_DIR"
         return 0
@@ -694,11 +710,27 @@ detect_tmp_dir() {
     # gets deleted/relocated out from under the extracted tree. So we use the
     # install dir's PARENT, never INSTALL_DIR itself. Dot-prefixed to stay
     # hidden and out of the way.
+    # A platform may declare where its bulk storage actually is. On the K2 both
+    # /opt (INSTALL_DIR's parent) and /usr/data live on a 240MB overlay while
+    # the 27.5GB user partition is at /mnt/UDISK, so the generic "sibling of
+    # INSTALL_DIR" rule below picks the small filesystem and a 60MB archive
+    # fills it. Declared roots are probed first; they still go through the same
+    # space/writability checks, so a unit that lacks the mount falls through.
     local candidates=""
+    if [ -n "${TMP_DIR_PREFERRED:-}" ]; then
+        # Name-guard it like any other TMP_DIR: whatever wins here is rm -rf'd
+        # on exit, so a declared root that is a bare mountpoint (the /mnt/UDISK
+        # incident shape) must be dropped rather than staged into.
+        if _user_dir_name_ok "$TMP_DIR_PREFERRED" '*helixscreen-install*' '.helix-update-staging'; then
+            candidates="$TMP_DIR_PREFERRED"
+        else
+            log_warn "Ignoring TMP_DIR_PREFERRED='$TMP_DIR_PREFERRED' (not an installer scratch dir name)"
+        fi
+    fi
     if [ -n "${INSTALL_DIR:-}" ]; then
         local install_parent
         install_parent=$(dirname "$INSTALL_DIR")
-        candidates="$install_parent/.helixscreen-install"
+        candidates="$candidates $install_parent/.helixscreen-install"
     fi
     if [ -n "${HOME:-}" ]; then
         candidates="$candidates $HOME/.helixscreen-install"
@@ -837,6 +869,15 @@ set_install_paths() {
         KLIPPER_USER="root"
         KLIPPER_GROUP="root"
         KLIPPER_HOME="/mnt/UDISK"
+        # /opt and /usr/data are both on the 240MB overlay; /mnt/UDISK is the
+        # 27.5GB user partition. Staging the download anywhere else fills the
+        # overlay (a unit was found with a leaked 60MB archive on it).
+        TMP_DIR_PREFERRED="/mnt/UDISK/helixscreen-install"
+        # Older builds cached thumbnails/gcode on the overlay via /usr/data;
+        # the app now caches on /mnt/UDISK, so reclaim the old location.
+        # Also reclaim scratch dirs leaked by pre-EXIT-trap installers: one
+        # unit held a 60MB archive at /usr/data/helixscreen-install for months.
+        STALE_CACHE_DIRS="/usr/data/helixscreen/cache /usr/data/helixscreen-install /opt/.helixscreen-install"
         log_info "Platform: Creality K2 series"
         log_info "Install directory: ${INSTALL_DIR}"
     elif [ "$platform" = "cc1" ]; then

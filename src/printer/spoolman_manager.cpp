@@ -92,10 +92,15 @@ void SpoolmanManager::init_subjects() {
     // Observe print state changes to auto-refresh Spoolman weights.
     // Refreshes when print starts, ends, or pauses to keep weight data current.
     using helix::ui::observe_int_sync;
-    print_state_observer_ = observe_int_sync<SpoolmanManager>(
+    using helix::ui::observe_print_state;
+    // RAW_PRINT_STATE_OK: subscribes to the WIRE deliberately - weights change when
+    // filament moves, which is the printer's own transition.
+    print_state_observer_ = observe_print_state<SpoolmanManager>(
         get_printer_state().get_print_state_enum_subject(), this,
-        [](SpoolmanManager* self, int state) {
-            auto print_state = static_cast<PrintJobState>(state);
+        [](SpoolmanManager* self, PrintJobState print_state) {
+            // RAW_PRINT_STATE_OK: Spoolman weights only change when filament
+            // actually moves, so this refreshes on the printer's own reported
+            // transitions. Nothing has been consumed during Preparing.
             if (print_state == PrintJobState::PRINTING || print_state == PrintJobState::COMPLETE ||
                 print_state == PrintJobState::PAUSED) {
                 spdlog::debug(
@@ -188,6 +193,17 @@ void SpoolmanManager::set_api(IMoonrakerAPI* api) {
 }
 
 void SpoolmanManager::refresh_spoolman_weights() {
+    // Resolve everything we need from AmsState BEFORE taking our own mutex_.
+    // AmsState::sync_from_backend() holds AmsState::mutex_ across its call to
+    // SpoolmanManager::find_identity(), so the canonical order is
+    // AmsState -> SpoolmanManager; reaching into AmsState from under mutex_ closes an
+    // ABBA cycle that ThreadSanitizer reports as a lock-order inversion. Both
+    // accessors are const reads that take and release AmsState::mutex_ themselves, so
+    // hoisting costs a vector index and a settings read on the early-return paths and
+    // buys a one-way lock order.
+    auto* backend = AmsState::instance().get_backend(0);
+    auto ext_spool = AmsState::instance().get_external_spool_info();
+
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     // Mock mode polls too. AmsBackendMock seeds spoolman_id = lane + 1 to mirror
@@ -234,8 +250,8 @@ void SpoolmanManager::refresh_spoolman_weights() {
 
     int linked_count = 0;
 
-    // Refresh AMS backend slots (if a backend is active)
-    auto* backend = AmsState::instance().get_backend(0);
+    // Refresh AMS backend slots (if a backend is active); `backend` was resolved
+    // above the lock.
     if (backend) {
         // When the backend tracks weight locally (e.g., AFC decrements weight
         // via extruder position), we still need total_weight_g (initial weight)
@@ -302,22 +318,31 @@ void SpoolmanManager::refresh_spoolman_weights() {
                             }
 
                             SpoolmanManager& mgr = SpoolmanManager::instance();
-                            std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
 
-                            // Success response — reset circuit breaker (on UI thread)
-                            if (mgr.consecutive_failures_ > 0) {
-                                spdlog::info(
-                                    "[SpoolmanManager] Spoolman recovered after {} failures",
-                                    mgr.consecutive_failures_);
+                            // Our own state, under our own lock, released before the
+                            // AmsState work below. AmsState::sync_from_backend() holds
+                            // AmsState::mutex_ across SpoolmanManager::find_identity(),
+                            // so carrying mutex_ into AmsState here closes an ABBA cycle
+                            // that ThreadSanitizer reports as a lock-order inversion.
+                            bool identity_is_new = false;
+                            {
+                                std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
+
+                                // Success response — reset circuit breaker (on UI thread)
+                                if (mgr.consecutive_failures_ > 0) {
+                                    spdlog::info(
+                                        "[SpoolmanManager] Spoolman recovered after {} failures",
+                                        mgr.consecutive_failures_);
+                                }
+                                mgr.consecutive_failures_ = 0;
+                                mgr.unavailable_notified_ = false;
+
+                                // Identity side channel. Must happen BEFORE the
+                                // slot-reassignment and weights-unchanged early
+                                // returns below — a slot whose weight never moves
+                                // would otherwise never get a name.
+                                identity_is_new = cache_identity(d->spool);
                             }
-                            mgr.consecutive_failures_ = 0;
-                            mgr.unavailable_notified_ = false;
-
-                            // Identity side channel. Must happen BEFORE the
-                            // slot-reassignment and weights-unchanged early
-                            // returns below — a slot whose weight never moves
-                            // would otherwise never get a name.
-                            const bool identity_is_new = cache_identity(d->spool);
 
                             AmsState& ams = AmsState::instance();
                             if (identity_is_new) {
@@ -427,8 +452,8 @@ void SpoolmanManager::refresh_spoolman_weights() {
         }
     } // if (backend)
 
-    // Also refresh external spool if it has a Spoolman link
-    auto ext_spool = AmsState::instance().get_external_spool_info();
+    // Also refresh external spool if it has a Spoolman link (`ext_spool` was
+    // resolved above the lock).
     if (ext_spool.has_value() && ext_spool->spoolman_id > 0 &&
         !is_identity_unresolvable(ext_spool->spoolman_id)) {
         ++linked_count;
@@ -624,38 +649,50 @@ void SpoolmanManager::reset_circuit_breaker() {
 }
 
 void SpoolmanManager::start_spoolman_polling() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-    // Record the wish unconditionally. Returning early here instead used to
-    // discard it outright: at boot every caller arrives before Spoolman is
-    // marked available, so the Home panel polled nothing for the whole session.
-    ++poll_refcount_;
-    spdlog::debug("[SpoolmanManager] Starting Spoolman polling (refcount: {})", poll_refcount_);
+        // Record the wish unconditionally. Returning early here instead used to
+        // discard it outright: at boot every caller arrives before Spoolman is
+        // marked available, so the Home panel polled nothing for the whole session.
+        ++poll_refcount_;
+        spdlog::debug("[SpoolmanManager] Starting Spoolman polling (refcount: {})", poll_refcount_);
+    }
 
+    // Outside the lock: ensure_poll_timer() takes mutex_ itself and ends in
+    // refresh_spoolman_weights(), which reads AmsState. mutex_ is recursive, so
+    // holding it across this call nested silently and put AmsState::mutex_ under
+    // it - the ABBA cycle TSan reports as a lock-order inversion.
     ensure_poll_timer();
 }
 
 void SpoolmanManager::ensure_poll_timer() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-    if (poll_refcount_ == 0 || poll_timer_ != nullptr) {
-        return;
+        if (poll_refcount_ == 0 || poll_timer_ != nullptr) {
+            return;
+        }
+
+        if (!get_printer_state().is_spoolman_available()) {
+            spdlog::debug(
+                "[SpoolmanManager] Spoolman not available yet, poll deferred (refcount: {})",
+                poll_refcount_);
+            return;
+        }
+
+        poll_timer_ = lv_timer_create(
+            [](lv_timer_t* timer) {
+                auto* self = static_cast<SpoolmanManager*>(lv_timer_get_user_data(timer));
+                self->refresh_spoolman_weights();
+            },
+            POLL_INTERVAL_MS, this);
     }
 
-    if (!get_printer_state().is_spoolman_available()) {
-        spdlog::debug("[SpoolmanManager] Spoolman not available yet, poll deferred (refcount: {})",
-                      poll_refcount_);
-        return;
-    }
-
-    poll_timer_ = lv_timer_create(
-        [](lv_timer_t* timer) {
-            auto* self = static_cast<SpoolmanManager*>(lv_timer_get_user_data(timer));
-            self->refresh_spoolman_weights();
-        },
-        POLL_INTERVAL_MS, this);
-
-    // Also do an immediate refresh
+    // Also do an immediate refresh - outside the lock. refresh_spoolman_weights()
+    // reads AmsState, and AmsState::sync_from_backend() holds AmsState::mutex_
+    // across SpoolmanManager::find_identity(); calling it under mutex_ closes the
+    // ABBA cycle. The timer callback above already runs lock-free.
     refresh_spoolman_weights();
 }
 

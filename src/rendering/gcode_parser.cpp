@@ -2073,9 +2073,21 @@ int tool_index_for_line(const std::string& raw) {
     return static_cast<int>(value);
 }
 
+// True when `seen` covers every index in `stop_set` (early-exit condition).
+bool seen_all(const std::set<int>& seen, const std::set<int>& stop_set) {
+    if (stop_set.empty())
+        return false;
+    for (int t : stop_set) {
+        if (seen.count(t) == 0)
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
-std::set<int> scan_tools_used_from_content(const std::string& content) {
+std::set<int> scan_tools_used_from_content(const std::string& content,
+                                           std::set<int> early_exit_full_set) {
     std::set<int> tools;
     std::string line;
     line.reserve(128);
@@ -2084,6 +2096,8 @@ std::set<int> scan_tools_used_from_content(const std::string& content) {
             int t = tool_index_for_line(line);
             if (t >= 0) {
                 tools.insert(t);
+                if (seen_all(tools, early_exit_full_set))
+                    return tools;
             }
             line.clear();
         } else {
@@ -2100,7 +2114,8 @@ std::set<int> scan_tools_used_from_content(const std::string& content) {
     return tools;
 }
 
-std::set<int> scan_tools_used_from_file(const std::string& filepath) {
+std::set<int> scan_tools_used_from_file(const std::string& filepath,
+                                        std::set<int> early_exit_full_set) {
     std::set<int> tools;
     std::ifstream in(filepath, std::ios::binary);
     if (!in.is_open()) {
@@ -2113,6 +2128,8 @@ std::set<int> scan_tools_used_from_file(const std::string& filepath) {
         int t = tool_index_for_line(line);
         if (t >= 0) {
             tools.insert(t);
+            if (seen_all(tools, early_exit_full_set))
+                break;
         }
     }
     return tools;

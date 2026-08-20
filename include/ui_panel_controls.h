@@ -210,9 +210,19 @@ class ControlsPanel : public PanelBase {
     lv_subject_t fan_pct_subject_{};
     uint32_t last_fan_slider_input_ = 0; // Tick of last slider interaction (suppression window)
 
-    // Macro button subjects for declarative binding
+    // Macro button subjects for declarative binding.
+    //
+    // Two independent gates, because a macro button has three states, not two:
+    //   *_visible   0 = nothing is assigned to this slot, do not render it
+    //   *_available 0 = rendered but not usable — the slot resolves to a macro
+    //                   the connected printer does not define
+    // A slot the user configured against a macro this printer lacks stays
+    // visible and goes disabled, so the button that stopped working is still
+    // where they left it instead of silently vanishing.
     lv_subject_t macro_1_visible_{};
     lv_subject_t macro_2_visible_{};
+    lv_subject_t macro_1_available_{};
+    lv_subject_t macro_2_available_{};
     lv_subject_t macro_1_name_{};
     lv_subject_t macro_2_name_{};
     char macro_1_name_buf_[64] = {};
@@ -244,6 +254,7 @@ class ControlsPanel : public PanelBase {
 
     /// @brief Temperature observer bundle (nozzle + bed temps)
     helix::ui::TemperatureObserverBundle<ControlsPanel> temp_observers_;
+    ObserverGuard macros_version_observer_; // Macro slot resolution changed
     ObserverGuard fan_observer_;
     ObserverGuard fans_version_observer_;      // Multi-fan list changes
     ObserverGuard temp_sensor_count_observer_; // Temp sensor list changes
@@ -401,6 +412,8 @@ class ControlsPanel : public PanelBase {
     std::optional<StandardMacroSlot> macro_4_slot_;
     lv_subject_t macro_3_visible_{};
     lv_subject_t macro_4_visible_{};
+    lv_subject_t macro_3_available_{};
+    lv_subject_t macro_4_available_{};
     lv_subject_t macro_3_name_{};
     lv_subject_t macro_4_name_{};
     char macro_3_name_buf_[64] = {};
@@ -497,12 +510,13 @@ class ControlsPanel : public PanelBase {
      * @param macros Reference to StandardMacros instance
      * @param slot Optional slot for this button (nullopt = hide)
      * @param visible_subject Subject controlling visibility binding
+     * @param available_subject Subject controlling the disabled-state binding
      * @param name_subject Subject controlling label text binding
      * @param button_num Button number for debug logging (1-4)
      */
     void update_macro_button(StandardMacros& macros, const std::optional<StandardMacroSlot>& slot,
-                             lv_subject_t& visible_subject, lv_subject_t& name_subject,
-                             int button_num);
+                             lv_subject_t& visible_subject, lv_subject_t& available_subject,
+                             lv_subject_t& name_subject, int button_num);
 
     //
     // === Speed/Flow Override Handlers ===

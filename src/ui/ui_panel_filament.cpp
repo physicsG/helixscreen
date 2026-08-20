@@ -9,6 +9,7 @@
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
 #include "ui_icon.h"
+#include "ui_manual_pull_prompt.h"
 #include "ui_nav_manager.h"
 #include "ui_overlay_temp_graph.h"
 #include "ui_panel_ams.h"
@@ -129,10 +130,10 @@ FilamentPanel::FilamentPanel(PrinterState& printer_state, IMoonrakerAPI* api)
         {"on_filament_nozzle_target_tap", on_nozzle_target_tap_clicked},
         {"on_filament_bed_target_tap", on_bed_target_tap_clicked},
         {"on_filament_chamber_target_tap", on_filament_chamber_target_tap},
-        // Purge amount buttons
-        {"on_filament_purge_5mm", on_purge_5mm_clicked},
-        {"on_filament_purge_10mm", on_purge_10mm_clicked},
-        {"on_filament_purge_25mm", on_purge_25mm_clicked},
+        // Extrude length buttons
+        {"on_filament_extrude_length_5mm", on_extrude_length_5mm_clicked},
+        {"on_filament_extrude_length_10mm", on_extrude_length_10mm_clicked},
+        {"on_filament_extrude_length_25mm", on_extrude_length_25mm_clicked},
         // Cooldown button
         {"on_filament_cooldown", on_cooldown_clicked},
         // Extruder selector dropdown
@@ -217,13 +218,15 @@ FilamentPanel::FilamentPanel(PrinterState& printer_state, IMoonrakerAPI* api)
     // panel is already open, so without this the buttons keep the pre-pause
     // enablement until some unrelated AMS signal happens to fire.
     //
-    // print_state_enum, not print_active: PRINTING -> PAUSED is now a gating edge
-    // (a pause UNGATES the buttons on every backend but AD5X) and print_active is
-    // 1 across both, so it never fires on that transition. The lifetime token is
-    // mandatory — PrinterState is a separate singleton whose subjects tests tear
-    // down while this guard is alive (#705).
+    // print_lifecycle, not print_active and no longer print_state_enum. It has to
+    // distinguish PRINTING -> PAUSED (a pause UNGATES the buttons on every backend
+    // but AD5X, and print_active is 1 across both so it never fires there) AND see
+    // Idle -> Preparing, which the raw enum does not move on at all — the gate now
+    // refuses during a host-side pre-print block. The lifetime token is mandatory —
+    // PrinterState is a separate singleton whose subjects tests tear down while
+    // this guard is alive (#705).
     print_active_observer_ = observe_int_sync<FilamentPanel>(
-        printer_state_.get_print_state_enum_subject(), this,
+        printer_state_.get_print_lifecycle_subject(), this,
         [](FilamentPanel* self, int) { self->update_filament_op_buttons(); },
         printer_state_.get_static_print_subjects_lifetime());
 
@@ -311,14 +314,14 @@ void FilamentPanel::init_subjects() {
         // Cooldown button visibility (1 when nozzle or bed target > 0)
         UI_MANAGED_SUBJECT_INT(nozzle_heating_subject_, 0, "filament_nozzle_heating", subjects_);
 
-        // Purge amount button active states (boolean: 0=inactive, 1=active)
+        // Extrude length button active states (boolean: 0=inactive, 1=active)
         // Using separate subjects because bind_style doesn't work well with multiple ref_values
-        UI_MANAGED_SUBJECT_INT(purge_5mm_active_subject_, 0, "filament_purge_5mm_active",
-                               subjects_);
-        UI_MANAGED_SUBJECT_INT(purge_10mm_active_subject_, 1, "filament_purge_10mm_active",
-                               subjects_);
-        UI_MANAGED_SUBJECT_INT(purge_25mm_active_subject_, 0, "filament_purge_25mm_active",
-                               subjects_);
+        UI_MANAGED_SUBJECT_INT(extrude_length_5mm_active_subject_, 0,
+                               "filament_extrude_length_5mm_active", subjects_);
+        UI_MANAGED_SUBJECT_INT(extrude_length_10mm_active_subject_, 1,
+                               "filament_extrude_length_10mm_active", subjects_);
+        UI_MANAGED_SUBJECT_INT(extrude_length_25mm_active_subject_, 0,
+                               "filament_extrude_length_25mm_active", subjects_);
 
         // Per-op button feedback state (0=idle, 1=busy spinner, 2=done check).
         // Bound to each op button's bind_op_state in filament_panel.xml.
@@ -536,8 +539,8 @@ void FilamentPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     update_warning_text();
     update_safety_state();
 
-    // Trigger initial purge button selection (notifies bind_style observers)
-    handle_purge_amount_select(purge_amount_);
+    // Trigger initial extrude length selection (notifies bind_style observers)
+    handle_extrude_length_select(extrude_length_);
 
     // Setup combined temperature graph if TemperatureService is available
     if (temp_control_panel_) {
@@ -594,8 +597,9 @@ void FilamentPanel::update_status() {
 
     // First check if nozzle is ready for extrusion (highest priority for filament operations)
     if (helix::ui::temperature::is_extrusion_safe(nozzle_current_, min_extrude_temp_)) {
-        // Hot enough - ready to load
-        status_msg = lv_tr("Ready to load");
+        // Hot enough for any extruder move — load, unload and purge all sit on
+        // this panel, so the wording names the state rather than one of them.
+        status_msg = lv_tr("Ready for filament operations");
         update_status_icon("check", "success");
     } else if (nozzle_target_ >= min_extrude_temp_) {
         // Nozzle heating in progress — show current AND target so the user can
@@ -1062,13 +1066,13 @@ void FilamentPanel::update_status_icon_for_state() {
 
 // set_operation_in_progress removed — replaced by OperationTimeoutGuard
 
-void FilamentPanel::handle_purge_amount_select(int amount) {
-    purge_amount_ = amount;
+void FilamentPanel::handle_extrude_length_select(int amount) {
+    extrude_length_ = amount;
     // Update boolean subjects for each button (only one active at a time)
-    lv_subject_set_int(&purge_5mm_active_subject_, amount == 5 ? 1 : 0);
-    lv_subject_set_int(&purge_10mm_active_subject_, amount == 10 ? 1 : 0);
-    lv_subject_set_int(&purge_25mm_active_subject_, amount == 25 ? 1 : 0);
-    spdlog::debug("[{}] Purge amount set to {}mm", get_name(), amount);
+    lv_subject_set_int(&extrude_length_5mm_active_subject_, amount == 5 ? 1 : 0);
+    lv_subject_set_int(&extrude_length_10mm_active_subject_, amount == 10 ? 1 : 0);
+    lv_subject_set_int(&extrude_length_25mm_active_subject_, amount == 25 ? 1 : 0);
+    spdlog::debug("[{}] Extrude length set to {}mm", get_name(), amount);
 }
 
 // ============================================================================
@@ -1159,7 +1163,16 @@ void FilamentPanel::op_succeeded(FilamentOp op) {
     // checkmark lands on top of the error toast.
     if (op_aborted_ && *op_aborted_ == op) {
         op_aborted_.reset();
+        if (op == FilamentOp::Unload) {
+            helix::ui::disarm_manual_pull_prompt();
+        }
         return;
+    }
+    if (op == FilamentOp::Unload) {
+        // No-op unless execute_unload armed it, and unless the toolhead sensor
+        // stayed silent — a printer with one has already prompted, at the earlier
+        // and truer moment the filament actually cleared the gears.
+        helix::ui::manual_pull_unload_finished();
     }
     op_showing_busy_.reset();
     // Instant-completing ops (mock gcode fires success synchronously; fast real
@@ -1179,6 +1192,11 @@ void FilamentPanel::op_succeeded(FilamentOp op) {
 }
 
 void FilamentPanel::op_failed(FilamentOp op) {
+    if (op == FilamentOp::Unload) {
+        // A refused or timed-out unload must not leave the prompt armed to fire
+        // on some later unrelated sensor edge.
+        helix::ui::disarm_manual_pull_prompt();
+    }
     op_showing_busy_.reset();
     cancel_op_revert_timer(); // also clears any pending min-spinner delay
     set_op_state(op, 0);      // back to idle; the error/timeout toast still fires
@@ -1255,12 +1273,15 @@ void FilamentPanel::handle_load_button() {
         // dispatch (unchanged) -- only the confirmation moves earlier, so a
         // decline never wastes a preheat cycle (#1235-adjacent).
         //
-        // Skipped only when a backend positively declares it never emits that
-        // G28 (Snapmaker U1, ACE: they dispatch to firmware directly). With no
-        // AMS backend at all the load runs the user's own macro, which may well
-        // home, so the question stands -- absence of a backend is not evidence.
+        // Skipped when a backend positively declares it never emits that G28
+        // (Snapmaker U1, ACE: they dispatch to firmware directly), and when the
+        // printer side homes for itself (AFC with auto_home), where the G28 is
+        // redundant rather than absent. With no AMS backend at all the load runs
+        // the user's own macro, which may well home, so the question stands --
+        // absence of a backend is not evidence.
         AmsBackend* ams = AmsState::instance().get_backend();
-        const bool load_may_home = !ams || ams->filament_ops_may_home();
+        const bool load_may_home =
+            !ams || (ams->filament_ops_may_home() && !ams->delegates_homing_to_printer());
         if (!helix::toolhead_is_homed(printer_state_) && load_may_home) {
             spdlog::info("[{}] Toolhead not homed -- asking before starting preheat for load",
                          get_name());
@@ -1354,7 +1375,7 @@ void FilamentPanel::handle_extrude_button() {
 }
 
 void FilamentPanel::execute_extrude() {
-    spdlog::info("[{}] Extruding {}mm", get_name(), purge_amount_);
+    spdlog::info("[{}] Extruding {}mm", get_name(), extrude_length_);
 
     if (!api_) {
         return;
@@ -1363,8 +1384,8 @@ void FilamentPanel::execute_extrude() {
     // Inline G-code: M83 = relative extrusion, G1 E{amount} F{speed}
     begin_operation_guard();
     int speed_mm_min = helix::SettingsManager::instance().get_extrude_speed() * 60;
-    spdlog::info("[{}] Extruding {}mm at F{}", get_name(), purge_amount_, speed_mm_min);
-    std::string gcode = fmt::format("M83\nG1 E{} F{}", purge_amount_, speed_mm_min);
+    spdlog::info("[{}] Extruding {}mm at F{}", get_name(), extrude_length_, speed_mm_min);
+    std::string gcode = fmt::format("M83\nG1 E{} F{}", extrude_length_, speed_mm_min);
     op_started(FilamentOp::Extrude); // on-button spinner replaces the start toast
 
     api_->execute_gcode(
@@ -1540,7 +1561,7 @@ void FilamentPanel::handle_retract_button() {
 }
 
 void FilamentPanel::execute_retract() {
-    spdlog::info("[{}] Retracting {}mm", get_name(), purge_amount_);
+    spdlog::info("[{}] Retracting {}mm", get_name(), extrude_length_);
 
     if (!api_) {
         return;
@@ -1549,8 +1570,8 @@ void FilamentPanel::execute_retract() {
     // Inline G-code: M83 = relative extrusion, negative E = retract
     begin_operation_guard();
     int speed_mm_min = helix::SettingsManager::instance().get_extrude_speed() * 60;
-    spdlog::info("[{}] Retracting {}mm at F{}", get_name(), purge_amount_, speed_mm_min);
-    std::string gcode = fmt::format("M83\nG1 E-{} F{}", purge_amount_, speed_mm_min);
+    spdlog::info("[{}] Retracting {}mm at F{}", get_name(), extrude_length_, speed_mm_min);
+    std::string gcode = fmt::format("M83\nG1 E-{} F{}", extrude_length_, speed_mm_min);
     op_started(FilamentOp::Retract); // on-button spinner replaces the start toast
 
     api_->execute_gcode(
@@ -1860,11 +1881,9 @@ void FilamentPanel::update_filament_op_buttons() {
     // IFS). Reading the raw print_active subject here would grey the buttons
     // through every runout pause on every other backend — i.e. exactly when the
     // user needs them.
-    const auto job_state = static_cast<helix::PrintJobState>(
-        lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
-    const bool print_blocks_op = helix::ui::print_blocks_filament_op(
-        job_state == helix::PrintJobState::PRINTING, job_state == helix::PrintJobState::PAUSED,
-        backend->filament_ops_self_home());
+    const auto lifecycle = printer_state_.get_print_lifecycle();
+    const bool print_blocks_op =
+        helix::ui::print_blocks_filament_op(lifecycle, backend->filament_ops_self_home());
 
     // check_preconditions() refuses on a busy AMS *before* it even looks at the
     // print state, and an op can be started from the AMS panel or by the printer
@@ -1876,9 +1895,18 @@ void FilamentPanel::update_filament_op_buttons() {
     helix::ui::OpButtonState state;
     state.print_blocks_op = print_blocks_op;
     state.system_busy = sys.is_busy();
+    // unload_target_is_loaded() with is_current_slot=false keeps the narrow
+    // per-slot rule this gating has always used for lanes (the recovery arm
+    // belongs to the runout dialog, not to a resting panel) while routing the
+    // bypass sentinel to the toolhead-wide flag — the only signal that can
+    // answer for a spool with no lane behind it.
+    state.slot_is_loaded = helix::ui::unload_target_is_loaded(
+        slot, backend->slot_is_actively_loaded(slot), backend->slot_has_filament_at_toolhead(slot),
+        /*is_current_slot=*/false, sys.filament_loaded);
     if (slot >= 0) {
-        state.slot_is_loaded =
-            backend->slot_is_actively_loaded(slot) || backend->slot_has_filament_at_toolhead(slot);
+        // Bypass deliberately skipped: there is no lane whose presence sensor
+        // could answer, and slot_presence()'s nullopt ("unanswerable") is what
+        // keeps Load reachable so the user can feed the next external spool.
         state.slot_has_filament = helix::ui::slot_presence(backend->get_slot_info(slot));
     }
     // Unload/Purge act on whatever is at the toolhead for this slot, and the
@@ -1891,11 +1919,11 @@ void FilamentPanel::update_filament_op_buttons() {
     lv_subject_set_int(&load_disabled_subject_, gating.load_disabled ? 1 : 0);
     lv_subject_set_int(&unload_disabled_subject_, gating.unload_disabled ? 1 : 0);
     spdlog::debug("[FilamentPanel] Op buttons: slot={} loaded={} has_filament={} busy={} "
-                  "print_blocks={} (state={}, self_homes={}) "
+                  "print_blocks={} (lifecycle={}, self_homes={}) "
                   "(load_disabled={}, unload_disabled={})",
                   slot, state.slot_is_loaded,
                   state.slot_has_filament ? (*state.slot_has_filament ? "yes" : "no") : "unknown",
-                  state.system_busy, print_blocks_op, static_cast<int>(job_state),
+                  state.system_busy, print_blocks_op, static_cast<int>(lifecycle),
                   backend->filament_ops_self_home(), gating.load_disabled, gating.unload_disabled);
 }
 
@@ -2215,25 +2243,25 @@ void FilamentPanel::on_filament_chamber_target_tap(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_END();
 }
 
-// Purge amount callbacks (XML event_cb - use global singleton)
-void FilamentPanel::on_purge_5mm_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_purge_5mm_clicked");
+// Extrude length callbacks (XML event_cb - use global singleton)
+void FilamentPanel::on_extrude_length_5mm_clicked(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_extrude_length_5mm_clicked");
     LV_UNUSED(e);
-    get_global_filament_panel().handle_purge_amount_select(5);
+    get_global_filament_panel().handle_extrude_length_select(5);
     LVGL_SAFE_EVENT_CB_END();
 }
 
-void FilamentPanel::on_purge_10mm_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_purge_10mm_clicked");
+void FilamentPanel::on_extrude_length_10mm_clicked(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_extrude_length_10mm_clicked");
     LV_UNUSED(e);
-    get_global_filament_panel().handle_purge_amount_select(10);
+    get_global_filament_panel().handle_extrude_length_select(10);
     LVGL_SAFE_EVENT_CB_END();
 }
 
-void FilamentPanel::on_purge_25mm_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_purge_25mm_clicked");
+void FilamentPanel::on_extrude_length_25mm_clicked(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[FilamentPanel] on_extrude_length_25mm_clicked");
     LV_UNUSED(e);
-    get_global_filament_panel().handle_purge_amount_select(25);
+    get_global_filament_panel().handle_extrude_length_select(25);
     LVGL_SAFE_EVENT_CB_END();
 }
 
@@ -2574,11 +2602,12 @@ void FilamentPanel::restore_heater_after_preheat() {
     // never cooled — so after a swap the nozzle held the material temp indefinitely
     // (AFC's auto-heat on load makes this the common case). A real print re-heats or
     // cancels the pending cooldown, so cooling 120s after an idle swap is safe.
-    auto state = static_cast<helix::PrintJobState>(
-        lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
-    bool printing =
-        (state == helix::PrintJobState::PRINTING || state == helix::PrintJobState::PAUSED);
-    if (!printing) {
+    // The lifecycle, so a job that is starting also suppresses the cooldown —
+    // the pre-start block is about to heat the nozzle, and the comment above
+    // already gives "a real print re-heats or cancels the pending cooldown" as
+    // the reason this is safe. Preparing is that case, one step earlier.
+    const auto lifecycle = printer_state_.get_print_lifecycle();
+    if (!job_holds_machine(lifecycle)) {
         PostOpCooldownManager::instance().schedule();
     }
     prior_nozzle_target_ = 0;
@@ -2629,8 +2658,8 @@ void FilamentPanel::execute_load() {
     }
 
     const auto& info = StandardMacros::instance().get(StandardMacroSlot::LoadFilament);
-    const helix::ui::FilamentOpPlan plan =
-        helix::ui::plan_load(sys, caps, target_slot, !info.is_empty());
+    const helix::ui::FilamentOpPlan plan = helix::ui::plan_load(
+        sys, caps, target_slot, !info.is_empty(), info.get_source() == MacroSource::CONFIGURED);
 
     switch (plan.tier) {
     case helix::ui::FilamentTier::AmsBackend: {
@@ -2758,15 +2787,24 @@ void FilamentPanel::execute_unload() {
         // Only `present` matters to plan_unload; the remaining caps answer the
         // load-vs-swap question, which unload does not ask.
         caps.present = true;
-        loaded = slot >= 0 && helix::ui::unload_target_is_loaded(
-                                  backend->slot_is_actively_loaded(slot),
-                                  backend->slot_has_filament_at_toolhead(slot),
-                                  backend->get_system_info().current_slot == slot);
+        const AmsSystemInfo sys = backend->get_system_info();
+        loaded = helix::ui::unload_target_is_loaded(slot, backend->slot_is_actively_loaded(slot),
+                                                    backend->slot_has_filament_at_toolhead(slot),
+                                                    sys.current_slot == slot, sys.filament_loaded);
     }
 
     const auto& info = StandardMacros::instance().get(StandardMacroSlot::UnloadFilament);
-    const helix::ui::FilamentOpPlan plan =
-        helix::ui::plan_unload(caps, slot, loaded, !info.is_empty());
+    const helix::ui::FilamentOpPlan plan = helix::ui::plan_unload(
+        caps, slot, loaded, !info.is_empty(), info.get_source() == MacroSource::CONFIGURED);
+
+    // Nothing reels a bypass spool (or a backend-less printer's spool) back down
+    // a lane, so the user has to finish the job by hand. Armed before dispatch so
+    // the toolhead sensor's clear edge is already being watched when the retract
+    // starts; op_succeeded/op_failed close it out for every tier below.
+    if (plan.tier != helix::ui::FilamentTier::Refused &&
+        helix::ui::unload_needs_manual_pull(backend != nullptr, slot)) {
+        helix::ui::arm_manual_pull_prompt();
+    }
 
     switch (plan.tier) {
     case helix::ui::FilamentTier::AmsBackend: {

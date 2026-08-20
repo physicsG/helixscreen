@@ -55,7 +55,10 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
         300000; // 5 min - BED_MESH_CALIBRATE, SCREWS_TILT_CALCULATE
     static constexpr uint32_t LEVELING_TIMEOUT_MS = 600000; // 10 min - QGL, Z_TILT_ADJUST
     static constexpr uint32_t SHAPER_TIMEOUT_MS =
-        300000; // 5 min - SHAPER_CALIBRATE, MEASURE_AXES_NOISE
+        600000; // 10 min - SHAPER_CALIBRATE, MEASURE_AXES_NOISE. Analysis alone
+                // measured ~3m50s per axis on a Creality K1C host; the analysis
+                // phase shows a spinner + elapsed time, so the longer wait is
+                // not silent.
     static constexpr uint32_t PID_TIMEOUT_MS =
         1200000; // 20 min - PID_CALIBRATE (slow-cooling beds, e.g. AD5M Pro, exceed 15 min)
     static constexpr uint32_t MPC_TIMEOUT_MS = 1200000; // 20 min - MPC_CALIBRATE
@@ -257,7 +260,10 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
      * printer will actually test rather than an assumed range.
      *
      * @param axis Axis to test ('X' or 'Y')
-     * @param on_progress Called with progress percentage (0-100) and phase
+     * @param on_progress Called with progress percentage (0-100) and phase.
+     *        The sweep maps onto the whole 0-100 range; once the analysis
+     *        phase begins the percent is 0 and carries no meaning - the phase
+     *        is the signal (show an indeterminate spinner, not a bar position).
      * @param on_complete Called with test results
      * @param on_error Called on failure
      */

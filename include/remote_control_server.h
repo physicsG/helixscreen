@@ -162,6 +162,12 @@ class RemoteControlServer {
     nlohmann::json handle_text(const nlohmann::json& params);
     nlohmann::json handle_set_text(const nlohmann::json& params);
 
+    // Read a widget's LVGL states (checked/disabled/focused/pressed) and the
+    // hidden/clickable/scrollable flags. Descends a composite row to its
+    // value-control the same way click/set_value do, so `state <row>` reports
+    // on what those commands would act.
+    nlohmann::json handle_state(const nlohmann::json& params);
+
     // Synthetic pointer: drives LVGL's real input pipeline so gestures
     // (long-press, drag, slide-to-select, scroll-vs-tap) are testable. Widget-level
     // `click` cannot reach any of that — see remote_pointer.h.

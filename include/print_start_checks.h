@@ -24,6 +24,32 @@
 
 namespace helix {
 
+/**
+ * @brief How many AMS lanes does this print actually need?
+ *
+ * More than one means the file extrudes from more than one tool, so the lane
+ * mapping is live. One (or zero) means it does not: on a bypass print the
+ * filament comes from the external spool and the mapping decides nothing.
+ *
+ * @p tools_used comes from the G-code scan and is authoritative. The palette
+ * count is only a fallback for "the scan has not run yet", because slicers emit
+ * a full-profile palette (e.g. PLA;ASA-GF;ASA-GF;PLA) even for a file that
+ * extrudes from a single tool — counting the palette would misread every
+ * single-tool file sliced on a multi-tool profile as a lane print.
+ *
+ * Shared rather than reimplemented: the pre-print gate uses it to decide whether
+ * to compare against the external spool instead of the lanes, and the filament
+ * mapping card uses it to decide whether offering a mapping means anything. Two
+ * copies of this precedence would drift into a card that offers a control the
+ * gate ignores.
+ *
+ * @param tools_used          Tools the scan saw extrude; empty = scan not run.
+ * @param filament_color_count Slicer palette size, used only when @p tools_used
+ *                             is empty.
+ */
+[[nodiscard]] size_t print_lane_requirement(const std::set<int>& tools_used,
+                                            size_t filament_color_count);
+
 /// Severity for a gate dialog. Maps 1:1 onto ModalSeverity in the controller
 /// (kept separate so this header stays LVGL-free).
 enum class GateSeverity { Info, Warning, Error };
@@ -80,6 +106,12 @@ struct PrintStartGate {
 /// PrintStartController::MaterialMismatchDetail).
 struct MaterialMismatchDetail {
     int tool_index = 0;
+    /// Same polymer, different filler: the file wants PLA-CF and the lane
+    /// holds PLA, or the reverse. FilamentMapper::materials_match() passes
+    /// these (one compat group), so they are found by a second pass over
+    /// filament::grades_match() and get their own dialog. A hard mismatch
+    /// leaves this false.
+    bool grade_only = false;
     std::string expected_material;
     std::string loaded_material;
     int expected_nozzle_min = 0;

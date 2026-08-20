@@ -515,6 +515,38 @@ build_3d_geometry_in_budget(const helix::gcode::ParsedGCodeFile& file, const cha
  * Dispatches to either the 3D GLES renderer or the 2D layer renderer
  * based on current render mode and AUTO fallback state.
  */
+// Apply the colour priority chain to the 2D renderer: per-tool AMS overrides, then a
+// single external (AMS/Spoolman) override, then the colour the file was sliced for.
+//
+// Must run every time the 2D renderer is created, not just on load. Switching render
+// mode lazily constructs it and used to apply only the G-code's own tool palette, so
+// flipping 3D -> 2D silently reverted the view from the loaded filament colour to the
+// sliced-for colour.
+static void apply_2d_renderer_colors(gcode_viewer_state_t* st) {
+    if (!st || !st->layer_renderer_2d_ || !st->gcode_file) {
+        return;
+    }
+
+    if (!st->gcode_file->tool_color_palette.empty()) {
+        st->layer_renderer_2d_->set_tool_color_palette(st->gcode_file->tool_color_palette);
+    }
+
+    if (!st->tool_color_overrides.empty()) {
+        st->layer_renderer_2d_->set_tool_color_overrides(st->tool_color_overrides);
+        spdlog::debug("[GCode Viewer] 2D renderer using {} tool color overrides",
+                      st->tool_color_overrides.size());
+    } else if (st->has_external_color_override) {
+        st->layer_renderer_2d_->set_extrusion_color(st->external_color_override);
+        spdlog::debug("[GCode Viewer] 2D renderer using external color override");
+    } else if (st->use_filament_color && st->gcode_file->filament_color_hex.length() >= 2) {
+        lv_color_t color = lv_color_hex(static_cast<uint32_t>(
+            std::strtol(st->gcode_file->filament_color_hex.c_str() + 1, nullptr, 16)));
+        st->layer_renderer_2d_->set_extrusion_color(color);
+        spdlog::debug("[GCode Viewer] 2D renderer using filament color: {}",
+                      st->gcode_file->filament_color_hex);
+    }
+}
+
 static void gcode_viewer_draw_cb(lv_event_t* e) {
     lv_obj_t* obj = lv_event_get_target_obj(e);
     lv_layer_t* layer = lv_event_get_layer(e);
@@ -571,26 +603,7 @@ static void gcode_viewer_draw_cb(lv_event_t* e) {
             st->layer_renderer_2d_->set_canvas_size(width, height);
             st->layer_renderer_2d_->auto_fit();
 
-            // Apply tool color palette for multi-color prints
-            if (!st->gcode_file->tool_color_palette.empty()) {
-                st->layer_renderer_2d_->set_tool_color_palette(st->gcode_file->tool_color_palette);
-            }
-
-            // Apply per-tool AMS color overrides (takes priority over single-color override)
-            if (!st->tool_color_overrides.empty()) {
-                st->layer_renderer_2d_->set_tool_color_overrides(st->tool_color_overrides);
-                spdlog::debug("[GCode Viewer] 2D renderer using {} tool color overrides",
-                              st->tool_color_overrides.size());
-            } else if (st->has_external_color_override) {
-                st->layer_renderer_2d_->set_extrusion_color(st->external_color_override);
-                spdlog::debug("[GCode Viewer] 2D renderer using external color override");
-            } else if (st->use_filament_color && st->gcode_file->filament_color_hex.length() >= 2) {
-                lv_color_t color = lv_color_hex(static_cast<uint32_t>(
-                    std::strtol(st->gcode_file->filament_color_hex.c_str() + 1, nullptr, 16)));
-                st->layer_renderer_2d_->set_extrusion_color(color);
-                spdlog::debug("[GCode Viewer] 2D renderer using filament color: {}",
-                              st->gcode_file->filament_color_hex);
-            }
+            apply_2d_renderer_colors(st);
 
             // Apply any stored content offset
             if (st->content_offset_y_percent_ != 0.0f) {
@@ -2108,9 +2121,7 @@ void ui_gcode_viewer_set_render_mode(lv_obj_t* obj, GcodeViewerRenderMode mode) 
     if (st->is_using_2d_mode() && st->gcode_file && !st->layer_renderer_2d_) {
         st->layer_renderer_2d_ = std::make_unique<helix::gcode::GCodeLayerRenderer>();
         st->layer_renderer_2d_->set_gcode(st->gcode_file.get());
-        if (!st->gcode_file->tool_color_palette.empty()) {
-            st->layer_renderer_2d_->set_tool_color_palette(st->gcode_file->tool_color_palette);
-        }
+        apply_2d_renderer_colors(st);
 
         lv_area_t coords;
         lv_obj_get_coords(obj, &coords);

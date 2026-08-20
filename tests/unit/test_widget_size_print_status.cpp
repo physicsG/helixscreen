@@ -85,6 +85,7 @@
 #include "../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
 #include "panel_widget_size.h"
+#include "print_lifecycle_state.h"
 #include "printer_state.h"
 #include "src/ui/panel_widgets/print_status_widget.h"
 #include "tool_state.h"
@@ -314,7 +315,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
         lv_obj_t* filament_label = lv_obj_get_child(data_col, 3);
         REQUIRE(filament_label != nullptr);
 
-        h.widget().on_print_state_changed_for_test(PrintJobState::PRINTING);
+        h.widget().on_print_state_changed_for_test(PrintState::Printing);
         process_lvgl(30);
         REQUIRE(lv_subject_get_int(PrintStatusWidget::view_subject_for_test()) ==
                 4); // active_detailed

@@ -40,11 +40,24 @@ unrelated to the leak is normalized away. A baseline that churns is a baseline
 people regenerate blindly, which is the same as having no gate:
 
   * The LINE NUMBER is discarded. It moves on any edit anywhere above the
-    allocation in that file, which would fail the build for a comment.
+    allocation in that file, which would fail the build for a comment. The
+    optional COLUMN clang prints after it (`file.cpp:339:17`) is likewise
+    discarded, by a LAZY file match — a greedy one glued `:339` onto the file
+    for every clang frame, which is how the 2026-08-16 nightly failed on all
+    23 origins at once.
   * The file path is run through normpath, so the compiler's
     `tests/unit/../../src/ui/ui_button.cpp` and `src/ui/ui_button.cpp` are one
     key — and, importantly, `tests/unit/../catch_amalgamated.hpp` collapses onto
-    tests/catch_amalgamated.hpp so the Catch2 skip actually fires on it.
+    tests/catch_amalgamated.hpp so the Catch2 skip actually fires on it. An
+    ABSOLUTE checkout prefix is then stripped the same way: CI compiles with
+    absolute source paths and a local build with relative ones, and the same
+    file must be one key in both. Only a remainder that exists under this
+    repository's tree roots is trusted, so `/usr/include/...` stays foreign.
+  * The RETURN TYPE is dropped, and lambda closure types collapse to the token
+    `lambda` (gcc `{lambda(Args)#1}`, clang `$_8`), and clang's `[abi:cxx11]`
+    vendor tags go away. All three differ between gcc and clang symbolizers
+    and between declaration orders; the function name that remains is what
+    both compilers agree on.
   * TEMPLATE ARGUMENTS are truncated to the first one:
     `observe_int_sync<helix::PrintStatusWidget, helix::PrintStatusWidget::attach(
     lv_obj_t*, lv_obj_t*)::<lambda(helix::PrintStatusWidget*, int)> >` becomes
@@ -123,11 +136,16 @@ LEAK_BLOCK_RE = re.compile(
 
 # "    #1 0x614af140b0ff in ui_button_create tests/unit/../../src/ui/ui_button.cpp:568"
 # The symbol may contain spaces (return types, parameter lists), so the file is
-# taken as the last whitespace-separated token that ends in :<line>. Frames with
-# no source info ("in _start (/path/to/bin+0x446d2e4) (BuildId: ...)") match the
-# frame prefix but yield no file, and are treated as unattributable.
+# taken as the last whitespace-separated token that ends in :<line>. The file
+# part is LAZY and the column is a separate optional group because clang prints
+# file:line:col while gcc prints file:line — with a greedy file, `a.cpp:562:26`
+# parses as file "a.cpp:562", line 26, and the line number glues itself onto
+# every key (the 2026-08-16 nightly: all 23 origins "new" for this alone).
+# Frames with no source info ("in _start (/path/to/bin+0x446d2e4) (BuildId:
+# ...)") match the frame prefix but yield no file, and are treated as
+# unattributable.
 FRAME_RE = re.compile(r'^\s+#(?P<n>\d+) 0x[0-9a-f]+ in (?P<rest>.*)$')
-FRAME_LOC_RE = re.compile(r'^(?P<func>.*)\s+(?P<file>\S+):(?P<line>\d+)$')
+FRAME_LOC_RE = re.compile(r'^(?P<func>.*)\s+(?P<file>\S+?):(?P<line>\d+)(?::\d+)?$')
 
 LEAK_HEADER_RE = re.compile(r'ERROR: LeakSanitizer: detected memory leaks')
 SUMMARY_RE = re.compile(
@@ -259,21 +277,112 @@ def strip_parameter_list(s):
 
 ANON_NS_RE = re.compile(r'\(anonymous namespace\)::')
 CATCH2_TEST_RE = re.compile(r'CATCH2_INTERNAL_TEST_\d+')
+# Clang spells the TEST_CASE-method class with a parameter list
+# (`CATCH2_INTERNAL_TEST_22()::`) where gcc spells it bare. Drop clang's parens
+# so both compilers key the same frame.
+CATCH2_TEST_PARENS_RE = re.compile(r'CATCH2_INTERNAL_TEST\(\)')
+# Clang appends vendor tags like `[abi:cxx11]` to operator() symbols.
+ABI_TAG_RE = re.compile(r'\[abi:[^\]]*\]')
+# The two compilers spell a lambda's closure type differently, and BOTH number
+# them by declaration order within the enclosing scope — adding an unrelated
+# lambda above the site renumbers it and would fork the key. Collapse either
+# spelling to the literal token `lambda`.
+LAMBDA_CLANG_RE = re.compile(r'\$_\d+')
+LAMBDA_GCC_RE = re.compile(r'\{lambda\([^()]*\)(?:#[0-9]+)?\}')
+# Leading namespace qualifiers of the FUNCTION name: gcc's libbacktrace
+# reconstructs template function names from DWARF without their enclosing
+# namespaces, while clang prints them fully qualified. Lowercase segments are
+# namespaces by repo convention; CamelCase qualifiers are classes and survive.
+NAMESPACE_PREFIX_RE = re.compile(r'^(?:[a-z_][a-z0-9_]*::)+')
 WHITESPACE_RE = re.compile(r'\s+')
+
+# A bare trailing word that is an operator name rather than a function: taking
+# the last whitespace token of `Foo::operator new` would key on just `new`.
+OPERATOR_WORDS = {'new', 'delete', 'co_await'}
+
+
+def _split_top_level_tokens(s):
+    """Split on whitespace that is not nested inside <>, (), [] or {}."""
+    tokens = []
+    depth = 0
+    current = []
+    for c in s:
+        if c in '<([{':
+            depth += 1
+        elif c in '>)]}':
+            depth -= 1
+        if c.isspace() and depth == 0:
+            if current:
+                tokens.append(''.join(current))
+                current = []
+        else:
+            current.append(c)
+    if current:
+        tokens.append(''.join(current))
+    return tokens
+
+
+def strip_return_type(s):
+    """Drop a leading return type from a demangled symbol.
+
+    Clang's symbolizer prints `RetType ns::func<Args>(params)`; gcc prints the
+    same shape for template free functions (`void ns::func<...>(...)`) but no
+    return type at all for plain methods. The function name is the LAST
+    top-level token once the parameter list is gone, so keying on it unifies
+    both spellings. The parameter list must already be stripped — `operator()`
+    and friends carry meaning in their tail.
+    """
+    tokens = _split_top_level_tokens(s)
+    if len(tokens) <= 1:
+        return s
+    if tokens[-1] in OPERATOR_WORDS:
+        return ' '.join(tokens[-2:]) if len(tokens) >= 2 else s
+    return tokens[-1]
 
 
 def normalize_function(func):
     """Normalize a demangled symbol into a stable key component."""
     func = ANON_NS_RE.sub('', func)
     func = CATCH2_TEST_RE.sub('CATCH2_INTERNAL_TEST', func)
+    func = CATCH2_TEST_PARENS_RE.sub('CATCH2_INTERNAL_TEST', func)
+    func = ABI_TAG_RE.sub('', func)
+    func = LAMBDA_CLANG_RE.sub('lambda', func)
+    func = LAMBDA_GCC_RE.sub('lambda', func)
     func = truncate_template_args(func)
     func = strip_parameter_list(func)
+    func = strip_return_type(func)
+    func = NAMESPACE_PREFIX_RE.sub('', func)
     return WHITESPACE_RE.sub(' ', func).strip()
 
 
+# Repository tree roots, in the spelling they have as the FIRST path segment of
+# a repo-relative source path. Used to strip an absolute checkout prefix.
+TREE_ROOTS = ('src', 'include', 'lib', 'tests', 'mk', 'scripts')
+
+# The repo this script lives in. Existence checks for relativization are made
+# against it, so the gate behaves the same run from any cwd.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def normalize_path(path):
-    """Collapse `..` segments so one source file has one spelling."""
-    return os.path.normpath(path)
+    """Collapse `..` segments so one source file has one spelling.
+
+    Also strips an absolute checkout prefix: CI compiles with absolute source
+    paths (`/home/runner/work/<repo>/<repo>/src/...`), a local build may use
+    either spelling, and the same file must be one key. A tree-root segment is
+    only trusted when the remainder actually exists in this repository, so
+    `/usr/src/linux/...` and `/usr/include/...` stay foreign (they contain
+    `src`/`include` segments too, but no such repo files exist).
+    """
+    path = os.path.normpath(path)
+    if os.path.isabs(path):
+        parts = [p for p in path.split(os.sep) if p]
+        for i, seg in enumerate(parts):
+            if seg in TREE_ROOTS:
+                rel = os.path.join(*parts[i:])
+                if os.path.isfile(os.path.join(REPO_ROOT, rel)):
+                    return rel
+    return path
 
 
 def is_our_code(path):
@@ -281,8 +390,10 @@ def is_our_code(path):
     if path.startswith(SKIP_PATH_PREFIXES):
         return False
     if path.startswith('/'):
-        # Anything else absolute is toolchain or system code by construction:
-        # the build compiles with repo-relative paths.
+        # Still absolute after normalize_path's relativization attempt: either
+        # toolchain/system code (/usr/..., /lib/...) or a repo file that no
+        # longer exists under any tree root. Neither can match a baseline key,
+        # so it is not ours.
         return False
     if path.startswith('..'):
         # ../csu/, ../sysdeps/, ../../../../src/libsanitizer/ — out of tree.
@@ -444,10 +555,13 @@ BASELINE_HEADER = (
     '# frame that is our code. Only DIRECT leaks are keyed — an indirect leak is a\n'
     '# child of a direct one, and counting both double-counts the same defect.\n'
     '#\n'
-    '# Line numbers are deliberately absent, template argument lists are truncated\n'
-    '# to their first argument, parameter lists are dropped, and Catch2 test\n'
-    '# numbering is normalized away. All four move for reasons that have nothing to\n'
-    '# do with the leak, and a key that moves is a baseline nobody trusts. See the\n'
+    '# Line numbers (and clang\'s trailing columns) are deliberately absent, template\n'
+    '# argument lists are truncated to their first argument, parameter lists and\n'
+    '# return types are dropped, absolute checkout prefixes are relativized, lambda\n'
+    '# closure spellings collapse to `lambda`, and Catch2 test numbering is\n'
+    '# normalized away — the key is the same whether gcc or clang symbolized the\n'
+    '# run. All of these move for reasons that have nothing to do with the leak,\n'
+    '# and a key that moves is a baseline nobody trusts. See the\n'
     '# rationale in scripts/check_asan_leaks.py.\n'
     '#\n'
     '# A key NOT listed here fails the build. The list may SHRINK as leaks are\n'

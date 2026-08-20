@@ -181,7 +181,10 @@ uninstall() {
     # stop_service and rm -rf.  Swept at the end by clean_helix_state_dirs;
     # the trap covers the abort case so a stuck sentinel can't silently block
     # future update.service firings.
-    trap '_sweep_uninstalling_sentinel' EXIT INT TERM
+    # Chained with the scratch-dir cleanup main.sh arms: a trap REPLACES the
+    # previous handler for a signal, and install.sh bundles both modules, so
+    # setting only the sweep here would disarm cleanup on the --uninstall path.
+    trap '_sweep_uninstalling_sentinel; type cleanup_on_success >/dev/null 2>&1 && cleanup_on_success' EXIT INT TERM
     _drop_uninstalling_sentinel
 
     # Remove the [update_manager helixscreen] section FIRST, before any files

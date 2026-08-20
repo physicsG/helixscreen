@@ -678,8 +678,8 @@ void PIDCalibrationPanel::send_save_config() {
     if (!api_)
         return;
 
-    // Suppress recovery modal — SAVE_CONFIG triggers an expected Klipper restart
-    EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::LONG);
+    // SAVE_CONFIG triggers an expected Klipper restart
+    helix::ui::begin_expected_klippy_restart("Saving config... Klipper will restart.");
 
     spdlog::info("[PIDCal] Sending SAVE_CONFIG");
     auto token = lifetime_.token();
@@ -840,8 +840,9 @@ void PIDCalibrationPanel::handle_start_clicked() {
 void PIDCalibrationPanel::handle_abort_clicked() {
     spdlog::info("[PIDCal] Abort clicked, sending emergency stop + firmware restart");
 
-    // Suppress recovery modal — E-stop + restart triggers expected reconnect
-    EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::LONG);
+    // E-stop + firmware restart: klippy comes back, so this is an expected
+    // reconnect, not a fault
+    helix::ui::begin_expected_klippy_restart("Firmware restarting...");
 
     // M112 emergency stop halts immediately at MCU level (bypasses blocked gcode queue),
     // then firmware restart brings Klipper back online

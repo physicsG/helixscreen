@@ -218,6 +218,132 @@ TEST_CASE("extract_base_material strips a trailing plus", "[filament][family][de
 }
 
 // ===========================================================================
+// Grade awareness: filled vs unfilled, one step below family
+// ===========================================================================
+
+TEST_CASE("grades_match forgives marketing grades", "[filament][family][grade]") {
+    // "+" is a toughener brand suffix, not a filler. Same polymer, same
+    // hardware, same flow envelope.
+    CHECK(filament::grades_match("PLA", "PLA+"));
+    CHECK(filament::grades_match("ABS+", "ABS"));
+    // Speed and temperature ratings describe the print profile, not the
+    // filament's abrasiveness.
+    CHECK(filament::grades_match("PLA", "PLA-HS"));
+    CHECK(filament::grades_match("PETG-HF", "PETG"));
+    CHECK(filament::grades_match("HT-PLA", "PLA"));
+    // Unfilled cosmetic grades: a co-polymer blend and a surface agent.
+    CHECK(filament::grades_match("Silk PLA", "PLA"));
+    CHECK(filament::grades_match("Matte PLA", "PLA"));
+    // Identity, and case insensitivity.
+    CHECK(filament::grades_match("ASA-GF", "asa-gf"));
+    CHECK(filament::grades_match("", ""));
+}
+
+TEST_CASE("grades_match flags filled grades", "[filament][family][grade]") {
+    // Fiber fills: abrasive, and printed well below the base polymer's flow.
+    CHECK_FALSE(filament::grades_match("ASA", "ASA-GF"));
+    CHECK_FALSE(filament::grades_match("PLA-CF", "PLA"));
+    // Two different fillers are not each other either.
+    CHECK_FALSE(filament::grades_match("ASA-CF", "ASA-GF"));
+    // Foaming grades: density is a function of temperature, so a profile
+    // sliced for one is meaningless on the other.
+    CHECK_FALSE(filament::grades_match("PLA-AERO", "PLA"));
+    CHECK_FALSE(filament::grades_match("PLA-LW", "PLA"));
+    // Particle fills the marketing calls cosmetic. Glow is strontium
+    // aluminate and outwears carbon fiber on a brass nozzle.
+    CHECK_FALSE(filament::grades_match("Glow PLA", "PLA"));
+    CHECK_FALSE(filament::grades_match("Wood PLA", "PLA"));
+    CHECK_FALSE(filament::grades_match("Metal PLA", "PLA"));
+    CHECK_FALSE(filament::grades_match("Marble PLA", "PLA"));
+}
+
+TEST_CASE("grades_match composes with the affix stripper", "[filament][family][grade]") {
+    // Benign affixes are transparent: both sides reduce to the same filler set.
+    CHECK(filament::grades_match("HT-PLA-GF", "PLA-GF"));
+    CHECK(filament::grades_match("PLA+-CF", "PLA-CF"));
+    // A benign affix does not launder a filler.
+    CHECK_FALSE(filament::grades_match("HT-PLA-GF", "HT-PLA"));
+    // Fused polymer grades reduce through the override table with the filler
+    // still recorded ("PA6-CF" -> CF + PA6 -> CF + PA).
+    CHECK_FALSE(filament::grades_match("PA6-CF", "PA6"));
+    CHECK(filament::grades_match("PA6-CF", "PA-CF"));
+    // Names the affix table cannot parse carry no filler and match anything
+    // else that carries none. Silence beats a guess.
+    CHECK(filament::grades_match("PLA SnapSpeed", "PLA"));
+    CHECK(filament::grades_match("Unobtainium", "PLA"));
+}
+
+TEST_CASE("is_filled_grade identifies the abrasive side", "[filament][family][grade]") {
+    // Drives which of the two directional warnings the dialog shows.
+    CHECK(filament::is_filled_grade("ASA-GF"));
+    CHECK(filament::is_filled_grade("PLA-CF"));
+    CHECK(filament::is_filled_grade("Glow PLA"));
+    CHECK(filament::is_filled_grade("PLA-AERO"));
+    CHECK_FALSE(filament::is_filled_grade("ASA"));
+    CHECK_FALSE(filament::is_filled_grade("PLA+"));
+    CHECK_FALSE(filament::is_filled_grade("Silk PLA"));
+    CHECK_FALSE(filament::is_filled_grade(""));
+}
+
+TEST_CASE("every filled database material reads as filled", "[filament][family][grade]") {
+    // The affix table and MATERIALS[] are edited independently. Any row whose
+    // NAME advertises a filler must be visible to is_filled_grade(), or the
+    // warning silently skips that material.
+    for (const auto& mat : filament::MATERIALS) {
+        std::string name = mat.name;
+        const bool advertises_filler =
+            name.find("-CF") != std::string::npos || name.find("-GF") != std::string::npos ||
+            name.find("-AERO") != std::string::npos || name.find("Wood") != std::string::npos ||
+            name.find("Metal") != std::string::npos || name.find("Marble") != std::string::npos ||
+            name.find("Glow") != std::string::npos;
+        if (!advertises_filler) {
+            continue;
+        }
+        INFO("material=" << name);
+        CHECK(filament::is_filled_grade(name));
+    }
+}
+
+// ===========================================================================
+// materials_compatible: one answer to "same polymer?"
+// ===========================================================================
+
+TEST_CASE("materials_compatible reduces before comparing groups", "[filament][family][compat]") {
+    CHECK(filament::materials_compatible("PLA", "PLA-CF"));
+    CHECK(filament::materials_compatible("PLA", "PLA+"));
+    CHECK(filament::materials_compatible("ABS", "ASA")); // one compat group
+    CHECK_FALSE(filament::materials_compatible("PLA", "PETG"));
+    CHECK_FALSE(filament::materials_compatible("PLA", "ABS"));
+}
+
+TEST_CASE("materials_compatible sees through a decorated product name",
+          "[filament][family][compat]") {
+    // The bug this function exists to close: are_materials_compatible() looks a
+    // name up in MATERIALS[] and reads a miss as "unknown, compatible with
+    // everything". A name the family reducer CAN read must never reach that
+    // fallback, or a lane the user labelled from a spool database silently
+    // pairs with any other lane.
+    CHECK_FALSE(filament::materials_compatible("PLA SnapSpeed", "ABS"));
+    CHECK_FALSE(filament::materials_compatible("HT-PLA-GF", "PETG"));
+    CHECK(filament::materials_compatible("PLA SnapSpeed", "PLA"));
+    CHECK(filament::materials_compatible("HT-PLA-GF", "PLA-CF"));
+
+    // Proof the old rule really was permissive here, so this test cannot quietly
+    // stop testing anything if the two implementations are ever re-merged.
+    CHECK(filament::are_materials_compatible("PLA SnapSpeed", "ABS"));
+}
+
+TEST_CASE("materials_compatible stays permissive for genuinely unknown names",
+          "[filament][family][compat]") {
+    // Nothing to reduce and nothing in the database: an unrecognised name is
+    // compatible with anything, which keeps a firmware-only or hand-typed
+    // material from blocking the user. Deliberate, and the reason the previous
+    // case has to name something the reducer CAN read.
+    CHECK(filament::materials_compatible("Unobtainium", "PLA"));
+    CHECK(filament::materials_compatible("Unobtainium", "Unobtainium"));
+}
+
+// ===========================================================================
 // Blast-radius guard: materials_match() must be unchanged
 // ===========================================================================
 

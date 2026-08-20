@@ -1,6 +1,11 @@
 <?xml version="1.0"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <consts>
+    <!-- Legend indicator dot size, held constant across breakpoints like the
+         lock-screen PIN dots (components/lock_screen.xml). -->
+    <px name="legend_dot_size" value="8"/>
+  </consts>
   <view name="input_shaper_panel"
         extends="lv_obj" width="#overlay_width_transient" height="100%" align="right_mid" style_border_width="0"
         style_pad_all="0" style_bg_opa="255" style_bg_color="#card_bg" scrollable="false" flex_flow="column">
@@ -181,7 +186,21 @@
               <text_body text="X Axis" translation_tag="X Axis"/>
               <text_small bind_text="is_result_x_shaper" style_text_color="#text_muted"/>
             </lv_obj>
-            <!-- Frequency response chart container (hidden when no freq data) -->
+            <!-- Firmware overwrote the staged X result during the Y run (fork behavior) -->
+            <lv_obj name="fw_overwrite_warn_x"
+                    width="100%" height="content" style_bg_color="#warning" style_bg_opa="25"
+                    style_radius="#border_radius" style_border_width="1" style_border_color="#warning"
+                    style_pad_all="#space_sm" flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm"
+                    scrollable="false">
+              <bind_flag_if_eq subject="is_x_fw_overwrite_warn" flag="hidden" ref_value="0"/>
+              <icon src="alert" size="sm" variant="warning"/>
+              <text_small text="Firmware saved X = Y's value; the measured X result was discarded"
+                          translation_tag="Firmware saved X = Y's value; the measured X result was discarded"
+                          style_text_color="#warning" flex_grow="1"/>
+            </lv_obj>
+            <!-- Y-axis quantity caption, then frequency response chart (hidden when no freq data) -->
+            <text_small name="chart_x_caption"
+                        text="Relative vibration" translation_tag="Relative vibration" style_text_color="#text_muted"/>
             <lv_obj name="chart_container_x"
                     width="100%" height="180" style_pad_all="0" style_radius="#border_radius"
                     style_bg_color="#screen_bg" style_bg_opa="255" scrollable="false">
@@ -332,14 +351,26 @@
                       style_flex_cross_place="center" scrollable="false">
                 <!-- Measured PSD dot + label -->
                 <lv_obj name="legend_x_measured_dot"
-                        width="8" height="8" style_radius="4" style_bg_opa="255" style_bg_color="0xB0B0B0"
-                        style_pad_all="0" scrollable="false"/>
-                <text_small text="Measured" translation_tag="Measured" style_text_color="#text_muted"/>
+                        width="#legend_dot_size" height="#legend_dot_size" style_radius="4" style_bg_opa="255"
+                        style_bg_color="0xB0B0B0" style_pad_all="0" scrollable="false"/>
+                <text_small name="legend_x_measured_label"
+                            text="Measured (shaper off)" translation_tag="Measured (shaper off)"
+                            style_text_color="#text_muted"/>
                 <!-- Active shaper dot + label -->
                 <lv_obj name="legend_x_shaper_dot"
-                        width="8" height="8" style_radius="4" style_bg_opa="255" style_bg_color="0x66BB6A"
-                        style_pad_all="0" style_margin_left="#space_xs" scrollable="false"/>
+                        width="#legend_dot_size" height="#legend_dot_size" style_radius="4" style_bg_opa="255"
+                        style_bg_color="0x66BB6A" style_pad_all="0" style_margin_left="#space_xs" scrollable="false"/>
                 <text_small bind_text="is_x_legend_shaper_label" style_text_color="#text_muted"/>
+                <!-- Previous (live-before) setting dot + label - only when a before-config was captured -->
+                <lv_obj name="legend_x_previous_dot"
+                        width="#legend_dot_size" height="#legend_dot_size" style_radius="4" style_bg_opa="255"
+                        style_bg_color="#text_muted" style_pad_all="0" style_margin_left="#space_xs" scrollable="false">
+                  <bind_flag_if_eq subject="is_x_has_delta" flag="hidden" ref_value="0"/>
+                </lv_obj>
+                <text_small name="legend_x_previous_label"
+                            text="Previous" translation_tag="Previous" style_text_color="#text_muted">
+                  <bind_flag_if_eq subject="is_x_has_delta" flag="hidden" ref_value="0"/>
+                </text_small>
               </lv_obj>
             </lv_obj>
             <!-- Comparison table for X axis -->
@@ -509,6 +540,15 @@
               <!-- Explanation -->
               <text_small width="100%"
                           bind_text="is_result_x_explanation" style_text_color="#text_muted" style_pad_top="#space_sm"/>
+              <!-- Live-before -> measured delta (hidden until a before-value exists) -->
+              <text_small width="100%"
+                          bind_text="is_x_delta_text" style_text_color="#text_muted" style_pad_top="#space_sm">
+                <bind_flag_if_eq subject="is_x_has_delta" flag="hidden" ref_value="0"/>
+              </text_small>
+              <!-- Old setting re-scored on today's measured spectrum -->
+              <text_small width="100%" bind_text="is_x_verdict_text" style_text_color="#text_muted">
+                <bind_flag_if_eq subject="is_x_has_verdict" flag="hidden" ref_value="0"/>
+              </text_small>
             </lv_obj>
           </lv_obj>
           <!-- Y Axis Result Card -->
@@ -523,7 +563,23 @@
               <text_body text="Y Axis" translation_tag="Y Axis"/>
               <text_small bind_text="is_result_y_shaper" style_text_color="#text_muted"/>
             </lv_obj>
-            <!-- Frequency response chart container (hidden when no freq data) -->
+            <!-- Same firmware-overwrite warning as the X card, shown only when
+                 the X card is absent (a Y-only run has nowhere else to surface
+                 that the fork saved X = Y's value) -->
+            <lv_obj name="fw_overwrite_warn_y"
+                    width="100%" height="content" style_bg_color="#warning" style_bg_opa="25"
+                    style_radius="#border_radius" style_border_width="1" style_border_color="#warning"
+                    style_pad_all="#space_sm" flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm"
+                    scrollable="false">
+              <bind_flag_if cond="is_x_fw_overwrite_warn eq 1 and is_results_has_x eq 0" flag="hidden" invert="true"/>
+              <icon src="alert" size="sm" variant="warning"/>
+              <text_small text="Firmware saved X = Y's value; the measured X result was discarded"
+                          translation_tag="Firmware saved X = Y's value; the measured X result was discarded"
+                          style_text_color="#warning" flex_grow="1"/>
+            </lv_obj>
+            <!-- Y-axis quantity caption, then frequency response chart (hidden when no freq data) -->
+            <text_small name="chart_y_caption"
+                        text="Relative vibration" translation_tag="Relative vibration" style_text_color="#text_muted"/>
             <lv_obj name="chart_container_y"
                     width="100%" height="180" style_pad_all="0" style_radius="#border_radius"
                     style_bg_color="#screen_bg" style_bg_opa="255" scrollable="false">
@@ -674,14 +730,26 @@
                       style_flex_cross_place="center" scrollable="false">
                 <!-- Measured PSD dot + label -->
                 <lv_obj name="legend_y_measured_dot"
-                        width="8" height="8" style_radius="4" style_bg_opa="255" style_bg_color="0xB0B0B0"
-                        style_pad_all="0" scrollable="false"/>
-                <text_small text="Measured" translation_tag="Measured" style_text_color="#text_muted"/>
+                        width="#legend_dot_size" height="#legend_dot_size" style_radius="4" style_bg_opa="255"
+                        style_bg_color="0xB0B0B0" style_pad_all="0" scrollable="false"/>
+                <text_small name="legend_y_measured_label"
+                            text="Measured (shaper off)" translation_tag="Measured (shaper off)"
+                            style_text_color="#text_muted"/>
                 <!-- Active shaper dot + label -->
                 <lv_obj name="legend_y_shaper_dot"
-                        width="8" height="8" style_radius="4" style_bg_opa="255" style_bg_color="0x66BB6A"
-                        style_pad_all="0" style_margin_left="#space_xs" scrollable="false"/>
+                        width="#legend_dot_size" height="#legend_dot_size" style_radius="4" style_bg_opa="255"
+                        style_bg_color="0x66BB6A" style_pad_all="0" style_margin_left="#space_xs" scrollable="false"/>
                 <text_small bind_text="is_y_legend_shaper_label" style_text_color="#text_muted"/>
+                <!-- Previous (live-before) setting dot + label - only when a before-config was captured -->
+                <lv_obj name="legend_y_previous_dot"
+                        width="#legend_dot_size" height="#legend_dot_size" style_radius="4" style_bg_opa="255"
+                        style_bg_color="#text_muted" style_pad_all="0" style_margin_left="#space_xs" scrollable="false">
+                  <bind_flag_if_eq subject="is_y_has_delta" flag="hidden" ref_value="0"/>
+                </lv_obj>
+                <text_small name="legend_y_previous_label"
+                            text="Previous" translation_tag="Previous" style_text_color="#text_muted">
+                  <bind_flag_if_eq subject="is_y_has_delta" flag="hidden" ref_value="0"/>
+                </text_small>
               </lv_obj>
             </lv_obj>
             <!-- Comparison table for Y axis -->
@@ -851,6 +919,15 @@
               <!-- Explanation -->
               <text_small width="100%"
                           bind_text="is_result_y_explanation" style_text_color="#text_muted" style_pad_top="#space_sm"/>
+              <!-- Live-before -> measured delta (hidden until a before-value exists) -->
+              <text_small width="100%"
+                          bind_text="is_y_delta_text" style_text_color="#text_muted" style_pad_top="#space_sm">
+                <bind_flag_if_eq subject="is_y_has_delta" flag="hidden" ref_value="0"/>
+              </text_small>
+              <!-- Old setting re-scored on today's measured spectrum -->
+              <text_small width="100%" bind_text="is_y_verdict_text" style_text_color="#text_muted">
+                <bind_flag_if_eq subject="is_y_has_verdict" flag="hidden" ref_value="0"/>
+              </text_small>
             </lv_obj>
           </lv_obj>
         </lv_obj>

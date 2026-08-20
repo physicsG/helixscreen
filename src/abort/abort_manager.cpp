@@ -304,10 +304,13 @@ void AbortManager::send_cancel_print() {
     // Register observer on print_state_enum to detect when Klipper reports print ended
     // This allows early completion before the timeout when the cancel finishes
     if (printer_state_) {
-        cancel_state_observer_ = helix::ui::observe_int_immediate<AbortManager>(
+        // RAW_PRINT_STATE_OK: subscribes to the WIRE deliberately - the cancel macro's
+        // completion is something the PRINTER reports, and Preparing is not a
+        // state CANCEL_PRINT can produce.
+        cancel_state_observer_ = helix::ui::observe_print_state_immediate<AbortManager>(
             printer_state_->get_print_state_enum_subject(), this,
-            [](AbortManager* self, int value) {
-                self->on_print_state_during_cancel(static_cast<PrintJobState>(value));
+            [](AbortManager* self, PrintJobState value) {
+                self->on_print_state_during_cancel(value);
             });
         spdlog::debug("[AbortManager] Registered print_state_enum observer for cancel detection");
     }
@@ -719,6 +722,8 @@ void AbortManager::on_print_state_during_cancel(PrintJobState state) {
 
     // Terminal states indicate the print has ended — cancel worked
     switch (state) {
+    // RAW_PRINT_STATE_OK: every arm below asks what the PRINTER reported after a
+    // cancel. Preparing is not a state CANCEL_PRINT can produce.
     case PrintJobState::STANDBY:
     case PrintJobState::CANCELLED:
     case PrintJobState::COMPLETE:
@@ -730,8 +735,11 @@ void AbortManager::on_print_state_during_cancel(PrintJobState state) {
         complete_abort("Print cancelled");
         break;
 
+    // RAW_PRINT_STATE_OK: still-running arms of the cancel wait; see above.
     case PrintJobState::PRINTING:
     case PrintJobState::PAUSED:
+        // RAW_PRINT_STATE_OK: waiting for the PRINTER to leave a running state
+        // after a cancel. Preparing is not something CANCEL_PRINT produces.
         // Non-terminal — cancel macro is still running, keep waiting
         spdlog::debug("[AbortManager] Print state {} during cancel — still waiting",
                       print_job_state_to_string(state));

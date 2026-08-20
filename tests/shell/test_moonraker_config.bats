@@ -392,6 +392,10 @@ NET_DEPLOY_NO_ASSET='class NetDeploy(AppDeploy):
     rm -f "$INSTALL_DIR/bin/helix-screen"
     fake_moonraker_src "zip_deploy.py" "class ZipDeploy(AppDeploy): pass" >/dev/null
     fake_non_buildroot_os_release
+    # system_updates_unavailable() is os-release OR no-package-manager, so the
+    # package-manager probe has to be pinned too — otherwise a host without apt
+    # (macOS, a slim CI container) takes the second term and edits the conf.
+    fake_os_package_manager_present
     mock_command_script "systemctl" 'exit 0'
 
     local before
@@ -1303,6 +1307,10 @@ CONF
     conf=$(setup_moonraker_home)
     create_moonraker_conf_with_helix "$conf"
     fake_non_buildroot_os_release
+    # Not buildroot is only half the predicate: system_updates_unavailable()
+    # also fires when no package manager is on PATH, so pin that too rather
+    # than inheriting whatever the host running the suite happens to have.
+    fake_os_package_manager_present
 
     local before
     before=$(cat "$conf")
@@ -1433,6 +1441,9 @@ CONF
     MOONRAKER_CONF_PATHS="$conf"
     rm -f "$INSTALL_DIR/bin/helix-screen"
     fake_non_buildroot_os_release
+    # The no-package-manager term of system_updates_unavailable() would fire on
+    # its own on a host without apt, so pin the probe as well as the os-release.
+    fake_os_package_manager_present
     mock_command_script "systemctl" 'exit 0'
 
     configure_moonraker_updates "pi"
@@ -1457,6 +1468,11 @@ path: /usr/data/helixscreen
 CONF
     MOONRAKER_CONF_PATHS="$conf"
     rm -f "$INSTALL_DIR/bin/helix-screen"
+    # "Unchanged" only holds where system_updates_unavailable() is false, which
+    # needs BOTH a non-buildroot os-release and a package manager on PATH. Left
+    # to the ambient host this passes on Debian CI and fails anywhere without apt.
+    fake_non_buildroot_os_release
+    fake_os_package_manager_present
 
     local original_content
     original_content=$(cat "$conf")

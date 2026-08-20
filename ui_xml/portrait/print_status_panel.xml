@@ -87,7 +87,8 @@
                 style_translate_x="#space_md" style_translate_y="#space_md" style_bg_color="#card_bg" style_bg_opa="180"
                 style_radius="#icon_button_radius_lg" clickable="true" style_pad_all="0" scrollable="false">
           <bind_flag_if_eq subject="exclude_objects_available" flag="hidden" ref_value="0"/>
-          <lv_label text="#icon_view_list" style_text_font="mdi_icons_24" style_text_color="#text_muted" align="center"/>
+          <lv_label text="#icon_debug_step_over"
+                    style_text_font="mdi_icons_24" style_text_color="#text_muted" align="center"/>
           <event_cb trigger="clicked" callback="on_print_status_objects"/>
         </lv_obj>
 

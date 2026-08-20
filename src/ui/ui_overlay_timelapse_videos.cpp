@@ -3,6 +3,9 @@
 
 #include "ui_overlay_timelapse_videos.h"
 
+#include "helix_plugin_installer.h"
+#include "host_identity.h"
+
 #if HELIX_HAS_TIMELAPSE_VIEWER
 
 #include "ui_callback_helpers.h"
@@ -651,25 +654,18 @@ void TimelapseVideosOverlay::detect_playback_capability() {
     can_play_ = cached_can_play;
     player_command_ = cached_player;
 
-    // Check if we're running on the same host as Moonraker (may change between connections)
+    // Check if we're running on the same host as Moonraker (may change between
+    // connections). Both halves are shared: extract_host_from_websocket_url()
+    // already handles the [::1] bracket form this parse got wrong, and
+    // is_moonraker_on_same_host() answers for a host named by hostname or LAN IP,
+    // not just a loopback literal — playback works whenever the file is on this
+    // machine, however the host happens to be spelled.
     if (api_) {
-        std::string ws_url = api_->get_websocket_url();
-        // Extract host from ws://host:port/...
-        std::string host;
-        auto scheme_end = ws_url.find("://");
-        if (scheme_end != std::string::npos) {
-            auto host_start = scheme_end + 3;
-            auto host_end = ws_url.find(':', host_start);
-            if (host_end == std::string::npos) {
-                host_end = ws_url.find('/', host_start);
-            }
-            if (host_end != std::string::npos) {
-                host = ws_url.substr(host_start, host_end - host_start);
-            } else {
-                host = ws_url.substr(host_start);
-            }
-        }
-        is_local_moonraker_ = helix::timelapse::is_local_host(host);
+        const std::string host = helix::extract_host_from_websocket_url(api_->get_websocket_url());
+        // Empty means we could not name the host at all; that is not evidence of
+        // locality, and is_moonraker_on_same_host() reads "" as the localhost
+        // default.
+        is_local_moonraker_ = !host.empty() && helix::is_moonraker_on_same_host(host);
     }
 
     spdlog::debug("[{}] Playback capability: can_play={} player='{}' local={}", get_name(),

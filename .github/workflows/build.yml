@@ -25,13 +25,20 @@ jobs:
     - name: Initialize submodules
       uses: ./.github/actions/init-submodules
 
+    - name: Prepare apt
+      uses: ./.github/actions/apt-prepare
+
     - name: Install dependencies
       uses: nick-fields/retry@v4
       with:
-        # Bumped to 10 min: slow apt mirrors can push the download phase past a
-        # 5-min cap, and on timeout retry@v4 crashes with "kill EPERM" (Node 24)
-        # instead of retrying — so the longer window keeps us off that path.
-        timeout_minutes: 10
+        # The window is a backstop, not the fix. When apt wedges on a bad
+        # mirror, retry@v4 cannot rescue it: apt runs under sudo, so the
+        # timeout's process.kill returns EPERM and the step dies with
+        # "Error: kill EPERM" instead of retrying. Widening the cap only moves
+        # the failure later -- Compile hit the ceiling at 10 minutes and then
+        # again at 20. The Prepare apt step above is what actually prevents the
+        # hang, by dropping the azure mirror and capping apt's own timeouts.
+        timeout_minutes: 20
         max_attempts: 3
         command: |
           sudo apt-get update
@@ -164,6 +171,9 @@ jobs:
 
     - name: Initialize submodules
       uses: ./.github/actions/init-submodules
+
+    - name: Prepare apt
+      uses: ./.github/actions/apt-prepare
 
     # This job only ever gets the -dev-free runtime closure, so every library the
     # compile job picked up transitively via a -dev package has to be named here.
@@ -426,10 +436,14 @@ jobs:
     - name: Initialize submodules
       uses: ./.github/actions/init-submodules
 
+    - name: Prepare apt
+      uses: ./.github/actions/apt-prepare
+
     - name: Install dependencies
       uses: nick-fields/retry@v4
       with:
-        timeout_minutes: 10
+        # See the note on the first Install dependencies step above.
+        timeout_minutes: 20
         max_attempts: 3
         command: |
           sudo apt-get update

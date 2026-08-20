@@ -4032,7 +4032,7 @@
           "max_x": 520,
           "min_y": 480,
           "max_y": 520,
-          "confidence": 97,
+          "confidence": 55,
           "reason": "Build volume ~500x500mm (SV08 Max size)"
         },
         {

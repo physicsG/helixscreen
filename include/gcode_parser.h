@@ -830,12 +830,20 @@ GCodeHeaderMetadata extract_header_metadata_from_content(const std::string& cont
  *     ignored, and `Tn` appearing inside a comment is ignored.
  *
  * @param content G-code content (a whole file, or any line-complete chunk).
+ * @param early_exit_full_set When non-empty, scanning stops as soon as the
+ *        seen set covers it (`seen ⊇ early_exit_full_set`). Soundness:
+ *        callers pass the full slicer palette {0..N-1}; tools at indices
+ *        >= palette size are already dropped by every downstream consumer
+ *        (get_used_tool_info() filters to palette indices), so a missed
+ *        beyond-palette tool is invisible. Empty set => scan whole content
+ *        (back-compat).
  * @return Distinct tool indices seen. Unlike ParsedGCodeFile::tools_used_indices,
  *         this does NOT inject {0} for single-extruder files with only a color
  *         palette (it has no palette knowledge); callers needing that convention
  *         should fall back to {0} when this returns an empty set and tools exist.
  */
-std::set<int> scan_tools_used_from_content(const std::string& content);
+std::set<int> scan_tools_used_from_content(const std::string& content,
+                                           std::set<int> early_exit_full_set = {});
 
 /**
  * @brief Streaming, memory-safe variant of scan_tools_used_from_content() that
@@ -846,9 +854,17 @@ std::set<int> scan_tools_used_from_content(const std::string& content);
  * into a std::string on constrained devices.
  *
  * @param filepath Path to a local G-code file.
+ * @param early_exit_full_set When non-empty, scanning stops as soon as the
+ *        seen set covers it (`seen ⊇ early_exit_full_set`). Soundness:
+ *        callers pass the full slicer palette {0..N-1}; tools at indices
+ *        >= palette size are already dropped by every downstream consumer
+ *        (get_used_tool_info() filters to palette indices), so a missed
+ *        beyond-palette tool is invisible. Empty set => scan whole file
+ *        (back-compat).
  * @return Distinct tool indices seen (empty if the file can't be opened).
  */
-std::set<int> scan_tools_used_from_file(const std::string& filepath);
+std::set<int> scan_tools_used_from_file(const std::string& filepath,
+                                        std::set<int> early_exit_full_set = {});
 
 } // namespace gcode
 } // namespace helix

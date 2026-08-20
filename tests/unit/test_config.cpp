@@ -3193,6 +3193,11 @@ TEST_CASE("Config::init() consumes the fresh-install marker", "[core][config][mo
 
 TEST_CASE("Config::init() keeps a shipped preset when the marker cannot be deleted",
           "[core][config][moonraker-update]") {
+    // root bypasses the permission bits this case depends on, so the marker cannot be deleted
+    // and the assertion below would be asserting the opposite of the point.
+    if (::geteuid() == 0) {
+        SKIP("Test requires non-root euid - root bypasses permission bits");
+    }
     TarballTestEnv env("tarball_marker_readonly");
 
     env.write_config({{"preset", "k1"},

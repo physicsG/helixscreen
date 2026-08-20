@@ -551,7 +551,7 @@ void ColorPicker::switch_tab(bool show_custom) {
     }
 
     // Style active tab as a filled segmented-control pill; matches the
-    // purge_btn_selected pattern (primary fill / text-on-primary).
+    // extrude_length_btn_selected pattern (primary fill / text-on-primary).
     const auto primary = theme_manager_get_color("primary");
     const auto text = theme_manager_get_color("text");
     const auto text_muted = theme_manager_get_color("text_muted");

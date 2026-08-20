@@ -92,29 +92,6 @@ enum class PrintJobState {
 };
 
 /**
- * @brief True while a print job still owns the toolhead — PRINTING or PAUSED.
- *
- * A paused print is NOT a safe state for toolhead motion: the nozzle is parked
- * over (or in) the part and the job resumes from wherever it is left. On
- * loadcell-Z printers a G28 probes the nozzle DOWN into the bed, so a homing
- * move issued while paused collides with the print exactly as it would
- * mid-print (bundle XWPBR2DX, commit 329e731e9).
- *
- * Single source of truth for the AMS backend guard AND the UI affordances that
- * must agree with it — a button that is offered but always refused is a dead
- * end for the user (bundle JX2FVRB9).
- *
- * The `print_active` subject (get_print_active_subject()) is the subject-shaped
- * equivalent, derived from the raw print_stats.state string by
- * PrinterPrintState::status_indicates_active_print(). The two agree by
- * construction; UI code that already has a subject should read that instead of
- * reaching for the enum.
- */
-[[nodiscard]] constexpr bool print_occupies_toolhead(PrintJobState state) {
-    return state == PrintJobState::PRINTING || state == PrintJobState::PAUSED;
-}
-
-/**
  * @brief Terminal outcome of a print job (for UI persistence)
  *
  * Captures how the last print ended. Unlike PrintJobState (which always reflects
@@ -614,6 +591,13 @@ class PrinterState {
      */
     PrintJobState get_print_job_state() const;
 
+    /// The derived print lifecycle. Prefer this over reading
+    /// get_print_lifecycle_subject() by hand — see
+    /// PrinterPrintState::get_print_lifecycle() for why the hand-cast is a trap.
+    [[nodiscard]] PrintState get_print_lifecycle() const {
+        return print_domain_.get_print_lifecycle();
+    }
+
     /**
      * @brief Check if a new print can be started
      *
@@ -862,6 +846,38 @@ class PrinterState {
      * Integer subject holding PrintStartPhase enum value.
      * Use with bind_flag_if_eq/not_eq in XML to show/hide progress overlay.
      */
+    void begin_preparing(const PrintJobRef& job) {
+        print_domain_.begin_preparing(job);
+    }
+    void retire_preparing(PreparingExit reason) {
+        print_domain_.retire_preparing(reason);
+    }
+    [[nodiscard]] bool has_preparing_job() const {
+        return print_domain_.has_preparing_job();
+    }
+    [[nodiscard]] const PrintJobRef& preparing_job() const {
+        return print_domain_.preparing_job();
+    }
+    lv_subject_t* get_preparing_epoch_subject() {
+        return print_domain_.get_preparing_epoch_subject();
+    }
+    lv_subject_t* get_print_lifecycle_prev_subject() {
+        return print_domain_.get_print_lifecycle_prev_subject();
+    }
+    [[nodiscard]] PreparingExit last_preparing_exit() const {
+        return print_domain_.last_preparing_exit();
+    }
+
+    lv_subject_t* get_print_lifecycle_subject() {
+        return print_domain_.get_print_lifecycle_subject();
+    }
+
+    /// Boolean form of job_holds_machine(print_lifecycle). See
+    /// PrinterPrintState::get_job_holds_machine_subject().
+    lv_subject_t* get_job_holds_machine_subject() {
+        return print_domain_.get_job_holds_machine_subject();
+    }
+
     lv_subject_t* get_print_start_phase_subject() {
         return print_domain_.get_print_start_phase_subject();
     }

@@ -116,7 +116,6 @@ src/rendering/bed_mesh_rasterizer.cpp  # not in the v1 Core+AMS cut
 src/rendering/bed_mesh_render_thread.cpp  # not in the v1 Core+AMS cut
 src/rendering/bed_mesh_renderer.cpp  # not in the v1 Core+AMS cut
 src/rendering/gcode_camera.cpp  # not in the v1 Core+AMS cut
-src/rendering/gcode_color_metadata.cpp  # not in the v1 Core+AMS cut
 src/rendering/gcode_data_source.cpp  # not in the v1 Core+AMS cut
 src/rendering/gcode_geometry_builder.cpp  # not in the v1 Core+AMS cut
 src/rendering/gcode_gles_renderer.cpp  # not in the v1 Core+AMS cut

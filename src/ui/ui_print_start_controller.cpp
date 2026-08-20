@@ -26,6 +26,7 @@
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
+#include "print_job_ref.h"
 #include "printer_state.h"
 
 #include <spdlog/spdlog.h>
@@ -129,6 +130,8 @@ void PrintStartController::initiate() {
 
     // Check if a print is already active before allowing a new one to start
     if (!printer_state_.can_start_new_print()) {
+        // RAW_PRINT_STATE_OK: the preparing axis is carried separately here by
+        // can_start_new_print(); this arm asks only what the printer reports.
         PrintJobState current_state = printer_state_.get_print_job_state();
         const char* state_str = print_job_state_to_string(current_state);
         NOTIFY_ERROR(lv_tr("Cannot start print: printer is {}"), state_str);
@@ -200,11 +203,21 @@ void PrintStartController::execute_print_start() {
     // delegate to PrintPreparationManager. Hoisted into a continuation so the
     // Snapmaker U1 native pre-print config send (which must land BEFORE
     // PRINT_START) can run first and only invoke this on success.
-    auto start_now = [this, prep_manager, filename_to_print, path = path_, thumbnail_path,
+    // PrinterState outlives the controller, so a bare pointer threaded through
+    // the background-thread completion chain cannot dangle.
+    PrinterState* ps = &printer_state_;
+
+    auto start_now = [this, ps, prep_manager, filename_to_print, path = path_, thumbnail_path,
                       on_started, update_button, show_detail]() {
         // Navigate to print status panel IMMEDIATELY (optimistic navigation)
         // The busy overlay will show on top during download/upload operations.
         // On failure, we'll navigate back to the detail overlay.
+        // Arm the preparing window BEFORE any pre-start work. From here the
+        // panel answers "which job is this?" from the preparing job rather than
+        // from print_stats, which still describes the PREVIOUS job for the whole
+        // duration of a host-side pre-start block.
+        printer_state_.begin_preparing(helix::PrintJobRef{filename_to_print, path, ""});
+
         if (navigate_to_print_status_) {
             spdlog::info("[PrintStartController] Navigating to print status panel (preparing...)");
             if (hide_detail_view_) {
@@ -250,18 +263,20 @@ void PrintStartController::execute_print_start() {
             },
             // Completion callback
             // NOTE: Called from background HTTP thread - must defer LVGL calls to main thread
-            [update_button, show_detail](bool success, const std::string& error) {
-                helix::ui::queue_update([success, error, update_button, show_detail]() {
+            [update_button, show_detail, ps](bool success, const std::string& error) {
+                helix::ui::queue_update([success, error, update_button, show_detail, ps]() {
                     auto& status_panel = get_global_print_status_panel();
 
                     if (success) {
+                        // Deliberately does NOT end preparation: the RPC
+                        // succeeding is when PRINT_START BEGINS. The printer's
+                        // own PRINTING report retires the claim (Confirmed).
                         spdlog::debug("[PrintStartController] Print started successfully");
-                        status_panel.end_preparing(true);
                     } else if (!error.empty()) {
                         NOTIFY_ERROR(lv_tr("Print preparation failed: {}"), error);
                         LOG_ERROR_INTERNAL("[PrintStartController] Print preparation failed: {}",
                                            error);
-                        status_panel.end_preparing(false);
+                        ps->retire_preparing(helix::PreparingExit::Failed);
 
                         // Only unwind the optimistic navigation if the print
                         // status overlay is still what the user is looking at.
@@ -393,7 +408,7 @@ void PrintStartController::initiate_reprint(const std::string& filename, const s
                                             const std::set<int>& tools_used,
                                             std::function<void()> on_started,
                                             std::function<void()> on_error) {
-    (void)path; // The lightweight start uses the bare filename; path kept for symmetry.
+    // path is used for the preparing-job identity; the start RPC takes the bare name.
 
     if (!api_) {
         spdlog::error("[PrintStartController] initiate_reprint: no API");
@@ -402,6 +417,11 @@ void PrintStartController::initiate_reprint(const std::string& filename, const s
         }
         return;
     }
+
+    // The reprint path skips the preparation manager, so it used to record no
+    // job identity at all and ran with whatever override the previous print
+    // left behind.
+    printer_state_.begin_preparing(helix::PrintJobRef{filename, path, ""});
 
     // Lightweight start — the file is already on the printer; no upload/prep.
     auto start = [this, filename, on_started, on_error]() {
@@ -415,9 +435,10 @@ void PrintStartController::initiate_reprint(const std::string& filename, const s
                     }
                 });
             },
-            [tok, on_error](const MoonrakerError& err) mutable {
+            [tok, on_error, ps = &printer_state_](const MoonrakerError& err) mutable {
                 std::string msg = err.user_message();
-                tok.defer("PrintStartController::reprint.err", [msg, on_error]() {
+                tok.defer("PrintStartController::reprint.err", [msg, on_error, ps]() {
+                    ps->retire_preparing(helix::PreparingExit::Failed);
                     NOTIFY_ERROR(lv_tr("Failed to reprint: {}"), msg);
                     if (on_error) {
                         on_error();
@@ -432,7 +453,20 @@ void PrintStartController::initiate_reprint(const std::string& filename, const s
     // spurious-feed fix. On native-send error the modal is shown and on_error runs.
     AmsBackend* backend = AmsState::instance().get_backend();
     if (backend && backend->requires_preprint_send()) {
-        send_snapmaker_preprint_then(tools_used, /*remap=*/{}, start, on_error);
+        // The abort path has to retire the job this function armed above.
+        // execute_print_start() avoids the problem by arming INSIDE its
+        // success-only lambda; reprint arms before the pre-send because the
+        // pre-send is itself part of the window. Handing on_error straight
+        // through would leave the job armed on a rejected pre-send, and
+        // print_in_progress is published from it - so can_start_new_print()
+        // would refuse every later print until the watchdog fired.
+        auto abort = [this, on_error]() {
+            printer_state_.retire_preparing(helix::PreparingExit::Failed);
+            if (on_error) {
+                on_error();
+            }
+        };
+        send_snapmaker_preprint_then(tools_used, /*remap=*/{}, start, abort);
         return; // start fires from the send continuation — do NOT also start here
     }
 
@@ -721,6 +755,8 @@ bool PrintStartController::apply_filament_remaps() {
 }
 
 void PrintStartController::observe_print_state_for_restore() {
+    // RAW_PRINT_STATE_OK: restores the filament mapping on a TERMINAL state,
+    // which the wire reports directly.
     auto* subject = printer_state_.get_print_state_enum_subject();
     if (!subject) {
         spdlog::warn("[PrintStartController] No print state subject — cannot auto-restore mapping");
@@ -731,9 +767,8 @@ void PrintStartController::observe_print_state_for_restore() {
     // At registration time, state is typically STANDBY (print hasn't started yet).
     // We only trigger restore on terminal states (COMPLETE/CANCELLED/ERROR),
     // NOT STANDBY — otherwise the immediate fire would undo our remaps.
-    print_state_observer_ = observe_int_sync<PrintStartController>(
-        subject, this, [](PrintStartController* self, int state_val) {
-            auto state = static_cast<PrintJobState>(state_val);
+    print_state_observer_ = observe_print_state<PrintStartController>(
+        subject, this, [](PrintStartController* self, PrintJobState state) {
             if (state == PrintJobState::COMPLETE || state == PrintJobState::CANCELLED ||
                 state == PrintJobState::ERROR) {
                 self->restore_filament_mapping();
@@ -1008,7 +1043,12 @@ void PrintStartController::recover_pending_remap() {
         // restore_filament_mapping on COMPLETE/CANCELLED/ERROR; the immediate-
         // fire on the current PRINTING/PAUSED value is a no-op there.
         auto current_state = static_cast<PrintJobState>(
+            // RAW_PRINT_STATE_OK: suppresses the observer's registration-fire
+            // while a job runs; a preparing job has no mapping to restore.
             lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
+        // RAW_PRINT_STATE_OK: the mapping is restored on a TERMINAL state; this
+        // only suppresses the observer's immediate registration-fire while a job
+        // is running. A preparing job has no mapping to restore yet.
         bool print_active =
             (current_state == PrintJobState::PRINTING || current_state == PrintJobState::PAUSED);
 

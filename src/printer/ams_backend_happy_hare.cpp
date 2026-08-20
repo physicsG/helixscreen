@@ -2402,7 +2402,7 @@ void AmsBackendHappyHare::apply_overrides(SlotInfo& slot, int slot_index) {
     if (it == overrides_.end())
         return;
     helix::ams::MergeOptions opts;
-    opts.firmware_reports_spool_ids = firmware_reports_spool_ids();
+    opts.printer_reports_spool_ids = printer_reports_spool_ids();
     opts.keep_spool_info_on_eject = SettingsManager::instance().get_ams_keep_spool_info_on_eject();
     // Own-write echo suppression (SlotFingerprintTracker::expect()
     // semantics): if we just re-linked this gate's spool id, in-flight
@@ -2481,6 +2481,30 @@ void AmsBackendHappyHare::clear_slot_override(int slot_index) {
         }
     }
     emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+}
+
+void AmsBackendHappyHare::publish_external_spool_lane(const SlotInfo* spool) {
+    // Same shape as AFC's publish: capability + gate count under the lock,
+    // lazy shared-namespace store from api_, send outside. Lane key style —
+    // HelixScreen's filament-system convention (spec filament_slots.md §4);
+    // Happy Hare's own outer keys differ but the inner 0-based `lane` field is
+    // what readers key off.
+    int lane_index = 0;
+    bool supported = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        supported = system_info_.supports_bypass;
+        lane_index = system_info_.total_slots;
+    }
+    if (!supported || lane_index <= 0 || !api_) {
+        return;
+    }
+    if (!lane_publish_store_) {
+        lane_publish_store_ = std::make_unique<helix::ams::FilamentSlotOverrideStore>(
+            api_, "happyhare", helix::ams::LaneKeyStyle::Lane);
+    }
+    helix::ams::publish_external_lane(lane_publish_store_.get(), lane_index, spool,
+                                      backend_log_tag());
 }
 
 AmsError AmsBackendHappyHare::set_slot_info(int slot_index, const SlotInfo& info, bool persist) {

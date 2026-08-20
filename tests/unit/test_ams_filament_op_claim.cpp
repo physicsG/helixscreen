@@ -35,6 +35,7 @@
  */
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/print_state_test_drivers.h"
 #include "ams_backend_happy_hare.h"
 #include "ams_backend_qidi.h"
 #include "ams_error.h"
@@ -177,7 +178,7 @@ struct ClaimFixture : public LVGLTestFixture {
     }
 
     void set_print_state(helix::PrintJobState s) {
-        lv_subject_set_int(state.get_print_state_enum_subject(), static_cast<int>(s));
+        helix::test::set_wire_state(state, s);
     }
 
     /// Concurrency doubles get a NULL api on purpose: refuse_if_printing() reads

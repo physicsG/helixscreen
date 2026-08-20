@@ -109,7 +109,7 @@ Like `PrinterState`, `ToolState` is fed `update_from_status()` on the main threa
 | `ProbeSensorManager` | `probe_sensor_manager.h` | Native Klipper probe sensors |
 | `AccelSensorManager` | `accel_sensor_manager.h` | ADXL345, LIS2DW, LIS3DH, MPU9250, ICM20948 |
 | `ColorSensorManager` | `color_sensor_manager.h` | TD-1 color sensors |
-| `FilamentSensorManager` | `filament_sensor_manager.h` | Filament sensor discovery + runout state |
+| `FilamentSensorManager` | `filament_sensor_manager.h` | Filament sensor discovery + runout state; owns the bypass⇄runout arming policy (`on_bypass_active_changed`) |
 | `DetectionManager` | `detection_manager.h` | Detection-source registry + policy dispatch |
 | **Filament & spools** | | |
 | `SpoolmanManager` | `spoolman_manager.h` | Spoolman polling, circuit breaker, identity cache |
@@ -208,6 +208,9 @@ Registration order is load-bearing: `SubjectInitializer` initializes `Navigation
 - **Do not add `StaticSubjectRegistry` registration inside a domain class.** `PrinterState` registers once and its `deinit_subjects()` fans out to all thirteen. A second registration would deinit a domain twice.
 - **`deinit_subjects()` expires the lifetime token first**, then unregisters the cache invalidator, then tears down — keep that order if you ever touch it; surviving observers depend on the token flipping before the observer lists free (ch. 03).
 - **New global panel? Use the macros.** `DEFINE_GLOBAL_PANEL` / `DEFINE_GLOBAL_PANEL_WITH_STATE` (`include/ui_panel_singleton_macros.h`) get the `StaticPanelRegistry` wiring right by construction; hand-rolled globals are how shutdown crashes happen.
+- **`Preparing` is not a sub-state of Moonraker's PRINTING.** `PrinterPrintState` owns the window between the user committing to a job and the printer reporting it (`begin_preparing()` / `retire_preparing()`), because a host-side pre-start block runs *before* the printer is handed the job and `print_stats` describes the PREVIOUS job for its whole duration. Two guards deliberately yield to a live preparing job: the phase-update stale guard and the `print_active -> 0` safety reset. Do not re-tighten either to "only while printing" — see `../PRINT_STATE_MACHINE.md` § "The preparing job".
+- **`begin_preparing()` is synchronous, unlike its neighbours.** `set_print_start_state()` defers because WebSocket callbacks call it; a button press is already on the main thread, and the previous job's outcome must be cleared before any observer can paint a `Preparing` state next to the finished job's numbers.
+- **A new session-scoped member on `PrinterPrintState` must also be cleared in `PrinterPrintStateTestAccess::reset_extra()`** (`tests/test_helpers/printer_state_test_access.h`). Members that survive `reset_for_new_print()` by design — `printer_reports_layers_`, `preparing_job_` — leak across tests sharing the singleton, and the failure surfaces in whatever unrelated test runs next in that shard, not in yours. Adding `preparing_job_` without this turned three *AMS* shards red while every AMS test passed in isolation.
 - **Counting rule for the census:** `rg 'static\s+\w+(&|\*)\s+instance\s*\(' include/ --glob '*.h'` → 76 at audit time. If you add singleton number 77, this chapter's count is stale — update it.
 
 ## Going deeper

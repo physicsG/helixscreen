@@ -1026,7 +1026,7 @@ Select the mock AMS visual scenario.
 
 | Property | Value |
 |----------|-------|
-| **Values** | `idle`, `loading`, `error`, `bypass`, `unaccounted` |
+| **Values** | `idle`, `loading`, `error`, `bypass`, `unaccounted`, `grade` |
 | **Default** | `idle` (slot 0 loaded, slot 3 empty, others available) |
 | **File** | `src/printer/ams_backend.cpp` |
 
@@ -1037,6 +1037,7 @@ Select the mock AMS visual scenario.
 | `error` | Slot errors visible; buffer fault also shown when combined with `afc` mode |
 | `bypass` | Bypass mode active |
 | `unaccounted` | Filament at the toolhead that no lane accounts for (drives the print-start gate warning) |
+| `grade` | Every lane holds `PLA-CF` instead of its usual filament — same compat group, so the mapper routes a PLA tool exactly as before and the print-start **grade** dialog is what fires. All four lanes, not one, because a tool lands on a lane by colour and then by positional fallback over the file's whole palette |
 
 ```bash
 # Show error states (slot errors + buffer fault)
@@ -1047,6 +1048,10 @@ HELIX_MOCK_AMS_STATE=loading ./build/bin/helix-screen --test
 
 # Show bypass mode
 HELIX_MOCK_AMS_STATE=bypass ./build/bin/helix-screen --test
+
+# Filled-grade lanes: drives the "Filament Grade Mismatch" print-start dialog.
+# Open any PLA file (xyz-10mm-calibration-cube) and tap Print.
+HELIX_MOCK_AMS_STATE=grade ./build/bin/helix-screen --test -vv
 
 # Combine with topology selection
 HELIX_MOCK_AMS=afc HELIX_MOCK_AMS_STATE=error ./build/bin/helix-screen --test
@@ -1513,6 +1518,33 @@ SCREWS_AUTO_START=1 ./build/bin/helix-screen --test &
 ---
 
 ## Development
+
+### `HELIX_TEMP_GRAPH_GRAD_SKIP`
+
+Force the temperature graph's gradient to re-render on every dirtied frame, disabling the
+content-signature skip. Diagnostic only: it exists so the skip's effect can be measured on a
+device without swapping binaries.
+
+The gradient under each trace is cached and re-rendered only when the drawn result would
+change. "Would change" is decided by hashing the pixel row each column's fill starts at
+(`include/temp_graph_column_map.h`), not the raw sample values - real temperatures jitter a
+tenth of a degree every sample, so a value hash never matches and nothing is ever skipped.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `0` (skip disabled, always render), anything else or unset (skip enabled) |
+| **Default** | Skip **enabled** |
+| **File** | `src/ui/ui_temp_graph.cpp`, `include/temp_graph_column_map.h` |
+
+```bash
+# Baseline: every dirtied frame renders. Pair with -vv for the per-render timing.
+HELIX_TEMP_GRAPH_GRAD_SKIP=0 ./build/bin/helix-screen --test -vv
+```
+
+Measured on a Creality K2 Plus (456x102 gradient, 2 series): 167ms median per render with the
+skip ineffective, ~10ms after coalescing equal-height column runs, with ~47% of frames skipped
+outright. Most of the original cost was `lv_canvas_finish_layer()` rasterising 456 separate
+single-column fills, not the pixels themselves.
 
 ### `HELIX_HOT_RELOAD`
 
@@ -2131,7 +2163,9 @@ Override the base directory for all HelixScreen cache/temp files (thumbnails, sc
 
 When set, all cache subdirectories are created under `$HELIX_CACHE_DIR/<subdir>`. Platform hooks set this automatically:
 - **AD5M**: `/data/helixscreen/cache` (5.8GB ext4 partition)
-- **K1/K2**: `/usr/data/helixscreen/cache`
+- **K1**: `/usr/data/helixscreen/cache`
+- **K2**: `/mnt/UDISK/helixscreen/cache` (27.5GB user partition). `/usr/data` on the
+  K2 is the ~240MB root overlay, not user storage, so it is only a fallback.
 
 ```bash
 # Custom cache location

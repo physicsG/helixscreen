@@ -104,6 +104,8 @@ void PrintStartCollector::start() {
         // Record start time for timeout fallback
         printing_state_start_ = std::chrono::steady_clock::now();
         last_activity_time_ = printing_state_start_;
+        // Assume the narrower window until something says otherwise.
+        window_ = helix::PreprintWindow::PrinterEdge;
         detected_phases_.clear();
         current_phase_ = PrintStartPhase::INITIALIZING;
         print_start_detected_ = false;
@@ -298,6 +300,22 @@ void PrintStartCollector::stop() {
         state_.reset_print_start_state();
         spdlog::debug("[PrintStartCollector] Stopped monitoring");
     }
+}
+
+void PrintStartCollector::note_host_side_pre_start() {
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (window_ == helix::PreprintWindow::HostPreStart) {
+            return; // already declared
+        }
+        window_ = helix::PreprintWindow::HostPreStart;
+    }
+    spdlog::info("[PrintStartCollector] Host-side pre-start block is part of this window - "
+                 "re-filtering prediction history");
+    // start() has already loaded the printer-edge bucket, so re-run the load
+    // now that we know which population this run belongs to. Cheap, and it
+    // happens once, milliseconds after arming.
+    load_prediction_history();
 }
 
 void PrintStartCollector::reset() {
@@ -1660,14 +1678,16 @@ void PrintStartCollector::load_prediction_history() {
     int temp_bucket = (bed_temp >= 40) ? 2 : 1;
 
     std::lock_guard<std::mutex> lock(state_mutex_);
-    predictor_.load_entries(entries, temp_bucket);
+    predictor_.load_entries(entries, temp_bucket, window_);
     loaded_temp_bucket_ = temp_bucket;
 
     if (!entries.empty()) {
-        spdlog::debug("[PrintStartCollector] Loaded {} prediction entries for {} bucket "
-                      "(predicted total: {}s)",
-                      predictor_.get_entries().size(), temp_bucket == 2 ? "warm" : "cold",
-                      predictor_.predicted_total());
+        spdlog::debug(
+            "[PrintStartCollector] Loaded {}/{} prediction entries for the {} / {} "
+            "bucket (predicted total: {}s)",
+            predictor_.get_entries().size(), entries.size(), temp_bucket == 2 ? "warm" : "cold",
+            window_ == helix::PreprintWindow::HostPreStart ? "host-pre-start" : "printer-edge",
+            predictor_.predicted_total());
     }
 }
 
@@ -1972,6 +1992,7 @@ void PrintStartCollector::save_prediction_entry() {
     entry.timestamp = static_cast<int64_t>(std::time(nullptr));
     entry.phase_durations = std::move(phase_durations);
     entry.temp_bucket = (start_bed_temp_ >= 40) ? 2 : 1;
+    entry.window = window_;
 
     std::vector<helix::PreprintEntry> bucket_entries;
     {
@@ -2026,6 +2047,11 @@ void PrintStartCollector::save_prediction_entry() {
                 entry_json["phases"] = phases_json;
                 if (e.temp_bucket > 0) {
                     entry_json["temp_bucket"] = e.temp_bucket;
+                }
+                // Omitted for Unknown so the field only appears once it means
+                // something; a reader treats its absence as PrinterEdge.
+                if (e.window != helix::PreprintWindow::Unknown) {
+                    entry_json["window"] = static_cast<int>(e.window);
                 }
                 entries_json.push_back(entry_json);
             }

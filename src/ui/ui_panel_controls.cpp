@@ -153,6 +153,8 @@ void ControlsPanel::init_subjects() {
     // Macro button visibility and names (for declarative binding)
     UI_MANAGED_SUBJECT_INT(macro_1_visible_, 0, "macro_1_visible", subjects_);
     UI_MANAGED_SUBJECT_INT(macro_2_visible_, 0, "macro_2_visible", subjects_);
+    UI_MANAGED_SUBJECT_INT(macro_1_available_, 0, "macro_1_available", subjects_);
+    UI_MANAGED_SUBJECT_INT(macro_2_available_, 0, "macro_2_available", subjects_);
     UI_MANAGED_SUBJECT_STRING(macro_1_name_, macro_1_name_buf_, "", "macro_1_name", subjects_);
     UI_MANAGED_SUBJECT_STRING(macro_2_name_, macro_2_name_buf_, "", "macro_2_name", subjects_);
 
@@ -190,6 +192,8 @@ void ControlsPanel::init_subjects() {
     // Macro buttons 3 & 4 visibility and names
     UI_MANAGED_SUBJECT_INT(macro_3_visible_, 0, "macro_3_visible", subjects_);
     UI_MANAGED_SUBJECT_INT(macro_4_visible_, 0, "macro_4_visible", subjects_);
+    UI_MANAGED_SUBJECT_INT(macro_3_available_, 0, "macro_3_available", subjects_);
+    UI_MANAGED_SUBJECT_INT(macro_4_available_, 0, "macro_4_available", subjects_);
     UI_MANAGED_SUBJECT_STRING(macro_3_name_, macro_3_name_buf_, "", "macro_3_name", subjects_);
     UI_MANAGED_SUBJECT_STRING(macro_4_name_, macro_4_name_buf_, "", "macro_4_name", subjects_);
     UI_MANAGED_SUBJECT_INT(macro_header_visible_, 1, "macro_header_visible", subjects_);
@@ -632,6 +636,16 @@ void ControlsPanel::register_observers() {
             }
         });
 
+    // Which macros a printer defines is not fixed for the life of a session: a
+    // Klipper restart or a config change re-runs discovery, and StandardMacros
+    // re-resolves every slot against the new list. Sampling once at setup() left
+    // a button enabled for a macro that had gone away (and hidden for one that
+    // had arrived) until the panel next deactivated.
+    macros_version_observer_ = observe_int_sync<ControlsPanel>(
+        StandardMacros::instance().get_macros_version_subject(), this,
+        [](ControlsPanel* self, int /* version */) { self->refresh_macro_buttons(); },
+        StandardMacros::instance().get_subjects_lifetime());
+
     // Subscribe to active tool changes for dynamic nozzle label
     active_tool_observer_ = observe_int_sync<ControlsPanel>(
         helix::ToolState::instance().get_active_tool_subject(), this,
@@ -816,24 +830,44 @@ void ControlsPanel::update_fan_display() {
 
 void ControlsPanel::update_macro_button(StandardMacros& macros,
                                         const std::optional<StandardMacroSlot>& slot,
-                                        lv_subject_t& visible_subject, lv_subject_t& name_subject,
+                                        lv_subject_t& visible_subject,
+                                        lv_subject_t& available_subject, lv_subject_t& name_subject,
                                         int button_num) {
     if (!slot) {
         lv_subject_set_int(&visible_subject, 0);
+        lv_subject_set_int(&available_subject, 0);
         return;
     }
 
     const auto& info = macros.get(*slot);
-    if (info.is_empty()) {
-        lv_subject_set_int(&visible_subject, 0);
-        spdlog::trace("[{}] Macro {} slot '{}' is empty, hiding button", get_name(), button_num,
-                      info.slot_name);
-    } else {
+
+    if (!info.is_empty()) {
         lv_subject_set_int(&visible_subject, 1);
+        lv_subject_set_int(&available_subject, 1);
         lv_subject_copy_string(&name_subject, info.translated_name());
         spdlog::trace("[{}] Macro {}: '{}' → {}", get_name(), button_num, info.display_name,
                       info.get_macro());
+        return;
     }
+
+    if (info.has_missing_macro()) {
+        // The user assigned this slot and the printer does not answer for it (a
+        // preset can seed a macro name the machine never defined, and a Klipper
+        // config change can retire one). Keep the button where they left it and
+        // grey it out: a button that disappears reads as a bug in the screen,
+        // while a disabled one points at the assignment that needs fixing.
+        lv_subject_set_int(&visible_subject, 1);
+        lv_subject_set_int(&available_subject, 0);
+        lv_subject_copy_string(&name_subject, info.translated_name());
+        spdlog::debug("[{}] Macro {} slot '{}' disabled: '{}' is not defined on this printer",
+                      get_name(), button_num, info.slot_name, info.missing_macro);
+        return;
+    }
+
+    lv_subject_set_int(&visible_subject, 0);
+    lv_subject_set_int(&available_subject, 0);
+    spdlog::trace("[{}] Macro {} slot '{}' is empty, hiding button", get_name(), button_num,
+                  info.slot_name);
 }
 
 void ControlsPanel::refresh_macro_buttons() {
@@ -844,12 +878,14 @@ void ControlsPanel::refresh_macro_buttons() {
                                                        &macro_3_slot_, &macro_4_slot_};
     lv_subject_t* visible_subjects[] = {&macro_1_visible_, &macro_2_visible_, &macro_3_visible_,
                                         &macro_4_visible_};
+    lv_subject_t* available_subjects[] = {&macro_1_available_, &macro_2_available_,
+                                          &macro_3_available_, &macro_4_available_};
     lv_subject_t* name_subjects[] = {&macro_1_name_, &macro_2_name_, &macro_3_name_,
                                      &macro_4_name_};
 
     for (size_t i = 0; i < 4; ++i) {
-        update_macro_button(macros, *slots[i], *visible_subjects[i], *name_subjects[i],
-                            static_cast<int>(i + 1));
+        update_macro_button(macros, *slots[i], *visible_subjects[i], *available_subjects[i],
+                            *name_subjects[i], static_cast<int>(i + 1));
     }
 
     // Hide the Quick Actions header when row 2 is visible (macro 3 or 4) to save space
@@ -1500,6 +1536,20 @@ void ControlsPanel::execute_macro(size_t index) {
     if (!slot) {
         spdlog::debug("[{}] Macro {} clicked but no slot configured", get_name(),
                       static_cast<int>(index + 1));
+        return;
+    }
+
+    // Backstop for the XML disabled binding. LVGL suppresses CLICKED on a
+    // LV_STATE_DISABLED object, so this normally cannot be reached from touch —
+    // but execute_macro() is also the entry point for the remote-control server
+    // and any future caller, and dispatching a macro the printer does not define
+    // is exactly the silent failure this gate exists to stop.
+    const auto& gate_info = StandardMacros::instance().get(*slot);
+    if (gate_info.is_empty() && gate_info.has_missing_macro()) {
+        spdlog::warn("[{}] Macro {} slot '{}' names '{}', which this printer does not define",
+                     get_name(), static_cast<int>(index + 1), gate_info.slot_name,
+                     gate_info.missing_macro);
+        NOTIFY_WARNING(lv_tr("{} is not set up on this printer"), gate_info.translated_name());
         return;
     }
 

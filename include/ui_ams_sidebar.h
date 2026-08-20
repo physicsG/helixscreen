@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "ui_bypass_toggle_controller.h"
 #include "ui_clog_meter.h"
 #include "ui_observer_guard.h"
 
@@ -190,8 +191,8 @@ class AmsOperationSidebar {
     // work for the active operation. Empty => legacy coarse model.
     AmsBackend::OperationStepModel current_step_model_;
 
-    // Bypass-after-unload state
-    bool pending_bypass_enable_ = false;
+    // Bypass toggle policy (guards, unload-first chain, print refusal)
+    BypassToggleController bypass_toggle_;
 
     // Preheat state
     int pending_load_slot_ = -1;

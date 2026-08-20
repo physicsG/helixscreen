@@ -81,12 +81,17 @@ Tune vibration compensation for smoother, faster prints:
 5. Tap **Calibrate** to run the resonance test (5-minute timeout applies)
 6. View **frequency response chart** with interactive shaper overlay toggles
 7. Review the **comparison table** showing recommended shaper and alternatives (frequency, vibration reduction, smoothing)
-8. Tap **Apply** to use for this session or **Save Config** to persist
+8. Check the **change summary** under the table: it shows what was active before the run ("ei @ 69.8 Hz -> mzv @ 53.8 Hz") and, when the chart has data, how much vibration the old setting would leave on today's measurements versus the new one ("Old setting on today's data: 8.4% residual - now: 7.8%")
+9. Tap **Apply** to use for this session or **Save Config** to persist
 
 **Chart features:**
+- The chart plots **relative vibration** (see the caption above each chart): lower is less residual vibration
+- The legend keys all three curve kinds: **Measured (shaper off)** is the raw vibration your printer produced during the test, the shaper chips show the vibration each shaper would leave behind, and **Previous** shows what your old setting would have left behind (only shown when a previous setting existed)
 - Toggle different shaper types on/off to compare their frequency response curves
 - Platform-adaptive: full interactive charts on desktop, simplified on embedded hardware
 - Per-axis results shown independently
+
+> **Creality K1/K2 note:** some Creality firmware versions overwrite the saved X-axis result with the Y-axis values when you calibrate both axes. HelixScreen detects this and shows a warning on the X results card — the X values it measured were correct, but the printer's saved config discards them. Re-run **Calibrate X** alone and save if you want the measured X values kept.
 
 ![Input Shaper Results](../../images/screenshot-shaper-results.png)
 

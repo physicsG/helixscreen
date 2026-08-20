@@ -18,6 +18,23 @@ namespace filament {
 
 namespace {
 
+/// @p filled marks an affix that changes what it is like to PRINT the
+/// filament, not just what it looks like: solid particles in the melt, or a
+/// foaming agent whose density is temperature-driven. Those cut the usable
+/// flow rate, alter cooling, and (for every particle fill) wear a brass nozzle.
+/// The unfilled ones are the same polymer on the same hardware -- speed and
+/// temperature ratings describe a profile, Silk is a co-polymer blend, Matte is
+/// a surface agent. The distinction drives grades_match(); base extraction
+/// strips both kinds alike.
+///
+/// "Cosmetic" is NOT the dividing line. Wood, Marble, Metal and Glow are all
+/// particle-filled -- glow-in-the-dark is strontium aluminate, which outwears
+/// carbon fiber on a brass nozzle -- so they sit with the fiber fills.
+struct VariantAffix {
+    const char* name;
+    bool filled;
+};
+
 /// Known variant affixes, matched case-insensitively and ONLY when delimited by
 /// a '-', '_' or ' ' separator. Derived from the type strings actually present
 /// in assets/filaments.json (CF, GF, AERO), the variant rows in
@@ -28,24 +45,25 @@ namespace {
 /// Deliberately NOT listed: "ABS" (so "PC-ABS" keeps its own identity and its
 /// ABS_ASA compat group), "Soft"/"95A"/"85A" (TPU shore grades), "Change"
 /// (Color-Change). Adding a polymer name here would merge two real materials.
-constexpr const char* VARIANT_AFFIXES[] = {
+constexpr VariantAffix VARIANT_AFFIXES[] = {
     // Fiber fills
-    "CF",
-    "GF",
+    {"CF", true},
+    {"GF", true},
     // Foaming / lightweight grades
-    "AERO",
-    "LW",
+    {"AERO", true},
+    {"LW", true},
     // Speed / temperature grades
-    "HS",
-    "HF",
-    "HT",
-    // Cosmetic finishes
-    "Silk",
-    "Matte",
-    "Wood",
-    "Marble",
-    "Metal",
-    "Glow",
+    {"HS", false},
+    {"HF", false},
+    {"HT", false},
+    // Cosmetic finishes -- unfilled
+    {"Silk", false},
+    {"Matte", false},
+    // Cosmetic finishes -- particle filled
+    {"Wood", true},
+    {"Marble", true},
+    {"Metal", true},
+    {"Glow", true},
 };
 
 /// Family for PAHT-branded products. "PAHT" is not a standardized polymer
@@ -103,13 +121,13 @@ bool is_separator(char c) {
     return c == '-' || c == '_' || c == ' ';
 }
 
-bool is_variant_affix(std::string_view token) {
-    for (const char* affix : VARIANT_AFFIXES) {
-        if (iequals(token, affix)) {
-            return true;
+const VariantAffix* find_variant_affix(std::string_view token) {
+    for (const auto& affix : VARIANT_AFFIXES) {
+        if (iequals(token, affix.name)) {
+            return &affix;
         }
     }
-    return false;
+    return nullptr;
 }
 
 std::string_view trim(std::string_view s) {
@@ -120,16 +138,24 @@ std::string_view trim(std::string_view s) {
     return s;
 }
 
-/// One pass of affix removal. Returns true if @p s was shortened.
-bool strip_one_affix(std::string_view& s) {
+/// One pass of affix removal. Returns true if @p s was shortened. When
+/// @p removed is non-null it receives the table row that was stripped, or
+/// nullptr for the trailing-"+" rule (which has no row).
+bool strip_one_affix(std::string_view& s, const VariantAffix** removed = nullptr) {
+    if (removed) {
+        *removed = nullptr;
+    }
     // Leading affix: "HT-PLA-GF" -> "PLA-GF", "Silk PLA" -> "PLA"
     for (size_t i = 0; i < s.size(); ++i) {
         if (!is_separator(s[i]))
             continue;
-        if (is_variant_affix(s.substr(0, i))) {
+        if (const VariantAffix* affix = find_variant_affix(s.substr(0, i))) {
             std::string_view rest = s.substr(i + 1);
             if (!rest.empty()) {
                 s = rest;
+                if (removed) {
+                    *removed = affix;
+                }
                 return true;
             }
         }
@@ -139,10 +165,13 @@ bool strip_one_affix(std::string_view& s) {
     for (size_t i = s.size(); i > 0; --i) {
         if (!is_separator(s[i - 1]))
             continue;
-        if (is_variant_affix(s.substr(i))) {
+        if (const VariantAffix* affix = find_variant_affix(s.substr(i))) {
             std::string_view rest = s.substr(0, i - 1);
             if (!rest.empty()) {
                 s = rest;
+                if (removed) {
+                    *removed = affix;
+                }
                 return true;
             }
         }
@@ -159,6 +188,13 @@ bool strip_one_affix(std::string_view& s) {
     return false;
 }
 
+/// The filled affixes @p name carries, upper-cased so spelling never splits a
+/// set. Mirrors extract_base_material()'s reduction loop exactly -- same alias
+/// resolution, same override early-out, same guard -- so a name the reducer can
+/// read is a name this can read. Anything it cannot parse simply carries no
+/// filler, which makes an unknown string match every other unfilled name.
+std::set<std::string> filled_affixes_of(std::string_view name);
+
 /// Explicit family override lookup, or empty if the name has no entry.
 std::string_view family_override(std::string_view name) {
     for (const auto& row : FAMILY_OVERRIDES) {
@@ -167,6 +203,34 @@ std::string_view family_override(std::string_view name) {
         }
     }
     return {};
+}
+
+std::set<std::string> filled_affixes_of(std::string_view name) {
+    std::set<std::string> filled;
+    std::string_view work = trim(name);
+    if (work.empty()) {
+        return filled;
+    }
+    work = resolve_alias(work);
+    for (int guard = 0; guard < 8; ++guard) {
+        // An override ENDS the reduction (extract_base_material returns here),
+        // so stop looking for affixes at the same point it does. Anything the
+        // rounds before this one stripped has already been recorded.
+        if (!family_override(work).empty()) {
+            break;
+        }
+        const VariantAffix* removed = nullptr;
+        if (!strip_one_affix(work, &removed)) {
+            break;
+        }
+        if (removed && removed->filled) {
+            std::string key(removed->name);
+            std::transform(key.begin(), key.end(), key.begin(),
+                           [](unsigned char c) { return std::toupper(c); });
+            filled.insert(std::move(key));
+        }
+    }
+    return filled;
 }
 
 /// Lazily-loaded Orca tables. Guarded because backends resolve from their own
@@ -388,6 +452,26 @@ std::string extract_base_material(std::string_view name) {
     }
 
     return std::string(work);
+}
+
+bool materials_compatible(std::string_view a, std::string_view b) {
+    // Empty vs non-empty is always a mismatch. (Callers that want "unlabelled
+    // means do not block me" check for empty themselves, before asking.)
+    if (a.empty() != b.empty()) {
+        return false;
+    }
+    if (iequals(a, b)) {
+        return true;
+    }
+    return are_materials_compatible(extract_base_material(a), extract_base_material(b));
+}
+
+bool grades_match(std::string_view a, std::string_view b) {
+    return filled_affixes_of(a) == filled_affixes_of(b);
+}
+
+bool is_filled_grade(std::string_view name) {
+    return !filled_affixes_of(name).empty();
 }
 
 std::string display_family(std::string_view type) {

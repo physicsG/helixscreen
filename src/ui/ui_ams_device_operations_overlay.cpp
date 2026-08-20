@@ -65,6 +65,7 @@ AmsDeviceOperationsOverlay::~AmsDeviceOperationsOverlay() {
         lv_subject_deinit(&has_backend_subject_);
         lv_subject_deinit(&is_afc_subject_);
         lv_subject_deinit(&reports_spool_ids_subject_);
+        lv_subject_deinit(&printer_retains_spool_info_subject_);
         lv_subject_deinit(&is_qidi_subject_);
         lv_subject_deinit(&qidi_eject_distance_display_subject_);
         lv_subject_deinit(&qidi_eject_velocity_display_subject_);
@@ -119,10 +120,17 @@ void AmsDeviceOperationsOverlay::init_subjects() {
     lv_xml_register_subject(nullptr, "ams_device_ops_is_afc", &is_afc_subject_);
 
     // Keep-spool-info-on-eject row visibility. Gates on
-    // AmsBackend::firmware_reports_spool_ids() in update_from_backend().
+    // AmsBackend::printer_reports_spool_ids() in update_from_backend().
     lv_subject_init_int(&reports_spool_ids_subject_, 0);
     lv_xml_register_subject(nullptr, "ams_device_ops_reports_spool_ids",
                             &reports_spool_ids_subject_);
+
+    // Disables the keep-spool-info toggle when firmware retention owns the
+    // behavior. Gates on AmsBackend::printer_retains_spool_info() in
+    // update_from_backend().
+    lv_subject_init_int(&printer_retains_spool_info_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_device_ops_printer_retains_spool_info",
+                            &printer_retains_spool_info_subject_);
 
     // QIDI Box gating + eject distance/velocity value displays
     lv_subject_init_int(&is_qidi_subject_, 0);
@@ -253,6 +261,7 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
         lv_subject_set_int(&supports_auto_heat_subject_, 0);
         lv_subject_set_int(&is_afc_subject_, 0);
         lv_subject_set_int(&reports_spool_ids_subject_, 0);
+        lv_subject_set_int(&printer_retains_spool_info_subject_, 0);
         lv_subject_set_int(&is_qidi_subject_, 0);
         lv_subject_set_int(&can_reset_endless_spool_subject_, 0);
         system_info_buf_[0] = '\0';
@@ -307,7 +316,14 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
     // Keep-spool-info-on-eject is only meaningful where the firmware reports
     // spool ids per lane (AFC, Happy Hare); other systems clear on a detected
     // spool swap regardless of the toggle, so the row stays hidden there.
-    lv_subject_set_int(&reports_spool_ids_subject_, backend->firmware_reports_spool_ids() ? 1 : 0);
+    lv_subject_set_int(&reports_spool_ids_subject_, backend->printer_reports_spool_ids() ? 1 : 0);
+
+    // Firmware retention (AFC remember_spool = true everywhere) makes the
+    // keep-spool-info toggle a no-op: firmware keeps reporting the spool id,
+    // so neither the eject rule nor the re-assert push ever fires. Show it
+    // disabled with a note rather than letting it silently lie.
+    lv_subject_set_int(&printer_retains_spool_info_subject_,
+                       backend->printer_retains_spool_info() ? 1 : 0);
 
     // The eject distance/velocity rows apply only to backends with configurable
     // eject params (QIDI Box). Sync the sliders + value displays from settings.

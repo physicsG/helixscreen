@@ -16,6 +16,7 @@
 #include "probe_sensor_manager.h"
 #include "runtime_config.h"
 #include "sensor_state.h"
+#include "shaper_response.h"
 
 #include <spdlog/spdlog.h>
 
@@ -264,19 +265,24 @@ MoonrakerClientMock::~MoonrakerClientMock() {
     // use-after-free when a subsequent test calls process_lvgl().
     // Timer callbacks self-delete via lv_timer_delete, so some tracked pointers
     // may be stale. Verify each exists in LVGL's timer list before deleting.
+    // The payload deleter runs either way when the timer is still armed: the
+    // callback that would have freed it will never fire.
     if (lv_is_initialized()) {
-        for (auto* tracked : calibration_timers_) {
+        for (auto& tracked : calibration_timers_) {
             bool still_alive = false;
             lv_timer_t* t = lv_timer_get_next(nullptr);
             while (t) {
-                if (t == tracked) {
+                if (t == tracked.timer) {
                     still_alive = true;
                     break;
                 }
                 t = lv_timer_get_next(t);
             }
             if (still_alive) {
-                lv_timer_delete(tracked);
+                if (tracked.free_payload) {
+                    tracked.free_payload();
+                }
+                lv_timer_delete(tracked.timer);
             }
         }
     }
@@ -658,10 +664,21 @@ void MoonrakerClientMock::populate_capabilities() {
     // Probe section — shared with the configfile.config query/subscribe responses
     // so all three payloads describe the same probe.
     mock_config.merge_patch(mock_internal::get_mock_probe_config());
+    // Stepper travel limits, matching the configfile.settings the query and
+    // subscribe handlers report. The real discovery sequence derives the build
+    // volume from these before detection runs, so the mock has to carry them or
+    // --test detects against an empty volume the live path no longer sees.
+    mock_config["stepper_x"] = {{"position_min", mock_internal::MOCK_BED_X_MIN},
+                                {"position_max", mock_internal::MOCK_BED_X_MAX}};
+    mock_config["stepper_y"] = {{"position_min", mock_internal::MOCK_BED_Y_MIN},
+                                {"position_max", mock_internal::MOCK_BED_Y_MAX}};
+    mock_config["stepper_z"] = {{"position_min", 0.0},
+                                {"position_max", mock_internal::MOCK_BED_Z_MAX}};
 
     std::unordered_set<std::string> macros_snapshot;
     discovery_.modify_hardware([&](PrinterDiscovery& hw) {
         hw.parse_config_keys(mock_config);
+        hw.parse_build_volume(mock_config);
         macros_snapshot = hw.macros();
     });
 
@@ -1995,7 +2012,7 @@ int MoonrakerClientMock::gcode_script(const std::string& raw_gcode) {
             },
             500, sim);                       // 500ms between cycles for quick mock
         lv_timer_set_repeat_count(timer, 6); // 5 progress + 1 result
-        calibration_timers_.push_back(timer);
+        calibration_timers_.push_back({timer, [sim] { delete sim; }});
 
         return 0; // Success - results come asynchronously via gcode_response
     }
@@ -2063,7 +2080,7 @@ int MoonrakerClientMock::gcode_script(const std::string& raw_gcode) {
             },
             500, sim);
         lv_timer_set_repeat_count(timer, total_phases + 1);
-        calibration_timers_.push_back(timer);
+        calibration_timers_.push_back({timer, [sim] { delete sim; }});
 
         return 0; // Success - results come asynchronously via gcode_response
     }
@@ -4620,6 +4637,24 @@ void write_mock_shaper_csv(const std::string& path, char axis) {
     std::mt19937 rng(42 + static_cast<unsigned>(axis)); // Deterministic per-axis
     std::uniform_real_distribution<float> noise_dist(0.8f, 1.2f);
 
+    // Frequency bins the PSD rows (and the shaper curves below) are sampled at
+    std::vector<double> bins;
+    for (float freq = 5.0f; freq <= 200.0f; freq += 4.0f) {
+        bins.push_back(freq);
+    }
+
+    // Real transfer curves per shaper (the same math the firmware uses to
+    // write these columns), so the shaped-PSD overlays and any client-side
+    // re-scoring of the mock data see physically consistent notches rather
+    // than a toy quadratic approximation.
+    std::vector<std::vector<double>> shaper_curves;
+    shaper_curves.reserve(num_shapers);
+    for (int i = 0; i < num_shapers; ++i) {
+        shaper_curves.push_back(helix::calibration::shaper_transfer_curve(
+            shapers[i].name, shapers[i].freq, helix::calibration::SHAPER_DEFAULT_DAMPING_RATIO,
+            bins));
+    }
+
     // Resonance peak parameters — should agree with optimal shaper frequencies above
     const float peak_freq = (axis == 'x' || axis == 'X') ? 53.8f : 48.2f;
     const float peak_width = 8.0f; // Hz bandwidth of resonance
@@ -4627,7 +4662,9 @@ void write_mock_shaper_csv(const std::string& path, char axis) {
     const float noise_floor = 5e-4f;
 
     // Generate ~50 bins from 5 to 200 Hz (step ~4 Hz)
-    for (float freq = 5.0f; freq <= 200.0f; freq += 4.0f) {
+    for (size_t bin = 0; bin < bins.size(); ++bin) {
+        const float freq = static_cast<float>(bins[bin]);
+
         // Raw PSD: noise floor + Lorentzian resonance peak
         float df = freq - peak_freq;
         float resonance = peak_amp / (1.0f + (df * df) / (peak_width * peak_width));
@@ -4650,21 +4687,13 @@ void write_mock_shaper_csv(const std::string& path, char axis) {
         ofs << std::scientific << std::setprecision(3) << freq << "," << psd_x << "," << psd_y
             << "," << psd_z << "," << psd_xyz;
 
-        // Shaper response curves: attenuate near their fitted frequencies
+        // Write transfer function coefficients (0-1), matching real Klipper CSV
+        // format. The CSV parser multiplies by raw PSD to get shaped PSD for
+        // charting. Shapers without a ported curve degrade to a flat passband.
         for (int i = 0; i < num_shapers; ++i) {
-            float shaper_freq_val = shapers[i].freq;
-            // Simple notch-filter model: strong attenuation near fitted freq
-            float dist = std::abs(freq - shaper_freq_val);
-            float attenuation;
-            if (dist < 15.0f) {
-                // Near the notch: strong attenuation
-                attenuation = 0.05f + 0.95f * (dist / 15.0f) * (dist / 15.0f);
-            } else {
-                attenuation = 1.0f;
-            }
-            // Write transfer function coefficient (0-1), matching real Klipper CSV format.
-            // The CSV parser multiplies by raw PSD to get shaped PSD for charting.
-            ofs << "," << attenuation;
+            const double attenuation =
+                (bin < shaper_curves[i].size()) ? shaper_curves[i][bin] : 1.0;
+            ofs << "," << std::fixed << std::setprecision(3) << attenuation;
         }
         ofs << "\n";
     }
@@ -4674,6 +4703,18 @@ void write_mock_shaper_csv(const std::string& path, char axis) {
 }
 
 } // anonymous namespace
+
+json MoonrakerClientMock::build_input_shaper_config() const {
+    char freq_x[16];
+    char freq_y[16];
+    snprintf(freq_x, sizeof(freq_x), "%.1f", shaper_freq_x_);
+    snprintf(freq_y, sizeof(freq_y), "%.1f", shaper_freq_y_);
+    return json{
+        {"shaper_type_x", shaper_type_x_}, {"shaper_freq_x", freq_x},
+        {"shaper_type_y", shaper_type_y_}, {"shaper_freq_y", freq_y},
+        {"damping_ratio_x", "0.1"},        {"damping_ratio_y", "0.1"},
+    };
+}
 
 void MoonrakerClientMock::dispatch_shaper_calibrate_response(char axis) {
     // Timer-based dispatch for realistic progress animation
@@ -4699,7 +4740,16 @@ void MoonrakerClientMock::dispatch_shaper_calibrate_response(char axis) {
         lines.emplace_back(buf);
     }
 
-    // Phase 2: the sweep-finished marker, then one fit + max_accel per shaper.
+    // Phase 2: analysis heartbeats, the sweep-finished marker, then one fit +
+    // max_accel per shaper. Creality's K1C build prints "Wait for calculations.."
+    // every ~5s through its (compressed here) analysis window before the
+    // "Calculating the best" line; the collector treats the repeats as liveness
+    // heartbeats, not new events. Ten lines give the phase ~1s of transcript on
+    // its own so the panel's spinner + elapsed-seconds label has a window to
+    // be observed in.
+    for (int i = 0; i < 10; ++i) {
+        lines.emplace_back("Wait for calculations..");
+    }
     snprintf(buf, sizeof(buf), "Calculating the best input shaper parameters for %c axis",
              axis_lower);
     lines.emplace_back(buf);
@@ -4776,14 +4826,16 @@ void MoonrakerClientMock::dispatch_shaper_calibrate_response(char axis) {
                 "[MoonrakerClientMock] Dispatched SHAPER_CALIBRATE response for axis {}",
                 static_cast<char>(std::toupper(static_cast<unsigned char>(s->axis_lower))));
             auto& timers = s->mock->calibration_timers_;
-            timers.erase(std::remove(timers.begin(), timers.end(), t), timers.end());
+            timers.erase(std::remove_if(timers.begin(), timers.end(),
+                                        [t](const CalibrationTimer& ct) { return ct.timer == t; }),
+                         timers.end());
             delete s;
             lv_timer_delete(t);
         },
         100, sim); // 100ms between lines for snappy animation
 
     lv_timer_set_repeat_count(timer, total_steps);
-    calibration_timers_.push_back(timer);
+    calibration_timers_.push_back({timer, [sim] { delete sim; }});
 
     spdlog::info("[MoonrakerClientMock] Started SHAPER_CALIBRATE timer for axis {} ({:.0f}-{:.0f} "
                  "Hz sweep)",

@@ -305,6 +305,40 @@ AmsError AmsBackendMock::start() {
                 scenario_thread_running_ = false;
             });
             spdlog::info("[AMS Mock] Applied initial state scenario: bypass");
+        } else if (scenario == "grade") {
+            // EVERY lane holds a filled grade of PLA. Same compat group as
+            // plain PLA, so FilamentMapper routes a PLA tool exactly as it did
+            // before and the print-start grade pass is the only thing that
+            // speaks up.
+            //
+            // All four rather than one on purpose: which lane a tool lands on
+            // is decided by colour match and then by POSITIONAL fallback over
+            // the file's full palette, so a single-tool file whose used tool is
+            // T2 lands on lane 3, not lane 1. Pinning one lane would make the
+            // scenario depend on which fixture is opened; filling every lane
+            // makes it hold for any PLA file, whichever lane wins.
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const auto mat = filament::find_material("PLA-CF");
+                for (int i = 0; i < slots_.slot_count(); ++i) {
+                    auto* entry = slots_.get_mut(i);
+                    if (!entry) {
+                        continue;
+                    }
+                    entry->info.material = "PLA-CF";
+                    // Temperatures follow the material, as they do everywhere
+                    // else a slot's filament changes; leaving PLA's numbers on
+                    // a PLA-CF lane would make the dialog's own temperature
+                    // block disagree with the material it names.
+                    if (mat) {
+                        entry->info.nozzle_temp_min = mat->nozzle_min;
+                        entry->info.nozzle_temp_max = mat->nozzle_max;
+                        entry->info.bed_temp = mat->bed_temp;
+                    }
+                }
+            }
+            emit_event(EVENT_SLOT_CHANGED);
+            spdlog::info("[AMS Mock] Applied initial state scenario: grade (all lanes -> PLA-CF)");
         } else if (scenario == "unaccounted") {
             // Filament at the toolhead with no lane accounting for it — drives
             // the unaccounted_toolhead_filament print-start gate (hand-fed /

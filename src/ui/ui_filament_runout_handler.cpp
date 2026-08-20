@@ -343,8 +343,8 @@ void FilamentRunoutHandler::dispatch_load() {
     }
 
     const auto& load_info = StandardMacros::instance().get(StandardMacroSlot::LoadFilament);
-    const helix::ui::FilamentOpPlan plan =
-        helix::ui::plan_load(sys, caps, slot, !load_info.is_empty());
+    const helix::ui::FilamentOpPlan plan = helix::ui::plan_load(
+        sys, caps, slot, !load_info.is_empty(), load_info.get_source() == MacroSource::CONFIGURED);
 
     switch (plan.tier) {
     case helix::ui::FilamentTier::AmsBackend: {
@@ -449,15 +449,17 @@ void FilamentRunoutHandler::dispatch_unload() {
     // filament is still at the head, and #1199 deliberately keeps Unload
     // reachable in exactly that state (#995).
     bool loaded = false;
-    if (backend && slot >= 0) {
-        loaded = helix::ui::unload_target_is_loaded(backend->slot_is_actively_loaded(slot),
+    if (backend) {
+        loaded = helix::ui::unload_target_is_loaded(slot, backend->slot_is_actively_loaded(slot),
                                                     backend->slot_has_filament_at_toolhead(slot),
-                                                    /*is_current_slot=*/true);
+                                                    /*is_current_slot=*/true,
+                                                    backend->get_system_info().filament_loaded);
     }
 
     const auto& unload_info = StandardMacros::instance().get(StandardMacroSlot::UnloadFilament);
     const helix::ui::FilamentOpPlan plan =
-        helix::ui::plan_unload(caps, slot, loaded, !unload_info.is_empty());
+        helix::ui::plan_unload(caps, slot, loaded, !unload_info.is_empty(),
+                               unload_info.get_source() == MacroSource::CONFIGURED);
 
     switch (plan.tier) {
     case helix::ui::FilamentTier::AmsBackend: {

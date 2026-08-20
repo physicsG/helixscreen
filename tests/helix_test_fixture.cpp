@@ -14,6 +14,7 @@
 #include "config.h"
 #include "display_settings_manager.h"
 #include "fault_surface_correlation.h"
+#include "filament_slot_override_store.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "panel_widget_manager.h"
 #include "runtime_config.h"
@@ -99,6 +100,18 @@ struct ConfigSandbox {
         fs::create_directories(base / "state", ec);
         fs::create_directories(base / "backup", ec);
         dir = base.string();
+
+        // FilamentSlotOverrideStore's on-disk read-cache defaults to
+        // helix::get_user_config_dir() — the RELATIVE "config", i.e. the
+        // repo's own config/ under the test binary's CWD. AMS backend tests
+        // construct real backends whose stores get no per-instance dir (the
+        // per-test TestAccess classes that pin one exist only in the
+        // dedicated store tests), so `make test-run` wrote
+        // config/filament_slot_overrides.json into the repo. Redirect the
+        // process-wide fallback here — static initializer, so before main()
+        // and before any backend thread exists. Per-instance dirs still win.
+        helix::ams::detail::slot_override_cache_dir_ref() = dir;
+
         apply();
     }
 

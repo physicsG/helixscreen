@@ -66,9 +66,13 @@ void PrintExcludeObjectManager::init() {
     // the stuck-visual edge case where both the status push and the RPC return fail
     // to arrive (Klipper crash, network drop, etc). Done silently per UX review —
     // cancels are usually deliberate and a toast would just be noise.
-    print_state_observer_ = helix::ui::observe_int_sync<PrintExcludeObjectManager>(
+    // RAW_PRINT_STATE_OK: subscribes to the WIRE deliberately - asks whether a live gcode
+    // queue exists; see on_print_state_changed().
+    print_state_observer_ = helix::ui::observe_print_state<PrintExcludeObjectManager>(
         printer_state_.get_print_state_enum_subject(), this,
-        [](PrintExcludeObjectManager* self, int state) { self->on_print_state_changed(state); },
+        [](PrintExcludeObjectManager* self, PrintJobState state) {
+            self->on_print_state_changed(state);
+        },
         printer_state_.get_subjects_lifetime());
 
     // Register long-press callback on gcode viewer
@@ -397,12 +401,11 @@ void PrintExcludeObjectManager::on_excluded_objects_changed() {
     }
 }
 
-void PrintExcludeObjectManager::on_print_state_changed(int state_enum) {
-    // Terminal states mirror PrintJobState in printer_state.h:
-    //   STANDBY=0, PRINTING=1, PAUSED=2, COMPLETE=3, CANCELLED=4, ERROR=5
-    // Anything that isn't PRINTING or PAUSED means there's no live print queue for
-    // a still-awaiting EXCLUDE_OBJECT to land on.
-    const auto state = static_cast<helix::PrintJobState>(state_enum);
+void PrintExcludeObjectManager::on_print_state_changed(helix::PrintJobState state) {
+    // RAW_PRINT_STATE_OK: asks whether a live gcode queue exists for a pending
+    // EXCLUDE_OBJECT to land on. During a host-side block the printer holds no
+    // job, so there is none - and during a firmware-side PRINT_START the wire
+    // already reads printing, which is the correct answer.
     const bool print_active =
         (state == helix::PrintJobState::PRINTING) || (state == helix::PrintJobState::PAUSED);
     if (print_active) {
@@ -414,7 +417,7 @@ void PrintExcludeObjectManager::on_print_state_changed(int state_enum) {
 
     spdlog::info("[PrintExcludeObjectManager] Print ended (state={}) with {} unconfirmed "
                  "exclusion(s) — dropping optimistic visuals",
-                 state_enum, awaiting_confirmation_.size());
+                 static_cast<int>(state), awaiting_confirmation_.size());
     awaiting_confirmation_.clear();
 
     // Refresh the viewer so any red-ghosted objects that never made it to

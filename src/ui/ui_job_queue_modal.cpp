@@ -13,6 +13,7 @@
 #include "job_queue_state.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
+#include "printer_state.h"
 #include "theme_manager.h"
 
 #include <lvgl/lvgl.h>
@@ -382,12 +383,13 @@ void JobQueueModal::start_job(const std::string& job_id, const std::string& file
     if (!api)
         return;
 
+    // The queue entry is removed BEFORE the start is attempted, so an
+    // incomplete refusal loses the job: it is deleted and the print then fails.
+    // can_start_new_print() covers both axes — what the printer reports AND a
+    // start this app has already committed to but the printer has not confirmed,
+    // which is the whole of a host-side pre-print block.
     auto& ps = get_printer_state();
-    auto state = ps.get_print_job_state();
-
-    if (state == PrintJobState::PRINTING || state == PrintJobState::PAUSED) {
-        // Printer is busy — move job to front of queue (position 0)
-        // For now, just show a log message; full reorder API would be future work
+    if (!ps.can_start_new_print()) {
         spdlog::info("[JobQueueModal] Printer busy, cannot start '{}' now", filename);
         // TODO: Moonraker doesn't have a reorder API — could delete+re-add at position 0
         return;

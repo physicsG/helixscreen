@@ -32,6 +32,43 @@ class PrinterPrintStateTestAccess {
         pps.smoothed_remaining_ = 0.0;
         pps.has_smoothed_remaining_ = false;
         pps.sdcard_active_ = false;
+        // The job being prepared is session-scoped: it outlives
+        // reset_for_new_print() by design, since it exists precisely for the
+        // window before the printer reports the job. Leaving it set leaks a
+        // live preparing job into the next test, where it relaxes the
+        // phase-update guard and the print_active safety reset.
+        pps.preparing_job_ = {};
+        pps.cancel_preparing_watchdog();
+    }
+
+    /// Fire the preparing-job watchdog as if its timer had elapsed.
+    ///
+    /// The real bound is half an hour - longer than the slowest legitimate
+    /// pre-print - so no test can wait for it. Mirrors
+    /// ActivePrintMediaManagerTestAccess::fire_pending_retry().
+    ///
+    /// Invokes the PRODUCTION callback rather than reproducing what it does. An
+    /// earlier version open-coded `cancel(); retire(TimedOut);` here, which made
+    /// every watchdog assertion a tautology - the test asserted the exit reason
+    /// the helper itself had just supplied, and `preparing_watchdog_cb` was
+    /// reachable from no test at all. Changing the real callback's exit reason,
+    /// or dropping its `preparing_watchdog_ = nullptr` (a double-free setup,
+    /// since LVGL frees the one-shot on return), left the suite green.
+    ///
+    /// Deletes the timer afterwards because LVGL's one-shot repeat count is what
+    /// would normally free it, and nothing here runs lv_timer_handler.
+    static bool fire_preparing_watchdog(PrinterPrintState& pps) {
+        lv_timer_t* timer = pps.preparing_watchdog_;
+        if (!timer) {
+            return false;
+        }
+        PrinterPrintState::preparing_watchdog_cb(timer);
+        lv_timer_delete(timer);
+        return true;
+    }
+
+    static bool has_preparing_watchdog(const PrinterPrintState& pps) {
+        return pps.preparing_watchdog_ != nullptr;
     }
 
     /// Mark the layer counters as coming from real slicer/Moonraker fields

@@ -1152,8 +1152,18 @@ struct AmsSystemInfo {
     /// Tool number on the carriage when mount_state == MOUNTED, else -1.
     int mounted_tool = -1;
 
-    int pending_target_slot = -1;  ///< Target slot during tool change (-1=none)
-    int current_toolchange = -1;   ///< Current tool change number (-1=none yet, 0-based)
+    int pending_target_slot = -1; ///< Target slot during tool change (-1=none)
+    /// Current tool change number: 0-based index, -1 = none yet. Backends
+    /// normalize their firmware's own counter into this form (AFC publishes a
+    /// 1-based "changes started" count; Happy Hare a completed-change count);
+    /// the UI adds one back when it formats "N / total".
+    ///
+    /// The arithmetic is unified; the MEANING is not. Index 0 is "the first
+    /// change is under way" on AFC and "the first change has finished" on Happy
+    /// Hare, so identical rendered text describes states half a toolchange
+    /// apart. Do not build logic that treats this as a completion count without
+    /// checking which backend produced it.
+    int current_toolchange = -1;
     int number_of_toolchanges = 0; ///< Total expected tool changes this print
     bool filament_loaded = false;  ///< Filament at extruder
 
@@ -1602,6 +1612,28 @@ enum class EndlessSpoolAvailability : int {
     RequiresPlugin = 1, ///< Mechanism exists; its optional package is absent.
     Available = 2       ///< Present and usable.
 };
+
+/**
+ * @brief May this lane stand in for another when that one runs out?
+ *
+ * Tri-state because the honest answer has three cases, and flattening the
+ * middle one loses either safety or the feature itself:
+ *
+ *  - `Eligible` - same polymer, same grade. Nothing to say.
+ *  - `GradeDiffers` - same polymer, different filler (PLA-CF behind PLA). The
+ *    swap WILL work, so refusing it would let a print die at a runout with a
+ *    usable spool one lane over. But filled filament is abrasive and runs at a
+ *    lower flow rate, and an endless-spool swap happens mid-print with nobody
+ *    watching, so the user is told before choosing it.
+ *  - `Incompatible` - a different polymer, or a backend-specific rule the
+ *    firmware enforces. Tagged and refused.
+ *
+ * Backends own the verdict. Only the base rule ever answers `GradeDiffers`: a
+ * backend whose firmware matches the type string exactly (AD5X IFS) has no soft
+ * case to express, because a lane its firmware will not select is not a choice
+ * worth offering.
+ */
+enum class BackupEligibility : int { Eligible = 0, GradeDiffers = 1, Incompatible = 2 };
 
 /**
  * @brief Is endless spool switched on right now?

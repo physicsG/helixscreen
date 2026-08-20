@@ -505,6 +505,7 @@ const TokenEntry k_token_table[] = {
     {"px", "size_lg", "48"},
     {"px", "size_xl_micro", "32"},
     {"px", "size_xl", "64"},
+    {"px", "legend_dot_size", "8"},
     {"px", "chip_height", "36"},
     {"px", "chip_radius", "18"},
     {"px", "chip_min_width", "64"},

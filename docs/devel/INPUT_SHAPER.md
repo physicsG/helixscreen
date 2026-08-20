@@ -53,6 +53,8 @@ Klipper SHAPER_CALIBRATE
 | `include/calibration_types.h` | Data structures: `InputShaperResult`, `ShaperOption`, `ShaperResponseCurve`, `InputShaperConfig` |
 | `include/shaper_csv_parser.h` | CSV parser interface |
 | `src/calibration/shaper_csv_parser.cpp` | CSV parser implementation |
+| `include/shaper_response.h` | Klipper shaper transfer functions (client-side scoring) |
+| `src/calibration/shaper_response.cpp` | Tap definitions + transfer evaluation, pinned against firmware CSV output |
 | `include/input_shaper_calibrator.h` | Calibration orchestrator (state machine) |
 | `src/calibration/input_shaper_calibrator.cpp` | Orchestrator implementation |
 | `include/input_shaper_cache.h` | Result cache with JSON serialization |
@@ -72,6 +74,7 @@ Klipper SHAPER_CALIBRATE
 | File | Coverage |
 |------|----------|
 | `tests/unit/test_shaper_csv_parser.cpp` | CSV parsing: realistic data, axis selection, edge cases |
+| `tests/unit/test_shaper_response.cpp` | Transfer math: pinned against a K1C firmware CSV column, residual guards |
 | `tests/unit/test_frequency_response_chart.cpp` | Chart widget: lifecycle, series, data, downsampling, platform tiers |
 | `tests/unit/test_input_shaper_calibrator.cpp` | Calibrator: state machine, callbacks, validation, error handling |
 | `tests/unit/test_input_shaper_cache.cpp` | Cache: save/load round-trip, TTL expiry, printer ID matching |
@@ -128,6 +131,8 @@ ShaperCsvData parse_shaper_csv(const std::string& csv_path, char axis);
 ### Adding Support for New Shaper Types
 
 The parser auto-discovers shaper columns from the CSV header. Any column matching the `name(frequency)` pattern is parsed as a shaper curve. No code changes needed when Klipper adds new shaper types.
+
+Client-side re-scoring (`shaper_response.h`) is stricter: it ports each shaper's tap definitions, so a genuinely new shaper type needs a new taps function there. Unknown types degrade gracefully — `shaper_transfer_curve()` returns an empty vector and callers hide the verdict row / chart overlay rather than guessing.
 
 ---
 
@@ -195,7 +200,7 @@ struct ui_frequency_response_chart_t {
 
 ### Custom Draw Callbacks
 
-The chart uses four LVGL draw event callbacks registered on `LV_EVENT_DRAW_MAIN` and `LV_EVENT_DRAW_POST`:
+The chart uses five LVGL draw event callbacks registered on `LV_EVENT_DRAW_MAIN` and `LV_EVENT_DRAW_POST`:
 
 1. **`draw_freq_grid_lines_cb`** (DRAW_MAIN) -- Subtle grid lines at 25/50/75/100 Hz vertical markers and 4 horizontal amplitude divisions. Color from `elevated_bg` theme token at 15% opacity.
 
@@ -204,6 +209,8 @@ The chart uses four LVGL draw event callbacks registered on `LV_EVENT_DRAW_MAIN`
 3. **`draw_y_axis_labels_cb`** (DRAW_POST) -- Amplitude labels along the left side at each horizontal division. Auto-formats using scientific notation for large values (e.g., "1e9", "500M").
 
 4. **`draw_peak_dots_cb`** (DRAW_POST) -- For each series with a marked peak, draws a glow circle (10px radius, 30% opacity lighter tint) behind a solid dot (5px radius, series color) at the peak frequency position.
+
+5. **`draw_muted_series_cb`** (DRAW_POST) -- Draws series flagged via `ui_frequency_response_chart_set_series_muted()` as thin (1px, ~66% opacity) polylines from their stored data, instead of through their LVGL chart series (which stays hidden). Used for the live-before "Previous" curve so the fitted curves stay visually dominant. Point placement mirrors the built-in renderer: X from point index, Y from amplitude over the configured range.
 
 ### Downsampling
 
@@ -256,7 +263,7 @@ Each chip is an LVGL button styled as a pill-shaped toggle:
 
 ### Chip Subject Bindings
 
-Per chip (5 per axis, 10 total):
+Per chip (11 per axis matching `MAX_SHAPERS`; only chips backed by a CSV curve are shown, via `is_{axis}_num_chips`):
 - `is_x_chip_0_label` / `is_y_chip_0_label` -- Shaper name text (string subject)
 - `is_x_chip_0_active` / `is_y_chip_0_active` -- Toggle state (int subject, 0=off, 1=on)
 
@@ -286,9 +293,28 @@ Each shaper type has a distinct color for chart lines and legend dots:
 
 ### Legend
 
-A legend row sits to the right of the chips showing:
-- Gray dot (0xB0B0B0) + "Measured" label (always visible raw PSD series)
-- Colored dot + shaper name label (dynamically updated to show the last-toggled-on shaper)
+A legend row sits to the right of the chips keying all three curve kinds (a "Relative vibration" caption above the chart itself names the Y quantity):
+- Gray dot (0xB0B0B0) + "Measured (shaper off)" label -- the raw PSD series; shaping was not applied when it was captured
+- Colored dot + shaper name label (dynamically updated to show the last-toggled-on shaper) -- the fitted shaper chips' predicted residual PSD (transfer curve times the measured PSD)
+- Muted dot (`text_muted` token) + "Previous" label -- the live-before setting's predicted residual curve, gated by `is_{axis}_has_delta` so it only appears when a run had a before-config to compare against
+
+---
+
+## Live-Before Delta, Residual Verdict, and Firmware Overwrite Warning
+
+When a calibration run starts, the panel snapshots the currently live `[input_shaper]` config (`snapshot_config_before()`, first axis of a run only) so the results cards can show what actually changed — anchored to live-before rather than to what `SAVE_CONFIG` later writes.
+
+Per axis, when a before-value exists and the result is valid:
+
+- **Was / delta rows** — `is_{axis}_was_text` ("ei @ 69.8 Hz") and `is_{axis}_delta_text` ("ei @ 69.8 Hz -> mzv @ 53.8 Hz"), gated by `is_{axis}_has_delta`.
+- **Verdict row** — "Old setting on today's data: N% residual - now: M%": the old setting's transfer curve re-scored against the freshly measured PSD next to the new fit's residual (`residual_vibration_percent()`, which reproduces klippy's `_estimate_remaining_vibrations()` — thresholded at `psd.max()/20`, shaped spectrum `H*psd` linear — so the verdict is comparable to the vibrations% the comparison table shows). The new side prefers the curve the firmware fitted into the CSV column (the parser shapes it by the raw PSD, so the verdict divides that back out bin by bin); both sides hide via `is_{axis}_has_verdict` when the PSD is missing or a shaper type has no ported taps.
+- **Chart overlay** — the old setting's curve is added as a muted series (see `draw_muted_series_cb` above) so its notch is comparable against the fresh fit on the same spectrum.
+
+### Firmware overwrite warning (Creality forks)
+
+Some klippy forks (Creality's K1C build) overwrite the staged X result with the Y-axis values at the end of a Y-axis run and announce it with a console line starting `copy_TestAxis_y_to_x Recommended shaper_type_x = ...`. The collector's marker matcher runs BEFORE the recommendation parser — the marker embeds a real `Recommended shaper_type_x` wording that would otherwise clobber the Y run's own recommendation — and sets `InputShaperResult::x_overwritten_by_firmware` on the Y result. The panel carries that onto the X results card (`is_x_fw_overwrite_warn`) with a warning row: the measured X recommendation shown on screen was discarded by the firmware and the saved config holds Y's values for both axes.
+
+The transfer math lives in `src/calibration/shaper_response.cpp` and reproduces the klippy shaper tap definitions plus the damping-aware `_estimate_shaper()` (pessimized over Klipper's `TEST_DAMPING_RATIOS`), which is what the firmware writes into a calibration CSV's fitted columns. `tests/unit/test_shaper_response.cpp` pins it against a real K1C CSV column so the port cannot silently drift from firmware output.
 
 ---
 
@@ -301,6 +327,13 @@ IDLE (0)          Shows instructions, current config, Calibrate X/Y/All buttons
   |
   v
 MEASURING (1)     Spinner/progress bar, step labels, Abort button
+
+Both the panel and the first-run wizard step use the same analysis-phase
+treatment: the sweep shows a determinate bar; the offline analysis reports no
+percent, so the bar hides, a spinner takes over, and a 1 Hz
+`helix::ui::ElapsedLabelTimer` (ui_timer_guard.h) refreshes the status label
+with "Analyzing data... Ns" on the virtual clock. `PIDCalibrationPanel`'s eta
+timer is the same shape and is the intended follow-up consumer of the helper.
   |
   +---> RESULTS (2)   Per-axis result cards with charts, comparison tables, Save button
   |

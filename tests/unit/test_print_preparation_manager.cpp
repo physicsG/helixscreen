@@ -28,6 +28,13 @@ class PrintPreparationManagerTestAccess {
         return helix::ui::PrintPreparationManager::build_pre_start_gcode_block(setup_gcode, lines,
                                                                                emit_setup);
     }
+    /// The modify route's first synchronous bail-out. Private because nothing
+    /// outside the manager should dispatch it, but it is the cheapest reachable
+    /// failure exit and every other one retires the job the same way.
+    static void modify_and_print(helix::ui::PrintPreparationManager& m,
+                                 const std::string& file_path) {
+        m.modify_and_print(file_path, {}, {}, nullptr);
+    }
 };
 
 #include "../mocks/mock_websocket_server.h"
@@ -37,7 +44,9 @@ class PrintPreparationManagerTestAccess {
 #include "gcode_ops_detector.h"
 #include "hv/EventLoopThread.h"
 #include "moonraker_api.h"
+#include "moonraker_api_mock.h"
 #include "moonraker_client.h"
+#include "moonraker_client_mock.h"
 #include "moonraker_error.h"
 #include "operation_registry.h"
 #include "print_start_analyzer.h"
@@ -3178,4 +3187,75 @@ TEST_CASE_METHOD(
         GateFixture fx(std::move(set));
         REQUIRE(fx.requires_plugin("timelapse") == false);
     }
+}
+
+// ============================================================================
+// A start that dies inside the manager must retire the preparing job
+//
+// The modify and remap routes take NO completion callback — continue_print_start()
+// calls modify_and_print() and returns — so PrintStartController's
+// retire_preparing(Failed) is unreachable from them. Nothing else can retire the
+// job, and `print_in_progress` is now PUBLISHED from that job rather than set by
+// hand, so a leak latches the flag until the 1800s watchdog: can_start_new_print()
+// refuses every later print, job_holds_machine stays 1 (greying jog, levelling,
+// macros and the bypass tile), and the panel sits on "Preparing".
+//
+// Mutation check: delete the abandon_start() call from the exit this drives and
+// the REQUIRE_FALSE below fails.
+// ============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: a start that dies inside the manager retires the "
+                 "preparing job",
+                 "[print_preparation][lifecycle][preparing]") {
+    helix::PrinterState state;
+    state.init_subjects(false);
+
+    helix::ui::PrintPreparationManager manager;
+    manager.set_dependencies(nullptr, &state);
+
+    state.begin_preparing(helix::PrintJobRef{"doomed.gcode", "gcodes", ""});
+    REQUIRE(state.has_preparing_job());
+    REQUIRE(lv_subject_get_int(state.get_print_in_progress_subject()) == 1);
+
+    // api_ is null, so the modify route bails on its FIRST guard. Both of its
+    // synchronous guards are real reachable exits — continue_print_start()
+    // dispatches here whenever the user disabled an embedded operation, and the
+    // connection can drop between arming and dispatch — and every deferred
+    // failure exit further in retires the job the same way.
+    //
+    // Mutation-verified: deleting abandon_start("modify_no_api") fails the
+    // REQUIRE_FALSE below. (Deleting the OTHER guard's call does not, which is
+    // the point of naming which exit this drives rather than guessing.)
+    PrintPreparationManagerTestAccess::modify_and_print(manager, "doomed.gcode");
+
+    REQUIRE_FALSE(state.has_preparing_job());
+    REQUIRE(lv_subject_get_int(state.get_print_in_progress_subject()) == 0);
+    REQUIRE(state.last_preparing_exit() == helix::PreparingExit::Failed);
+
+    // And the machine is released — this is the user-visible half of the latch.
+    REQUIRE(lv_subject_get_int(state.get_job_holds_machine_subject()) == 0);
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: the scan-result guard retires the preparing job too",
+                 "[print_preparation][lifecycle][preparing]") {
+    // The sibling exit, reached with a live api_ and no cached scan. Separate
+    // case because a single test can only ever prove the FIRST guard it hits.
+    MoonrakerClientMock mock_client(MoonrakerClientMock::PrinterType::VORON_24);
+    helix::PrinterState state;
+    state.init_subjects(false);
+    MoonrakerAPIMock api(mock_client, state);
+
+    helix::ui::PrintPreparationManager manager;
+    manager.set_dependencies(&api, &state);
+
+    state.begin_preparing(helix::PrintJobRef{"doomed.gcode", "gcodes", ""});
+    REQUIRE(state.has_preparing_job());
+
+    PrintPreparationManagerTestAccess::modify_and_print(manager, "doomed.gcode");
+
+    REQUIRE_FALSE(state.has_preparing_job());
+    REQUIRE(lv_subject_get_int(state.get_print_in_progress_subject()) == 0);
+    REQUIRE(state.last_preparing_exit() == helix::PreparingExit::Failed);
 }

@@ -6,12 +6,14 @@
 #include "ui_format_utils.h"
 
 #include "system/crash_handler.h"
+#include "temp_graph_column_map.h"
 #include "temp_graph_internal.h"
 #include "temp_graph_tooltip.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
 
+#include <chrono>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -362,62 +364,73 @@ static void gradient_render_columns(ui_temp_graph_t* graph, const temp_graph_geo
         fd.grad.stops[1].opa = meta->gradient_bottom_opa;
         fd.grad.stops[1].frac = 255;
 
+        // Coalesce runs of columns that share a top row. Every such column is
+        // the SAME fill - same vertical ramp, same span down to the floor - so
+        // one rect per run is pixel-identical to one rect per column. Worth it
+        // because the cost is per DRAW TASK, not per pixel: measured on a K2
+        // Plus, queueing 456 single-column fills took 7-22ms while
+        // lv_canvas_finish_layer() spent 106-162ms rasterising them. A near-flat
+        // trace - an idle printer - collapses to a handful of runs.
+        //
+        // A run MUST break at any column the renderer does not fill, or the
+        // merged rect bridges the gap and paints columns that must stay empty.
+        bool run_open = false;
+        int32_t run_y = 0;
+        int32_t run_x1 = 0;
+        int32_t run_x2 = 0;
+        auto flush_run = [&]() {
+            if (!run_open)
+                return;
+            lv_area_t run_area;
+            run_area.x1 = run_x1;
+            run_area.x2 = run_x2;
+            run_area.y1 = run_y;
+            run_area.y2 = floor_y - 1;
+            lv_draw_fill(target, &fd, &run_area);
+            run_open = false;
+        };
+
         // Walk columns (not segments) so each pixel column is drawn exactly
         // once. When pc > cw (e.g. 400 points over ~332 px) a segment walk
         // would draw overlapping fills at shared boundaries, compounding
         // semi-transparent opacity into visible dark bands.
         for (int32_t x = 0; x < cw; x++) {
-            // Map this pixel column back to a fractional point index.
-            // frac_256 is in 8.8 fixed point to avoid float.
-            int32_t frac_256 = x * (pc - 1) * 256 / (cw - 1);
-            int32_t idx = frac_256 / 256;
-            int32_t t = frac_256 & 255; // fractional part [0..255]
-
-            if (idx >= pc - 1) {
-                idx = pc - 2;
-                t = 255;
+            // One shared mapper answers "where does this column's fill start",
+            // so the cache signature cannot drift from what is actually drawn.
+            int32_t idx = 0;
+            int32_t t = 0;
+            helix::temp_graph::column_to_point(x, cw, pc, idx, t);
+            const int32_t mapped = helix::temp_graph::column_series_y(
+                y_data[(sp + idx) % pc], y_data[(sp + idx + 1) % pc], t, y_min, y_max, ch);
+            if (mapped == helix::temp_graph::COLUMN_NOT_DRAWN) {
+                flush_run();
+                continue;
             }
-
-            int32_t v0 = y_data[(sp + idx) % pc];
-            int32_t v1 = y_data[(sp + idx + 1) % pc];
-
-            if (v0 == LV_CHART_POINT_NONE && v1 == LV_CHART_POINT_NONE)
-                continue;
-            if (v0 == LV_CHART_POINT_NONE)
-                v0 = v1;
-            if (v1 == LV_CHART_POINT_NONE)
-                v1 = v0;
-
-            // Curve Y in target coords: lv_map gives height above the floor.
-            int32_t py0 = floor_y - lv_map(v0, y_min, y_max, 0, ch);
-            int32_t py1 = floor_y - lv_map(v1, y_min, y_max, 0, ch);
-            int32_t series_y = py0 + (py1 - py0) * t / 256;
-
-            if (series_y < y_off)
-                series_y = y_off;
-            if (series_y >= floor_y)
-                continue;
+            const int32_t series_y = y_off + mapped; // mapper is content-relative
 
             // Fill from the curve down to the chart floor with the full-height
             // vertical fade. The ramp stays faintly visible well below the line,
             // so a taller series' tint correctly overlays lower series via alpha.
             // We deliberately do NOT clamp to a band: with this gentle ramp the
             // deep pixels are low-opacity but not invisible, so clamping would
-            // change the multi-series appearance (#979 review). The per-recompute
-            // cost is instead bounded by caching — this loop only runs when the
-            // data or viewport actually changes, not every frame.
-            int32_t col_bottom = floor_y - 1;
-            if (col_bottom < series_y)
+            // change the multi-series appearance (#979 review).
+            if (floor_y - 1 < series_y) {
+                flush_run();
                 continue;
+            }
 
-            lv_area_t col_area;
-            col_area.x1 = x_off + x;
-            col_area.x2 = x_off + x;
-            col_area.y1 = series_y;
-            col_area.y2 = col_bottom;
-
-            lv_draw_fill(target, &fd, &col_area);
+            if (run_open && series_y == run_y) {
+                run_x2 = x_off + x; // extend
+                continue;
+            }
+            flush_run();
+            run_open = true;
+            run_y = series_y;
+            run_x1 = x_off + x;
+            run_x2 = x_off + x;
         }
+
+        flush_run(); // tail
     }
 }
 
@@ -457,9 +470,88 @@ static bool gradient_ensure_cache_buf(ui_temp_graph_t* graph, const temp_graph_g
             graph->gradient_cache_w = g.cw;
             graph->gradient_cache_h = g.ch;
             graph->gradient_cache_dirty = true;
+            // Fresh buffer: its contents are undefined, so a signature match must
+            // not be allowed to skip the first render into it.
+            graph->gradient_cache_sig_valid = false;
         }
     }
     return graph->gradient_cache_buf != nullptr;
+}
+
+// Hash of the PIXEL ROWS gradient_render_columns() will actually fill.
+//
+// The obvious signature - hash the raw y-data - is exact but useless: real
+// temperatures jitter a tenth of a degree every sample, so the values always
+// differ and the hash always changes, even though at 456x102 that wiggle lands
+// on the same pixel row and the drawn result is identical. Measured on a K2
+// Plus: 40 renders, 0 skips, median 167ms each.
+//
+// So quantise the way the renderer does. Per column it derives exactly one
+// number, series_y (the top of the fill; everything below is the same ramp down
+// to the floor), and that number alone decides the pixels. Walk the same columns
+// with the same integer math and hash series_y, and the signature changes if and
+// only if the rendered image would.
+static uint64_t gradient_content_signature(ui_temp_graph_t* graph, const temp_graph_geometry_t& g) {
+    uint64_t h = 1469598103934665603ULL; // FNV-1a offset basis
+    auto mix = [&h](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ULL; // FNV-1a prime
+    };
+
+    const int32_t cw = g.cw;
+    const int32_t ch = g.ch;
+    const int32_t pc = static_cast<int32_t>(g.point_count);
+    const int32_t y_min = g.y_min;
+    const int32_t y_max = g.y_max;
+    mix(static_cast<uint64_t>(cw));
+    mix(static_cast<uint64_t>(ch));
+    mix(static_cast<uint64_t>(pc));
+    if (cw <= 1 || pc <= 1) {
+        return h; // degenerate viewport: the renderer draws nothing
+    }
+    // Buffer-relative coords, matching the gradient_render_columns(.., 0, 0) call.
+    const int32_t y_off = 0;
+    const int32_t floor_y = y_off + ch;
+
+    for (int si = 0; si < UI_TEMP_GRAPH_MAX_SERIES; si++) {
+        ui_temp_series_meta_t* meta = &graph->series_meta[si];
+        // Mirror the renderer's skip conditions exactly, so a series it ignores
+        // cannot perturb the hash and one it draws is always covered.
+        if (!meta->chart_series || !meta->visible)
+            continue;
+        if (meta->gradient_top_opa == LV_OPA_TRANSP && meta->gradient_bottom_opa == LV_OPA_TRANSP)
+            continue;
+        int32_t* y_data = lv_chart_get_y_array(graph->chart, meta->chart_series);
+        if (!y_data)
+            continue;
+
+        mix(static_cast<uint64_t>(si));
+        mix(static_cast<uint64_t>(lv_color_to_u32(meta->color)));
+        mix(static_cast<uint64_t>(meta->gradient_top_opa));
+        mix(static_cast<uint64_t>(meta->gradient_bottom_opa));
+
+        const uint32_t sp = lv_chart_get_x_start_point(graph->chart, meta->chart_series);
+        for (int32_t x = 0; x < cw; x++) {
+            int32_t idx = 0;
+            int32_t t = 0;
+            helix::temp_graph::column_to_point(x, cw, pc, idx, t);
+            // Hash the mapper's answer INCLUDING its not-drawn sentinel, so a
+            // column appearing or disappearing changes the signature.
+            mix(static_cast<uint64_t>(static_cast<uint32_t>(helix::temp_graph::column_series_y(
+                y_data[(sp + idx) % pc], y_data[(sp + idx + 1) % pc], t, y_min, y_max, ch))));
+        }
+    }
+    return h;
+}
+
+// Escape hatch for measuring the skip's effect on a device without swapping
+// binaries: HELIX_TEMP_GRAPH_GRAD_SKIP=0 forces every dirty frame to render.
+static bool gradient_skip_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("HELIX_TEMP_GRAPH_GRAD_SKIP");
+        return !(v && v[0] == '0');
+    }();
+    return enabled;
 }
 
 // Recompute the cached gradient buffer. lv_canvas_init_layer / finish_layer run a
@@ -484,18 +576,61 @@ static void gradient_recompute_async(void* arg) {
     if (!graph->gradient_cache_dirty)
         return; // nothing changed since the last recompute
 
-    lv_canvas_fill_bg(graph->gradient_canvas, lv_color_black(), LV_OPA_TRANSP);
+    // A pushed sample dirties the cache unconditionally, but most frames render
+    // the same picture. Skip those before paying for the per-column fill - and
+    // before the invalidate below, which would repaint the chart for nothing.
+    const uint64_t sig = gradient_content_signature(graph, g);
+    if (gradient_skip_enabled() && graph->gradient_cache_sig_valid &&
+        graph->gradient_cache_sig == sig) {
+        graph->gradient_cache_dirty = false;
+        ++graph->gradient_skip_count;
+        spdlog::debug("[TempGraph {}] gradient skip #{} (unchanged content, {}x{})",
+                      static_cast<const void*>(graph), graph->gradient_skip_count, g.cw, g.ch);
+        return;
+    }
 
+    using clk = std::chrono::steady_clock;
+    auto us_since = [](clk::time_point t) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t).count();
+    };
+    const auto render_start = clk::now();
+
+    lv_canvas_fill_bg(graph->gradient_canvas, lv_color_black(), LV_OPA_TRANSP);
+    const auto t_fill = us_since(render_start);
+
+    auto mark = clk::now();
     lv_layer_t glayer;
     lv_canvas_init_layer(graph->gradient_canvas, &glayer);
+    const auto t_init = us_since(mark);
+
+    mark = clk::now();
     gradient_render_columns(graph, g, &glayer, 0, 0); // buffer-relative coords
+    const auto t_cols = us_since(mark);
+
+    // finish_layer runs a nested synchronous draw dispatch, so it is a genuine
+    // suspect for the bulk of the cost rather than mere bookkeeping.
+    mark = clk::now();
     lv_canvas_finish_layer(graph->gradient_canvas, &glayer);
+    const auto t_finish = us_since(mark);
 
     graph->gradient_cache_dirty = false;
+    graph->gradient_cache_sig = sig;
+    graph->gradient_cache_sig_valid = true;
 
-    static uint64_t s_gradient_recompute_count = 0;
-    spdlog::debug("[TempGraph] gradient recompute #{} ({}x{}, {} series)",
-                  ++s_gradient_recompute_count, g.cw, g.ch, graph->series_count);
+    const auto render_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - render_start)
+                               .count();
+    graph->gradient_render_us_total += static_cast<uint64_t>(render_us);
+    ++graph->gradient_render_count;
+    // debug, not info: the measurement is done (K2 Plus: 167ms median before,
+    // ~10ms after), and a line every couple of seconds on every printer forever
+    // is not worth it. HELIX_TEMP_GRAPH_GRAD_SKIP=0 plus -vv brings it back.
+    spdlog::debug("[TempGraph {}] gradient render #{} ({}x{}, {} series) {}us "
+                  "[fill {}us init {}us cols {}us finish {}us] [skipped {}, mean {}us]",
+                  static_cast<const void*>(graph), graph->gradient_render_count, g.cw, g.ch,
+                  graph->series_count, render_us, t_fill, t_init, t_cols, t_finish,
+                  graph->gradient_skip_count,
+                  graph->gradient_render_us_total / graph->gradient_render_count);
 
     // The buffer changed — request a redraw so the draw cb blits the fresh pixels.
     lv_obj_invalidate(graph->chart);

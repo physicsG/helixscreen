@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/print_state_test_drivers.h"
 #include "ams_backend_ad5x_ifs.h"
 #include "ams_backend_afc.h"
 #include "ams_state.h"
@@ -12,6 +13,7 @@
 #include "filament_op_router.h"
 #include "filament_slot_override.h"
 #include "filament_slot_override_store.h"
+#include "filament_variants.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
@@ -9306,7 +9308,7 @@ struct Ad5xHomingGuardFixture : public LVGLTestFixture {
         Ad5xIfsTestAccess::set_running(*backend, true);
     }
     void set_print_state(helix::PrintJobState s) {
-        lv_subject_set_int(state.get_print_state_enum_subject(), static_cast<int>(s));
+        helix::test::set_wire_state(state, s);
     }
     MoonrakerClientMock mock_client;
     helix::PrinterState state;
@@ -9693,8 +9695,8 @@ struct Ad5xRunoutFixture : public LVGLTestFixture {
     // Plain null check, not REQUIRE: this also runs from the destructor, where a
     // Catch2 assertion would throw during unwinding.
     static void set_print_state(helix::PrintJobState s) {
-        if (auto* subj = get_printer_state().get_print_state_enum_subject()) {
-            lv_subject_set_int(subj, static_cast<int>(s));
+        if (get_printer_state().get_print_state_enum_subject()) {
+            helix::test::set_wire_state(get_printer_state(), s);
         }
     }
 
@@ -9746,8 +9748,7 @@ class Ad5xRunoutOpBackend : public AmsBackendAd5xIfs {
 struct Ad5xRunoutOpFixture : public Ad5xRunoutFixture {
     Ad5xRunoutOpFixture() : mock_client(MoonrakerClientMock::PrinterType::VORON_24) {
         local_state.init_subjects(false);
-        lv_subject_set_int(local_state.get_print_state_enum_subject(),
-                           static_cast<int>(helix::PrintJobState::STANDBY));
+        helix::test::set_wire_state(local_state, helix::PrintJobState::STANDBY);
         api = std::make_unique<MoonrakerAPIMock>(mock_client, local_state);
         backend = std::make_unique<Ad5xRunoutOpBackend>(api.get());
         Ad5xIfsTestAccess::set_running(*backend, true);
@@ -10494,29 +10495,47 @@ TEST_CASE("AD5X IFS overrides the eligibility rule with type+colour+presence",
         Ad5xIfsTestAccess::set_material(backend, 2, "PLA");
         Ad5xIfsTestAccess::set_color(backend, 2, "00FF00");
 
-        REQUIRE(filament::are_materials_compatible("PLA", "PLA"));
-        REQUIRE_FALSE(backend.is_endless_spool_backup_eligible(0, 2));
+        REQUIRE(filament::materials_compatible("PLA", "PLA"));
+        REQUIRE(backend.endless_spool_backup_eligibility(0, 2) ==
+                helix::printer::BackupEligibility::Incompatible);
     }
 
     SECTION("an absent port is not eligible even on an exact match") {
         Ad5xIfsTestAccess::set_material(backend, 2, "PLA");
         Ad5xIfsTestAccess::set_color(backend, 2, "FF0000");
         Ad5xIfsTestAccess::set_port_presence(backend, 2, false);
-        REQUIRE_FALSE(backend.is_endless_spool_backup_eligible(0, 2));
+        REQUIRE(backend.endless_spool_backup_eligibility(0, 2) ==
+                helix::printer::BackupEligibility::Incompatible);
     }
 
     SECTION("exact type + colour + presence is eligible, case-insensitively") {
         Ad5xIfsTestAccess::set_port_presence(backend, 2, true);
         Ad5xIfsTestAccess::set_material(backend, 2, "pla");
         Ad5xIfsTestAccess::set_color(backend, 2, "ff0000");
-        REQUIRE(backend.is_endless_spool_backup_eligible(0, 2));
+        REQUIRE(backend.endless_spool_backup_eligibility(0, 2) ==
+                helix::printer::BackupEligibility::Eligible);
         // And it is the same rule the firmware-match scan uses.
         REQUIRE(Ad5xIfsTestAccess::find_backup_slot(backend, 0) == 2);
     }
 
     SECTION("self and out-of-range are never eligible") {
-        REQUIRE_FALSE(backend.is_endless_spool_backup_eligible(0, 0));
-        REQUIRE_FALSE(backend.is_endless_spool_backup_eligible(0, AmsBackendAd5xIfs::NUM_PORTS));
-        REQUIRE_FALSE(backend.is_endless_spool_backup_eligible(-1, 0));
+        using helix::printer::BackupEligibility;
+        REQUIRE(backend.endless_spool_backup_eligibility(0, 0) == BackupEligibility::Incompatible);
+        REQUIRE(backend.endless_spool_backup_eligibility(0, AmsBackendAd5xIfs::NUM_PORTS) ==
+                BackupEligibility::Incompatible);
+        REQUIRE(backend.endless_spool_backup_eligibility(-1, 0) == BackupEligibility::Incompatible);
+    }
+
+    SECTION("a filled grade is refused outright, never softened") {
+        // The base rule would answer GradeDiffers here and let the user proceed.
+        // AD5X must not: its firmware matches the type string exactly, so a
+        // PLA-CF lane will simply never be selected for a PLA runout, and
+        // offering it as a choosable option would promise a swap that cannot
+        // happen. A backend's verdict is about what its firmware will do.
+        Ad5xIfsTestAccess::set_port_presence(backend, 2, true);
+        Ad5xIfsTestAccess::set_material(backend, 2, "PLA-CF");
+        Ad5xIfsTestAccess::set_color(backend, 2, "FF0000");
+        REQUIRE(backend.endless_spool_backup_eligibility(0, 2) ==
+                helix::printer::BackupEligibility::Incompatible);
     }
 }

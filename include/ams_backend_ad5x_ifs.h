@@ -346,7 +346,7 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
      * get_endless_spool_config() is deliberately NOT overridden either: the
      * firmware computes the match at runout time (find_backup_slot_locked) and
      * stores no per-slot relation, so the base's empty relation is the honest
-     * answer. is_endless_spool_backup_eligible() is where the rule is exposed.
+     * answer. endless_spool_backup_eligibility() is where the rule is exposed.
      *
      * @note Takes `mutex_`; callers must NOT hold it.
      */
@@ -362,8 +362,8 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
      *
      * @note Takes `mutex_`; callers must NOT hold it.
      */
-    [[nodiscard]] bool is_endless_spool_backup_eligible(int slot_index,
-                                                        int backup_slot) const override;
+    [[nodiscard]] helix::printer::BackupEligibility
+    endless_spool_backup_eligibility(int slot_index, int backup_slot) const override;
 
   protected:
     /// The recovery buttons for whichever fault is currently latched.
@@ -419,6 +419,11 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     // port_presence was true) shares this routine so the field-reset policy
     // stays in one place.
     void clear_slot_override(int slot_index) override;
+
+    /// Publish the external spool as lane{N+1} in the lane_data namespace.
+    /// ZMOD never writes lane_data — our mirror owns the namespace entirely,
+    /// so unlike AFC/HH there is no firmware writer to collide with.
+    void publish_external_spool_lane(const SlotInfo* spool) override;
 
     AmsError enable_bypass() override;
     AmsError disable_bypass() override;
@@ -835,7 +840,7 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
 
     /// The single-pair form of find_backup_slot_locked()'s rule: could
     /// @p candidate stand in for @p slot? Both that scan and the public
-    /// is_endless_spool_backup_eligible() run through here, so what the UI would
+    /// endless_spool_backup_eligibility() run through here, so what the UI would
     /// offer and what the firmware would pick cannot diverge. Caller holds mutex_.
     [[nodiscard]] bool backup_eligible_locked(int slot, int candidate) const;
 
@@ -1268,6 +1273,7 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     // after backend start fires a poll immediately.
     std::chrono::steady_clock::time_point last_json_poll_kick_{};
 
+    // RAW_PRINT_STATE_OK: names the wire state this member caches.
     // Was the printer in PrintJobState::PRINTING at the previous status update?
     // Used to spot the printing->done edge and force an off-cadence poll there,
     // so the slower in-print interval never delays seeing the firmware's

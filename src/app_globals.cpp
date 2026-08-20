@@ -460,11 +460,28 @@ std::string get_helix_cache_dir(const std::string& subdir) {
             return path;
         }
     }
-#elif defined(HELIX_PLATFORM_MIPS) || defined(HELIX_PLATFORM_K2)
+#elif defined(HELIX_PLATFORM_K2)
     {
+        // The K2 mounts its bulk storage at /mnt/UDISK (27.5GB). /usr/data is
+        // on the root overlay, which is only ~240MB and shared with the
+        // install itself, so caching thumbnails and modified gcode there
+        // competes with the firmware for the smallest partition on the box.
+        // Probed in order so a unit without the mount still gets a cache.
+        // Mirrors CREALITY_DATA_ROOTS in plr_backend.cpp.
+        for (const char* root : {"/mnt/UDISK", "/usr/data"}) {
+            std::string path = std::string(root) + "/helixscreen/cache/" + subdir;
+            if (try_create_dir(path)) {
+                spdlog::info("[App Globals] Cache dir (K2): {}", path);
+                return path;
+            }
+        }
+    }
+#elif defined(HELIX_PLATFORM_MIPS)
+    {
+        // K1 series: /usr/data IS the large user partition here, unlike on the K2.
         std::string path = "/usr/data/helixscreen/cache/" + subdir;
         if (try_create_dir(path)) {
-            spdlog::info("[App Globals] Cache dir (MIPS/K2): {}", path);
+            spdlog::info("[App Globals] Cache dir (MIPS): {}", path);
             return path;
         }
     }

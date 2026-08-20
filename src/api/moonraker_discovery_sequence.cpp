@@ -771,6 +771,26 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
                                     "settings")) {
                                 const auto& settings =
                                     config_response["result"]["status"]["configfile"]["settings"];
+
+                                // Build volume from the [stepper_*] travel limits. This is
+                                // the only place it can be filled before discovery completes:
+                                // the safety-limits fetch that also writes it is kicked off
+                                // from the discovery-complete handler, i.e. after
+                                // PrinterDetector::auto_detect() has already run and read an
+                                // empty volume. Two thirds of the printer database discriminate
+                                // on build_volume_range, so detection was declining without its
+                                // single most decisive input.
+                                //
+                                // Pure data write under the same mutex the config parse above
+                                // takes — no LVGL and no subject is touched here. The API-side
+                                // fetch still runs later and still calls
+                                // notify_build_volume_changed(), so any UI that observes the
+                                // volume is refreshed from the main thread as before.
+                                {
+                                    std::lock_guard<std::mutex> lock(hardware_mutex_);
+                                    hardware_.parse_build_volume(settings);
+                                }
+
                                 helix::MacroFanAnalyzer analyzer;
                                 auto macro_result = analyzer.analyze(settings);
 

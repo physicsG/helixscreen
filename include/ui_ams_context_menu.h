@@ -51,11 +51,12 @@ class AmsContextMenu : public ContextMenu {
   public:
     /// Answers "may slot `candidate` stand in for slot `slot`?"
     ///
-    /// Always AmsBackend::is_endless_spool_backup_eligible() in production. Taken
+    /// Always AmsBackend::endless_spool_backup_eligibility() in production. Taken
     /// as a parameter by the two pure functions below purely so they are testable
     /// without a backend; the production call sites bind it to the virtual and to
     /// nothing else.
-    using BackupEligibleFn = std::function<bool(int slot, int candidate)>;
+    using BackupEligibleFn =
+        std::function<helix::printer::BackupEligibility(int slot, int candidate)>;
 
     /// The spool number a slot's badge shows, which is not slot+1 once a unit
     /// re-uses another's identity: on multiACE an ACE-fed head and the ACE bay
@@ -233,7 +234,7 @@ class AmsContextMenu : public ContextMenu {
     void populate_backup_dropdown();
     std::string build_tool_options() const;
     std::string build_backup_options() const;
-    /// backend_->is_endless_spool_backup_eligible() as a callable, or an
+    /// backend_->endless_spool_backup_eligibility() as a callable, or an
     /// always-eligible stub when there is no backend (matching the old code,
     /// which skipped every compatibility check in that case).
     BackupEligibleFn backend_eligible_fn() const;
@@ -271,7 +272,7 @@ class AmsContextMenu : public ContextMenu {
     // Pure: the backup dropdown's option list, "(incompatible)"-tagged.
     //
     // The eligibility rule is the BACKEND's, reached through
-    // AmsBackend::is_endless_spool_backup_eligible(). This used to call
+    // AmsBackend::endless_spool_backup_eligibility(). This used to call
     // filament::are_materials_compatible() directly, which meant AD5X IFS's
     // stricter firmware rule (exact material AND exact colour AND port present)
     // could never reach the label, and no backend had any say. The base virtual

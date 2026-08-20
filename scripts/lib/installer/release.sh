@@ -1135,6 +1135,143 @@ validate_binary_architecture() {
 # roomy partition frees the install fs so the new tree can move in, and the
 # off-partition copy serves as the rollback source on failure.
 #
+# --- Filesystem measurement helpers -----------------------------------------
+#
+# `-P` is load-bearing, not decoration: without it df wraps a long device name
+# onto its own line, and `tail -1 | awk '{print $1}'` then returns a BLOCK COUNT
+# where the caller expects a device. Two filesystems would compare unequal by
+# accident and a rename would be mistaken for a copy. POSIX output is one line
+# per filesystem, which is why detect_rollback_dir already uses it.
+#
+# `-P` alone reports 512-byte blocks, so pair it with `-k` to get the 1K units
+# the arithmetic below assumes. Verified on BusyBox 1.29.3 and 1.33.2.
+
+# Echo the filesystem identity for a path (df's device column). Two paths with
+# the same value are on one filesystem, so a mv between them is a rename.
+_fs_id() {
+    df -kP "$1" 2>/dev/null | tail -1 | awk '{print $1}'
+}
+
+# Echo free space in MB on the filesystem holding a path.
+_fs_free_mb() {
+    df -kP "$1" 2>/dev/null | tail -1 | awk '{print int($4/1024)}'
+}
+
+# Echo the size of a directory tree in MB.
+#
+# Echoes NOTHING when the measurement fails. Callers must treat that as
+# "unknown" and refuse to proceed — never as zero. A zero silently turns every
+# space guard below into `free < 10`, which passes on any healthy filesystem
+# and protects nothing; that is the failure mode where the install dies
+# mid-copy with ENOSPC having reported no problem at all.
+# Verified present on BusyBox 1.29.3 (AD5M) and 1.33.2 (K2).
+_tree_size_mb() {
+    du -ms "$1" 2>/dev/null | awk '{print $1}'
+}
+
+# Decide whether the install swap can actually be performed.
+#
+# Args: SRC (the extracted tree) DST_PARENT (INSTALL_DIR's parent)
+# Returns 0 to proceed, 1 to refuse. Logs the reason either way.
+#
+# A mv within one filesystem is a rename and needs no free space; across
+# filesystems it is a copy-then-delete needing the whole tree's worth. The
+# staging dir is routinely on a different partition now (the K2 stages on
+# /mnt/UDISK and installs to /opt, because /opt is a 240MB overlay).
+#
+# The Phase 4 sizing upstream is not a substitute: it measures BEFORE the old
+# install is moved aside, and its tight path then relocates that old install
+# off-partition on the assumption the freed space suffices — which is false
+# whenever the new tree is materially larger than the old one. This runs after
+# all of that, against real free space, so an impossible copy fails having
+# written nothing rather than dying half-way through with ENOSPC.
+_check_swap_space() {
+    local src="$1" dst_parent="$2"
+    local src_fs dst_fs need_mb free_mb
+
+    src_fs=$(_fs_id "$src")
+    dst_fs=$(_fs_id "$dst_parent")
+
+    # Same filesystem: the mv is a rename, so it consumes nothing.
+    if [ -n "$src_fs" ] && [ -n "$dst_fs" ] && [ "$src_fs" = "$dst_fs" ]; then
+        return 0
+    fi
+
+    need_mb=$(_tree_size_mb "$src")
+    free_mb=$(_fs_free_mb "$dst_parent")
+
+    # Both values must be plain digits before they reach `$(( ))`.
+    #
+    # This is not defensive padding. The installer runs under `set -eu`, and
+    # dash aborts on `$(( garbage + 10 ))` with "Illegal number" — which would
+    # kill the run in the one window where the old install has already been
+    # moved aside and the new one is not in place yet, i.e. leave the printer
+    # with no install at all. An empty value is just as bad the other way:
+    # `$(( "" + 10 ))` quietly evaluates to 10, so the guard degrades to
+    # `free < 10` and stops protecting anything.
+    case "${need_mb}" in ''|*[!0-9]*) need_mb='' ;; esac
+    case "${free_mb}" in ''|*[!0-9]*) free_mb='' ;; esac
+
+    # Unmeasurable is NOT the same as fine. Say so out loud and continue rather
+    # than inventing a zero, which would silence the guard on every platform.
+    if [ -z "$need_mb" ] || [ -z "$free_mb" ]; then
+        log_warn "Could not measure free space for the cross-filesystem install swap; proceeding without the check."
+        return 0
+    fi
+
+    if [ "$free_mb" -lt $(( need_mb + 10 )) ]; then
+        log_error "Not enough space to install: the new tree is ${need_mb}MB but only ${free_mb}MB is free on ${dst_parent}."
+        log_error "The staging directory is on a different filesystem, so this step must COPY the tree, not rename it."
+        log_error "Free up space on ${dst_parent} and re-run the installer."
+        return 1
+    fi
+
+    log_info "Cross-filesystem install swap: ${need_mb}MB to copy, ${free_mb}MB free on ${dst_parent}"
+    return 0
+}
+
+# Put the previous installation back after the swap could not be completed.
+#
+# Shared by every abort between "old install moved aside" and "new install in
+# place": at that point INSTALL_DIR does not exist, so bailing without this
+# leaves the box with no install at all. Args: REASON (logged only).
+_restore_install_backup() {
+    local reason="${1:-unknown}"
+
+    [ -d "${INSTALL_BACKUP:-}" ] || return 0
+
+    log_warn "Rolling back to previous installation (${reason})..."
+    # Remove partial new install that may block the rollback mv.
+    # Unescalated first, then escalate — the same two-attempt idiom the
+    # stale-backup removals use. A forced $SUDO is not the safe choice here:
+    # under NoNewPrivileges (self-update) sudo cannot run at all, so escalating
+    # first turns a rollback that would have worked on a user-owned parent into
+    # a failed one, and a failed rollback leaves the box with no install.
+    if [ -d "${INSTALL_DIR}" ]; then
+        $(path_sudo "${INSTALL_DIR}") rm -rf "${INSTALL_DIR}" 2>/dev/null || \
+            $SUDO rm -rf "${INSTALL_DIR}" 2>/dev/null || true
+    fi
+    if $(path_sudo "$INSTALL_BACKUP") mv "$INSTALL_BACKUP" "${INSTALL_DIR}" 2>/dev/null || \
+       $SUDO mv "$INSTALL_BACKUP" "${INSTALL_DIR}"; then
+        log_warn "Rollback complete. Previous installation restored."
+        # Off-partition rollback: the cross-fs mv leaves an empty
+        # helixscreen-rollback/ dir behind. Remove it, but ONLY when its final
+        # component is exactly helixscreen-rollback (never a bare mount root —
+        # see the K2 /mnt/UDISK wipe incident).
+        if [ -n "${HELIX_OFFSITE_ROLLBACK_DIR:-}" ]; then
+            case "$HELIX_OFFSITE_ROLLBACK_DIR" in
+                */helixscreen-rollback)
+                    rm -rf "$HELIX_OFFSITE_ROLLBACK_DIR" 2>/dev/null || $SUDO rm -rf "$HELIX_OFFSITE_ROLLBACK_DIR" 2>/dev/null || true ;;
+            esac
+        fi
+        return 0
+    fi
+
+    log_error "CRITICAL: Rollback failed! Previous install at $INSTALL_BACKUP"
+    log_error "Manually restore with: mv $INSTALL_BACKUP ${INSTALL_DIR}"
+    return 1
+}
+
 # Args: NEEDED_MB INSTALL_PARENT
 # Echoes a qualifying candidate dir and returns 0, or echoes nothing and
 # returns 1 if none qualifies. Requires NEEDED_MB + 20 MB free on the candidate.
@@ -1233,12 +1370,23 @@ extract_release() {
             fi
             ;;
         *)
+            # `-o` means "don't restore user:group". Without it a root extract
+            # restores the numeric uid/gid the archive was built with (1001 on
+            # the CI runner), leaving the install owned by a user that does not
+            # exist on the printer. It is needed here as well as at packaging
+            # time because archives already published still carry those ids.
+            #
+            # `-o` is the ONLY portable spelling: BusyBox tar (1.33.2 on the K2)
+            # documents `-o` but has no --no-same-owner long option, so passing
+            # the long form fails extraction outright on every Creality box.
+            # GNU tar accepts -o as an alias for --no-same-owner when extracting.
+            #
             # BusyBox tar doesn't support -z; use gunzip pipe on embedded platforms
             case "$platform" in
                 ad5m|ad5x|k1|k2)
-                    gunzip -c "$archive" | tar xf - && extract_ok=true ;;
+                    gunzip -c "$archive" | tar xof - && extract_ok=true ;;
                 *)
-                    tar -xzf "$archive" && extract_ok=true ;;
+                    tar -xzof "$archive" && extract_ok=true ;;
             esac
             ;;
     esac
@@ -1501,40 +1649,27 @@ extract_release() {
 
     # Phase 5: Move new install into place
     $(file_sudo "$(dirname "${INSTALL_DIR}")") mkdir -p "$(dirname "${INSTALL_DIR}")"
+
+    # A mv within one filesystem is a rename and needs no free space. Across
+    # filesystems it is a copy-then-delete that needs the whole tree's worth —
+    # and TMP_DIR is routinely on a different partition now (the K2 stages on
+    # /mnt/UDISK and installs to /opt, because /opt is a 240MB overlay).
+    #
+    # Phase 4 already sized this, but only against the state BEFORE the old
+    # install was moved aside. Its tight path relocates the old install
+    # off-partition and assumes that freed enough room, which is false whenever
+    # the new tree is materially larger than the old one. Re-measure against
+    # real free space here, so an impossible copy fails having written nothing
+    # instead of dying half-way through with ENOSPC.
+    if ! _check_swap_space "${new_install}" "$(dirname "${INSTALL_DIR}")"; then
+        _restore_install_backup "space check"
+        rm -rf "$extract_dir"
+        exit 1
+    fi
+
     if ! $(file_sudo "$(dirname "${INSTALL_DIR}")") mv "${new_install}" "${INSTALL_DIR}"; then
         log_error "Failed to install new release."
-        # ROLLBACK: restore old installation
-        if [ -d "${INSTALL_BACKUP:-}" ]; then
-            log_warn "Rolling back to previous installation..."
-            # Remove partial new install that may block the rollback mv.
-            # Unescalated first, then escalate — the same two-attempt idiom the
-            # stale-backup removals above use. A forced $SUDO is not the safe
-            # choice here: under NoNewPrivileges (self-update) sudo cannot run at
-            # all, so escalating first turns a rollback that would have worked on
-            # a user-owned parent into a failed one, and a failed rollback leaves
-            # the box with no install.
-            if [ -d "${INSTALL_DIR}" ]; then
-                $(path_sudo "${INSTALL_DIR}") rm -rf "${INSTALL_DIR}" 2>/dev/null || \
-                    $SUDO rm -rf "${INSTALL_DIR}" 2>/dev/null || true
-            fi
-            if $(path_sudo "$INSTALL_BACKUP") mv "$INSTALL_BACKUP" "${INSTALL_DIR}" 2>/dev/null || \
-               $SUDO mv "$INSTALL_BACKUP" "${INSTALL_DIR}"; then
-                log_warn "Rollback complete. Previous installation restored."
-                # Off-partition rollback: the cross-fs mv leaves an empty
-                # helixscreen-rollback/ dir behind. Remove it, but ONLY when its
-                # final component is exactly helixscreen-rollback (never a bare
-                # mount root — see the K2 /mnt/UDISK wipe incident).
-                if [ -n "${HELIX_OFFSITE_ROLLBACK_DIR:-}" ]; then
-                    case "$HELIX_OFFSITE_ROLLBACK_DIR" in
-                        */helixscreen-rollback)
-                            rm -rf "$HELIX_OFFSITE_ROLLBACK_DIR" 2>/dev/null || $SUDO rm -rf "$HELIX_OFFSITE_ROLLBACK_DIR" 2>/dev/null || true ;;
-                    esac
-                fi
-            else
-                log_error "CRITICAL: Rollback failed! Previous install at $INSTALL_BACKUP"
-                log_error "Manually restore with: mv $INSTALL_BACKUP ${INSTALL_DIR}"
-            fi
-        fi
+        _restore_install_backup "failed swap"
         rm -rf "$extract_dir"
         exit 1
     fi
@@ -1734,6 +1869,52 @@ extract_release() {
 }
 
 # Remove backup of previous installation (call after service starts successfully)
+# Reclaim directories a previous version left on the wrong filesystem.
+#
+# Two kinds, both measured on a K2 whose root overlay is ~240MB while its user
+# partition at /mnt/UDISK is 27.5GB:
+#   - caches: the app used to cache thumbnails and modified gcode under
+#     /usr/data, i.e. on the overlay. It now caches on /mnt/UDISK.
+#   - scratch dirs: before cleanup was armed on EXIT (it hung off a bash-only
+#     ERR trap that never fired under ash/dash), an interrupted install left the
+#     whole download behind. One unit held a 60MB archive for two months.
+#
+# Platforms declare what to reclaim in STALE_CACHE_DIRS; a no-op elsewhere.
+#
+# SAFETY: same guard shape as the off-partition rollback cleanup below — the
+# final path component must be exactly "cache" or name itself an installer
+# scratch dir, and never a top-level directory. A past incident wiped a K2's
+# /mnt/UDISK mount root via an unguarded rm -rf.
+cleanup_stale_cache_dirs() {
+    [ -n "${STALE_CACHE_DIRS:-}" ] || return 0
+
+    local _stale _kind
+    for _stale in $STALE_CACHE_DIRS; do
+        case "$_stale" in
+            /*/*/cache)                 _kind="cache" ;;
+            /*/*helixscreen-install*)   _kind="scratch" ;;
+            *)
+                log_warn "Refusing to remove unexpected reclaim path: $_stale"
+                continue
+                ;;
+        esac
+
+        # Never remove the scratch dir this run is actively staging into.
+        if [ -n "${TMP_DIR:-}" ] && [ "$_stale" = "${TMP_DIR%/}" ]; then
+            continue
+        fi
+
+        [ -d "$_stale" ] || continue
+
+        rm -rf "$_stale" 2>/dev/null || $SUDO rm -rf "$_stale" 2>/dev/null || true
+        log_info "Reclaimed stale ${_kind} directory: $_stale"
+
+        # Drop the now-empty parent too, but only if nothing else lives there.
+        rmdir "$(dirname "$_stale")" 2>/dev/null || true
+    done
+    return 0
+}
+
 cleanup_old_install() {
     # Keep .old as a last-resort recovery path if config wasn't restored.
     # Without this guard, a failed Phase 6 + cleanup = permanent config loss.

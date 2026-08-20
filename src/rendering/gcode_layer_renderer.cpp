@@ -1371,67 +1371,218 @@ std::optional<std::string> GCodeLayerRenderer::pick_object_at(int screen_x, int 
 
     // Capture transform params (no widget offset for cache coords)
     TransformParams transform = capture_transform_params();
+    const glm::vec2 click_pos(static_cast<float>(screen_x), static_cast<float>(screen_y));
 
-    const float PICK_THRESHOLD = PICK_THRESHOLD_PX;
-    float closest_distance = std::numeric_limits<float>::max();
-    std::optional<std::string> picked_object;
+    // ------------------------------------------------------------------
+    // Stage 1: candidate objects by projected bounding box.
+    //
+    // render() draws every layer up to current_layer_, so the hit test has to
+    // cover the same volume. Testing current_layer_ alone made a full preview
+    // unpickable: current_layer_ is then the TOP layer, whose segments are a
+    // sliver in one corner, so tap-to-select and long-press-to-exclude both
+    // did nothing. Each GCodeObject carries a 3D bounding box accumulated over
+    // its whole toolpath, so projecting its 8 corners yields the object's
+    // screen footprint for one pass over the object list - no per-pixel
+    // buffer, no heap container, and no layer loads. The box covers the whole
+    // toolpath, though, and render() stops at current_layer_, so it is clamped
+    // to the drawn Z range first: what is not visible must not be pickable.
+    //
+    // Streaming mode has no object list (set_streaming_controller() clears
+    // gcode_), so it falls through to the segment walk with no filter.
+    // ------------------------------------------------------------------
+    constexpr size_t MAX_CANDIDATES = 32;
+    const std::string* candidate_names[MAX_CANDIDATES];
+    size_t candidate_count = 0;
+    bool candidate_overflow = false;
+    const bool objects_known = gcode_ && !gcode_->objects.empty() &&
+                               static_cast<size_t>(current_layer_) < gcode_->layers.size();
 
-    // Get segments for current layer
-    std::shared_ptr<const std::vector<ToolpathSegment>> segments_holder;
-    const std::vector<ToolpathSegment>* segments = nullptr;
+    if (objects_known) {
+        // Only layers 0..current_layer_ are on screen, so an object's pickable
+        // volume ends at the top of the current layer no matter how tall its
+        // bounding box is. Slack of a tenth of a micron absorbs float noise in
+        // the Z the parser stored for a layer versus the Z it stored on that
+        // layer's segments - orders of magnitude below the thinnest layer
+        // height anyone slices, so it can never admit an undrawn layer.
+        constexpr float Z_VISIBLE_EPSILON_MM = 1e-4f;
+        const float visible_top_z =
+            gcode_->layers[static_cast<size_t>(current_layer_)].z_height + Z_VISIBLE_EPSILON_MM;
+        const bool supports_hidden = !show_supports_.load(std::memory_order_relaxed);
 
-    if (streaming_controller_) {
-        // Cache-only: a hit-test must never seek and parse. We are picking
-        // against the layer already on screen, which render() has faulted in, so
-        // this is a hit in practice; a miss costs one unrecognised tap, whereas
-        // loading here froze the UI for seconds on a 2-core board (C2CP6ZAW).
-        segments_holder =
-            streaming_controller_->try_get_layer_segments(static_cast<size_t>(current_layer_));
-        segments = segments_holder.get();
-    } else if (gcode_) {
-        segments = &gcode_->layers[static_cast<size_t>(current_layer_)].segments;
-    }
+        for (const auto& [name, obj] : gcode_->objects) {
+            const AABB& box = obj.bounding_box;
+            // Defined but never extruded (EXCLUDE_OBJECT_DEFINE with no
+            // following move): the corners are +/-inf and projecting them
+            // yields garbage ints, which would swallow every tap.
+            if (box.is_empty())
+                continue;
 
-    if (!segments)
-        return std::nullopt;
+            // Has not started printing: render() has drawn nothing of it, and
+            // selecting geometry you cannot see is not a selection - you cannot
+            // decide to exclude an object that is not on screen.
+            if (box.min.z > visible_top_z)
+                continue;
 
-    glm::vec2 click_pos(static_cast<float>(screen_x), static_cast<float>(screen_y));
+            // Supports hidden, and this object is one. Stage 2 already filters
+            // segments through should_render_segment(), but the single-candidate
+            // fast path never reaches stage 2, so the check has to live here.
+            if (supports_hidden && name_looks_like_support(name))
+                continue;
 
-    for (const auto& seg : *segments) {
-        if (!should_render_segment(seg))
-            continue;
+            // Clamp to the drawn Z range before projecting. In FRONT view a
+            // higher Z maps higher on screen, so projecting the full box would
+            // stretch a partly-printed object's footprint above its drawn top
+            // and swallow clicks on empty space.
+            const AABB visible{box.min,
+                               glm::vec3(box.max.x, box.max.y, std::min(box.max.z, visible_top_z))};
 
-        if (seg.object_name_index < 0)
-            continue;
+            float min_sx = std::numeric_limits<float>::max();
+            float min_sy = std::numeric_limits<float>::max();
+            float max_sx = std::numeric_limits<float>::lowest();
+            float max_sy = std::numeric_limits<float>::lowest();
 
-        const std::string& obj_name = resolve_object_name(seg.object_name_index);
-        if (obj_name.empty())
-            continue;
+            for (const glm::vec3& corner : visible.corners()) {
+                glm::ivec2 p = world_to_screen_raw(transform, corner.x, corner.y, corner.z);
+                min_sx = std::min(min_sx, static_cast<float>(p.x));
+                min_sy = std::min(min_sy, static_cast<float>(p.y));
+                max_sx = std::max(max_sx, static_cast<float>(p.x));
+                max_sy = std::max(max_sy, static_cast<float>(p.y));
+            }
 
-        // Project segment endpoints to screen space
-        glm::ivec2 p1 = world_to_screen_raw(transform, seg.start.x, seg.start.y, seg.start.z);
-        glm::ivec2 p2 = world_to_screen_raw(transform, seg.end.x, seg.end.y, seg.end.z);
+            // Inflated by the same slop the segment test uses, so a tap on the
+            // edge of a thin object still lands.
+            if (click_pos.x < min_sx - PICK_THRESHOLD_PX ||
+                click_pos.x > max_sx + PICK_THRESHOLD_PX ||
+                click_pos.y < min_sy - PICK_THRESHOLD_PX ||
+                click_pos.y > max_sy + PICK_THRESHOLD_PX)
+                continue;
 
-        // Calculate distance from click to line segment
-        glm::vec2 v(static_cast<float>(p2.x - p1.x), static_cast<float>(p2.y - p1.y));
-        glm::vec2 w(click_pos.x - static_cast<float>(p1.x), click_pos.y - static_cast<float>(p1.y));
+            if (candidate_count < MAX_CANDIDATES) {
+                candidate_names[candidate_count++] = &name;
+            } else {
+                candidate_overflow = true;
+            }
+        }
 
-        float segment_length_sq = glm::dot(v, v);
-        float t = (segment_length_sq > 0.0001f)
-                      ? std::clamp(glm::dot(w, v) / segment_length_sq, 0.0f, 1.0f)
-                      : 0.0f;
-
-        glm::vec2 closest_point(static_cast<float>(p1.x) + t * v.x,
-                                static_cast<float>(p1.y) + t * v.y);
-        float dist = glm::length(click_pos - closest_point);
-
-        if (dist < PICK_THRESHOLD && dist < closest_distance) {
-            closest_distance = dist;
-            picked_object = obj_name;
+        if (!candidate_overflow) {
+            // Outside every footprint: nothing to pick, and no reason to touch
+            // a single layer's segments.
+            if (candidate_count == 0)
+                return std::nullopt;
+            // The common case - objects are laid out separated on the plate.
+            // O(objects), no segment scan at all.
+            if (candidate_count == 1)
+                return *candidate_names[0];
         }
     }
 
-    return picked_object;
+    // Overlapping footprints only. On overflow (a degenerate plate with >32
+    // objects under one tap) fall back to an unfiltered walk rather than
+    // dropping objects on the floor.
+    int16_t candidate_indices[MAX_CANDIDATES];
+    size_t candidate_index_count = 0;
+    const bool restrict_to_candidates = objects_known && !candidate_overflow && candidate_count > 1;
+
+    if (restrict_to_candidates) {
+        // Map each candidate to its interned index so the segment loop below
+        // compares int16s instead of strings. The name table holds one entry
+        // per object, so this is a handful of compares done once per tap.
+        for (size_t c = 0; c < candidate_count; ++c) {
+            for (size_t i = 0; i < gcode_->object_name_table.size(); ++i) {
+                if (gcode_->object_name_table[i] == *candidate_names[c]) {
+                    candidate_indices[candidate_index_count++] = static_cast<int16_t>(i);
+                    break;
+                }
+            }
+        }
+        // Every candidate is unreferenced by any segment, so no segment can
+        // ever match one.
+        if (candidate_index_count == 0)
+            return std::nullopt;
+    }
+
+    // ------------------------------------------------------------------
+    // Stage 2: disambiguate by segment distance. Walk layers from
+    // current_layer_ downward and stop at the first layer that produces any
+    // hit, so a tap over a stack picks whatever is actually on top of it.
+    // ------------------------------------------------------------------
+    for (int layer_idx = current_layer_; layer_idx >= 0; --layer_idx) {
+        std::shared_ptr<const std::vector<ToolpathSegment>> segments_holder;
+        const std::vector<ToolpathSegment>* segments = nullptr;
+
+        if (streaming_controller_) {
+            // Cache-only: a hit-test must never seek and parse. We are picking
+            // against layers already on screen, which render() has faulted in,
+            // so this is a hit in practice; a miss costs one unrecognised tap,
+            // whereas loading here froze the UI for seconds on a 2-core board
+            // (C2CP6ZAW).
+            segments_holder =
+                streaming_controller_->try_get_layer_segments(static_cast<size_t>(layer_idx));
+            segments = segments_holder.get();
+        } else if (gcode_) {
+            segments = &gcode_->layers[static_cast<size_t>(layer_idx)].segments;
+        }
+
+        // Uncached layer in streaming mode - keep going down.
+        if (!segments)
+            continue;
+
+        float closest_distance = std::numeric_limits<float>::max();
+        int16_t picked_index = -1;
+
+        for (const auto& seg : *segments) {
+            if (seg.object_name_index < 0)
+                continue;
+
+            if (restrict_to_candidates) {
+                bool is_candidate = false;
+                for (size_t c = 0; c < candidate_index_count; ++c) {
+                    if (candidate_indices[c] == seg.object_name_index) {
+                        is_candidate = true;
+                        break;
+                    }
+                }
+                if (!is_candidate)
+                    continue;
+            }
+
+            if (!should_render_segment(seg))
+                continue;
+
+            // Project segment endpoints to screen space
+            glm::ivec2 p1 = world_to_screen_raw(transform, seg.start.x, seg.start.y, seg.start.z);
+            glm::ivec2 p2 = world_to_screen_raw(transform, seg.end.x, seg.end.y, seg.end.z);
+
+            // Calculate distance from click to line segment
+            glm::vec2 v(static_cast<float>(p2.x - p1.x), static_cast<float>(p2.y - p1.y));
+            glm::vec2 w(click_pos.x - static_cast<float>(p1.x),
+                        click_pos.y - static_cast<float>(p1.y));
+
+            float segment_length_sq = glm::dot(v, v);
+            float t = (segment_length_sq > 0.0001f)
+                          ? std::clamp(glm::dot(w, v) / segment_length_sq, 0.0f, 1.0f)
+                          : 0.0f;
+
+            glm::vec2 closest_point(static_cast<float>(p1.x) + t * v.x,
+                                    static_cast<float>(p1.y) + t * v.y);
+            float dist = glm::length(click_pos - closest_point);
+
+            if (dist < PICK_THRESHOLD_PX && dist < closest_distance) {
+                closest_distance = dist;
+                picked_index = seg.object_name_index;
+            }
+        }
+
+        // Resolve the winner only - resolve_object_name() returns by value, so
+        // calling it per segment would allocate across the whole scan.
+        if (picked_index >= 0) {
+            std::string name = resolve_object_name(picked_index);
+            if (!name.empty())
+                return name;
+        }
+    }
+
+    return std::nullopt;
 }
 
 lv_color_t GCodeLayerRenderer::get_segment_color(const ToolpathSegment& seg) const {

@@ -21,6 +21,7 @@ translations:
   '%zu changes': '%zu изменений'
   '%zu events queued': '%zu событий в очереди'
   '%zu plugins failed to load': Не удалось загрузить %zu плагинов
+  (different grade): ''
   (incompatible): (несовместимо)
   (multi-tool): (мультиинструмент)
   (none detected): (не обнаружено)
@@ -194,7 +195,9 @@ translations:
     из «Настройки > О программе», если она повторится.
   An unexpected printer error occurred.: Произошла непредвиденная ошибка принтера.
   An update is available: Доступно обновление
+  Analyzing data...: ''
   Analyzing data... {}%: 'Анализ данных... {}%'
+  Analyzing data... {}s: ''
   Android logcat: Android logcat
   Animations: Анимации
   Anonymous data to help improve HelixScreen: Анонимные данные для улучшения HelixScreen
@@ -336,6 +339,9 @@ translations:
   Bypass: Обход
   Bypass Is Active: ''
   Bypass Mode: Режим обхода
+  Bypass active — this print runs on the external spool, not on the lanes below.: ''
+  Bypass active — this print runs on the external spool.: ''
+  Bypass cannot be changed while printing: ''
   Bypass controlled by hardware sensor: Обход управляется аппаратным датчиком
   Bypass controlled by sensor: Байпас управляется датчиком
   Bypass disabled: Байпас отключён
@@ -501,6 +507,8 @@ translations:
   Choose rendering mode for bed mesh visualization: Выберите режим рендеринга для
     визуализации сетки стола
   Choose sound style: Выберите стиль звука
+  ? Choose the model that matches your printer. This sets the print macros, fan roles and calibration behaviour HelixScreen uses.
+  : ''
   Choose what to power off or restart.: Выберите, что выключить или перезагрузить.
   Clean Brush: 'Очистить щётку'
   Clean Nozzle: Очистить сопло
@@ -1041,6 +1049,7 @@ translations:
   Filament: Филамент
   Filament Detected: Филамент обнаружен
   Filament Environment: Среда хранения филамента
+  Filament Grade Mismatch: ''
   Filament In The Toolhead: ''
   Filament Mapping: Назначение филамента
   Filament Runout: Окончание филамента
@@ -1053,6 +1062,7 @@ translations:
   Filament deleted: Филамент удалён
   Filament diameter sensors for flow compensation: Датчики диаметра филамента для
     компенсации потока
+  Filament is clear of the toolhead. Pull it out the rest of the way.: ''
   Filament is loose: Филамент ослаблен
   Filament is pulling tight: Филамент натянут
   ? Filament is still at the nozzle after unloading. The cut or retract may not have completed. Clear the toolhead before loading another spool.
@@ -1089,6 +1099,7 @@ translations:
   Firmware Restart: Перезапуск прошивки
   Firmware reports no bypass. Enable if you feed filament straight to the extruder: Прошивка не сообщает о байпасе. Включите, если филамент подаётся прямо в экструдер.
   Firmware restarting...: Перезапуск прошивки...
+  Firmware saved X = Y's value; the measured X result was discarded: ''
   FlashForge Adventurer 5M: FlashForge Adventurer 5M
   FlashForge Adventurer 5X: FlashForge Adventurer 5X
   FlashForge IFS: FlashForge IFS
@@ -1532,6 +1543,7 @@ translations:
   Measure and compare belt path frequencies: Измерить и сравнить частоты путей ремня
   Measure belt path frequencies: Измерить частоты путей ремня
   Measured: Измерено
+  Measured (shaper off): ''
   Measurement Failed: Измерение не удалось
   Measuring Path A... %d%%: Измерение пути A... %d%%
   Measuring Path B... %d%%: Измерение пути B... %d%%
@@ -1760,6 +1772,7 @@ translations:
   Objects: Объекты
   'Off': Выкл
   'Off:': 'Выкл:'
+  "Old setting on today's data: {} residual - now: {}": ''
   'On': Вкл
   On and Off macros must be different: Макросы включения и выключения должны отличаться
   On-screen Alerts: 'Экранные оповещения'
@@ -1915,6 +1928,7 @@ translations:
   Press Scan to search: Нажмите «Поиск» для сканирования
   'Pressure:': 'Давление:'
   Preview Sounds: Предпросмотр звуков
+  Previous: ''
   Price: Цена
   Primary: Основной
   Priming...: Грунтование...
@@ -1941,6 +1955,8 @@ translations:
   Print Time: Время печати
   Print Tuning: Настройка печати
   Print Was Terminated: Печать была прекращена
+  Print cancelled: ''
+  Print did not start: ''
   Print didn't start — printer may be busy or offline (B3 polls={}, status=0x{:02X}, error=0x{:02X}): Печать
     не началась — принтер может быть занят или не в сети (опросы B3={}, статус=0x{:02X},
     ошибка=0x{:02X})
@@ -1961,6 +1977,7 @@ translations:
   Printer Firmware Disconnected: Прошивка принтера отключена
   Printer Image: Изображение принтера
   Printer Manager: Менеджер принтеров
+  Printer Model: ''
   Printer Name: Название принтера
   'Printer Setup: Connection': 'Настройка принтера: Подключение'
   'Printer Setup: Fans': 'Настройка принтера: Вентиляторы'
@@ -2078,6 +2095,7 @@ translations:
   Re-syncs Happy Hare's tracked state with the hardware.: Повторно синхронизирует
     отслеживаемое состояние Happy Hare с оборудованием.
   Ready: Готов
+  Ready for filament operations: ''
   Ready to Apply: Готово к применению
   Ready to load: Готов к загрузке
   Reason: Причина
@@ -2111,6 +2129,7 @@ translations:
   Refresh: Обновить
   Refresh Interval: Интервал обновления
   Refresh RFID: 'Обновить RFID'
+  Relative vibration: ''
   Release all stepper motors. Position will be lost.: Отпустить все шаговые моторы.
     Позиция будет потеряна.
   Remaining (g): Осталось (г)
@@ -2141,6 +2160,7 @@ translations:
   Requires Moonraker power device: 'Требуется устройство питания Moonraker'
   Requires Moonraker-Timelapse plugin: Требуется плагин Moonraker-Timelapse
   Requires Multi-Filament System or MMU hardware: 'Требуется мультифиламентная система или оборудование MMU'
+  Requires a filament system with bypass: ''
   Requires clog detection hardware: 'Требуется оборудование для обнаружения засора'
   Resend write failed at chunk {}: Не удалось повторно отправить запись в блоке {}
   Reset: Сброс
@@ -2643,6 +2663,8 @@ translations:
   The filament system reported an error: Система филамента сообщила об ошибке
   The heater will cycle on and off several times.: Нагреватель будет несколько раз
     включаться и выключаться.
+  ? The loaded spool is {}, but this file was sliced for {}. Filled filament runs at a lower flow rate and needs a hardened nozzle.
+  : ''
   ? "The motor vibrates the belt while a strobe light flashes at the same frequency. When the belt appears to stand still (frozen), you have found the resonant frequency.\n\nUse the frequency buttons to sweep through values until the belt looks stationary, then lock the reading."
   : "Мотор вибрирует ремень, пока стробоскоп мигает с той же частотой. Когда ремень кажется неподвижным (застывшим), вы нашли резонансную частоту.\n\nИспользуйте кнопки частоты для перебора значений, пока ремень не будет выглядеть неподвижным, затем зафиксируйте показание."
   ? The print is paused. Changing tools now moves the toolhead and swaps the filament at the nozzle. Resume the print once the change finishes.
@@ -2672,6 +2694,7 @@ translations:
   Theme changes apply after restart.: Изменения темы применяются после перезапуска.
   Theme reset to defaults: Тема сброшена к настройкам по умолчанию
   'Theme: ': 'Тема: '
+  'These tools have a different filament grade loaded:': ''
   'These tools have incompatible materials loaded:': 'В этих инструментах загружены
     несовместимые материалы:'
   'These tools have no filament loaded:': 'В эти инструменты не загружен филамент:'
@@ -2688,8 +2711,10 @@ translations:
   ? This device has very little RAM. Resonance calibration is memory-intensive and may cause a "Timer Too Close" error. Continue anyway?
   : На этом устройстве очень мало ОЗУ. Калибровка резонансов требует много памяти и может вызвать ошибку "Timer Too Close". Всё равно продолжить?
   This doesn't match the linked Spoolman spool. Add it as a new spool, or update the linked one to match?: Это не совпадает с привязанной катушкой Spoolman. Добавить как новую катушку или обновить привязанную?
+  This filament system does not report buffer or flow data.: ''
   This file was sliced for {} but {} is loaded.: Файл нарезан для {}, но загружен
     {}.
+  This file was sliced for {}, but {} is loaded. It will print slower and hotter than the loaded spool needs.: ''
   This is exactly the data that will be sent: Это именно те данные, которые будут
     отправлены
   This is what data would be sent if enabled: Эти данные были бы отправлены при включении
@@ -2763,6 +2788,7 @@ translations:
   Toggle Auto-Refill: 'Переключить автопополнение'
   Toggle Moonraker power devices: 'Переключить устройства питания Moonraker'
   Toggle Quiet Mode: 'Переключить тихий режим'
+  Toggle external spool bypass: ''
   Toggle toolhead LED for an extruder: 'Переключить LED печатающей головки для экструдера'
   'Toggle:': 'Переключить:'
   Too humid: Слишком влажно
@@ -3061,6 +3087,7 @@ translations:
   of: из
   'off': выкл
   Monitor for print abnormalities (K2 Plus camera-based): Отслеживание дефектов печати (на основе камеры K2 Plus)
+  AFC's remember_spool is retaining spool info in firmware; that takes precedence over this toggle: ''
   AI detection: AI-детекция
   prints: печатей
   remaining: осталось
@@ -3105,6 +3132,7 @@ translations:
   '{} heater turned off': Нагреватель {} выключен
   '{} is installed but its backup-spool switching is turned off, so no automatic swap will happen.': '{} установлен, но переключение на резервную катушку выключено, поэтому автоматической замены не будет.'
   '{} is installed, but its backup-spool setting could not be read - do not count on an automatic swap.': '{} установлен, но прочитать его настройку резервной катушки не удалось - не рассчитывайте на автоматическую замену.'
+  '{} is not set up on this printer': ''
   '{} lanes': '{} слотов'
   '{} macro not configured': Макрос {} не настроен
   '{} may cause unintended changes. Are you sure?': '{} может привести к непреднамеренным

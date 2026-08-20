@@ -29,6 +29,7 @@
 #include "hv/requests.h"
 #include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "print_lifecycle_state.h"
 #include "printer_state.h"
 #include "spdlog/spdlog.h"
 #include "system/helix_paths.h"
@@ -1241,9 +1242,12 @@ void UpdateChecker::start_download() {
         return;
     }
 
-    // Safety: refuse download while printing
-    auto job_state = get_printer_state().get_print_job_state();
-    if (job_state == PrintJobState::PRINTING || job_state == PrintJobState::PAUSED) {
+    // Safety: refuse download while a job owns the machine. Preparing counts —
+    // a user who just committed to a print should not have the CPU and network
+    // pulled out from under the pre-start block.
+    const auto lifecycle = static_cast<PrintState>(
+        lv_subject_get_int(get_printer_state().get_print_lifecycle_subject()));
+    if (job_holds_machine(lifecycle)) {
         spdlog::warn("[UpdateChecker] Cannot download update while printing");
         report_download_status(DownloadStatus::Error, 0,
                                lv_tr("Error: Cannot update while printing"),
@@ -2887,9 +2891,10 @@ void UpdateChecker::start_auto_check() {
                     return;
                 }
 
-                // Skip if printer is printing or paused
-                auto job_state = get_printer_state().get_print_job_state();
-                if (job_state == PrintJobState::PRINTING || job_state == PrintJobState::PAUSED) {
+                // Skip while a job owns the machine, Preparing included.
+                const auto lifecycle = static_cast<PrintState>(
+                    lv_subject_get_int(get_printer_state().get_print_lifecycle_subject()));
+                if (job_holds_machine(lifecycle)) {
                     spdlog::info("[UpdateChecker] Auto-check: skipping notification during print");
                     return;
                 }

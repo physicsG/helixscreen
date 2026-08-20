@@ -12,6 +12,7 @@
  * widget registry gates the shutdown widget on that subject.
  */
 
+#include "ui_split_button.h"
 #include "ui_status_pill.h"
 
 #include "../../src/ui/panel_widgets/shutdown_widget.h"
@@ -22,7 +23,6 @@
 #include "panel_widget_registry.h"
 #include "platform_info.h"
 #include "setting_group.h"
-#include "ui_split_button.h"
 
 #include <string>
 
@@ -96,10 +96,17 @@ class AdvancedPowerGroupFixture : public XMLTestFixture {
 
         // XMLTestFixture (unlike LVGLUITestFixture) does not route through the
         // app_globals stub, so ensure the host-power subject exists before the
-        // panel's bindings resolve.
+        // panel's bindings resolve. STATIC, deliberately: the XML subject
+        // registry is process-global and never forgets an entry, so a fixture
+        // member here dangles after this test and any later consumer of the
+        // name (the home panel's shutdown-widget gate walk, XML
+        // bind_state_if_eq) dereferences a freed lv_subject_t — the nightly
+        // TSan SIGSEGV at setup_gate_observers and the 2026-08-16 ASan
+        // heap-buffer-overflow in lv_subject_add_observer_obj were both this.
         if (!lv_xml_get_subject(nullptr, "platform_host_power_supported")) {
-            lv_subject_init_int(&host_power_subject_, 1);
-            lv_xml_register_subject(nullptr, "platform_host_power_supported", &host_power_subject_);
+            static lv_subject_t host_power_subject;
+            lv_subject_init_int(&host_power_subject, 1);
+            lv_xml_register_subject(nullptr, "platform_host_power_supported", &host_power_subject);
         }
 
         panel_ = create_component("advanced_panel");
@@ -117,9 +124,6 @@ class AdvancedPowerGroupFixture : public XMLTestFixture {
 
     lv_obj_t* panel_ = nullptr;
     lv_obj_t* group_ = nullptr;
-
-  private:
-    lv_subject_t host_power_subject_{};
 };
 
 } // namespace
@@ -167,4 +171,32 @@ TEST_CASE_METHOD(XMLTestFixture, "show_shutdown_dialog is a no-op without host p
         helix::show_shutdown_dialog(&api(), modal, lifetime, test_screen());
         CHECK_FALSE(modal.is_visible());
     }
+}
+
+TEST_CASE("platform_host_power_supported outlives its registering fixture",
+          "[android][advanced][power][regression]") {
+    // The XML subject registry is process-global and never forgets an entry,
+    // so the subject behind "platform_host_power_supported" must live for the
+    // whole binary. It was a fixture MEMBER until 2026-08-19: every test after
+    // this fixture's death that touched the name (the home panel's
+    // shutdown-widget gate walk in setup_gate_observers, XML
+    // bind_state_if_eq) dereferenced a freed lv_subject_t — the nightly TSan
+    // SIGSEGV in the gate-coalescing test and the 2026-08-16 ASan
+    // heap-buffer-overflow in lv_subject_add_observer_obj were both this.
+    {
+        AdvancedPowerGroupFixture poison;
+        (void)poison;
+    } // registering fixture is dead here
+
+    lv_subject_t* subj = lv_xml_get_subject(nullptr, "platform_host_power_supported");
+    REQUIRE(subj != nullptr);
+
+    // The exact operation that faulted: observe through the registry entry
+    // after the registering fixture is gone. lv_ll_ins_tail walks the
+    // subject's subscriber list — a dangling subject dies here.
+    lv_observer_t* obs =
+        lv_subject_add_observer(subj, [](lv_observer_t*, lv_subject_t*) {}, nullptr);
+    REQUIRE(obs != nullptr);
+    lv_subject_set_int(subj, 1);
+    lv_observer_remove(obs);
 }

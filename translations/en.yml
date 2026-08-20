@@ -20,6 +20,7 @@ translations:
   '%zu changes': '%zu changes'
   '%zu events queued': '%zu events queued'
   '%zu plugins failed to load': '%zu plugins failed to load'
+  (different grade): (different grade)
   (incompatible): (incompatible)
   (multi-tool): (multi-tool)
   (none detected): (none detected)
@@ -190,7 +191,9 @@ translations:
     from Settings > About if it repeats.
   An unexpected printer error occurred.: An unexpected printer error occurred.
   An update is available: An update is available
+  Analyzing data...: Analyzing data...
   Analyzing data... {}%: Analyzing data... {}%
+  Analyzing data... {}s: Analyzing data... {}s
   Android logcat: Android logcat
   Animations: Animations
   Anonymous data to help improve HelixScreen: Anonymous data to help improve HelixScreen
@@ -329,6 +332,9 @@ translations:
   Bypass: Bypass
   Bypass Is Active: Bypass Is Active
   Bypass Mode: Bypass Mode
+  Bypass active — this print runs on the external spool, not on the lanes below.: Bypass active — this print runs on the external spool, not on the lanes below.
+  Bypass active — this print runs on the external spool.: Bypass active — this print runs on the external spool.
+  Bypass cannot be changed while printing: Bypass cannot be changed while printing
   Bypass controlled by hardware sensor: Bypass controlled by hardware sensor
   Bypass controlled by sensor: Bypass controlled by sensor
   Bypass disabled: Bypass disabled
@@ -487,6 +493,8 @@ translations:
   Choose rendering mode for bed mesh visualization: Choose rendering mode for bed
     mesh visualization
   Choose sound style: Choose sound style
+  ? Choose the model that matches your printer. This sets the print macros, fan roles and calibration behaviour HelixScreen uses.
+  : Choose the model that matches your printer. This sets the print macros, fan roles and calibration behaviour HelixScreen uses.
   Choose what to power off or restart.: Choose what to power off or restart.
   Clean Brush: Clean Brush
   Clean Nozzle: Clean Nozzle
@@ -1020,6 +1028,7 @@ translations:
   Filament: Filament
   Filament Detected: Filament Detected
   Filament Environment: Filament Environment
+  Filament Grade Mismatch: Filament Grade Mismatch
   Filament In The Toolhead: Filament In The Toolhead
   Filament Mapping: Filament Mapping
   Filament Runout: Filament Runout
@@ -1032,6 +1041,7 @@ translations:
   Filament deleted: Filament deleted
   Filament diameter sensors for flow compensation: Filament diameter sensors for flow
     compensation
+  Filament is clear of the toolhead. Pull it out the rest of the way.: Filament is clear of the toolhead. Pull it out the rest of the way.
   Filament is loose: Filament is loose
   Filament is pulling tight: Filament is pulling tight
   ? Filament is still at the nozzle after unloading. The cut or retract may not have completed. Clear the toolhead before loading another spool.
@@ -1069,6 +1079,7 @@ translations:
   Firmware Restart: Firmware Restart
   Firmware reports no bypass. Enable if you feed filament straight to the extruder: Firmware reports no bypass. Enable if you feed filament straight to the extruder
   Firmware restarting...: Firmware restarting...
+  Firmware saved X = Y's value; the measured X result was discarded: Firmware saved X = Y's value; the measured X result was discarded
   FlashForge Adventurer 5M: FlashForge Adventurer 5M
   FlashForge Adventurer 5X: FlashForge Adventurer 5X
   FlashForge IFS: FlashForge IFS
@@ -1506,6 +1517,7 @@ translations:
   Measure and compare belt path frequencies: Measure and compare belt path frequencies
   Measure belt path frequencies: Measure belt path frequencies
   Measured: Measured
+  Measured (shaper off): Measured (shaper off)
   Measurement Failed: Measurement Failed
   Measuring Path A... %d%%: Measuring Path A... %d%%
   Measuring Path B... %d%%: Measuring Path B... %d%%
@@ -1733,6 +1745,7 @@ translations:
   Objects: Objects
   'Off': 'Off'
   'Off:': 'Off:'
+  "Old setting on today's data: {} residual - now: {}": "Old setting on today's data: {} residual - now: {}"
   'On': 'On'
   On and Off macros must be different: On and Off macros must be different
   On-screen Alerts: On-screen Alerts
@@ -1889,6 +1902,7 @@ translations:
   Press Scan to search: Press Scan to search
   'Pressure:': 'Pressure:'
   Preview Sounds: Preview Sounds
+  Previous: Previous
   Price: Price
   Primary: Primary
   Priming...: Priming...
@@ -1915,6 +1929,8 @@ translations:
   Print Time: Print Time
   Print Tuning: Print Tuning
   Print Was Terminated: Print Was Terminated
+  Print cancelled: Print cancelled
+  Print did not start: Print did not start
   Print didn't start — printer may be busy or offline (B3 polls={}, status=0x{:02X}, error=0x{:02X}): Print
     didn't start — printer may be busy or offline (B3 polls={}, status=0x{:02X}, error=0x{:02X})
   Print error: Print error
@@ -1933,6 +1949,7 @@ translations:
   Printer Firmware Disconnected: Printer Firmware Disconnected
   Printer Image: Printer Image
   Printer Manager: Printer Manager
+  Printer Model: Printer Model
   Printer Name: Printer Name
   'Printer Setup: Connection': 'Printer Setup: Connection'
   'Printer Setup: Fans': 'Printer Setup: Fans'
@@ -2049,6 +2066,7 @@ translations:
   Re-syncs Happy Hare's tracked state with the hardware.: Re-syncs Happy Hare's tracked
     state with the hardware.
   Ready: Ready
+  Ready for filament operations: Ready for filament operations
   Ready to Apply: Ready to Apply
   Ready to load: Ready to load
   Reason: Reason
@@ -2082,6 +2100,7 @@ translations:
   Refresh: Refresh
   Refresh Interval: Refresh Interval
   Refresh RFID: Refresh RFID
+  Relative vibration: Relative vibration
   Release all stepper motors. Position will be lost.: Release all stepper motors.
     Position will be lost.
   Remaining (g): Remaining (g)
@@ -2112,6 +2131,7 @@ translations:
   Requires Moonraker power device: Requires Moonraker power device
   Requires Moonraker-Timelapse plugin: Requires Moonraker-Timelapse plugin
   Requires Multi-Filament System or MMU hardware: Requires Multi-Filament System or MMU hardware
+  Requires a filament system with bypass: Requires a filament system with bypass
   Requires clog detection hardware: Requires clog detection hardware
   Resend write failed at chunk {}: Resend write failed at chunk {}
   Reset: Reset
@@ -2608,6 +2628,8 @@ translations:
   The filament system reported an error: The filament system reported an error
   The heater will cycle on and off several times.: The heater will cycle on and off
     several times.
+  ? The loaded spool is {}, but this file was sliced for {}. Filled filament runs at a lower flow rate and needs a hardened nozzle.
+  : The loaded spool is {}, but this file was sliced for {}. Filled filament runs at a lower flow rate and needs a hardened nozzle.
   ? "The motor vibrates the belt while a strobe light flashes at the same frequency. When the belt appears to stand still (frozen), you have found the resonant frequency.\n\nUse the frequency buttons to sweep through values until the belt looks stationary, then lock the reading."
   : "The motor vibrates the belt while a strobe light flashes at the same frequency. When the belt appears to stand still (frozen), you have found the resonant frequency.\n\nUse the frequency buttons to sweep through values until the belt looks stationary, then lock the reading."
   ? The print is paused. Changing tools now moves the toolhead and swaps the filament at the nozzle. Resume the print once the change finishes.
@@ -2635,6 +2657,7 @@ translations:
   Theme changes apply after restart.: Theme changes apply after restart.
   Theme reset to defaults: Theme reset to defaults
   'Theme: ': 'Theme: '
+  'These tools have a different filament grade loaded:': 'These tools have a different filament grade loaded:'
   'These tools have incompatible materials loaded:': 'These tools have incompatible
     materials loaded:'
   'These tools have no filament loaded:': 'These tools have no filament loaded:'
@@ -2651,8 +2674,10 @@ translations:
   ? This device has very little RAM. Resonance calibration is memory-intensive and may cause a "Timer Too Close" error. Continue anyway?
   : This device has very little RAM. Resonance calibration is memory-intensive and may cause a "Timer Too Close" error. Continue anyway?
   This doesn't match the linked Spoolman spool. Add it as a new spool, or update the linked one to match?: This doesn't match the linked Spoolman spool. Add it as a new spool, or update the linked one to match?
+  This filament system does not report buffer or flow data.: This filament system does not report buffer or flow data.
   This file was sliced for {} but {} is loaded.: This file was sliced for {} but {}
     is loaded.
+  This file was sliced for {}, but {} is loaded. It will print slower and hotter than the loaded spool needs.: This file was sliced for {}, but {} is loaded. It will print slower and hotter than the loaded spool needs.
   This is exactly the data that will be sent: This is exactly the data that will be
     sent
   This is what data would be sent if enabled: This is what data would be sent if enabled
@@ -2727,6 +2752,7 @@ translations:
   Toggle Auto-Refill: Toggle Auto-Refill
   Toggle Moonraker power devices: Toggle Moonraker power devices
   Toggle Quiet Mode: Toggle Quiet Mode
+  Toggle external spool bypass: Toggle external spool bypass
   Toggle toolhead LED for an extruder: Toggle toolhead LED for an extruder
   'Toggle:': 'Toggle:'
   Too humid: Too humid
@@ -3026,6 +3052,7 @@ translations:
   of: of
   'off': 'off'
   Monitor for print abnormalities (K2 Plus camera-based): Monitor for print abnormalities (K2 Plus camera-based)
+  AFC's remember_spool is retaining spool info in firmware; that takes precedence over this toggle: AFC's remember_spool is retaining spool info in firmware; that takes precedence over this toggle
   AI detection: AI detection
   prints: prints
   remaining: remaining
@@ -3070,6 +3097,7 @@ translations:
   '{} heater turned off': '{} heater turned off'
   '{} is installed but its backup-spool switching is turned off, so no automatic swap will happen.': '{} is installed but its backup-spool switching is turned off, so no automatic swap will happen.'
   '{} is installed, but its backup-spool setting could not be read - do not count on an automatic swap.': '{} is installed, but its backup-spool setting could not be read - do not count on an automatic swap.'
+  '{} is not set up on this printer': '{} is not set up on this printer'
   '{} lanes': '{} lanes'
   '{} macro not configured': '{} macro not configured'
   '{} may cause unintended changes. Are you sure?': '{} may cause unintended changes.

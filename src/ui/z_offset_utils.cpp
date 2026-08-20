@@ -116,8 +116,11 @@ void apply_and_save(IMoonrakerAPI* api, ZOffsetCalibrationStrategy strategy,
         [api, apply_cmd, on_success, on_error]() {
             spdlog::info("[ZOffsetUtils] {} success, executing SAVE_CONFIG", apply_cmd);
 
-            // Suppress disconnect modal — SAVE_CONFIG triggers a Klipper restart
-            EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::LONG);
+            // SAVE_CONFIG triggers a Klipper restart. This callback runs on
+            // the WebSocket thread; begin_expected_klippy_restart() is safe
+            // here - the suppressions are atomics and the toast hops to the
+            // main thread.
+            helix::ui::begin_expected_klippy_restart("Saving config... Klipper will restart.");
 
             api->execute_gcode(
                 "SAVE_CONFIG",

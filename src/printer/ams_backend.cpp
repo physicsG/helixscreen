@@ -23,6 +23,7 @@
 #include "ams_backend_snapmaker.h"
 #include "ams_backend_toolchanger.h"
 #include "filament_database.h"
+#include "filament_variants.h"
 #include "i_moonraker_api.h"
 #include "printer_discovery.h"
 #include "runtime_config.h"
@@ -161,19 +162,26 @@ AmsError AmsBackend::reset_endless_spool() {
     return first_error;
 }
 
-bool AmsBackend::is_endless_spool_backup_eligible(int slot_index, int backup_slot) const {
+helix::printer::BackupEligibility
+AmsBackend::endless_spool_backup_eligibility(int slot_index, int backup_slot) const {
+    using helix::printer::BackupEligibility;
     if (slot_index < 0 || backup_slot < 0 || slot_index == backup_slot) {
-        return false;
+        return BackupEligibility::Incompatible;
     }
-    // Today's UI rule, moved behind a virtual so backends can tighten it: an
-    // unknown material on either side is treated as eligible rather than
-    // blocking a slot the user has simply not labelled yet.
+    // An unknown material on either side is eligible rather than blocking a
+    // slot the user has simply not labelled yet.
     const std::string material = get_slot_info(slot_index).material;
     const std::string backup_material = get_slot_info(backup_slot).material;
     if (material.empty() || backup_material.empty()) {
-        return true;
+        return BackupEligibility::Eligible;
     }
-    return filament::are_materials_compatible(material, backup_material);
+    if (!filament::materials_compatible(material, backup_material)) {
+        return BackupEligibility::Incompatible;
+    }
+    // Same polymer. A filled grade still prints, so this is a heads-up rather
+    // than a refusal - see BackupEligibility's own note.
+    return filament::grades_match(material, backup_material) ? BackupEligibility::Eligible
+                                                             : BackupEligibility::GradeDiffers;
 }
 
 lv_subject_t* AmsBackend::get_operation_step_index_subject(StepOperationType op) {

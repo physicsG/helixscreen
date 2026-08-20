@@ -415,6 +415,11 @@ TEST_CASE("Update checker error scenarios", "[update_checker][error]") {
 
 // Interface tests for UpdateChecker - now enabled
 
+#include "ui_update_queue.h"
+
+#include "app_globals.h"
+#include "print_lifecycle_state.h"
+#include "printer_state.h"
 #include "system/update_checker.h"
 
 using namespace helix;
@@ -515,7 +520,17 @@ TEST_CASE("UpdateChecker lifecycle", "[update_checker][lifecycle]") {
     }
 }
 
-TEST_CASE("UpdateChecker callback is optional", "[update_checker][callback]") {
+// [slow]: the thread-neutrality assertion below compares live_thread_count()
+// before and after, and that reads /proc/self/status "Threads:", which still
+// counts a thread the kernel has not finished reaping. A correctly JOINED libhv
+// loop therefore lingers in the count for a moment, so under the 96-way parallel
+// shard pool this reports 9 == 8 and reads as the very leak it exists to catch
+// (seen twice; passes 5/5 in isolation). Keeping it out of the parallel run
+// preserves what it is for - naming a regression at its source rather than as a
+// crash in an unrelated test (prestonbrown/helixscreen#1212) - without the false
+// positive. A condition-based wait for the count to settle would let it come
+// back into the default run.
+TEST_CASE("UpdateChecker callback is optional", "[update_checker][callback][slow]") {
     // Hermetic by construction: no real network. The dev channel already reads
     // its endpoint from config (/update/dev_url) and is exempt from the rate
     // limiter, so pointing it at a closed loopback port drives the full
@@ -1026,13 +1041,96 @@ TEST_CASE("UpdateChecker cancel_download sets cancelled flag", "[update_checker]
     checker.shutdown();
 }
 
-TEST_CASE("UpdateChecker blocks download during print", "[update_checker]") {
+// Drive the published print_lifecycle subject the way production does. The
+// lifecycle is published by PrinterPrintState::publish_lifecycle_state(), which
+// runs only from update_from_status() and set_print_start_state() — writing
+// print_state_enum directly leaves it stale.
+static void drive_lifecycle(PrinterState& ps, const char* wire_state, PrintStartPhase phase) {
+    ps.reset_print_start_state(); // force phase to IDLE so the next raise is a new print
+    ps.update_from_status(json{{"print_stats", {{"state", wire_state}}}});
+    ps.set_print_start_state(phase, "", 0);
+    for (int i = 0; i < 8; ++i) {
+        helix::ui::UpdateQueue::instance().drain();
+    }
+}
+
+namespace {
+
+/// These two drive the PROCESS-WIDE PrinterState, which HelixTestFixture does not
+/// reset. A REQUIRE that fires before a trailing restore would throw and leave
+/// print_lifecycle stuck at Preparing for every later test in the shard, which
+/// then fails for a reason unrelated to its own subject. The destructor runs on
+/// the throw path too.
+struct GlobalPrintStateFixture : public HelixTestFixture {
+    ~GlobalPrintStateFixture() override {
+        auto& ps = get_printer_state();
+        ps.reset_print_start_state();
+        ps.update_from_status(nlohmann::json{{"print_stats", {{"state", "standby"}}}});
+        for (int i = 0; i < 8; ++i) {
+            helix::ui::UpdateQueue::instance().drain();
+        }
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(GlobalPrintStateFixture,
+                 "UpdateChecker refuses to download while a job owns the machine",
+                 "[update_checker][job-holds-machine]") {
+    // update_install_suppressed() returns BEFORE the print guard and touches no
+    // download state, so on a firmware-managed or read-only install tree the
+    // guard is unreachable and everything below would pass vacuously. Assert the
+    // precondition rather than assume it.
+    REQUIRE_FALSE(update_install_suppressed());
+
+    auto& state = get_printer_state();
+    state.init_subjects(false); // no-op when an earlier test already did it
     auto& checker = UpdateChecker::instance();
     checker.init();
+    // Deliberately NO cached update. The print guard runs first, so its refusal
+    // is the one that must be reported; nothing here can reach the download
+    // thread on either side of the guard.
+    checker.clear_cache();
 
-    // In test mode, printer is never printing, so this verifies
-    // the guard doesn't interfere with normal operation
-    REQUIRE(checker.get_download_status() != UpdateChecker::DownloadStatus::Downloading);
+    // Host-side pre-print block: print_stats still reads standby while the
+    // lifecycle is already Preparing.
+    drive_lifecycle(state, "standby", PrintStartPhase::BED_MESH);
+    REQUIRE(state.get_print_lifecycle() == PrintState::Preparing);
+
+    checker.start_download();
+
+    CHECK(checker.get_download_status() == UpdateChecker::DownloadStatus::Error);
+    // The discriminator. Reverting the guard to `job_state == PRINTING ||
+    // job_state == PAUSED` does not make start_download() succeed — it makes it
+    // fall through to the no-cached-update branch, which also reports Error.
+    // Only the message tells the two refusals apart.
+    CHECK(checker.get_download_error() == "Stop the print before installing updates");
+
+    checker.shutdown();
+    drive_lifecycle(state, "standby", PrintStartPhase::IDLE);
+}
+
+TEST_CASE_METHOD(GlobalPrintStateFixture,
+                 "UpdateChecker allows a download when no job owns the machine",
+                 "[update_checker][job-holds-machine]") {
+    // Negative control for the test above: with the printer idle the print guard
+    // must not fire, so the refusal comes from the missing cache instead. Without
+    // this, a guard that refused unconditionally would satisfy both.
+    REQUIRE_FALSE(update_install_suppressed());
+
+    auto& state = get_printer_state();
+    state.init_subjects(false); // no-op when an earlier test already did it
+    auto& checker = UpdateChecker::instance();
+    checker.init();
+    checker.clear_cache();
+
+    drive_lifecycle(state, "standby", PrintStartPhase::IDLE);
+    REQUIRE(state.get_print_lifecycle() == PrintState::Idle);
+
+    checker.start_download();
+
+    CHECK(checker.get_download_status() == UpdateChecker::DownloadStatus::Error);
+    CHECK(checker.get_download_error() == "No update information cached");
 
     checker.shutdown();
 }

@@ -5,6 +5,7 @@
 
 #include "app_globals.h"
 #include "config.h"
+#include "print_lifecycle_state.h"
 #include "printer_state.h"
 #include "system/update_checker.h"
 
@@ -77,9 +78,16 @@ bool UpgradeNudge::is_update_visible_now() const {
     if (!UpdateChecker::instance().has_update_available()) {
         return false;
     }
-    // Don't nudge mid-print — the printer is the priority, not our prompts.
-    auto state = get_printer_state().get_print_job_state();
-    if (state == PrintJobState::PRINTING) {
+    // Don't nudge while a job owns the machine — the printer is the priority,
+    // not our prompts. This used to test PRINTING only, with no PAUSED arm; a
+    // paused print is still mid-print, the neighbouring guard in
+    // UpdateChecker::start_download() has always refused on PRINTING || PAUSED
+    // for the same reason, and a user who has just committed to a print is the
+    // last person who wants an upgrade prompt. Deliberately normalised: this
+    // makes the nudge strictly rarer, never more frequent.
+    const auto lifecycle = static_cast<PrintState>(
+        lv_subject_get_int(get_printer_state().get_print_lifecycle_subject()));
+    if (job_holds_machine(lifecycle)) {
         return false;
     }
     return true;

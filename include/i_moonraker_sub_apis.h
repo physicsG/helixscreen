@@ -406,6 +406,21 @@ class ITransfersAPI {
                                        size_t max_bytes, StringCallback on_success,
                                        ErrorCallback on_error) = 0;
 
+    /// Download only the LAST @p max_bytes of a file (HTTP suffix range).
+    ///
+    /// The head-range sibling above is for slicer preambles. Slicers that write
+    /// their settings block as a footer put it here instead: on an OrcaSlicer
+    /// file every `filament_colour` / `extruder_colour` key sits in the last
+    /// ~21 KB of a 13 MB print, so a suffix range answers "what colours does
+    /// this file use" for the price of one small request rather than a full
+    /// download and parse.
+    ///
+    /// Returns fewer bytes than asked when the file is shorter; a server that
+    /// ignores Range and sends the whole file still yields correct content.
+    virtual void download_file_tail(const std::string& root, const std::string& path,
+                                    size_t max_bytes, StringCallback on_success,
+                                    ErrorCallback on_error) = 0;
+
     virtual void download_file_to_path(const std::string& root, const std::string& path,
                                        const std::string& dest_path, StringCallback on_success,
                                        ErrorCallback on_error,

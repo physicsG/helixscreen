@@ -11,7 +11,7 @@ Every 3D print begins with a preparation sequence: heating the bed and nozzle, h
 The preprint prediction system solves this by:
 
 1. **Recording** per-phase durations each time a print starts (homing took 25s, bed mesh took 90s, etc.)
-2. **Persisting** the last 3 timing entries to disk
+2. **Persisting** the most recent timing entries to disk (up to `MAX_ENTRIES`, currently 10)
 3. **Predicting** future preparation time using a weighted average that favors recent entries
 4. **Displaying** a live countdown during preparation ("~3:20 left") that accounts for completed and in-progress phases
 
@@ -75,26 +75,30 @@ Only phases 2-9 are tracked for timing. IDLE, INITIALIZING, and COMPLETE are lif
 
 ### FIFO Entry Management
 
-The predictor keeps a maximum of **3 entries** (newest at the end of the vector). When a 4th entry is added, the oldest is evicted. This keeps predictions responsive to changes (new filament, different room temperature) without being thrown off by a single outlier.
+The predictor keeps a maximum of `PreprintPredictor::MAX_ENTRIES` = **10** entries
+(newest at the end of the vector). When an 11th is added the oldest is evicted.
+Recency bias comes from the weighting (below), not from a short buffer, so the
+history can be deep enough to survive one odd print without going stale.
 
 ```
 Entry added -> entries_.push_back(entry)
-              -> while (size > 3) erase(begin)  // FIFO trim
+              -> while (size > MAX_ENTRIES) erase(begin)  // FIFO trim
 ```
 
-`load_entries()` replaces all existing data and also trims to 3 if more are provided.
+`load_entries()` replaces all existing data and applies the same trim.
 
 ---
 
 ## Weighted History Averaging
 
-Predictions use a **recency-weighted average** where newer entries count more. The weights depend on how many entries are available:
+Predictions use an **exponential time-decay weighted average** where newer entries
+count more. Weight for entry `i` (oldest first) is `exp(lambda * i)`, normalized to
+sum to 1, with `lambda = 0.23` (`compute_weights()`). That constant is `ln(10)/10`,
+chosen so the oldest of a full 10-entry history carries roughly one eighth the
+weight of the newest.
 
-| Entries | Weights (oldest -> newest) | Rationale |
-|---------|---------------------------|-----------|
-| 1 | 100% | Only data point |
-| 2 | 40%, 60% | Favor recent |
-| 3 | 20%, 30%, 50% | Strong recency bias |
+The scheme is continuous in the number of entries - there is no per-count weight
+table. A single entry gets 100% by normalization.
 
 ### Per-Phase Calculation
 
@@ -124,17 +128,25 @@ The `predicted_total()` is the sum of all per-phase predictions.
 
 ---
 
-## Anomaly Rejection (15-Minute Threshold)
+## Anomaly Rejection (per-phase MAD)
 
-Entries with `total_seconds > 900` (15 minutes) are silently rejected by `add_entry()`. This protects against:
+`add_entry()` accepts **any** duration. There is no total-duration cap.
 
-- **Cancelled prints** where the user walked away and restarted much later
-- **Firmware hangs** during homing or probing that required manual intervention
-- **Abnormal heating** due to a thermistor issue or cold environment
+An earlier design rejected entries over 900 seconds outright. That was removed, and
+reinstating it would now be a bug: a legitimate pre-print can exceed it. A K2 Plus
+screen-started print whose window includes a host-side bed mesh runs ~1140s (see
+"Measurement windows"), and a cold ASA soak pushes it further. A blanket cap
+discards exactly the slowest printers, which are the ones most in need of an
+estimate.
 
-The threshold is defined as `MAX_TOTAL_SECONDS = 900` and applies only at insertion time. Entries loaded from config via `load_entries()` are not filtered (they were already validated when originally added).
+Outliers are handled per-phase instead, by **median absolute deviation**: a phase
+duration more than 3x MAD from the median for that phase is dropped from the
+average for that phase only, leaving the rest of the entry usable. This is strictly
+better than a total-duration cap, because one anomalous probe sequence no longer
+throws away good homing and heating data recorded in the same print.
 
-Entries at exactly 900 seconds are accepted (the check is `>`, not `>=`).
+Covered by `PreprintPredictor MAD anomaly rejection` and `PreprintPredictor: add_entry
+accepts any duration (MAD handles outliers)` in `tests/unit/test_preprint_predictor.cpp`.
 
 ---
 

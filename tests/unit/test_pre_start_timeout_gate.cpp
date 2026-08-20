@@ -22,6 +22,7 @@
 #include "moonraker_client_mock.h"
 #include "moonraker_error.h"
 #include "moonraker_job_api.h"
+#include "print_job_ref.h"
 #include "printer_state.h"
 #include "test_helpers/printer_state_test_access.h"
 
@@ -228,4 +229,48 @@ TEST_CASE_METHOD(PreStartGateFixture,
     CHECK(completed);
     CHECK_FALSE(completion_success);
     CHECK(jobs.start_print_calls == 0);
+}
+
+TEST_CASE_METHOD(PreStartGateFixture,
+                 "Cancelling during a blocking pre-start block abandons the queued start",
+                 "[print_preparation][pre_start][preparing]") {
+    // A host-side pre-start block can run for ten minutes. If the user cancels
+    // during it, the queued start must not fire when the macro finally returns —
+    // starting a print the user already cancelled is the worst outcome here.
+    // Cancel is expressed by retiring the preparing job, which is the same token
+    // the start was armed with.
+    state.begin_preparing(helix::PrintJobRef{"part.gcode", "", ""});
+    set_busy(true);
+
+    manager.start_print("part.gcode", "", []() {}, completion());
+    drain();
+    REQUIRE(api->captured_error);
+
+    // User cancels while the macro is still running.
+    state.retire_preparing(helix::PreparingExit::Cancelled);
+
+    // Macro finishes and the printer goes idle.
+    api->captured_error(
+        MoonrakerError::timeout("printer.gcode.script", IMoonrakerAPI::PRE_START_MACRO_TIMEOUT_MS));
+    drain();
+    set_busy(false);
+    drain();
+
+    CHECK(jobs.start_print_calls == 0);
+    CHECK_FALSE(completion_success);
+}
+
+TEST_CASE_METHOD(PreStartGateFixture, "A start with no preparing job still runs",
+                 "[print_preparation][pre_start][preparing]") {
+    // Guard must not punish a caller that never armed a job — otherwise every
+    // path is forced to arm before it can print.
+    set_busy(false);
+
+    manager.start_print("part.gcode", "", []() {}, completion());
+    drain();
+    REQUIRE(api->captured_success);
+    api->captured_success();
+    drain();
+
+    CHECK(jobs.start_print_calls == 1);
 }

@@ -121,7 +121,7 @@ to skip verification. Use `--sim-speed 4..10` to reach an active print in second
 
 | Gate | Enforces |
 |------|----------|
-| `check_l081_anti_pattern.py` | No bare `tok.expired()` then `this` access on a bg thread |
+| `check_l081_anti_pattern.py` | No bare `tok.expired()`/`expired_no_lvgl()` then `this` access on a bg thread |
 | `check_subscription_null_safety.py` | Subscription-handler JSON reads are guarded (baseline 0) |
 | `check_imperative_ui.py` | XML-owned widgets driven from C++ (ratcheting baseline) |
 | `check_doc_refs.py` | Docs cite files that exist (CLAUDE.md files, skills, all of `docs/devel/`); `docs/devel/` index is complete |

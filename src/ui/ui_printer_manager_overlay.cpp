@@ -8,6 +8,7 @@
 #include "ui_keyboard_manager.h"
 #include "ui_nav_manager.h"
 #include "ui_overlay_printer_image.h"
+#include "ui_overlay_printer_type.h"
 #include "ui_overlay_retraction_settings.h"
 #include "ui_overlay_timelapse_settings.h"
 #include "ui_panel_ams.h"
@@ -168,6 +169,8 @@ void PrinterManagerOverlay::register_callbacks() {
         {"pm_printer_name_clicked", pm_printer_name_clicked_cb},
         // Image click callback (opens printer image picker)
         {"on_change_printer_image_clicked", change_printer_image_clicked_cb},
+        // Model click callback (opens printer model picker)
+        {"on_change_printer_model_clicked", change_printer_model_clicked_cb},
         // Manage printers callback (opens printer list)
         {"pm_manage_printers_clicked", pm_manage_printers_clicked_cb},
     });
@@ -346,6 +349,23 @@ void PrinterManagerOverlay::change_printer_image_clicked_cb(lv_event_t* e) {
 void PrinterManagerOverlay::handle_change_printer_image_clicked() {
     spdlog::debug("[{}] Printer image clicked — opening image picker", get_name());
     auto& overlay = helix::settings::get_printer_image_overlay();
+    overlay.show(lv_display_get_screen_active(nullptr));
+}
+
+// =============================================================================
+// Printer Model Click
+// =============================================================================
+
+void PrinterManagerOverlay::change_printer_model_clicked_cb(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[PrinterManagerOverlay] change_printer_model_clicked_cb");
+    (void)e;
+    get_printer_manager_overlay().handle_change_printer_model_clicked();
+    LVGL_SAFE_EVENT_CB_END();
+}
+
+void PrinterManagerOverlay::handle_change_printer_model_clicked() {
+    spdlog::debug("[{}] Printer model clicked — opening model picker", get_name());
+    auto& overlay = helix::settings::get_printer_type_overlay();
     overlay.show(lv_display_get_screen_active(nullptr));
 }
 

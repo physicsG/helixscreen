@@ -1812,11 +1812,25 @@ void AmsBackendAfc::parse_afc_state(const nlohmann::json& afc_data,
         apply_state_string(afc_data["current_state"].get<std::string>(), "current_state");
     }
 
-    // Parse tool change progress (AFC tracks swap count during multi-color prints)
+    // Parse tool change progress (AFC tracks swap count during multi-color prints).
+    //
+    // AFC.current_toolchange on the wire is a 1-BASED count of changes started,
+    // not the 0-based index AmsSystemInfo stores. AFC increments its internal
+    // counter before logging "Change N out of M", and get_status() clamps the
+    // internal -1 sentinel on the way out (`self.current_toolchange if
+    // self.current_toolchange >= 0 else 0`), so what we receive is exactly the
+    // number AFC prints on the console. Subtracting one restores the documented
+    // 0-based index (0 -> -1 "none yet", 1 -> 0 "first change"), which the UI
+    // then adds back for display — without this the UI reads one change ahead
+    // and renders "162 / 161" at the end of a print.
     if (afc_data.contains("current_toolchange") &&
         afc_data["current_toolchange"].is_number_integer()) {
-        system_info_.current_toolchange = afc_data["current_toolchange"].get<int>();
-        spdlog::trace("[AMS AFC] Current toolchange: {}", system_info_.current_toolchange);
+        int afc_toolchange_count = afc_data["current_toolchange"].get<int>();
+        // Floor at -1: the struct documents -1 as the "none yet" sentinel, and a
+        // negative count from a firmware that stops clamping must not go past it.
+        system_info_.current_toolchange = std::max(-1, afc_toolchange_count - 1);
+        spdlog::trace("[AMS AFC] Current toolchange: AFC count {} -> index {}",
+                      afc_toolchange_count, system_info_.current_toolchange);
     }
     if (afc_data.contains("number_of_toolchanges") &&
         afc_data["number_of_toolchanges"].is_number_integer()) {
@@ -2731,6 +2745,22 @@ void AmsBackendAfc::parse_afc_stepper(int slot_index, const std::string& lane_na
             spdlog::trace("[AMS AFC] Lane {} runout backup: disabled", lane_name);
         }
     }
+}
+
+bool AmsBackendAfc::printer_retains_spool_info() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // ALL semantics: any lane at remember_spool = false still clears on
+    // eject, so the HelixScreen toggle keeps governing those lanes and must
+    // stay enabled. A lane that never reported the key is conservatively
+    // treated as not retaining too, and an empty map (nothing reported —
+    // the everyday default) is not retaining either.
+    if (lane_remember_spool_.empty() ||
+        static_cast<int>(lane_remember_spool_.size()) != slots_.slot_count()) {
+        return false;
+    }
+    return std::all_of(lane_remember_spool_.begin(), lane_remember_spool_.end(),
+                       [](const auto& entry) { return entry.second; });
 }
 
 void AmsBackendAfc::maybe_reassert_retained_spool_link(int slot_index,
@@ -4708,7 +4738,7 @@ void AmsBackendAfc::apply_overrides(SlotInfo& slot, int slot_index) {
     if (it == overrides_.end())
         return;
     helix::ams::MergeOptions opts;
-    opts.firmware_reports_spool_ids = firmware_reports_spool_ids();
+    opts.printer_reports_spool_ids = printer_reports_spool_ids();
     opts.keep_spool_info_on_eject = SettingsManager::instance().get_ams_keep_spool_info_on_eject();
     // Own-write echo suppression (SlotFingerprintTracker::expect()
     // semantics): if we just re-linked this lane's spool id, in-flight
@@ -4797,6 +4827,32 @@ void AmsBackendAfc::clear_slot_override(int slot_index) {
             }
         });
     }
+}
+
+void AmsBackendAfc::publish_external_spool_lane(const SlotInfo* spool) {
+    // Capability + index under the lock; the store send happens outside.
+    // Lazy store construction: built on first use from api_ so a never-started
+    // backend (unit tests) needs no Moonraker connection, and the shared
+    // namespace store only ever exists on a live API. Tool key style matches
+    // AFC's own lane_data keys since its virtual-tools firmware (T<n>, spec
+    // filament_slots.md §4) — one convention per namespace, and the inner
+    // 0-based `lane` field is what readers key off either way.
+    int lane_index = 0;
+    bool supported = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        supported = system_info_.supports_bypass;
+        lane_index = system_info_.total_slots;
+    }
+    if (!supported || lane_index <= 0 || !api_) {
+        return;
+    }
+    if (!lane_publish_store_) {
+        lane_publish_store_ = std::make_unique<helix::ams::FilamentSlotOverrideStore>(
+            api_, "afc", helix::ams::LaneKeyStyle::Tool);
+    }
+    helix::ams::publish_external_lane(lane_publish_store_.get(), lane_index, spool,
+                                      backend_log_tag());
 }
 
 bool AmsBackendAfc::can_recover_lane_position(int slot_index) const {

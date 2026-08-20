@@ -230,6 +230,32 @@ inner `lane`** — which OrcaSlicer ingests as duplicate trays (it does not
 dedup; see §8). Converging on the `T<n>` key makes the two writers overwrite
 one shared key instead of colliding.
 
+### The external / bypass spool lane (`i == num_gates`)
+
+HelixScreen publishes the external (bypass) spool as the lane **one past the
+last physical slot** — inner `lane` field `"N"`, outer key in the writer's
+normal style for that index — so a slicer renders it as one more tray beyond
+the physical bays (T4 beside T0–T3, `lane5` beside `lane1`–`lane4`). This is
+what makes "print this single-tool file from the external spool" a *selectable*
+choice in OrcaSlicer rather than an error.
+
+Rules:
+
+- **Written by HelixScreen only.** No filament-system plugin publishes its own
+  extern entry (verified in AFC's `AFC_lane.send_lane_data` — mapped lanes
+  only — and Happy Hare's `mmu_server.py push_lane_data` — gates only).
+- **Ephemerality is expected and self-healing.** AFC deletes the whole
+  namespace at boot (`AFC.py delete_lane_data()`) and Happy Hare's boot-time
+  cleanup deletes any record with `lane >= num_gates`. HelixScreen does NOT
+  fight either writer: it re-publishes on its triggers (bypass engage,
+  external-spool identity change), accepting that the entry disappears until
+  then after a firmware-plugin restart.
+- **Identity-gated.** A record with no Spoolman id, no material, and no picked
+  color (default-gray) clears the lane instead of publishing a phantom tray;
+  pure black is a real pick.
+- Backends with no bypass capability (`supports_bypass` false) never publish
+  one — there is no external feed to select.
+
 HelixScreen's writer produces the key via
 `format_lane_key(i, style)` (`"T"+i` for Tool, `"lane"+(i+1)` for Lane) and the
 inner field via `std::to_string(i)`. Readers recover the 0-based slot index
@@ -508,6 +534,14 @@ reader can resolve.
   their firmware-reported spool id doubles as the hardware-event signal
   (different positive id → §5 re-bind clear; `0`/absent → eject, there
   user-configurable via HelixScreen's "Keep Spool Info on Eject", default on).
+- **v1.7 (2026-08-18)**: Documented the **external / bypass spool lane**
+  (§4): HelixScreen publishes the extern spool as the lane one past the last
+  physical slot (`lane == num_gates`) on backends whose bypass it controls
+  (CFS, AD5X IFS via their mirror stores; AFC and Happy Hare via dedicated
+  shared-namespace stores). No third-party plugin publishes its own extern
+  entry, and both AFC's boot-time namespace delete and Happy Hare's boot-time
+  `lane >= num_gates` cleanup are documented as expected, self-healing
+  ephemerality. No wire-format change.
 - **v1.6 (2026-08-16)**: AFC's virtual-tools firmware (Klipper-Add-On #832, on
   `DEV`, 1.3 release line) switched its `lane_data` keys from `laneN` to
   `T<n>`, one record per mapped tool, with the inner `lane` field now the tool

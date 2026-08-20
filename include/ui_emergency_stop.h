@@ -240,7 +240,6 @@ class EmergencyStopOverlay {
 
     // State observers
     ObserverGuard print_state_observer_;
-    ObserverGuard print_start_phase_observer_;
     ObserverGuard klippy_state_observer_;
 
     // Event handlers
@@ -272,3 +271,38 @@ class EmergencyStopOverlay {
     static void advanced_firmware_restart_clicked(lv_event_t* e);
     static void home_firmware_restart_clicked(lv_event_t* e);
 };
+
+namespace helix {
+namespace ui {
+
+/// Disconnect-modal suppression window armed by begin_expected_klippy_restart().
+/// Mirrors RecoverySuppression::LONG - the reconnect blip from a klippy restart
+/// resolves in roughly the same span as the recovery-dialog window. 15 s is the
+/// value input-shaper armed before the helper existed; it is uniform now.
+constexpr uint32_t EXPECTED_RESTART_DISCONNECT_MODAL_MS = 15000;
+
+/**
+ * @brief Initiate an action that will restart Klipper
+ *
+ * The initiation counterpart of the klippy_state READY observer's completion
+ * in this file's .cpp: arms the recovery-dialog suppression window and the
+ * api-level disconnect-modal window, then shows one INFO toast so the user
+ * knows a restart is coming. The READY observer completes the contract -
+ * dismissing the recovery dialog with a "Printer ready" success toast, or
+ * firing that toast directly when the dialog was suppressed by the flow that
+ * initiated the restart. Mutual coverage: if the recovery window expires
+ * before klippy returns, the recovery dialog shows and the dialog path
+ * completes instead.
+ *
+ * The toast is a direct ToastManager call (no ui_notification_* severity, so
+ * no notification-history row) and hops through the update queue, which makes
+ * this safe from any thread - callers include Moonraker gcode callbacks that
+ * run on the WebSocket thread (z_offset_utils.cpp).
+ *
+ * @param message UNTRANSLATED source string; translated on the main thread
+ *                when the toast is shown
+ */
+void begin_expected_klippy_restart(const char* message);
+
+} // namespace ui
+} // namespace helix

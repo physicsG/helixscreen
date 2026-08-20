@@ -47,7 +47,7 @@ The AD5X's four-color **IFS (Intelligent Filament System)** is fully integrated,
 **What works:**
 - **4-slot IFS** — load, unload, and select filament per slot, with per-slot color and material tracking and per-port filament-presence sensors
 - **Automatic tool-to-port mapping** for multi-color prints (T0–T15 → physical ports), correct even with slot renumbering enabled
-- **External-spool bypass mode** for feeding a spool directly
+- **External-spool bypass mode** for feeding a spool directly — engages runout protection on the toolhead sensor automatically, and publishes the spool to OrcaSlicer as an extra lane
 - **[Spoolman](filament-tracking.md) integration** for assigning tracked spools to slots
 - **Infinite Spool Mode** reporting — when a slot runs out, the IFS automatically switches to another slot with the same filament type *and* color, if one is loaded. HelixScreen tells you this plainly on the runout screen and in the AMS panel
 - **Firmware-managed Z-offset** — ZMOD stores the offset itself, so there is no Save step. HelixScreen shows the *stored* value while the printer is idle, where other interfaces read 0.000, and adjusts from it correctly. See [Printing → Z-Offset](printing.md#z-offset--baby-steps)
@@ -85,6 +85,7 @@ Runs on the K2's built-in screen and — unlike the K1 — **works with stock fi
 - **Full CFS multi-material** — up to 4 units × 4 slots (16 colors): per-slot color, material type, and remaining filament length; per-unit temperature and humidity; load/unload
 - **Auto-refill / backup spool** switching, run by the CFS itself, and tool-to-slot color mapping. A runout always pauses the print first, and the box only swaps to another slot when auto-refill is on and that slot holds the exact same material *and* colour - otherwise the print stays paused
 - **CFS dryer and humidity monitoring** per unit
+- **External-spool bypass** — toggle it in the AMS panel: the CFS is stood down, the toolhead runout sensor is switched on for protection, and the spool is published to OrcaSlicer as an extra lane. See [Filament → CFS and the External Spool](filament.md#cfs-and-the-external-spool)
 - **Chamber heater** control (K2 Pro / Plus)
 - **AI print monitoring** available as a pre-print option. Filament runout is detected and acted on by the printer's own firmware, which pauses the job; HelixScreen reports what the CFS decided and offers the recovery buttons
 

@@ -623,8 +623,10 @@ class NavigationManager {
     // When LVGL deletes a tracked widget through ANY path (e.g. a teardown that
     // bypasses go_back), LV_EVENT_DELETE fires synchronously just before the
     // memory is freed. scrub_deleted_widget() erases the widget from every
-    // widget-keyed bookkeeping container so panel_stack_.back() can never
-    // dereference freed memory on the next push_overlay().
+    // widget-keyed bookkeeping container — plus the scalars overlay_backdrop_,
+    // app_layout_widget_ and the matching panel_widgets_ slots — so neither
+    // panel_stack_.back() on the next push_overlay() nor the show/hide sweep in
+    // handle_active_panel_change() can dereference freed memory.
     void scrub_deleted_widget(lv_obj_t* widget);
     // Attach the LV_EVENT_DELETE scrub callback to a widget exactly once.
     void ensure_delete_hook(lv_obj_t* widget);

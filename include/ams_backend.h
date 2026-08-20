@@ -673,6 +673,9 @@ class AmsBackend {
      * firmware macro this backend dispatches homes on its own; "not sure" must
      * stay false, because a permanent false refusal is its own broken workflow
      * (bundle JX2FVRB9).
+     *
+     * Distinct from delegates_homing_to_printer() (load/unload homing
+     * delegation); the two must stay separate.
      */
     [[nodiscard]] virtual bool filament_ops_self_home() const {
         return false;
@@ -706,6 +709,25 @@ class AmsBackend {
      * that answers false simply never reaches it.
      */
     [[nodiscard]] virtual bool filament_ops_may_home() const {
+        return false;
+    }
+
+    /**
+     * @brief Does the printer-side system arrange its own homing for filament
+     *        load/unload ops, so HelixScreen should neither prompt nor send G28?
+     *
+     * AFC answers true when [AFC] auto_home is set in AFC.cfg: its macros
+     * home-if-needed themselves, so both our confirmation prompt and the G28
+     * that ensure_homed_then() would synthesize are redundant.
+     *
+     * False-until-config-loaded by construction: the AFC override reads
+     * afc_config_, which lands asynchronously, so an early or failed load
+     * answers false — at worst one redundant prompt, never a skipped home.
+     *
+     * NOT the same question as filament_ops_self_home() (which gates
+     * PAUSED-print refusal); the two must stay separate.
+     */
+    [[nodiscard]] virtual bool delegates_homing_to_printer() const {
         return false;
     }
 
@@ -1689,6 +1711,30 @@ class AmsBackend {
         (void)slot_index;
     }
 
+    /**
+     * @brief Publish the external (bypass) spool into the backend's lane_data
+     *        mirror, or clear it.
+     *
+     * Capability question, not vendor dispatch: "can this filament system's
+     * external spool appear as an extra lane in the shared lane_data namespace
+     * (so slicers like OrcaSlicer can select it)?" Default no-op — backends
+     * whose firmware publishes lane_data itself (AFC, Happy Hare) or that have
+     * no bypass never publish. A backend that owns its lane_data mirror and
+     * supports bypass (CFS) publishes the spool as the lane one past its last
+     * physical slot.
+     *
+     * Called by AmsState when bypass engages and whenever the external spool's
+     * identity changes. Not called on bypass disengage — the lane mirrors the
+     * spool record, not the feed state, so a slicer mapping survives a
+     * bypass-off period.
+     *
+     * @param spool external spool info; nullptr (or an identity-less record)
+     *              clears the published lane
+     */
+    virtual void publish_external_spool_lane(const SlotInfo* spool) {
+        (void)spool;
+    }
+
     // ========================================================================
     // Bypass Mode Operations
     // ========================================================================
@@ -1898,19 +1944,22 @@ class AmsBackend {
     AmsError set_endless_spool_backup(int slot_index, int backup_slot);
 
     /**
-     * @brief Is @p backup_slot an acceptable backup for @p slot_index?
+     * @brief May @p backup_slot stand in for @p slot_index?
      *
-     * Backends own the eligibility rule; the base default is the
-     * material-compatibility test the AMS context menu has always applied
-     * (filament::are_materials_compatible(), with an unknown material on either
-     * side counting as eligible). AD5X IFS overrides with the stricter rule its
-     * firmware actually enforces: exact material AND exact colour AND the port
-     * reporting filament present.
+     * Backends own the eligibility rule. The base default asks two questions in
+     * order: filament::materials_compatible() decides the polymer, and
+     * filament::grades_match() decides the grade, so a filled variant of the
+     * right polymer comes back as GradeDiffers rather than being waved through.
+     * An unlabelled lane on either side stays Eligible - the user simply has
+     * not filled it in yet, and blocking on that helps nobody.
+     *
+     * AD5X IFS overrides with the stricter rule its firmware actually enforces:
+     * exact material AND exact colour AND the port reporting filament present.
      *
      * @note Holds no lock; reads through get_slot_info(), which takes `mutex_`.
      */
-    [[nodiscard]] virtual bool is_endless_spool_backup_eligible(int slot_index,
-                                                                int backup_slot) const;
+    [[nodiscard]] virtual helix::printer::BackupEligibility
+    endless_spool_backup_eligibility(int slot_index, int backup_slot) const;
 
     /**
      * @brief Reset all tool mappings to defaults
@@ -2353,7 +2402,19 @@ class AmsBackend {
     /// reports a positive spool id that disagrees with the override (AFC,
     /// Happy Hare, and flat-schema CFS, whose per-slot spoolman_id parse
     /// feeds it today).
-    [[nodiscard]] virtual bool firmware_reports_spool_ids() const {
+    [[nodiscard]] virtual bool printer_reports_spool_ids() const {
+        return false;
+    }
+
+    /// Whether the firmware is CURRENTLY retaining spool identity across
+    /// eject on its own (AFC's per-lane remember_spool = true everywhere).
+    /// Dynamic, unlike the capabilities above — it reflects a config
+    /// choice, not a firmware property. When true, "Keep Spool Info on
+    /// Eject" has no observable effect either way: firmware keeps reporting
+    /// the spool id, so neither the eject rule nor the #1289 re-assert push
+    /// ever fires. The AMS Management overlay shows the toggle disabled
+    /// with a note rather than letting it silently lie.
+    [[nodiscard]] virtual bool printer_retains_spool_info() const {
         return false;
     }
 

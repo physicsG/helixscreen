@@ -212,7 +212,7 @@ PrintStatusWidget::~PrintStatusWidget() {
 void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     using helix::ui::observe_int_immediate;
     using helix::ui::observe_int_sync;
-    using helix::ui::observe_print_state;
+    using helix::ui::observe_print_lifecycle;
     using helix::ui::observe_string_immediate;
 
     widget_obj_ = widget_obj;
@@ -270,9 +270,9 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     chamber_icon_binder_.bind(widget_obj_, printer_state_, helix::HeaterType::Chamber);
 
     // Set up observers (after widget references are cached and widget_obj_ is set)
-    print_state_observer_ = observe_print_state<PrintStatusWidget>(
-        printer_state_.get_print_state_enum_subject(), this,
-        [](PrintStatusWidget* self, PrintJobState state) {
+    print_state_observer_ = observe_print_lifecycle<PrintStatusWidget>(
+        printer_state_.get_print_lifecycle_subject(), this,
+        [](PrintStatusWidget* self, PrintState state) {
             if (!self->widget_obj_)
                 return;
             self->on_print_state_changed(state);
@@ -343,9 +343,7 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         token.defer("PrintStatusWidget::on_history_changed", [this]() {
             if (!widget_obj_ || !print_card_thumb_)
                 return;
-            auto state = static_cast<PrintJobState>(
-                lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
-            bool is_idle = (state != PrintJobState::PRINTING && state != PrintJobState::PAUSED);
+            bool is_idle = !job_holds_machine(printer_state_.get_print_lifecycle());
             if (is_idle) {
                 // Defer: token.defer body runs inside UpdateQueue::process_pending,
                 // and synchronous reset_print_card_to_idle would cascade lv_image_set_src
@@ -379,9 +377,8 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 
     // Check initial print state
     if (print_card_thumb_ && print_card_active_thumb_) {
-        auto state = static_cast<PrintJobState>(
-            lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
-        if (state == PrintJobState::PRINTING || state == PrintJobState::PAUSED) {
+        const PrintState state = printer_state_.get_print_lifecycle();
+        if (job_holds_machine(state)) {
             on_print_state_changed(state);
 #if defined(HELIX_PLATFORM_ESP32)
             // Widget instances are recycled across page rebuilds, so a fresh
@@ -746,12 +743,16 @@ void PrintStatusWidget::update_job_queue_row_visibility() {
 // Observer Callbacks
 // ============================================================================
 
-void PrintStatusWidget::on_print_state_changed(PrintJobState state) {
+void PrintStatusWidget::on_print_state_changed(PrintState state) {
     if (!widget_obj_ || !print_card_thumb_) {
         return;
     }
 
-    is_active_ = (state == PrintJobState::PRINTING || state == PrintJobState::PAUSED);
+    // job_holds_machine(), not the wire: during a host-side pre-print block the
+    // printer still reports standby, and the card claimed nothing was happening
+    // while the machine homed and probed (seen on the K2). Tapping it went to the
+    // file browser instead of the status overlay.
+    is_active_ = job_holds_machine(state);
 
     // The 5 card-body siblings are subject-driven (bind_flag_if_not_eq on
     // print_status_view). Recompute that subject; XML handles visibility.
@@ -1039,13 +1040,16 @@ void PrintStatusWidget::check_and_show_idle_runout_modal() {
         return;
     }
 
-    // Only show if printer is idle (not printing/paused)
-    int print_state = lv_subject_get_int(printer_state_.get_print_state_enum_subject());
-    if (print_state != static_cast<int>(PrintJobState::STANDBY) &&
-        print_state != static_cast<int>(PrintJobState::COMPLETE) &&
-        print_state != static_cast<int>(PrintJobState::CANCELLED)) {
-        spdlog::debug("[PrintStatusWidget] Print active (state={}) - skipping idle runout modal",
-                      print_state);
+    // Only show if the machine is genuinely between jobs. Same three states as
+    // before plus Preparing, which the wire could not express: a "load filament"
+    // dialog on top of a start the user just committed to is an ambush, and the
+    // block below would burn the one-shot grace on the way past.
+    const PrintState lifecycle = printer_state_.get_print_lifecycle();
+    if (lifecycle != PrintState::Idle && lifecycle != PrintState::Complete &&
+        lifecycle != PrintState::Cancelled) {
+        spdlog::debug(
+            "[PrintStatusWidget] Print active (lifecycle={}) - skipping idle runout modal",
+            static_cast<int>(lifecycle));
         return;
     }
 
@@ -1057,6 +1061,18 @@ void PrintStatusWidget::check_and_show_idle_runout_modal() {
     if (auto* backend = AmsState::instance().get_backend(0);
         backend && backend->should_suppress_idle_runout_modal()) {
         spdlog::debug("[PrintStatusWidget] AMS idle - suppressing runout modal");
+        return;
+    }
+
+    // An unload the user just asked for ends by dragging filament off the
+    // sensor. is_filament_operation_active() above only covers the window while
+    // the action runs, and the removal edge can land seconds after it finishes.
+    // Taken last, immediately before the modal: it is one-shot, so consuming it
+    // above a gate that returns anyway burns it on a call that could never have
+    // shown anything, and the deliberate unload it was armed for pops the modal
+    // unsuppressed.
+    if (AmsState::instance().consume_post_unload_runout_grace()) {
+        spdlog::info("[PrintStatusWidget] Skipping runout modal — filament left after an unload");
         return;
     }
 
@@ -1118,8 +1134,8 @@ void PrintStatusWidget::dispatch_load() {
     }
 
     const auto& load_info = StandardMacros::instance().get(StandardMacroSlot::LoadFilament);
-    const helix::ui::FilamentOpPlan plan =
-        helix::ui::plan_load(sys, caps, slot, !load_info.is_empty());
+    const helix::ui::FilamentOpPlan plan = helix::ui::plan_load(
+        sys, caps, slot, !load_info.is_empty(), load_info.get_source() == MacroSource::CONFIGURED);
 
     switch (plan.tier) {
     case helix::ui::FilamentTier::AmsBackend: {

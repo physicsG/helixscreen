@@ -362,7 +362,7 @@ void CameraStream::stream_thread_func() {
                                             const char* data, size_t size) {
                 // Check lifetime first — object may be destroyed or shutting down.
                 // L081_OK: dtor joins libhv handler; buf+boundary exclusive to stream-thread.
-                if (cb_token.expired())
+                if (cb_token.expired_no_lvgl())
                     return; // L081_OK
 
                 if (!running_.load()) {
@@ -469,8 +469,8 @@ void CameraStream::stream_thread_func() {
         spdlog::debug("[CameraStream] Stream thread exiting");
     } catch (const std::bad_alloc& e) {
         spdlog::error("[CameraStream] Out of memory in stream thread: {}", e.what());
-        if (!thread_token
-                 .expired()) { // L081_OK: stream_thread_ dtor-joined; recv_buf_ thread-exclusive
+        if (!thread_token.expired_no_lvgl()) { // L081_OK: stream_thread_ dtor-joined; recv_buf_
+                                               // thread-exclusive
             recv_buf_.clear();
             recv_buf_.shrink_to_fit();
             report_error(thread_token, "Out of memory");
@@ -566,10 +566,12 @@ void CameraStream::snapshot_poll_loop() {
     spdlog::info("[CameraStream] Starting snapshot poll loop (interval={}ms)",
                  SNAPSHOT_INTERVAL_MS);
 
-    while (!poll_token.expired() && running_.load()) {
+    // L081_OK: loop conditions on the thread the owner joins; no LVGL below.
+    while (!poll_token.expired_no_lvgl() && running_.load()) {
         fetch_snapshot();
         // Sleep in small increments to check running_ flag
-        for (int i = 0; i < SNAPSHOT_INTERVAL_MS / 100 && !poll_token.expired() && running_.load();
+        for (int i = 0;
+             i < SNAPSHOT_INTERVAL_MS / 100 && !poll_token.expired_no_lvgl() && running_.load();
              i++) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -618,7 +620,7 @@ void CameraStream::fetch_snapshot() {
 
     // After the blocking HTTP call, stop() may have run and the CameraStream
     // may be destroyed (detached thread). Check lifetime BEFORE touching members.
-    if (snap_token.expired()) {
+    if (snap_token.expired_no_lvgl()) { // L081_OK: guards members, not LVGL
         return;
     }
 

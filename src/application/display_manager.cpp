@@ -13,6 +13,8 @@
 
 #include "display_manager.h"
 
+#include "print_lifecycle_state.h"
+
 // Private LVGL header for direct flush_cb capture (matches application.cpp pattern)
 #include "ui_effects.h"
 #include "ui_fatal_error.h"
@@ -1019,8 +1021,12 @@ void DisplayManager::check_display_sleep() {
     // print (debug bundle RYAQGL6C: 8 touch events, 18-minute wake delay).
     bool inhibit_sleep_entry = false;
     if (!DisplaySettingsManager::instance().get_sleep_while_printing()) {
-        PrintJobState job_state = get_printer_state().get_print_job_state();
-        if (job_state == PrintJobState::PRINTING || job_state == PrintJobState::PAUSED) {
+        // Lifecycle: a user who turned off sleep-while-printing wants the
+        // screen up through the pre-print homing too, which is when they are
+        // most likely to be watching.
+        const auto lifecycle = static_cast<PrintState>(
+            lv_subject_get_int(get_printer_state().get_print_lifecycle_subject()));
+        if (job_holds_machine(lifecycle)) {
             // Reset LVGL activity timer so we don't immediately sleep when print ends
             lv_display_trigger_activity(nullptr);
             inhibit_sleep_entry = true;

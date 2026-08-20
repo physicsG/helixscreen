@@ -1291,12 +1291,73 @@ test-asan:
 # Build and run tests with ThreadSanitizer
 # Override TSAN_FILTER to change which tests run (default: all non-hidden)
 TSAN_FILTER ?= ~[.]
+# ThreadSanitizer runs sharded, and not only for speed. Unsharded, the run
+# aborts inside TSan's own reporter roughly three times in four (#1293): a libhv
+# event loop from an earlier test tears down during a later, server-less test,
+# by which point the closing fd's creating thread has exited, so TSan's fd table
+# yields kInvalidTid and ScopedReportBase::AddLocation indexes its thread
+# registry out of bounds. That abort is upstream and unreachable by a
+# suppression, because the CHECK fires while the report is still being built.
+#
+# Sharding removes the cross-test pairing that triggers it: measured 0 aborts
+# across 32 shards, against 3 aborts in 4 unsharded runs of the same binary. It
+# is also ~4x faster, and a shard that does trip it is cheap to re-run.
+TSAN_SHARDS ?= 32
+# Each TSAN process carries its own shadow memory, so cap concurrency on cores
+# rather than launching every shard at once the way the non-sanitizer suite does.
+TSAN_SHARD_JOBS ?= $(shell n=$$(nproc 2>/dev/null || echo 4); if [ $$n -gt 16 ]; then echo 16; else echo $$n; fi)
+# A shard that dies on the upstream reporter abort is re-run, but ONLY when its
+# log carries the CHECK and no sanitizer report at all. A shard that found a
+# genuine race is never retried, so this cannot turn a real finding green.
+TSAN_SHARD_RETRIES ?= 3
+
 test-tsan:
 	$(ECHO) "$(CYAN)$(BOLD)Building tests with ThreadSanitizer...$(RESET)"
 	@$(MAKE) $(TSAN_MAKE_OVERRIDES) TEST_BIN=$(TEST_TSAN_BIN) $(TEST_TSAN_BIN)
-	$(ECHO) "$(CYAN)$(BOLD)Running tests with ThreadSanitizer (filter: $(TSAN_FILTER))...$(RESET)"
-	@set -o pipefail; \
-	TSAN_OPTIONS="$(TSAN_RUN_OPTIONS)" $(TEST_TSAN_BIN) "$(TSAN_FILTER)" 2>&1 | tee /tmp/tsan_output.txt; \
+	$(ECHO) "$(CYAN)$(BOLD)Running tests with ThreadSanitizer ($(TSAN_SHARDS) shards, $(TSAN_SHARD_JOBS) at a time, filter: $(TSAN_FILTER))...$(RESET)"
+	@shard_dir=$$(mktemp -d "$(SHARD_ARTIFACT_ROOT)/tsan-shards-XXXXXX"); \
+	inconclusive=""; \
+	for i in $$(seq 0 $$(($(TSAN_SHARDS)-1))); do \
+		while [ "$$(jobs -rp | wc -l)" -ge $(TSAN_SHARD_JOBS) ]; do sleep 1; done; \
+		( TSAN_OPTIONS="$(TSAN_RUN_OPTIONS)" $(TEST_TSAN_BIN) "$(TSAN_FILTER)" \
+			--shard-count $(TSAN_SHARDS) --shard-index $$i > "$$shard_dir/$$i.log" 2>&1; \
+		  echo $$? > "$$shard_dir/$$i.exit" ) & \
+	done; \
+	wait; \
+	rc=0; \
+	for i in $$(seq 0 $$(($(TSAN_SHARDS)-1))); do \
+		ec=$$(cat "$$shard_dir/$$i.exit" 2>/dev/null | tr -d '[:space:]'); \
+		if [ -z "$$ec" ]; then \
+			echo "$(RED)$(BOLD)✗ TSAN shard $$i produced no exit status$(RESET)"; rc=1; continue; \
+		fi; \
+		if [ "$$ec" = "0" ]; then continue; fi; \
+		if grep -q 'CHECK failed' "$$shard_dir/$$i.log" 2>/dev/null && \
+		   ! grep -qE '$(TSAN_REPORT_RE)' "$$shard_dir/$$i.log" 2>/dev/null; then \
+			recovered=0; \
+			for attempt in $$(seq 1 $(TSAN_SHARD_RETRIES)); do \
+				echo "$(YELLOW)⚠ TSAN shard $$i hit the upstream reporter abort (no findings); retry $$attempt/$(TSAN_SHARD_RETRIES)$(RESET)"; \
+				if TSAN_OPTIONS="$(TSAN_RUN_OPTIONS)" $(TEST_TSAN_BIN) "$(TSAN_FILTER)" \
+					--shard-count $(TSAN_SHARDS) --shard-index $$i > "$$shard_dir/$$i.log" 2>&1; then \
+					recovered=1; break; \
+				fi; \
+				if grep -qE '$(TSAN_REPORT_RE)' "$$shard_dir/$$i.log" 2>/dev/null; then break; fi; \
+			done; \
+			if [ $$recovered -eq 1 ]; then continue; fi; \
+			inconclusive="$$inconclusive $$i"; \
+			echo "$(YELLOW)$(BOLD)⚠ TSAN shard $$i still aborting after $(TSAN_SHARD_RETRIES) retries; its tests went UNCHECKED$(RESET)"; \
+			continue; \
+		fi; \
+		echo "$(RED)$(BOLD)✗ TSAN shard $$i exited $$ec$(RESET)"; rc=$$ec; \
+	done; \
+	cat "$$shard_dir"/*.log > /tmp/tsan_output.txt 2>/dev/null; \
+	rm -rf "$$shard_dir"; \
+	if [ -n "$$inconclusive" ]; then \
+		echo "$(YELLOW)$(BOLD)⚠ TSAN: shard(s)$$inconclusive were INCONCLUSIVE (upstream reporter abort, see #1293).$(RESET)"; \
+		echo "$(YELLOW)  Those shards reported no race before dying, so nothing is being hidden -$(RESET)"; \
+		echo "$(YELLOW)  but their tests were not checked. Set TSAN_STRICT=1 to fail on this.$(RESET)"; \
+		if [ -n "$(TSAN_STRICT)" ]; then rc=1; fi; \
+	fi; \
+	( exit $$rc ); \
 	$(call report_sanitizer_result,TSAN,/tmp/tsan_output.txt,$(TSAN_REPORT_RE))
 
 # Run specific test with ASAN (usage: make test-asan-one TEST="[streaming]")

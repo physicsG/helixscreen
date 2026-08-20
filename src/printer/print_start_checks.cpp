@@ -19,11 +19,13 @@
 
 #include "color_utils.h"
 #include "filament_database.h"
+#include "filament_variants.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <lvgl.h>
 
 namespace helix {
@@ -34,6 +36,43 @@ CheckResult pass_result() {
     CheckResult r;
     r.verdict = CheckResult::Verdict::Pass;
     return r;
+}
+
+/// Context-shaped wrapper over the exported rule (print_start_checks.h), which
+/// the filament mapping card shares so the two cannot drift.
+size_t print_lane_requirement(const PrintStartContext& ctx) {
+    return helix::print_lane_requirement(ctx.tools_used, ctx.filament_color_count);
+}
+
+/// The one tool a bypass print runs on: the (single) used tool when the scan
+/// knows it, else tool 0. Valid only when print_lane_requirement() <= 1.
+int bypass_print_tool(const PrintStartContext& ctx) {
+    if (!ctx.tools_used.empty()) {
+        return *ctx.tools_used.begin();
+    }
+    return 0;
+}
+
+/// The two-step material comparison every branch runs. Kept in one place so a
+/// branch cannot answer the same question differently: FilamentMapper decides
+/// whether the polymer is right, filament::grades_match() whether the grade is.
+/// An unknown material on either side is not something to warn about.
+enum class MaterialVerdict { Ok, GradeChange, Mismatch };
+
+MaterialVerdict compare_material(const std::string& expected, const std::string& loaded) {
+    if (expected.empty() || loaded.empty()) {
+        return MaterialVerdict::Ok;
+    }
+    if (!FilamentMapper::materials_match(expected, loaded)) {
+        return MaterialVerdict::Mismatch;
+    }
+    return filament::grades_match(expected, loaded) ? MaterialVerdict::Ok
+                                                    : MaterialVerdict::GradeChange;
+}
+
+/// Log label for a verdict, so the two spdlog lines say which finding fired.
+const char* detail_kind(MaterialVerdict v) {
+    return v == MaterialVerdict::GradeChange ? "grade change" : "material mismatch";
 }
 
 /// Warning result with the dialog strings a gate mandates.
@@ -88,11 +127,12 @@ CheckResult gate_insufficient_spool_weight(const PrintStartContext& ctx) {
 }
 
 CheckResult gate_bypass_engaged_lane_print(const PrintStartContext& ctx) {
-    // Single-color prints with bypass engaged are the LEGITIMATE bypass use
-    // case — silent. Multi-color means the file needs AMS lanes, and firmware
-    // (AFC _check_bypass, verified) refuses a lane load while bypass filament
-    // is in the toolhead.
-    if (!ctx.any_bypass_active || ctx.filament_color_count <= 1) {
+    // Single-tool prints with bypass engaged are the LEGITIMATE bypass use
+    // case — silent. "Single-tool" is the used-tool count, not the palette
+    // size (see print_lane_requirement). Multi-tool means the file needs AMS
+    // lanes, and firmware (AFC _check_bypass, verified) refuses a lane load
+    // while bypass filament is in the toolhead.
+    if (!ctx.any_bypass_active || print_lane_requirement(ctx) <= 1) {
         return pass_result();
     }
     return warn_result(
@@ -133,6 +173,14 @@ CheckResult gate_required_filament_present(const PrintStartContext& ctx) {
     // consulting the backend's authoritative per-slot presence instead of the
     // aggregate motion sensors (avoids staged-but-retracted and unused-empty
     // false positives).
+    //
+    // A single-tool bypass print feeds from the external spool, not from any
+    // lane — the lanes it happens to map to are irrelevant, and an empty one
+    // must not block the print. Bypass engage itself proved filament at the
+    // toolhead. (Multi-tool bypass keeps the check; gate 2 already warned.)
+    if (ctx.any_bypass_active && print_lane_requirement(ctx) <= 1) {
+        return pass_result();
+    }
     if (ctx.ams_manages_filament && ctx.has_active_backend) {
         if (!ctx.empty_required_lanes.empty()) {
             spdlog::info("[PrintStartController] {} required tool(s) have an empty lane - "
@@ -188,10 +236,58 @@ CheckResult gate_unresolved_tools(const PrintStartContext& ctx) {
     return warn_result(lv_tr("Color Mismatch"), std::move(message), lv_tr("Start Anyway"));
 }
 
+/// Dialog for mismatches that are ALL grade changes: same polymer, different
+/// filler. Separate from the material dialog because the advice is different
+/// and because calling a correct-polymer lane a "material mismatch" trains the
+/// user to click through the dialog that matters.
+CheckResult grade_change_warning(const std::vector<MaterialMismatchDetail>& mismatches) {
+    std::string message;
+
+    if (mismatches.size() == 1) {
+        const auto& m = mismatches[0];
+        // The risk is not symmetric. Filled filament loaded against an unfilled
+        // profile runs abrasive material at the base polymer's flow rate, on
+        // what may well be a brass nozzle. The reverse just prints slower and
+        // hotter than the spool needs, which costs time and nothing else.
+        if (filament::is_filled_grade(m.loaded_material)) {
+            message = fmt::format(lv_tr("The loaded spool is {}, but this file was sliced "
+                                        "for {}. Filled filament runs at a lower flow rate "
+                                        "and needs a hardened nozzle."),
+                                  m.loaded_material, m.expected_material);
+        } else {
+            message = fmt::format(lv_tr("This file was sliced for {}, but {} is loaded. "
+                                        "It will print slower and hotter than the loaded "
+                                        "spool needs."),
+                                  m.expected_material, m.loaded_material);
+        }
+    } else {
+        message = lv_tr("These tools have a different filament grade loaded:");
+        message += "\n\n";
+        for (const auto& m : mismatches) {
+            message += fmt::format("  {} T{}: {} {}: {} {}\n", LV_SYMBOL_BULLET, m.tool_index,
+                                   lv_tr("needs"), m.expected_material, lv_tr("you have"),
+                                   m.loaded_material);
+        }
+    }
+
+    message += "\n\n";
+    message += lv_tr("Start print anyway?");
+
+    return warn_result(lv_tr("Filament Grade Mismatch"), std::move(message), lv_tr("Start Anyway"));
+}
+
 CheckResult gate_material_compatibility(const PrintStartContext& ctx) {
     auto mismatches = material_mismatches_in(ctx);
     if (mismatches.empty()) {
         return pass_result();
+    }
+
+    // A hard mismatch anywhere keeps the material dialog, grade rows included:
+    // the wrong polymer is the more urgent finding, and two dialogs on one tap
+    // is worse than one that lists everything.
+    if (std::all_of(mismatches.begin(), mismatches.end(),
+                    [](const MaterialMismatchDetail& m) { return m.grade_only; })) {
+        return grade_change_warning(mismatches);
     }
 
     // Body ported verbatim from show_material_mismatch_warning (no static
@@ -245,7 +341,44 @@ CheckResult gate_material_compatibility(const PrintStartContext& ctx) {
 
     return warn_result(lv_tr("Material Mismatch"), std::move(message), lv_tr("Start Anyway"));
 }
+/// Material mismatch detail for a print running on the external spool:
+/// temperature context from the filament database (or the spool's own preset
+/// when the user set one). Shared by the non-AMS path and the bypass path.
+MaterialMismatchDetail external_spool_mismatch(const SlotInfo& spool, int tool_index,
+                                               const std::string& expected) {
+    MaterialMismatchDetail detail;
+    detail.tool_index = tool_index;
+    detail.expected_material = expected;
+    detail.loaded_material = spool.material;
+
+    // Temperature from filament database for expected material
+    if (auto expected_info = filament::find_material(expected)) {
+        detail.expected_nozzle_min = expected_info->nozzle_min;
+        detail.expected_nozzle_max = expected_info->nozzle_max;
+        detail.expected_bed_temp = expected_info->bed_temp;
+    }
+
+    // Temperature from external spool (user-set) or fall back to database
+    if (spool.nozzle_temp_min > 0 && spool.nozzle_temp_max > 0) {
+        detail.loaded_nozzle_min = spool.nozzle_temp_min;
+        detail.loaded_nozzle_max = spool.nozzle_temp_max;
+        detail.loaded_bed_temp = spool.bed_temp;
+    } else if (auto loaded_info = filament::find_material(spool.material)) {
+        detail.loaded_nozzle_min = loaded_info->nozzle_min;
+        detail.loaded_nozzle_max = loaded_info->nozzle_max;
+        detail.loaded_bed_temp = loaded_info->bed_temp;
+    }
+    return detail;
+}
+
 } // namespace
+
+size_t print_lane_requirement(const std::set<int>& tools_used, size_t filament_color_count) {
+    if (!tools_used.empty()) {
+        return tools_used.size();
+    }
+    return filament_color_count;
+}
 
 std::vector<int> unresolved_tools_in(const PrintStartContext& ctx) {
     // Single-color prints need no mapping.
@@ -330,6 +463,34 @@ std::vector<MaterialMismatchDetail> material_mismatches_in(const PrintStartConte
         return filament_weights[tool_index] > 0.0;
     };
 
+    if (ctx.any_bypass_active && print_lane_requirement(ctx) <= 1) {
+        // Single-tool bypass print: the material actually printing is the
+        // EXTERNAL spool's, whatever the lane mapping happens to say. Compare
+        // the file's material for the used tool against the external spool —
+        // same comparison the non-AMS path runs, scoped to the bypass tool.
+        // The mapped lanes describe filament that is not being printed with.
+        std::string expected;
+        const int tool = bypass_print_tool(ctx);
+        if (const auto* t = ui::FilamentMappingCard::find_by_tool_index(ctx.tool_info, tool)) {
+            expected = t->material;
+        } else if (tool < static_cast<int>(ctx.filament_materials.size())) {
+            expected = ctx.filament_materials[tool];
+        }
+        if (expected.empty() || !ctx.external_spool.has_value() ||
+            ctx.external_spool->material.empty()) {
+            return mismatches;
+        }
+        const auto verdict = compare_material(expected, ctx.external_spool->material);
+        if (verdict != MaterialVerdict::Ok) {
+            auto detail = external_spool_mismatch(ctx.external_spool.value(), tool, expected);
+            detail.grade_only = (verdict == MaterialVerdict::GradeChange);
+            mismatches.push_back(std::move(detail));
+            spdlog::info("[PrintStartController] Bypass print: {} vs external spool ({} vs {})",
+                         detail_kind(verdict), expected, ctx.external_spool->material);
+        }
+        return mismatches;
+    }
+
     if (ctx.ams_available) {
         // AMS path: check ToolMapping.material_mismatch flags
         const auto& mappings = ctx.mappings;
@@ -337,16 +498,6 @@ std::vector<MaterialMismatchDetail> material_mismatches_in(const PrintStartConte
         const auto& slots = ctx.available_slots;
 
         for (const auto& m : mappings) {
-            if (!m.material_mismatch) {
-                continue;
-            }
-            if (!tool_is_used(m.tool_index)) {
-                spdlog::debug("[PrintStartController] Skipping T{} mismatch — "
-                              "tool has zero filament usage in gcode",
-                              m.tool_index);
-                continue;
-            }
-
             MaterialMismatchDetail detail;
             detail.tool_index = m.tool_index;
 
@@ -368,6 +519,26 @@ std::vector<MaterialMismatchDetail> material_mismatches_in(const PrintStartConte
 
             // Skip if either material is unknown (can't warn about unknowns)
             if (detail.expected_material.empty() || detail.loaded_material.empty()) {
+                continue;
+            }
+
+            // The mapper already ruled on the polymer, so trust its flag rather
+            // than re-deciding it here; a lane it considers a MATCH still gets
+            // the grade question asked, which is the only new work in this loop.
+            if (!m.material_mismatch) {
+                if (filament::grades_match(detail.expected_material, detail.loaded_material)) {
+                    continue;
+                }
+                detail.grade_only = true;
+            }
+
+            // Deliberately after the two "nothing to report" outcomes above: a
+            // tool the file never extrudes from is only worth a log line when
+            // it would otherwise have produced a dialog row.
+            if (!tool_is_used(m.tool_index)) {
+                spdlog::debug("[PrintStartController] Skipping T{} {} — "
+                              "tool has zero filament usage in gcode",
+                              m.tool_index, detail.grade_only ? "grade change" : "mismatch");
                 continue;
             }
 
@@ -411,34 +582,10 @@ std::vector<MaterialMismatchDetail> material_mismatches_in(const PrintStartConte
             return mismatches;
         }
 
-        if (!FilamentMapper::materials_match(expected, spool_info->material)) {
-            MaterialMismatchDetail detail;
-            detail.tool_index = 0;
-            detail.expected_material = expected;
-            detail.loaded_material = spool_info->material;
-
-            // Temperature from filament database for expected material
-            auto expected_info = filament::find_material(expected);
-            if (expected_info) {
-                detail.expected_nozzle_min = expected_info->nozzle_min;
-                detail.expected_nozzle_max = expected_info->nozzle_max;
-                detail.expected_bed_temp = expected_info->bed_temp;
-            }
-
-            // Temperature from external spool (user-set) or fall back to database
-            if (spool_info->nozzle_temp_min > 0 && spool_info->nozzle_temp_max > 0) {
-                detail.loaded_nozzle_min = spool_info->nozzle_temp_min;
-                detail.loaded_nozzle_max = spool_info->nozzle_temp_max;
-                detail.loaded_bed_temp = spool_info->bed_temp;
-            } else {
-                auto loaded_info = filament::find_material(spool_info->material);
-                if (loaded_info) {
-                    detail.loaded_nozzle_min = loaded_info->nozzle_min;
-                    detail.loaded_nozzle_max = loaded_info->nozzle_max;
-                    detail.loaded_bed_temp = loaded_info->bed_temp;
-                }
-            }
-
+        const auto verdict = compare_material(expected, spool_info->material);
+        if (verdict != MaterialVerdict::Ok) {
+            auto detail = external_spool_mismatch(*spool_info, 0, expected);
+            detail.grade_only = (verdict == MaterialVerdict::GradeChange);
             mismatches.push_back(std::move(detail));
         }
     }

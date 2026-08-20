@@ -1730,8 +1730,8 @@ void BedMeshPanel::execute_save_config() {
 
     spdlog::info("[{}] Saving config (will restart Klipper)", get_name());
 
-    // Suppress recovery dialog — SAVE_CONFIG triggers an expected Klipper restart
-    EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::LONG);
+    // SAVE_CONFIG triggers an expected Klipper restart
+    helix::ui::begin_expected_klippy_restart("Configuration saved - restarting");
 
     operation_guard_.begin(SLOW_OPERATION_TIMEOUT_MS, [this] {
         hide_all_modals();
@@ -1746,7 +1746,6 @@ void BedMeshPanel::execute_save_config() {
                             operation_guard_.end();
                             spdlog::info("[{}] SAVE_CONFIG sent - Klipper will restart",
                                          get_name());
-                            NOTIFY_INFO(lv_tr("Configuration saved - restarting"));
                         }),
         lifetime_.bg_cb("BedMeshPanel::save_config_error", [this](const MoonrakerError& err) {
             operation_guard_.end();

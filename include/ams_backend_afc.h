@@ -306,6 +306,14 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     /// Delete this slot's user override ("Clear Spool"). AFC previously
     /// inherited the no-op default, so the button did nothing here.
     void clear_slot_override(int slot_index) override;
+
+    /// Publish the external spool as T{N} (one past the last lane) in the
+    /// SHARED lane_data namespace — AFC's own plugin never publishes its
+    /// extern (verified: AFC_lane.send_lane_data runs only for lanes with a
+    /// tool mapping, and AFC deletes the whole namespace at boot). Our entry
+    /// is wiped by that boot delete; the AmsState event triggers (bypass
+    /// engage, external-spool edit) re-publish.
+    void publish_external_spool_lane(const SlotInfo* spool) override;
     AmsError eject_lane(int slot_index) override;
     [[nodiscard]] bool supports_lane_eject() const override {
         return true;
@@ -344,8 +352,20 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
         return true; // AFC uses SET_SPOOL_ID gcode for persistence
     }
 
-    [[nodiscard]] bool firmware_reports_spool_ids() const override {
+    [[nodiscard]] bool printer_reports_spool_ids() const override {
         return true; // AFC publishes a lane spool_id in its status
+    }
+
+    /// Per-lane remember_spool = true on EVERY reporting lane (ALL
+    /// semantics — a mixed config still leaves the toggle governing the
+    /// false lanes). See AmsBackend::printer_retains_spool_info().
+    [[nodiscard]] bool printer_retains_spool_info() const override;
+
+    /// [AFC] auto_home from AFC.cfg — true only once afc_config_ has landed
+    /// (see AmsBackend::delegates_homing_to_printer()).
+    [[nodiscard]] bool delegates_homing_to_printer() const override {
+        return afc_config_ && afc_config_->is_loaded() &&
+               afc_config_->parser().get_bool("AFC", "auto_home", false);
     }
 
     /**
@@ -492,7 +512,9 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     friend class AmsBackendAfcTestHelper;
     friend class AfcPerSlotLoadedHelper;
     friend class AfcHelper;
+    friend class AfcBypassPublishTestAccess;
     friend class AfcCurrentErrorHelper;
+    friend class AfcRetainsHelper;
     friend class AfcLaneDataClearHelper;
     friend class AfcRebindHelper;
     friend class AfcFaultEventCharHelper;
@@ -519,6 +541,8 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     friend class AfcSharedExtruderHelper;
     friend class AfcLaneDataToolKeyHelper;
     friend class AfcReassertHelper;
+    friend class AfcDelegatesHomingHelper;
+    friend class AfcDispatchHelper;
 
     // --- AmsSubscriptionBackend hooks ---
     void on_started() override;
@@ -553,6 +577,10 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     // override re-supplies the identity the user attached.
     static constexpr const char* OVERRIDE_NAMESPACE = "helix-screen-afc-overrides";
     std::unique_ptr<helix::ams::FilamentSlotOverrideStore> override_store_;
+    /// Store on the SHARED lane_data namespace, used only by
+    /// publish_external_spool_lane. AFC's plugin owns that namespace — our
+    /// private override_store_ is deliberately NOT pointed at it.
+    std::unique_ptr<helix::ams::FilamentSlotOverrideStore> lane_publish_store_;
     std::unordered_map<int, helix::ams::FilamentSlotOverride> overrides_;
     /// Layer the user override over firmware values. Callers hold mutex_.
     void apply_overrides(SlotInfo& slot, int slot_index);

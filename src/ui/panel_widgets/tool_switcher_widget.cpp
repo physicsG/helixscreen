@@ -119,15 +119,24 @@ void ToolSwitcherWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     // Re-grey on every print-state transition. PanelWidget instances are
     // RECYCLED across home-panel rebuilds, so registering here (rather than
     // only reacting to on_size_changed) is what keeps a reused instance from
-    // carrying the previous screen's gating. print_state_enum is a static
-    // global subject — no SubjectLifetime needed.
+    // carrying the previous screen's gating. print_lifecycle rather than
+    // print_state_enum: the gate now refuses during Preparing, and the raw enum
+    // does not move on the Idle -> Preparing edge, so the pills would stay lit
+    // through a host-side pre-print block even with the guard fixed.
+    //
+    // Takes the lifetime token. print_lifecycle is one of PrinterPrintState's
+    // static subjects, torn down by deinit_subjects() between test cases, and an
+    // ObserverGuard that outlives that cycle calls lv_observer_remove() on freed
+    // memory (#705). The comment here used to claim none was needed; its two
+    // sibling call sites (ui_panel_filament, ui_ams_sidebar) both pass it.
     print_state_observer_ = helix::ui::observe_int_sync<ToolSwitcherWidget>(
-        printer_state_.get_print_state_enum_subject(), this,
+        printer_state_.get_print_lifecycle_subject(), this,
         [token](ToolSwitcherWidget* self, int /*state*/) {
             if (token.expired())
                 return;
             self->refresh_print_gating();
-        });
+        },
+        printer_state_.get_static_print_subjects_lifetime());
 
     // Initial build deferred to on_size_changed() which fires after
     // the widget is fully attached to the screen tree.
@@ -575,17 +584,15 @@ void ToolSwitcherWidget::ToolPicker::on_created(lv_obj_t* backdrop) {
 // ============================================================================
 
 AmsError ToolSwitcherWidget::tool_change_refusal() const {
-    const auto job_state = static_cast<PrintJobState>(
-        lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
-    const bool printing = job_state == PrintJobState::PRINTING;
-    const bool paused = job_state == PrintJobState::PAUSED;
+    const auto lifecycle = printer_state_.get_print_lifecycle();
+    const bool paused = lifecycle == PrintState::Paused;
 
     // No backend means a plain Tn / macro path with no firmware macro that could
     // hide a home — the documented argument for passing false here.
     AmsBackend* backend = AmsState::instance().get_backend();
     const bool self_homes = backend && backend->filament_ops_self_home();
 
-    if (!helix::ui::print_blocks_filament_op(printing, paused, self_homes)) {
+    if (!helix::ui::print_blocks_filament_op(lifecycle, self_homes)) {
         return AmsErrorHelper::success();
     }
     // Same copy the backend would have produced had the request reached it, so
@@ -665,9 +672,8 @@ void ToolSwitcherWidget::handle_tool_selected(int tool_index) {
     // paused job (everything except AD5X IFS) — pause-then-swap is the runout
     // and colour-change recovery workflow, so the change is offered, with a
     // confirmation because it moves the toolhead into a part still on the bed.
-    const auto job_state = static_cast<PrintJobState>(
-        lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
-    if (job_state == PrintJobState::PAUSED) {
+    const auto lifecycle = printer_state_.get_print_lifecycle();
+    if (lifecycle == PrintState::Paused) {
         spdlog::info("[ToolSwitcher] Print paused, showing confirmation for T{}", tool_index);
 
         helix::ui::modal_show_confirmation(

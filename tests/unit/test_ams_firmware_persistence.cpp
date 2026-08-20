@@ -52,16 +52,16 @@ TEST_CASE("AmsBackendAd5xIfs: no firmware spool persistence", "[ams][backend][sp
 }
 
 // =============================================================================
-// firmware_reports_spool_ids() tests
+// printer_reports_spool_ids() tests
 // =============================================================================
 
-TEST_CASE("firmware_reports_spool_ids capability", "[ams][capabilities]") {
+TEST_CASE("printer_reports_spool_ids capability", "[ams][capabilities]") {
     // Qualified call pins the BASE default (false), not the AFC override.
     auto afc = std::make_unique<AmsBackendAfc>(nullptr, nullptr);
-    CHECK_FALSE(afc->AmsBackend::firmware_reports_spool_ids());
-    CHECK(afc->firmware_reports_spool_ids());
+    CHECK_FALSE(afc->AmsBackend::printer_reports_spool_ids());
+    CHECK(afc->printer_reports_spool_ids());
     auto hh = std::make_unique<AmsBackendHappyHare>(nullptr, nullptr);
-    CHECK(hh->firmware_reports_spool_ids());
+    CHECK(hh->printer_reports_spool_ids());
 }
 
 // =============================================================================

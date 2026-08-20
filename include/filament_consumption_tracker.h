@@ -7,6 +7,10 @@
 
 #include "consumption_sink.h"
 
+namespace helix {
+enum class PrintJobState;
+} // namespace helix
+
 #include <array>
 #include <cstddef>
 #include <memory>
@@ -101,7 +105,7 @@ class FilamentConsumptionTracker {
     /// `extruder` (i=0) / `extruder1` / `extruder2` / ... filament_used field.
     std::array<ObserverGuard, MAX_TRACKED_EXTRUDERS> extruder_obs_{};
 
-    void on_print_state_changed(int job_state);
+    void on_print_state_changed(helix::PrintJobState state);
     void on_filament_used_changed(int filament_mm);
 
     /// Handler for a single extruder's filament_used delta. Routes the delta

@@ -164,7 +164,9 @@ Do this *after* both tracks are confirmed publishing.
 
 - [ ] Remove the `show_beta_features` gate on `container_update_channel` in
       `about_settings_overlay.xml` (currently a 7-tap easter egg on the version row).
-      Note `android/app/src/main/assets/ui_xml/` carries its own copy.
+      Edit `ui_xml/` only — `android/app/src/main/assets/ui_xml/` is a Gradle build
+      output that `copyAssets` wipes and re-copies on every build, so an edit there
+      is erased. See `docs/devel/ANDROID_ASSETS.md`.
 - [ ] Rename the options for a two-track UX: **Stable / Devel**, keeping **Dev**
       behind the beta gate. Dev is still rejected outright without
       `/update/dev_url`, which is fine for a hidden developer option and wrong for

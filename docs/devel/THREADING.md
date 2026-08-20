@@ -255,6 +255,26 @@ if (tok.expired()) return; // L081_OK: synchronous wait wrapper, dtor joins this
 
 See `src/system/camera_stream.cpp` for legitimate examples.
 
+**The comment silences the lint gate, not the runtime detector.** For a site that runs on a
+background thread every launch, that leaves the anomaly channel emitting a hit per launch
+forever. Use `expired_no_lvgl()` there — same atomic load, no report:
+
+```cpp
+// L081_OK: loop condition on the thread the owner joins; no LVGL below.
+while (!poll_token.expired_no_lvgl() && running_.load()) { ... }
+```
+
+It is legitimate only where nothing after the check touches LVGL: a loop condition on a
+dtor-joined thread, a buffer exclusive to that thread, or a sweep over some *other* object's
+token. Anything that mutates a widget still owes you `expired()` + `defer()`. The lint gate
+matches this spelling too, so it keeps watching the site — and it still wants the
+`// L081_OK: <why>` note next to it.
+
+Why it exists: the detector cannot distinguish these from the real anti-pattern, so all of
+them reported. Over the 2026-08-09..18 telemetry window, four such sites (the WiFi
+state-observer sweep plus three in `CameraStream`) were ~67% of all `bg_tok_expired_check`
+volume — enough that a genuine Mechanism C hit would have been one event in 131.
+
 ### TOCTOU rule: `tok.defer()` vs `lifetime_.defer()`
 
 - **From a background thread:** always `tok.defer()`. The token holds its own `shared_ptr` to

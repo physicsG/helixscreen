@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Shared cross-file styles. The scope name comes from this file's basename
+     ("styles"), so every XML file can borrow a style here as
+     <style name="styles.<style_name>" selector="..."/>.
+
+     This file is registered from register_xml_components()
+     (src/xml_registration.cpp), which runs AFTER theme_manager_init() has
+     injected the theme constants. Style #const values resolve at registration
+     time, so #primary / #border_radius are baked in correctly here — the
+     reason globals.xml cannot host theme-token styles (see its own note). -->
+<component>
+  <styles>
+    <!-- Pressed feedback for clickable cards/rows: a primary-color wash while
+         the widget is pressed. Radius included so a use site needs exactly one
+         child element; an inline style_radius on the site overrides it. -->
+    <style name="press_wash" bg_color="#primary" bg_opa="30%" radius="#border_radius"/>
+  </styles>
+  <!-- Registration requires a <view>; nothing ever instantiates this
+       component, so an empty lv_obj keeps it harmless. -->
+  <view extends="lv_obj"/>
+</component>

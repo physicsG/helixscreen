@@ -53,9 +53,18 @@ class RunoutProbeBackend : public AmsBackendMock {
         info.type = type_;
         info.filament_runout = runout_;
         if (bypass_) {
-            info.current_slot = -2; // what AmsState reads as "bypass active"
+            info.current_slot = -2;
         }
         return info;
+    }
+
+    /// Reported alongside the sentinel above, because a real backend answers
+    /// both from the same state. Overriding only get_system_info() left the
+    /// double claiming bypass through the getter while is_bypass_active() —
+    /// which reads the backend's own internal slot, not this override — still
+    /// said no. AmsState asks the predicate, so the double has to answer it.
+    [[nodiscard]] bool is_bypass_active() const override {
+        return bypass_ || AmsBackendMock::is_bypass_active();
     }
 
     void set_runout(bool v) {

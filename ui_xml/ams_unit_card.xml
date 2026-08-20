@@ -39,8 +39,8 @@
            the centered row, and get clipped at BOTH ends ("HTLF Claymore 1" read as
            "TLF Claym"). long_mode="dots" needs a bounded width to do anything. -->
       <text_body name="unit_name"
-                 text="Unit" translation_tag="Unit" width="1" flex_grow="1"
-                 height="#ams_unit_name_h" long_mode="dots" style_text_align="center"/>
+                 width="1" height="#ams_unit_name_h" text="Unit" translation_tag="Unit" flex_grow="1" long_mode="dots"
+                 style_text_align="center"/>
     </lv_obj>
     <!-- Body row: slot content on the left, environment/dryer indicator on the right.
          Keeping the indicator in the row (not stacked below) prevents it from growing

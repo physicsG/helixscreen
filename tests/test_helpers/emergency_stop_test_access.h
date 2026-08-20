@@ -31,6 +31,14 @@ class EmergencyStopOverlayTestAccess {
         o.suppress_recovery_until_.store(0, std::memory_order_relaxed);
     }
 
+    /// Set the user-initiated-restart flag the way the recovery dialog's
+    /// Restart path does. Tests driving a klippy READY need the flag armed to
+    /// exercise the expected-restart branch, and a test that arms it without
+    /// delivering READY must clear it or every later test inherits it.
+    static void set_restart_in_progress(EmergencyStopOverlay& o, bool in_progress) {
+        o.restart_in_progress_.store(in_progress, std::memory_order_relaxed);
+    }
+
     /// Drop the dependency pointers init() installed. Same singleton problem as
     /// reset_suppression(), but it outlives memory rather than a deadline: tests
     /// pass init() a stack local or fixture member (test_unified_recovery_dialog

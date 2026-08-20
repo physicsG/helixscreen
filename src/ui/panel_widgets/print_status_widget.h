@@ -15,6 +15,7 @@
 #include "esp_psram_thumbnail.h"
 #endif
 #include "print_history_manager.h"
+#include "print_lifecycle_state.h" // PrintState, job_holds_machine
 #include "printer_temperature_state.h"
 #include "subject_managed_panel.h"
 
@@ -141,7 +142,7 @@ class PrintStatusWidget : public PanelWidget {
         return &view_subject_;
     }
     // Test-only — drive on_print_state_changed without a real PrinterState change.
-    void on_print_state_changed_for_test(PrintJobState state) {
+    void on_print_state_changed_for_test(PrintState state) {
         on_print_state_changed(state);
     }
     // Test-only — destroy the singleton formatter regardless of refcount. Used
@@ -330,7 +331,7 @@ class PrintStatusWidget : public PanelWidget {
     static inline bool detailed_subjects_initialized_ = false;
 
     // Compact mode and state tracking
-    bool is_active_ = false; // PRINTING or PAUSED (drives view_subject_)
+    bool is_active_ = false; // job_holds_machine() (drives view_subject_)
     bool is_compact_ = false;
     bool is_column_ = false;
     bool last_print_available_ = false;
@@ -494,7 +495,7 @@ class PrintStatusWidget : public PanelWidget {
     /// filename invalidates the cached render instead of being served forever.
     [[nodiscard]] time_t get_last_print_source_modified() const;
     void handle_print_card_clicked();
-    void on_print_state_changed(PrintJobState state);
+    void on_print_state_changed(PrintState state);
     void on_print_thumbnail_path_changed(const char* path);
 #if defined(HELIX_PLATFORM_ESP32)
     /// Pull the current PSRAM thumbnail from PrinterState, hold a reference,

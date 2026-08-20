@@ -64,7 +64,7 @@ flowchart TB
 
 ### The contract: interface, NVI base, eight concretes
 
-`AmsBackend` (`include/ams_backend.h:58`) is the vendor-neutral surface: `start()`/`stop()` lifecycle, a string-event system (`EVENT_STATE_CHANGED`, `EVENT_SLOT_CHANGED`, `EVENT_LOAD_COMPLETE`, ... at `:72`-80), state queries, filament operations, and a set of default capability questions — `manages_active_spool()` (`:188`), `tracks_weight_locally()` (`:202`), `has_firmware_spool_persistence()` (`:2004`), and the static `sensor_belongs_to_backend()` dispatcher (`:2191`) that keeps each backend's filament-sensor name patterns in its own file (#1054).
+`AmsBackend` (`include/ams_backend.h:58`) is the vendor-neutral surface: `start()`/`stop()` lifecycle, a string-event system (`EVENT_STATE_CHANGED`, `EVENT_SLOT_CHANGED`, `EVENT_LOAD_COMPLETE`, ... at `:72`-80), state queries, filament operations, and a set of default capability questions — `manages_active_spool()` (`:188`), `tracks_weight_locally()` (`:202`), `has_firmware_spool_persistence()` (`:2004`), `publish_external_spool_lane()` (`:1410`), and the static `sensor_belongs_to_backend()` dispatcher (`:2191`) that keeps each backend's filament-sensor name patterns in its own file (#1054).
 
 No real backend implements the interface directly: all eight derive from `AmsSubscriptionBackend` (`include/ams_subscription_backend.h:33`), a non-virtual-interface base that makes `start()`/`stop()` and the load/unload/select/change operations `final` and dispatches to `do_*` hooks. That base is where shared discipline lives — it owns the `SubscriptionGuard` for the backend's Moonraker subscription (`:323`) and runs the print-active gate *plus a test-and-set in-flight claim* in the public entry points, so a backend cannot ship without the gate (one did, `180a71c7d`) and two surfaces cannot start concurrent ops on the same backend.
 
@@ -94,6 +94,19 @@ The capability questions are where per-system behavior differences surface — a
 | `manages_active_spool()` | AFC, AD5X IFS (always); Happy Hare when its Spoolman mode is not OFF | Skip the direct `set_active_spool` push — the firmware calls Spoolman itself (#644) |
 | `tracks_weight_locally()` | AFC | Don't overwrite slot weights from Spoolman polling — the backend's own count is fresher |
 | `has_firmware_spool_persistence()` | Happy Hare (MMU_GATE_MAP SPOOLID), AFC (SET_SPOOL_ID) | ToolState may clear assignments when a slot loses its spool; otherwise ToolState is the source of truth and the sync reverses |
+| `publish_external_spool_lane()` (overridden) | CFS, AD5X IFS, AFC, Happy Hare | On the bypass-engage edge and every external-spool identity change, `AmsState` asks every backend to publish the extern spool as the lane one past its last slot in the shared `lane_data` namespace (OrcaSlicer picks it up as an extra tray). The override builds the record via one shared helper (`helix::ams::publish_external_lane`); backends with no bypass keep the default no-op. Which store it goes through differs — see FILAMENT_MANAGEMENT.md § "Bypass companions" |
+
+### Bypass transitions notify, layers own the policy
+
+The `any_bypass_active()` edge in `sync_from_backend()` (the same edge that
+bumps `slots_version_` for the pre-print check) is a *notification bus*, not
+an implementation site. It makes exactly two calls, and neither policy lives
+in the AMS layer: `FilamentSensorManager::on_bypass_active_changed()` (the
+sensor layer arms/restores RUNOUT-role sensors at the firmware level) and
+`publish_external_spool_lane()` on each backend (the capability question
+above). The vendor/layering rule from the repo root applies in full — no
+backend implements the sensor policy, and the sensor manager never names a
+filament system.
 
 ### Events in: queue first, lock and write on the main thread
 

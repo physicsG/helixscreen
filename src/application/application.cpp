@@ -2735,12 +2735,23 @@ void Application::settle_type_mismatch_warning() {
 }
 
 void Application::maybe_warn_type_mismatch(const helix::PrinterDiscovery& hardware) {
-    if (m_type_mismatch_shown)
+    // The gates below all decline silently in normal operation. A debug bundle
+    // is the only view we get of a reporter's run, so each one says why it
+    // declined: without that there is no way to tell a 68%-confidence near-miss
+    // apart from detection returning nothing at all (bundle TZT85MQ3).
+    if (m_type_mismatch_shown) {
+        spdlog::debug("[Application] Type mismatch check skipped: already prompted this session");
         return;
-    if (std::getenv("HELIX_MOCK_PRINTER"))
-        return; // mock clears the saved type each launch (moonraker_manager.cpp)
-    if (Config::get_instance()->is_wizard_required() || is_wizard_active())
+    }
+    if (std::getenv("HELIX_MOCK_PRINTER")) {
+        // mock clears the saved type each launch (moonraker_manager.cpp)
+        spdlog::debug("[Application] Type mismatch check skipped: mock printer");
         return;
+    }
+    if (Config::get_instance()->is_wizard_required() || is_wizard_active()) {
+        spdlog::debug("[Application] Type mismatch check skipped: wizard required or active");
+        return;
+    }
 
     auto* cfg = Config::get_instance();
     const std::string saved = cfg->get<std::string>(cfg->df() + helix::wizard::PRINTER_TYPE, "");
@@ -2748,11 +2759,21 @@ void Application::maybe_warn_type_mismatch(const helix::PrinterDiscovery& hardwa
         cfg->get<std::string>(cfg->df() + helix::wizard::TYPE_MISMATCH_SHOWN_FOR, "");
 
     auto detected = PrinterDetector::auto_detect(hardware);
-    if (!detected.detected())
+    const auto decision = detected.detected()
+                              ? PrinterDetector::classify_type_mismatch(saved, detected.type_name,
+                                                                        detected.confidence, flag)
+                              : PrinterDetector::MismatchDecision::NoDetection;
+    if (decision != PrinterDetector::MismatchDecision::Warn) {
+        // info, not debug: this runs once per discovery pass, and it is the line
+        // that answers "why was there no prompt?" in a bundle.
+        spdlog::info("[Application] No type mismatch prompt: detected '{}' at {}% (runner-up '{}' "
+                     "at {}%), saved '{}', dismissed-for '{}', need >={}% - {}",
+                     detected.type_name, detected.confidence, detected.runner_up_type_name,
+                     detected.runner_up_confidence, saved, flag,
+                     PrinterDetector::MISMATCH_MIN_CONFIDENCE,
+                     PrinterDetector::mismatch_decision_name(decision));
         return;
-    if (!PrinterDetector::should_warn_type_mismatch(saved, detected.type_name, detected.confidence,
-                                                    flag))
-        return;
+    }
 
     // Session guard: one prompt per boot regardless of which button dismisses it.
     m_type_mismatch_shown = true;
@@ -3824,6 +3845,9 @@ void Application::init_action_prompt() {
             }
 
             // Only track layers while printing or paused
+            // RAW_PRINT_STATE_OK: layer tracking. There are no layers during a
+            // preparing window, and admitting one would derive a layer number
+            // from the pre-print block's own Z moves.
             auto job_state = get_printer_state().get_print_job_state();
             if (job_state != PrintJobState::PRINTING && job_state != PrintJobState::PAUSED) {
                 return;

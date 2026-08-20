@@ -767,7 +767,10 @@ void MoonrakerClient::on_ws_message(const std::string& msg) {
                     get_printer_state().set_klippy_state_sync(KlippyState::READY);
                 });
 
-                // Emit event for UI layer to show success toast
+                // The event drives internal consumers (rediscovery below,
+                // connected observers) and routes to Ignore in the UI layer;
+                // the user-facing ready signal is the klippy_state observer
+                // in ui_emergency_stop.cpp.
                 emit_event(MoonrakerEventType::KLIPPY_READY, "Klipper ready", false);
 
                 // Unconditional retrigger (unlike notify_klippy_shutdown which

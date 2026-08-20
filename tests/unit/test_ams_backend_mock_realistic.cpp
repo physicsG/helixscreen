@@ -45,6 +45,21 @@ class FastTimingScope {
     double original_speedup_ = 1.0;
 };
 
+// Every case below that waits on the mock's operation thread is tagged [slow].
+//
+// They wait with wall-clock std::this_thread::sleep_for - 100ms to 1500ms sized
+// against the mock's phase timings - so under the 96-way parallel shard pool on a
+// loaded box the sleep expires before the phase advances and the assertion catches
+// an intermediate value. Observed twice: "realistic mode load operation phases"
+// reading a mid-load phase, and "error recovery sequence" seeing
+// infer_error_segment()==4 where NONE was expected. Both pass in isolation and in
+// their own shard, which is what makes them read as an unrelated regression in
+// whatever branch happens to be running.
+//
+// [slow] keeps them out of the parallel run. The real fix is condition-based
+// waiting (tests/CLAUDE.md, "condition-based-waiting"), which would let them come
+// back into the default run.
+
 TEST_CASE("AmsBackendMock realistic mode defaults", "[ams][mock][realistic]") {
     AmsBackendMock backend(4);
 
@@ -65,7 +80,8 @@ TEST_CASE("AmsBackendMock realistic mode defaults", "[ams][mock][realistic]") {
     }
 }
 
-TEST_CASE("AmsBackendMock realistic mode load operation phases", "[ams][mock][realistic][load]") {
+TEST_CASE("AmsBackendMock realistic mode load operation phases",
+          "[ams][mock][realistic][load][slow]") {
     FastTimingScope timing_guard; // RAII: 1000x speedup, auto-restored
 
     // Declare before backend so they outlive it (backend destructor joins threads)
@@ -135,7 +151,7 @@ TEST_CASE("AmsBackendMock realistic mode load operation phases", "[ams][mock][re
 }
 
 TEST_CASE("AmsBackendMock realistic mode unload operation phases",
-          "[ams][mock][realistic][unload]") {
+          "[ams][mock][realistic][unload][slow]") {
     FastTimingScope timing_guard; // RAII: 1000x speedup, auto-restored
 
     // Declare before backend so they outlive it (backend destructor joins threads)
@@ -193,7 +209,7 @@ TEST_CASE("AmsBackendMock realistic mode unload operation phases",
     backend.stop();
 }
 
-TEST_CASE("AmsBackendMock simple mode skips extra phases", "[ams][mock][realistic][simple]") {
+TEST_CASE("AmsBackendMock simple mode skips extra phases", "[ams][mock][realistic][simple][slow]") {
     FastTimingScope timing_guard; // RAII: 1000x speedup, auto-restored
 
     // Declare before backend so they outlive it (backend destructor joins threads)
@@ -285,7 +301,8 @@ TEST_CASE("AmsBackendMock realistic mode completes to IDLE",
     backend.stop();
 }
 
-TEST_CASE("AmsBackendMock realistic mode can be cancelled", "[ams][mock][realistic][cancel]") {
+TEST_CASE("AmsBackendMock realistic mode can be cancelled",
+          "[ams][mock][realistic][cancel][slow]") {
     FastTimingScope timing_guard; // RAII: 1000x speedup, auto-restored
 
     AmsBackendMock backend(4);
@@ -410,7 +427,7 @@ TEST_CASE("AmsBackendMock PAUSED state handling", "[ams][mock][realistic][paused
     backend.stop();
 }
 
-TEST_CASE("AmsBackendMock error recovery sequence", "[ams][mock][realistic][recovery]") {
+TEST_CASE("AmsBackendMock error recovery sequence", "[ams][mock][realistic][recovery][slow]") {
     FastTimingScope timing_guard; // RAII: 1000x speedup, auto-restored
 
     // Declare before backend so they outlive it (backend destructor joins threads)

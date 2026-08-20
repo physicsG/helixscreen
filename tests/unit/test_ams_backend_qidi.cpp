@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/print_state_test_drivers.h"
 #include "ams_backend_qidi.h"
 #include "ams_error.h"
 #include "ams_types.h"
@@ -1789,7 +1790,7 @@ struct QidiHomingGuardFixture : public LVGLTestFixture {
         QidiBoxTestAccess::set_fw_caps(*backend, /*m603=*/true, /*clear_nozzle=*/false);
     }
     void set_print_state(helix::PrintJobState s) {
-        lv_subject_set_int(state.get_print_state_enum_subject(), static_cast<int>(s));
+        helix::test::set_wire_state(state, s);
     }
     MoonrakerClientMock mock_client;
     helix::PrinterState state;

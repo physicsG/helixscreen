@@ -3284,6 +3284,7 @@
     "keypad_width_small",
     "keypad_width_tiny",
     "left_column_width",
+    "legend_dot_size",
     "light_icon_off",
     "light_icon_on",
     "list_header_padding",

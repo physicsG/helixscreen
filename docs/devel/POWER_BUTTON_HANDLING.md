@@ -268,4 +268,4 @@ This would let us:
 - ForgeX power config: `ad5m-forgex/macros/headless.cfg`
 - Klipper gcode_button docs: https://www.klipper3d.org/Config_Reference.html#gcode_button
 - Klipper action:prompt docs: https://www.klipper3d.org/G-Codes.html#action-commands
-- Linux KEY_POWER: `/usr/include/linux/input-event-codes.h` (code 116)
+- Linux KEY_POWER: <linux/input-event-codes.h> on the target device (code 116)

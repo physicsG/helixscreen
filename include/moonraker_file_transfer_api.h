@@ -105,6 +105,22 @@ class MoonrakerFileTransferAPI : public ITransfersAPI {
      * @param on_success Callback with partial file content as string
      * @param on_error Error callback
      */
+    /**
+     * @brief Download only the last N bytes of a file (for scanning footers)
+     *
+     * HTTP suffix range (`bytes=-N`). Slicers that emit their settings block
+     * after the print body — OrcaSlicer's `filament_colour` among them — put the
+     * data a preamble scan can never reach.
+     *
+     * @param root Root directory ("gcodes", "config", etc.)
+     * @param path File path relative to root
+     * @param max_bytes Maximum bytes to download from the end
+     * @param on_success Callback with the trailing file content as string
+     * @param on_error Error callback
+     */
+    void download_file_tail(const std::string& root, const std::string& path, size_t max_bytes,
+                            StringCallback on_success, ErrorCallback on_error) override;
+
     void download_file_partial(const std::string& root, const std::string& path, size_t max_bytes,
                                StringCallback on_success, ErrorCallback on_error) override;
 

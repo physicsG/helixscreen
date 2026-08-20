@@ -44,6 +44,7 @@ void register_temp_graph_widget();
 void register_tool_switcher_widget();
 void register_nozzle_temps_widget();
 void register_active_spool_widget();
+void register_bypass_widget();
 #if HELIX_HAS_CAMERA
 void register_camera_widget();
 #endif
@@ -75,6 +76,7 @@ static std::vector<PanelWidgetDef> s_widget_defs = {
     {"temp_graph",       "Temperature Graph", "chart_line",       "Live temperature graph with configurable sensors", nullptr,         nullptr,                               false, 2, 2, 1, 1, 6, 4, true},
     {"preheat",          "Preheat",           "heat_wave",        "Quick preheat with material selection",            nullptr,            nullptr,                               false, 3, 1, 2, 1, 4, 1},
     {"ams",              "Multi-Filament System Status",        "filament",         "Multi-Filament System spool status and control",       "ams_slot_count",     "Requires Multi-Filament System or MMU hardware",        false, 1, 1, 1, 1, 4, 2},
+    {"bypass",           "Bypass",            "source_branch",    "Toggle external spool bypass",  "ams_supports_bypass", "Requires a filament system with bypass", false, 1, 1, 1, 1, 2, 1},
     {"active_spool",     "Active Spool",      "inventory",  "Currently loaded spool info",     nullptr,                  nullptr,                           false, 1, 1, 1, 1, 4, 2},
     {"filament",         "Filament Sensor",   "filament_alert",   "Filament runout detection status",  "filament_sensor_count", "No filament sensor detected",      true, 1, 1, 1, 1, 2, 1},
     {"humidity",         "Humidity",          "water",            "Enclosure humidity sensor readings",         "humidity_sensor_count", "No humidity sensor detected",       false, 1, 1, 1, 1, 2, 2},
@@ -87,7 +89,7 @@ static std::vector<PanelWidgetDef> s_widget_defs = {
     {"job_queue",        "Job Queue",         "progress_clock",   "Queued print jobs",        nullptr,              nullptr,                               false, 2, 2, 2, 1, 4, 3},
     //                                                                                                        gate_subject          gate_hint                              default col row min_c min_r max_c max_r  multi  half_c half_r
     {"tips",             "Tips",              "help_circle",      "Rotating tips and helpful information",             nullptr,              nullptr,                               true,  4, 2, 2, 1, 6, 2},
-    {"clog_detection",   "Clog Detection",    "water",            "Filament clog/flow detection meter",   "clog_meter_mode",    "Requires clog detection hardware",    false, 1, 1, 1, 1, 2, 2},
+    {"clog_detection",   "Clog Detection",    "gauge",            "Filament clog/flow detection meter",   "clog_meter_mode",    "Requires clog detection hardware",    false, 1, 1, 1, 1, 2, 2},
     {"print_stats",      "Print Stats",       "printer_3d",       "Print history statistics",      nullptr,              nullptr,                               false, 2, 2, 2, 1, 3, 2},
     {"gcode_console",    "GCode Console",     "console",          "Open G-code command console",    nullptr,              nullptr,                               false, 1, 1, 1, 1, 1, 1},
 #if HELIX_HAS_CAMERA
@@ -181,6 +183,7 @@ void init_widget_registrations() {
     register_motion_widget();
     register_preheat_widget();
     register_active_spool_widget();
+    register_bypass_widget();
     register_tool_switcher_widget();
     register_nozzle_temps_widget();
 #if HELIX_HAS_CAMERA

@@ -212,12 +212,16 @@ cross-field rules that can drop the **whole record** instead of merging:
   `suppress_rebind_firmware_{old,new}_id` — the id firmware last reported
   before the write and the just-written id don't fire; a third id fires and
   consumes the expectation.
-- **Rule 2 — eject.** `AmsBackend::firmware_reports_spool_ids()` (true only
+- **Rule 2 — eject.** `AmsBackend::printer_reports_spool_ids()` (true only
   on AFC and Happy Hare) arms **only** this rule: there a firmware id ≤ 0
   while the override holds a positive id is the plugin's own eject signal,
   and it clears the record only when the `ams/keep_spool_info_on_eject`
   setting is off (default on — "Keep Spool Info on Eject" toggle in the AMS
-  Management overlay, shown only where the capability is true).
+  Management overlay, shown only where the capability is true). Caveat: with
+  AFC's own retention on (`remember_spool = true` everywhere) firmware never
+  reports the eject zero, so this rule cannot fire and the toggle is a no-op —
+  `printer_retains_spool_info()` detects that shape and the overlay disables
+  the toggle with a note instead.
 
 Sentinel values that fall through to firmware:
 
@@ -250,7 +254,7 @@ Four distinct clear paths, handled separately:
 - **Merge-rule clears (re-bind / eject).** The two cross-field rules in
   `merge_override()` (§5) can drop the whole record during `apply_overrides`:
   an external re-bind (firmware reports a different positive spool id), or —
-  only where `firmware_reports_spool_ids()` is true and the setting is off —
+  only where `printer_reports_spool_ids()` is true and the setting is off —
   a firmware eject signal.
 - **Self-wipe prevention.** When the user edits the color on IFS, the IFS
   backend pre-updates `last_firmware_color_` to the user's new RGB before

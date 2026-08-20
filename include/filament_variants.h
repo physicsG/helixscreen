@@ -49,6 +49,57 @@ namespace filament {
 std::string extract_base_material(std::string_view name);
 
 /**
+ * @brief Are these two names the same polymer, for compatibility purposes?
+ *
+ * Exact match, else reduce both through extract_base_material() and compare
+ * their filament-database compat groups. The reduction is the point: comparing
+ * groups on RAW names sends anything that is not literally a MATERIALS[] row
+ * ("PLA SnapSpeed", "HT-PLA-GF", most spool-database names) into
+ * are_materials_compatible()'s unknown-material fallback, which answers
+ * "compatible with everything".
+ *
+ * A name that survives reduction unrecognised still gets that permissive
+ * answer, deliberately: a firmware-only or hand-typed material should not block
+ * the user. The difference is that a name we CAN read is now read.
+ *
+ * @see grades_match() for the finer question this one does not ask.
+ */
+bool materials_compatible(std::string_view a, std::string_view b);
+
+/**
+ * @brief Do two names carry the same set of grade-significant fillers?
+ *
+ * One step finer than extract_base_material(): both "PLA+" and "PLA-CF" reduce
+ * to PLA, but only the second is a different thing to print. The axis is
+ * whether the filament carries solid particles, not what the marketing calls
+ * the grade -- fiber (CF/GF), foaming (AERO/LW) and particle fills (Wood/
+ * Marble/Metal/Glow) change flow, cooling and nozzle wear; "+", Silk, Matte and
+ * the HS/HF/HT speed and temperature ratings do not.
+ *
+ * Presupposes the base materials already match: this answers "same polymer,
+ * different grade?", never "same polymer?". Callers gate on
+ * FilamentMapper::materials_match() first.
+ *
+ * Unparseable names carry no filler, so an unrecognised string matches any
+ * other unfilled name. Staying silent on a name we cannot read is the safe
+ * direction for a warning.
+ *
+ * @param a First material name, possibly an alias, possibly decorated.
+ * @param b Second material name.
+ * @return true when both sides carry the same fillers (usually none).
+ */
+bool grades_match(std::string_view a, std::string_view b);
+
+/**
+ * @brief Does this name carry any grade-significant filler?
+ *
+ * The directional half of grades_match(): tells a caller which of two
+ * mismatched names is the abrasive, low-flow one, so a warning can say which
+ * way the risk runs.
+ */
+bool is_filled_grade(std::string_view name);
+
+/**
  * @brief Display family heading for a catalog type string.
  *
  * Thin wrapper over extract_base_material() that guarantees a non-empty result:

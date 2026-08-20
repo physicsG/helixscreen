@@ -727,6 +727,42 @@ TEST_CASE("Happy Hare endless spool is read-only on multi-unit",
     CHECK(result.result == AmsResult::NOT_SUPPORTED);
 }
 
+// Bypass: Happy Hare's selector sits on the bypass position and reports gate -2.
+// do_unload_filament() ignores the slot entirely and sends MMU_UNLOAD, so the
+// sentinel needs no special handling here — but nothing pinned that, and the UI
+// decision layer that DID refuse -2 was fixed by teaching it the sentinel is a
+// real target. This asserts the backend half of that contract.
+TEST_CASE("Happy Hare unload_filament under bypass sends MMU_UNLOAD", "[ams][happy_hare][bypass]") {
+    AmsBackendHappyHareTestHelper helper;
+    helper.initialize_test_gates(4);
+    helper.set_running(true);
+    helper.set_filament_loaded(true);
+    helper.set_current_slot(-2); // bypass sentinel
+
+    auto result = helper.unload_filament(-2);
+
+    REQUIRE(result.success());
+    REQUIRE(helper.has_gcode_containing("MMU_UNLOAD"));
+}
+
+TEST_CASE("Happy Hare unload_filament under bypass still refuses an empty toolhead",
+          "[ams][happy_hare][bypass]") {
+    // Bypass being engaged is not itself evidence of filament: the selector can
+    // sit on the bypass position with nothing fed. The backend's own guard must
+    // still bite, so the UI's affordance and the backend's refusal agree.
+    AmsBackendHappyHareTestHelper helper;
+    helper.initialize_test_gates(4);
+    helper.set_running(true);
+    helper.set_filament_loaded(false);
+    helper.set_current_slot(-2);
+
+    auto result = helper.unload_filament(-2);
+
+    REQUIRE_FALSE(result.success());
+    REQUIRE(result.result == AmsResult::WRONG_STATE);
+    REQUIRE_FALSE(helper.has_gcode_containing("MMU_UNLOAD"));
+}
+
 // ============================================================================
 // eject_lane() Tests
 // ============================================================================

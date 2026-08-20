@@ -362,6 +362,14 @@ int count_z_steppers(const std::vector<std::string>& steppers) {
     return count;
 }
 
+// Heuristic types that corroborate an identification but can never establish
+// one. Build volume is shared by dozens of printers - it narrows a field, it
+// does not name a machine - so a printer whose ONLY evidence is its bed size
+// is not identified at all.
+bool is_corroborating_only(const std::string& type) {
+    return type == "build_volume_range";
+}
+
 // Check if build volume is within specified range
 bool check_build_volume_range(const BuildVolume& volume, const json& heuristic) {
     // Get the dimensions we need to check
@@ -659,6 +667,7 @@ PrinterDetectionResult execute_printer_heuristics(const json& printer,
     struct HeuristicMatch {
         int confidence;
         std::string reason;
+        bool corroborating; // may support a match, may never establish one
     };
     std::vector<HeuristicMatch> matches;
 
@@ -670,7 +679,8 @@ PrinterDetectionResult execute_printer_heuristics(const json& printer,
             return {"", 0, "", 0};
         }
         if (confidence > 0) {
-            matches.push_back({confidence, heuristic.value("reason", "")});
+            matches.push_back({confidence, heuristic.value("reason", ""),
+                               is_corroborating_only(heuristic.value("type", ""))});
         }
     }
 
@@ -682,18 +692,32 @@ PrinterDetectionResult execute_printer_heuristics(const json& printer,
     std::sort(matches.begin(), matches.end(),
               [](const auto& a, const auto& b) { return a.confidence > b.confidence; });
 
+    // A build volume is shared by dozens of printers - at 215-235mm up to 15
+    // database windows cover the same point. It can support an identification
+    // made on other evidence, but it can never make one on its own, so the base
+    // score must come from a heuristic that actually names this printer. With
+    // nothing but volume matching, the printer scores nothing at all.
+    auto identifying =
+        std::find_if(matches.begin(), matches.end(), [](const auto& m) { return !m.corroborating; });
+    if (identifying == matches.end()) {
+        spdlog::debug("[PrinterDetector] {} matched only corroborating evidence "
+                      "(build volume) - not identifying, scoring 0",
+                      printer_name);
+        return {"", 0, "", 0};
+    }
+
     // Combined scoring: base + bonus for additional matches
     // 3 points per extra match, capped at 12 (4 extra matches worth)
     constexpr int BONUS_PER_EXTRA_MATCH = 3;
     constexpr int MAX_BONUS = 12;
 
-    int base_confidence = matches[0].confidence;
+    int base_confidence = identifying->confidence;
     int extra_matches = static_cast<int>(matches.size()) - 1;
     int bonus = std::min(extra_matches * BONUS_PER_EXTRA_MATCH, MAX_BONUS);
     int combined = std::min(base_confidence + bonus, 100);
 
     // Format reason with match count if multiple matches
-    std::string reason = matches[0].reason;
+    std::string reason = identifying->reason;
     if (matches.size() > 1) {
         reason += fmt::format(" (+{} more)", matches.size() - 1);
     }
@@ -1700,6 +1724,31 @@ PrinterDetectionResult PrinterDetector::auto_detect(const helix::PrinterDiscover
     return detect(hw_data);
 }
 
+std::string PrinterDetector::apply_type_choice(Config* config, const std::string& type_name,
+                                               const helix::PrinterDiscovery& discovery) {
+    if (!config || type_name.empty()) {
+        spdlog::warn("[PrinterDetector] apply_type_choice called with no config or empty type");
+        return {};
+    }
+
+    config->set<std::string>(config->df() + helix::wizard::PRINTER_TYPE, type_name);
+
+    std::string applied;
+    const std::string preset = get_preset_for_name(type_name);
+    if (!preset.empty()) {
+        applied = apply_preset_with_variants(config, preset, discovery);
+        if (!applied.empty()) {
+            spdlog::info("[PrinterDetector] Applied preset '{}' for user-chosen printer '{}'",
+                         applied, type_name);
+        }
+    }
+
+    config->save();
+    get_printer_state().set_printer_type_sync(type_name);
+    spdlog::info("[PrinterDetector] Printer type set by user: '{}'", type_name);
+    return applied;
+}
+
 bool PrinterDetector::auto_detect_and_save(const helix::PrinterDiscovery& discovery,
                                            Config* config) {
     if (!config) {
@@ -1732,36 +1781,43 @@ bool PrinterDetector::auto_detect_and_save(const helix::PrinterDiscovery& discov
     // Run detection
     PrinterDetectionResult result = auto_detect(discovery);
 
-    if (result.confidence > 0) {
-        spdlog::info("[PrinterDetector] Auto-detected printer: '{}' ({}% confidence, reason: {})",
-                     result.type_name, result.confidence, result.reason);
-
-        // Save to config
-        config->set<std::string>(config->df() + helix::wizard::PRINTER_TYPE, result.type_name);
-        if (!result.preset.empty()) {
-            std::string applied = apply_preset_with_variants(config, result.preset, discovery);
-            if (!applied.empty()) {
-                spdlog::info("[PrinterDetector] Applied preset '{}' for printer '{}'", applied,
-                             result.type_name);
-            }
-        }
-        config->save();
-
-        // Update PrinterState so home panel gets correct image and capabilities
-        get_printer_state().set_printer_type_sync(result.type_name);
-
-        // Strip heuristics to reclaim memory — detection is a one-time operation
-        compact_database();
-
-        return true;
+    if (!meets_autosave_threshold(result)) {
+        // Ambiguous. Persist nothing: PRINTER_TYPE stays empty so the wizard's
+        // identify step offers its Custom/Other default for the user to correct,
+        // and a later reconnect with a fuller discovery snapshot gets another
+        // chance instead of being locked out by a non-empty saved type.
+        spdlog::info("[PrinterDetector] Detection below auto-save bar (best '{}' at {}%, "
+                     "runner-up '{}' at {}%, need >={}%) - leaving printer type unset "
+                     "for the user to choose",
+                     result.type_name, result.confidence, result.runner_up_type_name,
+                     result.runner_up_confidence, AUTOSAVE_MIN_CONFIDENCE);
+        // Deliberately NOT compacting: compact_database() strips the heuristics,
+        // and without them a later attempt could never match anything. Holding
+        // them is the cost of staying open to a better answer.
+        return false;
     }
 
-    spdlog::info("[PrinterDetector] No printer type detected from hardware fingerprints");
+    spdlog::info("[PrinterDetector] Auto-detected printer: '{}' ({}% confidence, reason: {})",
+                 result.type_name, result.confidence, result.reason);
 
-    // Strip heuristics to reclaim memory — detection is a one-time operation
+    // Save to config
+    config->set<std::string>(config->df() + helix::wizard::PRINTER_TYPE, result.type_name);
+    if (!result.preset.empty()) {
+        std::string applied = apply_preset_with_variants(config, result.preset, discovery);
+        if (!applied.empty()) {
+            spdlog::info("[PrinterDetector] Applied preset '{}' for printer '{}'", applied,
+                         result.type_name);
+        }
+    }
+    config->save();
+
+    // Update PrinterState so home panel gets correct image and capabilities
+    get_printer_state().set_printer_type_sync(result.type_name);
+
+    // Strip heuristics to reclaim memory — the type is settled now.
     compact_database();
 
-    return false;
+    return true;
 }
 
 /// Case-insensitive check whether the configured printer type contains @p needle.
@@ -1850,15 +1906,53 @@ std::string PrinterDetector::screws_tilt_direction_override() {
     return "";
 }
 
+bool PrinterDetector::meets_autosave_threshold(const PrinterDetectionResult& result) {
+    if (result.type_name.empty() || !result.detected())
+        return false;
+    return result.confidence >= AUTOSAVE_MIN_CONFIDENCE;
+}
+
+const char* PrinterDetector::mismatch_decision_name(MismatchDecision decision) {
+    switch (decision) {
+    case MismatchDecision::Warn:
+        return "warn";
+    case MismatchDecision::NoDetection:
+        return "no detection";
+    case MismatchDecision::ConfidenceTooLow:
+        return "confidence below threshold";
+    case MismatchDecision::MatchesSavedType:
+        return "detected type matches saved type";
+    case MismatchDecision::SavedTypeNotSpecific:
+        return "saved type is unset or not specific";
+    case MismatchDecision::AlreadyDismissed:
+        return "already answered for this saved type";
+    }
+    return "unknown";
+}
+
+PrinterDetector::MismatchDecision
+PrinterDetector::classify_type_mismatch(const std::string& saved_type,
+                                        const std::string& detected_type, int detected_confidence,
+                                        const std::string& flag_value) {
+    // Emptiness is checked before confidence so a no-detection pass is
+    // distinguishable in the log from a real candidate that scored short.
+    if (detected_type.empty())
+        return MismatchDecision::NoDetection;
+    if (detected_confidence < MISMATCH_MIN_CONFIDENCE)
+        return MismatchDecision::ConfidenceTooLow;
+    if (detected_type == saved_type)
+        return MismatchDecision::MatchesSavedType;
+    if (saved_type.empty() || saved_type == "Custom/Other" || saved_type == "Unknown")
+        return MismatchDecision::SavedTypeNotSpecific;
+    if (flag_value == saved_type)
+        return MismatchDecision::AlreadyDismissed;
+    return MismatchDecision::Warn;
+}
+
 bool PrinterDetector::should_warn_type_mismatch(const std::string& saved_type,
                                                 const std::string& detected_type,
                                                 int detected_confidence,
                                                 const std::string& flag_value) {
-    if (detected_confidence < 70)
-        return false;
-    if (detected_type.empty() || detected_type == saved_type)
-        return false;
-    if (saved_type.empty() || saved_type == "Custom/Other" || saved_type == "Unknown")
-        return false;
-    return flag_value != saved_type;
+    return classify_type_mismatch(saved_type, detected_type, detected_confidence, flag_value) ==
+           MismatchDecision::Warn;
 }

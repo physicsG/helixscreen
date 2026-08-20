@@ -237,6 +237,221 @@ TEST_CASE("material_mismatches_in: non-AMS external spool mismatch",
     CHECK(out[0].loaded_material == "PLA");
 }
 
+TEST_CASE("material_mismatches_in: bypass print compares external spool, not lanes",
+          "[print-start][gate-pipeline]") {
+    // K2 CFS regression: file sliced ASA-GF on lane 2, bypass engaged,
+    // external spool set to Spoolman PLA. The lane mapping is irrelevant —
+    // the dialog must name the external spool's material.
+    auto make = [](const char* spool_material) {
+        return ctx_with([&](PrintStartContext& c) {
+            c.has_detail_view = true;
+            c.ams_available = true; // AMS present — bypass is what redirects
+            c.any_bypass_active = true;
+            c.tools_used = {1};
+            c.filament_color_count = 4; // full profile palette, one tool used
+            GcodeToolInfo t;
+            t.tool_index = 1;
+            t.material = "ASA-GF";
+            c.tool_info = {t};
+            ToolMapping m; // lane mapping would be a MATCH — must be ignored
+            m.tool_index = 1;
+            m.mapped_slot = 1;
+            m.material_mismatch = false;
+            c.mappings = {m};
+            SlotInfo spool;
+            spool.material = spool_material;
+            c.external_spool = spool;
+        });
+    };
+    auto out = material_mismatches_in(make("PLA"));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].tool_index == 1);
+    CHECK(out[0].expected_material == "ASA-GF");
+    CHECK(out[0].loaded_material == "PLA");
+
+    // Exact same material (case-insensitive) stays silent.
+    CHECK(material_mismatches_in(make("asa-gf")).empty());
+
+    // Same comparator as every other path: a same-family grade change
+    // (ASA vs ASA-GF) is not a MATERIAL mismatch. It is still reported, as a
+    // grade change, by the second pass — see the grade cases below.
+    auto grade = material_mismatches_in(make("ASA"));
+    REQUIRE(grade.size() == 1);
+    CHECK(grade[0].grade_only);
+    CHECK(material_mismatches_in(make("ASA-CF"))[0].grade_only);
+
+    // Unknown spool material — nothing to compare, stay silent.
+    CHECK(material_mismatches_in(make("")).empty());
+}
+
+// ---------------------------------------------------------------------------
+// Grade mismatches — same polymer, different filler
+// ---------------------------------------------------------------------------
+
+TEST_CASE("material_mismatches_in: non-AMS grade change is flagged grade_only",
+          "[print-start][gate-pipeline][grade]") {
+    // materials_match() passes (both reduce to ASA, same compat group), so the
+    // hard mismatch stays silent. The grade pass is what speaks up.
+    auto make = [](const char* file_material, const char* spool_material) {
+        return ctx_with([&](PrintStartContext& c) {
+            c.has_detail_view = true;
+            c.ams_available = false;
+            c.filament_materials = {file_material};
+            SlotInfo spool;
+            spool.material = spool_material;
+            c.external_spool = spool;
+        });
+    };
+
+    auto out = material_mismatches_in(make("ASA-GF", "ASA"));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].grade_only);
+    CHECK(out[0].expected_material == "ASA-GF");
+    CHECK(out[0].loaded_material == "ASA");
+
+    // Marketing grades are not a grade change.
+    CHECK(material_mismatches_in(make("PLA+", "PLA")).empty());
+    CHECK(material_mismatches_in(make("Silk PLA", "PLA")).empty());
+
+    // A real material mismatch is NOT grade_only — the harder finding wins.
+    auto hard = material_mismatches_in(make("ABS", "PLA"));
+    REQUIRE(hard.size() == 1);
+    CHECK_FALSE(hard[0].grade_only);
+}
+
+TEST_CASE("material_mismatches_in: bypass grade change is flagged grade_only",
+          "[print-start][gate-pipeline][grade]") {
+    // The bypass branch runs the same two comparisons as the non-AMS branch,
+    // against the external spool rather than the mapped lane.
+    auto make = [](const char* spool_material) {
+        return ctx_with([&](PrintStartContext& c) {
+            c.has_detail_view = true;
+            c.ams_available = true;
+            c.any_bypass_active = true;
+            c.tools_used = {1};
+            c.filament_color_count = 4;
+            GcodeToolInfo t;
+            t.tool_index = 1;
+            t.material = "ASA-GF";
+            c.tool_info = {t};
+            ToolMapping m;
+            m.tool_index = 1;
+            m.mapped_slot = 1;
+            m.material_mismatch = false;
+            c.mappings = {m};
+            SlotInfo spool;
+            spool.material = spool_material;
+            c.external_spool = spool;
+        });
+    };
+
+    auto out = material_mismatches_in(make("ASA"));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].grade_only);
+    CHECK(out[0].tool_index == 1);
+
+    // Same grade, and a marketing suffix on the same grade, stay silent.
+    CHECK(material_mismatches_in(make("asa-gf")).empty());
+    CHECK(material_mismatches_in(make("ASA-GF+")).empty());
+}
+
+TEST_CASE("material_mismatches_in: AMS grade change is flagged on a matched lane",
+          "[print-start][gate-pipeline][grade]") {
+    // material_mismatch is false — FilamentMapper considers the lane a match —
+    // yet the lane holds the unfilled grade of a filled file.
+    auto make = [](const char* slot_material, double weight) {
+        return ctx_with([&](PrintStartContext& c) {
+            c.has_detail_view = true;
+            c.ams_available = true;
+            GcodeToolInfo t;
+            t.tool_index = 0;
+            t.material = "PLA-CF";
+            c.tool_info = {t};
+            ToolMapping m;
+            m.tool_index = 0;
+            m.mapped_slot = 0;
+            m.material_mismatch = false;
+            c.mappings = {m};
+            AvailableSlot s;
+            s.slot_index = 0;
+            s.backend_index = -1;
+            s.material = slot_material;
+            c.available_slots = {s};
+            FileMetadata md;
+            md.filament_weights = {weight};
+            c.metadata = md;
+        });
+    };
+
+    auto out = material_mismatches_in(make("PLA", 12.0));
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].grade_only);
+    CHECK(out[0].expected_material == "PLA-CF");
+    CHECK(out[0].loaded_material == "PLA");
+
+    // Same filler -> silent.
+    CHECK(material_mismatches_in(make("PLA-CF", 12.0)).empty());
+    // A tool the file never extrudes from is skipped, exactly as the hard
+    // mismatch pass skips it.
+    CHECK(material_mismatches_in(make("PLA", 0.0)).empty());
+}
+
+TEST_CASE("gate material_compatibility: grade-only dialog names the abrasive direction",
+          "[print-start][gate-pipeline][grade]") {
+    const auto& gates = default_print_start_gates();
+    const auto& gate = gates.back();
+    REQUIRE(gate.name == "material_compatibility");
+
+    auto ctx_for = [](const char* file_material, const char* spool_material) {
+        return ctx_with([&](PrintStartContext& c) {
+            c.has_detail_view = true;
+            c.ams_available = false;
+            c.filament_materials = {file_material};
+            SlotInfo spool;
+            spool.material = spool_material;
+            c.external_spool = spool;
+        });
+    };
+
+    // Loaded spool is the filled one: the direction that costs a nozzle.
+    auto abrasive = gate.evaluate(ctx_for("ASA", "ASA-GF"));
+    REQUIRE(abrasive.verdict == CheckResult::Verdict::Warn);
+    CHECK(abrasive.title != "Material Mismatch"); // lv_tr identity in the test locale
+    CHECK(abrasive.body.find("hardened") != std::string::npos);
+
+    // File is the filled one: slower and hotter than needed, no hardware risk.
+    auto benign = gate.evaluate(ctx_for("ASA-GF", "ASA"));
+    REQUIRE(benign.verdict == CheckResult::Verdict::Warn);
+    CHECK(benign.body.find("hardened") == std::string::npos);
+    CHECK(benign.body.find("ASA-GF") != std::string::npos);
+
+    // A hard mismatch keeps the original dialog, even alongside a grade row.
+    auto hard = gate.evaluate(ctx_for("PETG", "PLA"));
+    REQUIRE(hard.verdict == CheckResult::Verdict::Warn);
+    CHECK(hard.title == "Material Mismatch");
+}
+
+TEST_CASE("material_mismatches_in: bypass falls back to palette materials",
+          "[print-start][gate-pipeline]") {
+    // No mapping-card tool_info (e.g. scan produced tools_used but the card
+    // was never built) — the file's palette still names the used tool's
+    // material.
+    auto ctx = ctx_with([](PrintStartContext& c) {
+        c.has_detail_view = true;
+        c.any_bypass_active = true;
+        c.tools_used = {2};
+        c.filament_materials = {"PLA", "PLA", "ASA-GF", "PLA"};
+        SlotInfo spool;
+        spool.material = "PETG";
+        c.external_spool = spool;
+    });
+    auto out = material_mismatches_in(ctx);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].tool_index == 2);
+    CHECK(out[0].expected_material == "ASA-GF");
+    CHECK(out[0].loaded_material == "PETG");
+}
+
 // ---------------------------------------------------------------------------
 // default_print_start_gates: order + names
 // ---------------------------------------------------------------------------
@@ -280,6 +495,34 @@ TEST_CASE("gate bypass_engaged_lane_print: fires only on bypass + multi-color",
     CHECK(r.title == "Bypass Is Active");
     CHECK(r.proceed_label == "Start Anyway");
     CHECK(r.body.find("bypass") != std::string::npos);
+}
+
+TEST_CASE("gate bypass_engaged_lane_print: used-tool count beats palette size",
+          "[print-start][gate-pipeline]") {
+    // K2 CFS regression: a single-tool file sliced on a 4-lane profile carries
+    // a full palette (PLA;ASA-GF;ASA-GF;PLA) but extrudes from one tool. The
+    // print needs no lanes, so bypass is the legitimate source — no warning.
+    auto& g = default_print_start_gates()[1];
+    auto single_used_tool = ctx_with([](PrintStartContext& c) {
+        c.any_bypass_active = true;
+        c.filament_color_count = 4; // full profile palette
+        c.tools_used = {1};         // gcode scan: only T1 extrudes
+    });
+    CHECK(g.evaluate(single_used_tool).verdict == CheckResult::Verdict::Pass);
+
+    auto two_used_tools = ctx_with([](PrintStartContext& c) {
+        c.any_bypass_active = true;
+        c.filament_color_count = 4;
+        c.tools_used = {0, 2};
+    });
+    CHECK(g.evaluate(two_used_tools).verdict == CheckResult::Verdict::Warn);
+
+    // No scan result (empty tools_used) falls back to the palette count.
+    auto no_scan = ctx_with([](PrintStartContext& c) {
+        c.any_bypass_active = true;
+        c.filament_color_count = 4;
+    });
+    CHECK(g.evaluate(no_scan).verdict == CheckResult::Verdict::Warn);
 }
 
 TEST_CASE("gate unaccounted_toolhead_filament: verdict matrix", "[print-start][gate-pipeline]") {
@@ -345,6 +588,30 @@ TEST_CASE("gate required_filament_present: AMS lanes all fed -> pass",
         c.has_active_backend = true;
     });
     CHECK(default_print_start_gates()[3].evaluate(ctx).verdict == CheckResult::Verdict::Pass);
+}
+
+TEST_CASE("gate required_filament_present: single-tool bypass ignores empty lanes",
+          "[print-start][gate-pipeline]") {
+    // Bypass feeds the toolhead from the external spool; the mapped lane's
+    // emptiness is irrelevant for a single-tool print and must not warn.
+    auto ctx = ctx_with([](PrintStartContext& c) {
+        c.ams_manages_filament = true;
+        c.has_active_backend = true;
+        c.any_bypass_active = true;
+        c.tools_used = {1};
+        c.empty_required_lanes = {{1, 2}}; // would warn without bypass
+    });
+    CHECK(default_print_start_gates()[3].evaluate(ctx).verdict == CheckResult::Verdict::Pass);
+
+    // Multi-tool bypass still needs lanes — lane truth stays active there.
+    auto multi = ctx_with([](PrintStartContext& c) {
+        c.ams_manages_filament = true;
+        c.has_active_backend = true;
+        c.any_bypass_active = true;
+        c.tools_used = {0, 2};
+        c.empty_required_lanes = {{2, 3}};
+    });
+    CHECK(default_print_start_gates()[3].evaluate(multi).verdict == CheckResult::Verdict::Warn);
 }
 
 TEST_CASE("gate required_filament_present: non-AMS runout says empty -> warn",

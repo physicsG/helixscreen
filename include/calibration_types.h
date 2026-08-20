@@ -411,6 +411,13 @@ struct InputShaperResult {
     /// recommendation is still valid; only the chart is unavailable.
     bool chart_data_unavailable = false;
 
+    /// True when the firmware overwrote the staged X result with the Y-axis
+    /// values at the end of this (Y-axis) run, discarding the measured X
+    /// recommendation. Carried on the Y result because that is the run whose
+    /// console output announces the copy; the X results card reads it to warn
+    /// that its measured value never reached the saved config.
+    bool x_overwritten_by_firmware = false;
+
     /// Frequency response data for graphing (frequency Hz, amplitude)
     std::vector<std::pair<float, float>> freq_response;
 

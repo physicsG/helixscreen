@@ -5,6 +5,111 @@ All notable changes to HelixScreen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.99.115] - 2026-08-20
+
+<!-- whatsnew
+The second 1.0 release candidate. Highlights:
+
+- Printers are no longer guessed at from thin evidence, and you can correct the model yourself
+- The window between pressing Print and the first layer is now tracked properly
+- Buttons no longer send macros your printer does not have
+- Input shaper sweeps your printer's real frequency range and shows what changed
+- K2 Auto Bed Mesh actually meshes, at the job's own temperatures
+- Fixes for crashes in the power panel and panel navigation
+-->
+
+**This is the second 1.0 release candidate**, following 0.99.114. The bulk of the work is in two
+areas: identifying your printer honestly rather than guessing, and modelling the preparation
+window between pressing Print and the first layer going down.
+
+### Added
+
+- **Printer model picker.** Printer Manager's model row is now editable. If your printer was set
+  up as the wrong model, you can correct it without deleting the printer and starting over.
+- **Print preparation is a tracked job.** The window between pressing Print and the first layer
+  now has its own lifecycle, so the print card, media, progress and completion reporting follow
+  it instead of showing the previous print or reading as idle.
+- **Bypass toggle home-screen widget**, with print-start gating and runout arming.
+- **Instant filament colour chips** on the print detail page, answered from a cached G-code read
+  keyed by path, size and modification time.
+- **Input shaper** now sweeps the printer's real frequency range, shows an old-versus-new delta,
+  displays a spinner with elapsed seconds during analysis, and warns when firmware overwrites the
+  X result.
+- **AMS spool retention.** A Keep Spool Info on Eject toggle, surfaced over the eject control on
+  firmware that reports spool IDs, plus external spool support on CFS.
+- **New pre-print checks:** bypass engaged, unaccounted toolhead, and a warning when the filament
+  grade changes rather than only when the material does.
+- **Homing delegation.** Printers whose filament system homes for them no longer get a redundant
+  home prompt or G28.
+
+### Fixed
+
+**Printer identification**
+
+- Detection no longer saves a low-confidence guess. Below 85% confidence it records nothing and
+  leaves the choice to you, so a later reconnect or your own correction settles it.
+- The detector was running without most of its evidence: the Klipper object list was classified
+  but never retained on the command-line detection path, so every object-existence and macro
+  heuristic silently scored zero. That path is what the installer uses to seed a printer preset.
+- Build volume now reaches detection during discovery instead of arriving afterwards. It can
+  break a tie between otherwise identical printers, but can never identify one on its own.
+- An LED named `chamber_light` no longer reads as a FlashForge Adventurer 5M Pro. Two users'
+  Vorons were labelled that way.
+- When a saved printer type contradicts what the hardware says, the warning now records why it
+  declined to prompt, so a debug bundle can explain itself.
+
+**Macros and filament**
+
+- Configured macro buttons are verified against the printer. A macro your printer does not have
+  no longer reaches the dispatch path, where it outranked the filament system itself and
+  dead-ended the fallbacks beneath it.
+- AFC's toolchange counter is read as the 1-based count it is, so a print no longer ends at
+  "162 / 161".
+- AFC lane data keyed by tool number resolves through the tool mapping, and mapping resets use
+  the name the firmware actually accepts.
+- CFS auto-refill and colour writes match Creality's own screen, and bypass unload uses the
+  extruder rather than the box's bay retract.
+
+**Crashes**
+
+- Navigation kept raw pointers to panels after their widgets were deleted, and wrote through
+  them from queued updates.
+- The power panel kept cached widget pointers past their tree's death, and deleted device rows
+  from inside a queued batch.
+
+**Printing**
+
+- The K2 Auto Bed Mesh toggle now actually meshes, at the job's own temperatures, with its points
+  counted once.
+- A print that dies inside PRINT_START is reported as a failure and cools down, instead of
+  hanging in preparation.
+- Print status resolves media from the preparing job rather than the previous print, and runs its
+  per-job resets for prints started in the app.
+- Pre-print blocks no longer leave the home screen's print card reading idle.
+- The post-unload runout grace is bounded and no longer consumed by gated calls.
+
+**Screens and widgets**
+
+- Two-dimensional G-code view responds to tap and long-press for object selection, and will not
+  select geometry it did not draw.
+- Loaded filament colour survives a render-mode switch.
+- Gated tiles no longer open panels for hardware that is not present.
+- Active Spool widget text stays inside its card.
+- Touch calibration draws its capture dots through the pre-session calibration.
+
+**Installation**
+
+- Free space is checked before the cross-filesystem install swap, scratch directories are
+  reclaimed, and the build host's user and group IDs no longer ship into installs.
+
+### Changed
+
+- Bed-size heuristics now corroborate a printer match rather than establishing one. At common bed
+  sizes a dozen or more printer entries claim the same dimensions, so bed size alone is not
+  identifying evidence.
+- Printer detection may legitimately return no answer. Two printers that present identically over
+  Moonraker are ambiguous, and declining is preferred to guessing.
+
 ## [0.99.114] - 2026-08-16
 
 <!-- whatsnew
@@ -5378,6 +5483,7 @@ Initial tagged release. Foundation for all subsequent development.
 - Automated GitHub Actions release pipeline
 - One-liner installation script with platform auto-detection
 
+[0.99.115]: https://github.com/prestonbrown/helixscreen/compare/v0.99.114...v0.99.115
 [0.99.114]: https://github.com/prestonbrown/helixscreen/compare/v0.99.113...v0.99.114
 [0.99.113]: https://github.com/prestonbrown/helixscreen/compare/v0.99.112...v0.99.113
 [0.99.112]: https://github.com/prestonbrown/helixscreen/compare/v0.99.111...v0.99.112

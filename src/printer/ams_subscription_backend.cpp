@@ -5,6 +5,7 @@
 
 #include "filament_op_router.h"
 #include "moonraker_error.h"
+#include "print_lifecycle_state.h"
 #include "printer_state.h"
 #include "toolhead_homing.h"
 
@@ -324,16 +325,25 @@ AmsError AmsSubscriptionBackend::refuse_if_printing() const {
     // emits one when toolhead.homed_axes lacks "xyz" — which a paused print,
     // homed by construction, never does.
     //
+    // PREPARING is refused like PRINTING. Asked of the raw print_stats.state
+    // this window was invisible — a host-side pre-start block reads STANDBY (or
+    // the previous job's terminal state) for its whole duration — so a filament
+    // op was accepted while the pre-start G-code homed and probed. Note that
+    // Layer 1 deliberately does NOT extend to Preparing: it would refuse the
+    // app's own pre-start block, which is itself sent through execute_gcode()
+    // and may contain a G28. That is why this guard has to cover the window.
+    //
     // api_ can be null in unit tests / cold-boot; when it is, print state is
     // unknown and we do not block (mirrors ensure_homed_then's null-client path).
     if (!api_) {
         return AmsErrorHelper::success();
     }
-    const helix::PrintJobState pstate = api_->printer_state().get_print_job_state();
-    if (!helix::print_occupies_toolhead(pstate)) {
+    const auto lifecycle = static_cast<PrintState>(
+        lv_subject_get_int(api_->printer_state().get_print_lifecycle_subject()));
+    if (!job_holds_machine(lifecycle)) {
         return AmsErrorHelper::success();
     }
-    const bool is_paused = (pstate == helix::PrintJobState::PAUSED);
+    const bool is_paused = (lifecycle == PrintState::Paused);
     const bool self_homes = filament_ops_self_home();
     if (is_paused && !self_homes) {
         spdlog::info("{} Allowing filament operation on a PAUSED print "
@@ -341,8 +351,9 @@ AmsError AmsSubscriptionBackend::refuse_if_printing() const {
                      backend_log_tag());
         return AmsErrorHelper::success();
     }
-    spdlog::warn("{} Refusing filament operation while a print is active (state={}, self_homes={})",
-                 backend_log_tag(), static_cast<int>(pstate), self_homes);
+    spdlog::warn("{} Refusing filament operation while a print is active (lifecycle={}, "
+                 "self_homes={})",
+                 backend_log_tag(), static_cast<int>(lifecycle), self_homes);
     // A non-self-homing backend that reaches here is PRINTING, and pausing is a
     // recovery it can actually offer — say so instead of "finish or cancel".
     return AmsErrorHelper::print_active(is_paused, /*pause_allows_ops=*/!self_homes);
@@ -376,14 +387,16 @@ AmsSubscriptionBackend::ensure_homed_then(std::string gcode, std::function<void(
     // toolhead is in the standing objects.subscribe set, so querying it again
     // was a redundant round trip. skip_homing short-circuits the check
     // entirely -- toolhead_homed() is never called -- for firmware macros that
-    // home themselves (CFS Fork variant).
+    // home themselves (CFS Fork variant). delegates_homing_to_printer()
+    // short-circuits the same way when the printer-side system homes (AFC
+    // auto_home) — neither prompt nor G28.
     //
     // home_preconfirmed_ is intentionally NOT consulted here: it must never
     // substitute for the toolhead_homed() answer (that would skip the G28
     // itself, changing what the printer does), only for the PROMPT below. See
     // the std::exchange() consume further down, which only runs once this
     // branch has already proven the toolhead genuinely needs a G28.
-    if (skip_homing || toolhead_homed()) {
+    if (skip_homing || delegates_homing_to_printer() || toolhead_homed()) {
         return dispatch_payload(std::move(gcode), std::move(on_complete), std::move(on_error),
                                 timeout_ms, silent, caller_surfaces_errors);
     }

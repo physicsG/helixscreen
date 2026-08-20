@@ -253,6 +253,8 @@ void AmsPanel::init_subjects() {
     //
     // The lifetime token is mandatory: PrinterState is a separate singleton and
     // its subjects can be torn down while this guard is still alive (#705).
+    // RAW_PRINT_STATE_OK: subscribes to the WIRE deliberately - paired with the keep-raw
+    // comparison below; see the marker there for the full reason.
     print_state_observer_ = observe_int_sync<AmsPanel>(
         printer_state_.get_print_state_enum_subject(), this,
         [](AmsPanel* self, int print_state) {
@@ -268,6 +270,12 @@ void AmsPanel::init_subjects() {
             if (prev_state < 0)
                 return;
 
+            // RAW_PRINT_STATE_OK: a value question about what the printer
+            // reports, not the capability question job_holds_machine() answers.
+            // print_lifecycle stays Preparing for the whole of a firmware-side
+            // PRINT_START, so reading it here would move this dismissal to the
+            // END of PRINT_START. Pinned by the keep-raw case in
+            // tests/unit/test_ams_error_modal_autodismiss.cpp.
             constexpr int printing = static_cast<int>(helix::PrintJobState::PRINTING);
             if (print_state != printing || prev_state == printing)
                 return;

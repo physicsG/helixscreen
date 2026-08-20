@@ -1438,7 +1438,8 @@ TEST_CASE_METHOD(HelixTestFixture, "a bay swap plans as a swap and dispatches bo
     caps.needs_unload_before_load = backend.needs_unload_before_load(info, 5);
     caps.change_tool_completes_load = backend.change_tool_completes_load(5);
 
-    const auto plan = helix::ui::plan_load(info, caps, 5, /*macro_available=*/false);
+    const auto plan = helix::ui::plan_load(info, caps, 5, /*macro_available=*/false,
+                                          /*macro_user_configured=*/false);
     // Still dispatched as a plain Load -- `T3` mounts the head and feeds nothing,
     // so the ChangeTool arm stays off. That is exactly why is_swap has to be its
     // own answer: reading the display off ams_call gave LOAD_FRESH here.
@@ -1455,7 +1456,9 @@ TEST_CASE_METHOD(HelixTestFixture, "a bay swap plans as a swap and dispatches bo
     info = backend.get_system_info();
     caps.needs_unload_before_load = backend.needs_unload_before_load(info, 4);
     caps.change_tool_completes_load = backend.change_tool_completes_load(4);
-    CHECK_FALSE(helix::ui::plan_load(info, caps, 4, false).is_swap);
+    CHECK_FALSE(helix::ui::plan_load(info, caps, 4, /*macro_available=*/false,
+                                     /*macro_user_configured=*/false)
+                    .is_swap);
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "the swap step model carries both halves in one bar",

@@ -246,6 +246,35 @@ The `extract_release()` function in `release.sh` implements a safe upgrade path:
 5. Restore user config from backup
 6. If step 4 fails, automatically roll back from `.old`
 
+### Archive Ownership
+
+An installed tree must never carry the build machine's uid/gid. Two independent
+guarantees, because either one alone leaves a hole:
+
+**Packaging** — every release tarball is created with `$(TAR_OWNER_FLAGS)`
+(`mk/cross.mk`), which zeroes owner and group. A bare `tar -czvf` stamps each entry with
+whatever uid built it: 1001 on the GitHub Actions runner, 1000 on a local build host. The
+flag spelling is probed once, because GNU tar wants `--owner=0 --group=0` and bsdtar wants
+`--uid 0 --gid 0`, neither accepts the other's, and releases are packaged on both. The
+`.zip` artifacts need nothing — neither `unzip` nor Python's `zipfile` restores ownership.
+
+**Extraction** — every `tar` extract passes **`-o`** ("don't restore user:group"). Root
+extracts with `--same-owner` by default on both GNU and BusyBox tar, so without this an
+install lands owned by a uid with no `/etc/passwd` entry on the printer. This is not
+redundant with the packaging fix: archives published before it still carry the old ids.
+
+> `-o` is the **only** portable spelling. BusyBox documents `-o` but has no
+> `--no-same-owner` long option, so the long form fails extraction outright on every
+> Creality box. GNU tar accepts `-o` as an alias for `--no-same-owner` when extracting.
+> Verified on BusyBox 1.29.3 (AD5M), 1.31.1 (K1), 1.33.2 (K2), 1.36.1 (CC1, U1).
+
+**Repair** — `fix_install_ownership()` normalises the whole tree, including on root-run
+platforms (ad5m/ad5x/k1/k2/cc1/u1), which it used to skip entirely. That is what heals
+installs made before the above landed; a measured K2 had 890 of 915 files owned by uid 1001.
+
+The `deploy-*` targets extract with `-o` on the device for the same reason — a dev deploy
+was a second way for the build host's uid to reach a printer.
+
 ### `NoNewPrivileges` and Self-Update on Pi (systemd)
 
 When helix-screen performs a **self-update** (user presses "Check for Updates", the binary downloads a new archive and spawns `install.sh`), the installer runs as a subprocess of the helix-screen systemd service.
@@ -727,7 +756,18 @@ ssh root@printer-ip "sh /data/install.sh --local /data/helixscreen-ad5m.zip"
 
 **Cause**: Temp directory ran out of space during extraction.
 
-**Fix**: The installer tries multiple temp locations (`/data/`, `/mnt/data/`, `/var/tmp/`, `/tmp/`), picking the first with 100MB+ free. Override with `TMP_DIR=` env var.
+**Fix**: The installer tries multiple temp locations, picking the first with 100MB+ free.
+The order is: a platform-declared staging root (`TMP_DIR_PREFERRED`, set by
+`set_install_paths` -- the K2 declares `/mnt/UDISK/helixscreen-install`, since both `/opt`
+and `/usr/data` are on its ~240MB root overlay), then a sibling of `INSTALL_DIR`, then
+`$HOME`, then `/user-resource/`, `/data/`, `/mnt/data/`, `/usr/data/`, `/var/tmp/`, `/tmp/`.
+Override with the `TMP_DIR=` env var.
+
+Whatever wins is `rm -rf`'d when the installer exits, so every candidate -- including a
+platform-declared one -- goes through the same name guard: the final path component must
+contain `helixscreen-install`. The scratch dir is removed on **any** exit (EXIT/INT/TERM),
+not just the success path; the older `ERR`-only trap was a bash extension that silently did
+nothing under the ash/dash shells the embedded platforms run, which leaked the full download.
 
 ### ForgeX: Screen flickers or goes blank after install
 

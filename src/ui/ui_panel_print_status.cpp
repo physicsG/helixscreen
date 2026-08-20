@@ -21,6 +21,7 @@
 #include "ui_print_start_controller.h"
 #include "ui_subject_registry.h"
 #include "ui_temperature_utils.h"
+#include "ui_timer_guard.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
@@ -172,6 +173,9 @@ PrintStatusPanel::PrintStatusPanel(PrinterState& printer_state, IMoonrakerAPI* a
         [](PrintStatusPanel* self, int progress) { self->on_print_progress_changed(progress); },
         ps_subjects);
     print_state_observer_ = observe_print_state<PrintStatusPanel>(
+        // RAW_PRINT_STATE_OK: the panel's lifecycle_ adopts the published
+        // PrintState (Phase 0b); this observer feeds it the wire transition that
+        // derive_print_state() needs alongside the live phase.
         printer_state_.get_print_state_enum_subject(), this,
         [](PrintStatusPanel* self, PrintJobState state) { self->on_print_state_changed(state); },
         ps_subjects);
@@ -338,6 +342,17 @@ PrintStatusPanel::PrintStatusPanel(PrinterState& printer_state, IMoonrakerAPI* a
     gcode_render_mode_observer_ = observe_int_sync<PrintStatusPanel>(
         DisplaySettingsManager::instance().subject_gcode_render_mode(), this,
         [](PrintStatusPanel* self, int mode) {
+            // A command-line override outranks the saved setting (cmdline > env > settings,
+            // as applied below in on_activate). Without this guard the observer fires once
+            // at startup with the persisted value and silently overwrites --render-2d /
+            // --render-3d about 16ms after they were applied, so the flags appeared to do
+            // nothing.
+            const auto* rt_config = get_runtime_config();
+            if (rt_config && rt_config->gcode_render_mode >= 0) {
+                spdlog::debug("[{}] Ignoring settings render mode {} - command line pinned {}",
+                              self->get_name(), mode, rt_config->gcode_render_mode);
+                return;
+            }
             spdlog::info("[{}] G-code render mode changed from settings: {}", self->get_name(),
                          mode);
             if (self->gcode_viewer_ && self->is_active_) {
@@ -389,6 +404,7 @@ PrintStatusPanel::~PrintStatusPanel() {
         lv_timer_delete(gcode_load_timer_);
         gcode_load_timer_ = nullptr;
     }
+    cancel_preparing_show_timer();
 
     // ObserverGuard handles observer cleanup automatically
     resize_registered_ = false;
@@ -1030,6 +1046,7 @@ void PrintStatusPanel::on_activate() {
     OverlayBase::on_activate(); // Sets visible_ = true
     is_active_ = true;
 
+    // RAW_PRINT_STATE_OK: pairs with the scoped-runout guard's reason below.
     int state_enum = lv_subject_get_int(printer_state_.get_print_state_enum_subject());
     spdlog::debug("[{}] on_activate() print_state_enum={}", get_name(), state_enum);
 
@@ -1165,6 +1182,7 @@ void PrintStatusPanel::cleanup() {
         lv_timer_delete(gcode_load_timer_);
         gcode_load_timer_ = nullptr;
     }
+    cancel_preparing_show_timer();
 
     OverlayBase::cleanup(); // Sets cleanup_called_ = true
 }
@@ -1821,6 +1839,10 @@ void PrintStatusPanel::recompute_scoped_runout() {
     // the parsed file is dropped, get_tools_used() empties → compute returns -1;
     // but also clear explicitly here so a terminal transition reliably hides the
     // badge even if tools_used hasn't cleared yet (issue 9).
+    // RAW_PRINT_STATE_OK: the badge is scoped to the tools the RUNNING file
+    // uses. During a preparing window get_tools_used() still describes the
+    // previous job, so widening this would scope the badge to the wrong file
+    // instead of hiding it.
     auto state = static_cast<PrintJobState>(
         lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
     bool print_active = (state == PrintJobState::PRINTING || state == PrintJobState::PAUSED);
@@ -2585,8 +2607,15 @@ void PrintStatusPanel::recompute_paused_overlay_visibility() {
     auto pending = static_cast<helix::ui::PendingAction>(
         lv_subject_get_int(helix::ui::PrintControlButtons::instance().pending_action_subject()));
 
+    // RAW_PRINT_STATE_OK: a value question - is the printer reporting paused? -
+    // driving the optimistic Pause/Resume overlay. (PAUSED outranks a live phase
+    // in derive_print_state(), so the lifecycle would answer identically; the
+    // wire is simply the more direct statement of what is being asked.)
     auto state = static_cast<PrintJobState>(
+        // RAW_PRINT_STATE_OK: see the optimistic-overlay note below.
         lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
+    // RAW_PRINT_STATE_OK: is the printer REPORTING paused - the optimistic
+    // Pause/Resume overlay tracks the printer, not our intent.
     bool paused = (state == PrintJobState::PAUSED);
 
     // Optimistic overlay state while a Pause/Resume RPC is in flight: show the
@@ -2675,6 +2704,28 @@ void PrintStatusPanel::on_print_progress_changed(int progress) {
     spdlog::trace("[{}] Progress updated: {}%", get_name(), lifecycle_.progress());
 }
 
+void PrintStatusPanel::apply_new_print_resets(bool reset_progress_bar,
+                                              bool clear_excluded_objects) {
+    if (reset_progress_bar) {
+        if (progress_bar_) {
+            lv_bar_set_value(progress_bar_, 0, LV_ANIM_OFF);
+        }
+        complete_view_mode_ = false;
+        // Reset toggle icon to default (progress view)
+        if (const char* icon = lv_xml_get_const(nullptr, "icon_cube")) {
+            lv_subject_copy_string(&view_toggle_icon_subject_, icon);
+        }
+        // Clear any prior end-overlay dismissal so the next outcome surfaces.
+        lv_subject_set_int(&end_overlay_dismissed_subject_, 0);
+        spdlog::debug("[{}] Reset progress bar and view toggle for new print", get_name());
+    }
+
+    if (clear_excluded_objects && exclude_manager_) {
+        exclude_manager_->clear_excluded_objects();
+        spdlog::debug("[{}] Cleared excluded objects for new print", get_name());
+    }
+}
+
 void PrintStatusPanel::on_print_state_changed(PrintJobState job_state) {
     spdlog::debug("[{}] on_print_state_changed() job_state={} current_state={}", get_name(),
                   static_cast<int>(job_state), static_cast<int>(lifecycle_.state()));
@@ -2683,8 +2734,12 @@ void PrintStatusPanel::on_print_state_changed(PrintJobState job_state) {
     auto outcome =
         static_cast<PrintOutcome>(lv_subject_get_int(printer_state_.get_print_outcome_subject()));
 
-    // Delegate state mapping and transition logic to lifecycle
-    auto result = lifecycle_.on_job_state_changed(job_state, outcome);
+    // Delegate state mapping and transition logic to lifecycle. The live phase
+    // goes in too: without it this derives Printing (or Complete) while the
+    // published print_lifecycle correctly says Preparing, and the two disagree
+    // for the whole pre-print window.
+    const int start_phase = lv_subject_get_int(printer_state_.get_print_start_phase_subject());
+    auto result = lifecycle_.on_job_state_changed(job_state, outcome, start_phase);
     if (!result.state_changed) {
         return;
     }
@@ -2738,7 +2793,7 @@ void PrintStatusPanel::on_print_state_changed(PrintJobState job_state) {
 #endif
             pending_gcode_filename_.clear();
             // The print is over. lifecycle_ already reset its own gcode_loaded
-            // flag inside on_job_state_changed() (result.clear_gcode_loaded). The
+            // flag inside on_job_state_changed(). The
             // widgets keep showing the final frame; the desired file becomes
             // empty, so leave displayed_file_ as-is — a new print's filename
             // change clears it.
@@ -2801,23 +2856,9 @@ void PrintStatusPanel::on_print_state_changed(PrintJobState job_state) {
     // covers PRINTING→PAUSED, PAUSED→PRINTING, PAUSED→CANCELLED, mid-print attach.
     recompute_paused_overlay_visibility();
 
-    if (result.should_reset_progress_bar) {
-        if (progress_bar_) {
-            lv_bar_set_value(progress_bar_, 0, LV_ANIM_OFF);
-        }
-        complete_view_mode_ = false;
-        // Reset toggle icon to default (progress view)
-        if (const char* icon = lv_xml_get_const(nullptr, "icon_cube")) {
-            lv_subject_copy_string(&view_toggle_icon_subject_, icon);
-        }
-        // Clear any prior end-overlay dismissal so the next outcome surfaces.
-        lv_subject_set_int(&end_overlay_dismissed_subject_, 0);
-        spdlog::debug("[{}] Reset progress bar and view toggle for new print", get_name());
-    }
-
-    if (result.should_clear_excluded_objects && exclude_manager_) {
-        exclude_manager_->clear_excluded_objects();
-        spdlog::debug("[{}] Cleared excluded objects for new print", get_name());
+    if (result.should_reset_progress_bar || result.should_clear_excluded_objects) {
+        apply_new_print_resets(result.should_reset_progress_bar,
+                               result.should_clear_excluded_objects);
     }
 
     // Transition remaining display from preprint observer back to Moonraker's time_left
@@ -3024,6 +3065,13 @@ void PrintStatusPanel::on_print_time_left_changed(int seconds) {
     spdlog::trace("[{}] Time remaining updated: {}s, ETA: {}", get_name(), seconds, eta_buf_);
 }
 
+void PrintStatusPanel::cancel_preparing_show_timer() {
+    if (preparing_show_timer_) {
+        helix::ui::lv_timer_cancel_safe(preparing_show_timer_);
+        preparing_show_timer_ = nullptr;
+    }
+}
+
 void PrintStatusPanel::on_print_start_phase_changed(int phase) {
     // Phase 0 = IDLE (not preparing), non-zero = preparing
     bool preparing = (phase != 0);
@@ -3033,15 +3081,41 @@ void PrintStatusPanel::on_print_start_phase_changed(int phase) {
         return;
     }
 
-    // Delegate state transition to lifecycle
+    // Delegate state transition to lifecycle. RAW_PRINT_STATE_OK: the panel's
+    // PrintLifecycleState derives its own PrintState from (wire, phase) via
+    // derive_print_state(), so this feeds it the wire half deliberately.
     auto current_job_state = static_cast<PrintJobState>(
         lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
     bool state_changed = lifecycle_.on_start_phase_changed(phase, current_job_state);
 
-    // Update preparing visibility subject
-    lv_subject_set_int(&preparing_visible_subject_, preparing ? 1 : 0);
+    // Update preparing visibility, debounced on the way UP only. Hiding is
+    // immediate: once preparation is over the overlay must go at once.
+    if (!preparing) {
+        cancel_preparing_show_timer();
+        lv_subject_set_int(&preparing_visible_subject_, 0);
+    } else if (lv_subject_get_int(&preparing_visible_subject_) == 0 && !preparing_show_timer_) {
+        preparing_show_timer_ = lv_timer_create(
+            [](lv_timer_t* t) {
+                auto* self = static_cast<PrintStatusPanel*>(lv_timer_get_user_data(t));
+                self->preparing_show_timer_ = nullptr;
+                lv_timer_delete(t);
+                // Re-check: preparation may have ended while we waited.
+                if (lv_subject_get_int(self->printer_state_.get_print_start_phase_subject()) != 0) {
+                    lv_subject_set_int(&self->preparing_visible_subject_, 1);
+                }
+            },
+            PREPARING_SHOW_DELAY_MS, this);
+        lv_timer_set_repeat_count(preparing_show_timer_, 1);
+    }
 
     if (preparing && !was_preparing_) {
+        // Tune/Timelapse enablement follows PrintState, so it has to be
+        // republished on the way IN to Preparing as well as on the way out.
+        // Without this it only happened to be right because a normal start
+        // navigates, and on_activate() republishes; Reprint leaves the panel
+        // already active, so Tune stayed greyed for the whole window.
+        update_button_states();
+
         // Idle→Preparing edge ONLY. The pre-print phase number changes many
         // times during one preparation, so these one-time resets must not
         // re-run on every sub-phase or the progress bar / elapsed flicker back
@@ -3072,6 +3146,23 @@ void PrintStatusPanel::on_print_start_phase_changed(int phase) {
         }
     } else if (!preparing && state_changed) {
         // Preparation complete - lifecycle restored state from current job state
+
+        // The per-job resets have to fire HERE for a print started in-app. The
+        // panel is already Preparing before Moonraker reports printing, so
+        // on_job_state_changed() derives Preparing == current, reports
+        // state_changed=false and returns early: its should_reset_progress_bar /
+        // should_clear_excluded_objects never become true. Exiting Preparing is
+        // the only edge that sees the new print at all.
+        //
+        // Without this, print B opened in print A's completion view (a dismissed
+        // end overlay stays dismissed, complete_view_mode_ survives a cached
+        // panel) and carried print A's excluded objects. Externally started
+        // prints were unaffected, because those go Idle -> Printing.
+        if (lifecycle_.state() == PrintState::Printing) {
+            apply_new_print_resets(/*reset_progress_bar=*/true,
+                                   /*clear_excluded_objects=*/true);
+        }
+
         update_all_displays();
         update_button_states();
 
@@ -3833,58 +3924,5 @@ void PrintStatusPanel::set_thumbnail_source(const std::string& filename) {
         spdlog::debug(
             "[{}] Source set before WebSocket, cleared displayed file for deferred reload",
             get_name());
-    }
-}
-
-void PrintStatusPanel::set_state(PrintState state) {
-    // Map PrintState back to PrintJobState so lifecycle can process the transition
-    PrintJobState mapped = PrintJobState::STANDBY;
-    switch (state) {
-    case PrintState::Idle:
-        mapped = PrintJobState::STANDBY;
-        break;
-    case PrintState::Printing:
-        mapped = PrintJobState::PRINTING;
-        break;
-    case PrintState::Paused:
-        mapped = PrintJobState::PAUSED;
-        break;
-    case PrintState::Complete:
-        mapped = PrintJobState::COMPLETE;
-        break;
-    case PrintState::Cancelled:
-        mapped = PrintJobState::CANCELLED;
-        break;
-    case PrintState::Error:
-        mapped = PrintJobState::ERROR;
-        break;
-    case PrintState::Preparing:
-        // Preparing is handled via on_start_phase_changed, not here
-        mapped = PrintJobState::PRINTING;
-        break;
-    }
-    lifecycle_.on_job_state_changed(mapped, PrintOutcome::NONE);
-    update_all_displays();
-    update_button_states();
-    spdlog::debug("[{}] State changed to: {}", get_name(), static_cast<int>(state));
-}
-
-// ============================================================================
-// PRE-PRINT PREPARATION STATE
-// ============================================================================
-
-void PrintStatusPanel::end_preparing(bool success) {
-    // Hide preparing UI
-    lv_subject_set_int(&preparing_visible_subject_, 0);
-    lv_subject_set_int(&preparing_progress_subject_, 0);
-
-    if (success) {
-        // Transition to Printing state
-        set_state(PrintState::Printing);
-        spdlog::debug("[{}] Preparation complete, starting print", get_name());
-    } else {
-        // Transition back to Idle
-        set_state(PrintState::Idle);
-        spdlog::warn("[{}] Preparation cancelled or failed", get_name());
     }
 }

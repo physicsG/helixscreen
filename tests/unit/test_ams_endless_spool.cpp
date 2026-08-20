@@ -15,6 +15,7 @@
 #include "ams_backend_mock.h"
 #include "ams_types.h"
 #include "filament_database.h"
+#include "filament_variants.h"
 
 #include <algorithm>
 
@@ -359,26 +360,84 @@ TEST_CASE("Default backup eligibility is material compatibility",
     REQUIRE_FALSE(m0.empty());
 
     SECTION("a slot is never its own backup, whatever the material") {
-        CHECK_FALSE(backend.is_endless_spool_backup_eligible(0, 0));
+        CHECK(backend.endless_spool_backup_eligibility(0, 0) == BackupEligibility::Incompatible);
     }
 
     SECTION("out-of-range indices are not eligible") {
-        CHECK_FALSE(backend.is_endless_spool_backup_eligible(-1, 0));
-        CHECK_FALSE(backend.is_endless_spool_backup_eligible(0, -1));
+        CHECK(backend.endless_spool_backup_eligibility(-1, 0) == BackupEligibility::Incompatible);
+        CHECK(backend.endless_spool_backup_eligibility(0, -1) == BackupEligibility::Incompatible);
     }
 
     SECTION("identical materials are eligible") {
-        // Same slot's material against a sibling we force to match by asking the
-        // compatibility helper directly, so this asserts the wiring, not the
-        // fixture's colour choices.
+        // Same slot's material against a sibling, cross-checked against the
+        // compatibility helper directly, so this asserts the wiring rather than
+        // the fixture's colour choices.
         for (int other = 1; other < 4; ++other) {
             const std::string mo = backend.get_slot_info(other).material;
             if (mo.empty()) {
                 continue;
             }
-            CHECK(backend.is_endless_spool_backup_eligible(0, other) ==
-                  filament::are_materials_compatible(m0, mo));
+            const bool usable = backend.endless_spool_backup_eligibility(0, other) !=
+                                BackupEligibility::Incompatible;
+            CHECK(usable == filament::materials_compatible(m0, mo));
         }
+    }
+
+    backend.stop();
+}
+
+TEST_CASE("Backup eligibility separates a grade change from a material mismatch",
+          "[ams][endless_spool][eligibility][grade]") {
+    AmsBackendMock backend(4);
+    backend.set_operation_delay(0);
+    REQUIRE(backend.start());
+
+    auto set_material = [&backend](int slot, const char* material) {
+        SlotInfo info = backend.get_slot_info(slot);
+        info.material = material;
+        REQUIRE(backend.set_slot_info(slot, info, false));
+    };
+
+    set_material(0, "PLA");
+    set_material(1, "PLA");
+    set_material(2, "PLA-CF");
+    set_material(3, "ABS");
+
+    SECTION("same polymer, same grade is plainly eligible") {
+        CHECK(backend.endless_spool_backup_eligibility(0, 1) == BackupEligibility::Eligible);
+    }
+
+    SECTION("same polymer, filled grade is its own verdict") {
+        // Not Incompatible: an endless-spool swap exists to keep the print
+        // alive, and PLA-CF behind PLA prints. Not Eligible either: it is
+        // abrasive and slower, and the swap happens mid-print with nobody
+        // watching. The UI tags it and lets the user decide.
+        CHECK(backend.endless_spool_backup_eligibility(0, 2) == BackupEligibility::GradeDiffers);
+        // Symmetric - the question is "do these differ", not which is filled.
+        CHECK(backend.endless_spool_backup_eligibility(2, 0) == BackupEligibility::GradeDiffers);
+    }
+
+    SECTION("a different polymer is still incompatible") {
+        CHECK(backend.endless_spool_backup_eligibility(0, 3) == BackupEligibility::Incompatible);
+    }
+
+    SECTION("an unlabelled lane stays eligible") {
+        set_material(1, "");
+        CHECK(backend.endless_spool_backup_eligibility(0, 1) == BackupEligibility::Eligible);
+    }
+
+    SECTION("a lane is never its own backup, and out-of-range is refused") {
+        CHECK(backend.endless_spool_backup_eligibility(0, 0) == BackupEligibility::Incompatible);
+        CHECK(backend.endless_spool_backup_eligibility(-1, 0) == BackupEligibility::Incompatible);
+        CHECK(backend.endless_spool_backup_eligibility(0, -1) == BackupEligibility::Incompatible);
+    }
+
+    SECTION("a decorated product name is not a free pass") {
+        // are_materials_compatible() would call this pair compatible, because
+        // "PLA SnapSpeed" is not a row in MATERIALS[].
+        set_material(0, "PLA SnapSpeed");
+        CHECK(backend.endless_spool_backup_eligibility(0, 3) == BackupEligibility::Incompatible);
+        CHECK(backend.endless_spool_backup_eligibility(0, 1) == BackupEligibility::Eligible);
     }
 
     backend.stop();

@@ -515,6 +515,12 @@ class UpdateChecker {
                                   const std::string& member);
 
   private:
+    // Test-only seam (tests/test_helpers/update_checker_test_access.h). Seeds
+    // cached_info_ + status_ so has_update_available() answers true without a
+    // network round trip — the gate every "an update exists" consumer sits
+    // behind. Kept out of the production API so no shipped code can fake one.
+    friend class UpdateCheckerTestAccess;
+
     UpdateChecker() = default;
     ~UpdateChecker();
 

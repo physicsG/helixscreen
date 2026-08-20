@@ -6,11 +6,10 @@
 namespace helix {
 
 MoonrakerEventDecision decide_moonraker_event(MoonrakerEventType type, bool is_error,
-                                              bool within_grace_period, bool wizard_active,
-                                              bool modal_active) {
-    // Recovery-dialog events are routed regardless of is_error, the grace
-    // period, or the wizard — a disconnected or shut-down Klippy is not a toast
-    // that can be suppressed as startup noise.
+                                              bool wizard_active, bool modal_active) {
+    // Recovery-dialog events are routed regardless of is_error or the wizard; a
+    // disconnected or shut-down Klippy is not a toast that can be suppressed as
+    // startup noise.
     if (type == MoonrakerEventType::KLIPPY_DISCONNECTED) {
         return {MoonrakerEventRoute::RecoveryDisconnected, nullptr,
                 MoonrakerEventSuppression::None};
@@ -64,13 +63,23 @@ MoonrakerEventDecision decide_moonraker_event(MoonrakerEventType type, bool is_e
                 MoonrakerEventSuppression::None};
     }
 
+    // Non-error: klippy becoming ready is an internal lifecycle event, not a
+    // notification. A klippy-down path either shows the recovery dialog (the
+    // branches above) or is suppressed by the flow that initiated the restart
+    // (SAVE_CONFIG, power/host toggles); either way the klippy_state READY
+    // observer in ui_emergency_stop.cpp carries the completion signal -
+    // dialog dismissal, or the expected-restart success toast when the dialog
+    // was suppressed. Routing this event as a notification instead would
+    // write a history row for good news. Unconditional, because any
+    // boot-anchored grace window covers only the first ready.
+    if (type == MoonrakerEventType::KLIPPY_READY) {
+        return {MoonrakerEventRoute::Ignore, nullptr, MoonrakerEventSuppression::KlippyReady};
+    }
+
     // Non-error: the wizard owns the screen during first connection, so a
     // "reconnected" toast there is wrong, not merely noisy.
     if (wizard_active) {
         return {MoonrakerEventRoute::Ignore, nullptr, MoonrakerEventSuppression::Wizard};
-    }
-    if (type == MoonrakerEventType::KLIPPY_READY && within_grace_period) {
-        return {MoonrakerEventRoute::Ignore, nullptr, MoonrakerEventSuppression::StartupGrace};
     }
     return {MoonrakerEventRoute::WarningToast, nullptr, MoonrakerEventSuppression::None};
 }

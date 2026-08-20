@@ -21,6 +21,7 @@
 #include "data_root_resolver.h"
 #include "filament_database.h"
 #include "filament_display_name.h"
+#include "filament_sensor_manager.h"
 #include "helix_psram_attr.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
@@ -276,6 +277,16 @@ void AmsState::init_subjects(bool register_xml) {
         subjects_.register_subject(&external_spool_color_);
         if (register_xml)
             lv_xml_register_subject(nullptr, "ams_external_spool_color", &external_spool_color_);
+
+        // Material string flavor — same source, string subject idiom as
+        // ams_system_name_ (own buffer, nullptr prev_buf).
+        lv_subject_init_string(&external_spool_material_, external_spool_material_buf_, nullptr,
+                               sizeof(external_spool_material_buf_),
+                               ext_spool.has_value() ? ext_spool->material.c_str() : "");
+        subjects_.register_subject(&external_spool_material_);
+        if (register_xml)
+            lv_xml_register_subject(nullptr, "ams_external_spool_material",
+                                    &external_spool_material_);
     }
 
     lv_subject_init_int(&supports_bypass_, 0);
@@ -639,6 +650,8 @@ void AmsState::install_print_state_observer() {
     // subjects (e.g. between tests).
     print_state_observer_.reset();
     auto lifetime = get_printer_state().get_static_print_subjects_lifetime();
+    // RAW_PRINT_STATE_OK: subscribes to the WIRE deliberately - recompute_action_detail()
+    // labels what the printer reports, and reads the same subject.
     print_state_observer_ = helix::ui::observe_int_sync<AmsState>(
         get_printer_state().get_print_state_enum_subject(), this,
         [](AmsState* self, int /*print_state*/) { self->recompute_action_detail(); }, lifetime);
@@ -852,6 +865,11 @@ void AmsState::clear_backends() {
     runout_edge_armed_ = false;
     runout_prev_paused_ = false;
     runout_level_seeded_ = false;
+    // Same reasoning for the post-unload grace: it was armed for a removal on
+    // the backend going away, and nothing the next one reports can be that.
+    post_unload_runout_grace_ = false;
+    post_unload_runout_grace_at_ = {};
+    saw_unload_in_op_ = false;
 
     // Drop AMS-derived tool topology so the UI doesn't show stale tool pills
     // between backend disappearance and the next reconnect's init_tools().
@@ -1454,6 +1472,32 @@ void AmsState::sync_from_backend() {
         lv_subject_set_int(&ams_type_, new_type);
     }
     int new_action = static_cast<int>(info.action);
+    // One-shot runout grace. An unload ends with the filament deliberately
+    // dragged off the toolhead sensor, and that empty reading is the operation
+    // working, not a runout — but is_filament_operation_active() only covers
+    // the window while the action is still running. Measured on a K2 Plus:
+    // the script completed at 12:03:02 and the sensor cleared at 12:03:12, ten
+    // seconds after the guard had closed, so the idle runout modal fired on a
+    // deliberate unload.
+    //
+    // Tracked across the whole operation rather than off an UNLOADING -> IDLE
+    // edge, because apply_synthesized_action_locked() overwrites the action
+    // with a sub-phase as physical signals arrive: that K2 unload actually
+    // ended CUTTING -> IDLE, which such an edge would have missed entirely.
+    {
+        const auto action = static_cast<AmsAction>(new_action);
+        const auto prev = static_cast<AmsAction>(lv_subject_get_int(&ams_action_));
+        if (action == AmsAction::UNLOADING) {
+            saw_unload_in_op_ = true;
+        }
+        if (action == AmsAction::IDLE && prev != AmsAction::IDLE) {
+            post_unload_runout_grace_ = saw_unload_in_op_;
+            if (post_unload_runout_grace_) {
+                post_unload_runout_grace_at_ = std::chrono::steady_clock::now();
+            }
+            saw_unload_in_op_ = false;
+        }
+    }
     if (lv_subject_get_int(&ams_action_) != new_action) {
         spdlog::debug("[AmsState] sync_from_backend: action changed to {} ({})", new_action,
                       ams_action_to_string(info.action));
@@ -1542,6 +1586,9 @@ void AmsState::sync_from_backend() {
     // AmsBackendAd5xIfs::evaluate_runout_locked() already accepts deliberately —
     // a printer that boots into a job already paused on a runout reports nothing,
     // because we witnessed no transition.
+    // RAW_PRINT_STATE_OK: the edge must be witnessed while the printer is
+    // actually running the job. Arming it during Preparing would light the
+    // warning for a latch raised before any material moved.
     const PrintJobState job_state = get_printer_state().get_print_job_state();
     const bool paused = job_state == PrintJobState::PAUSED;
     const bool job_running = paused || job_state == PrintJobState::PRINTING;
@@ -1579,8 +1626,23 @@ void AmsState::sync_from_backend() {
                       new_runout, info.filament_runout, runout_edge_armed_, paused);
         lv_subject_set_int(&filament_runout_, new_runout);
     }
-    int new_bypass = info.current_slot == -2 ? 1 : 0;
+    // The one bypass truth: the backend's own is_bypass_active(), the same
+    // predicate BypassToggleController branches on when the user taps. This
+    // subject used to be derived independently from current_slot == -2, so with
+    // a declaration latched and the filament pulled the switch rendered
+    // unchecked while a tap took the DISABLE path — "turn it on" answered
+    // "Bypass disabled", and the pre-print gate meanwhile acted on a bypass the
+    // user could not see or clear. Display and action now read one value.
+    // Filament back at the toolhead retires the grace: it was armed for the
+    // removal this unload caused, and anything after a reload is a new event.
+    if (info.filament_loaded && post_unload_runout_grace_) {
+        post_unload_runout_grace_ = false;
+        spdlog::debug("[AmsState] Post-unload runout grace retired — filament loaded again");
+    }
+
+    const int new_bypass = backend->is_bypass_active() ? 1 : 0;
     if (lv_subject_get_int(&bypass_active_) != new_bypass) {
+        spdlog::debug("[AmsState] bypass -> {}", new_bypass);
         lv_subject_set_int(&bypass_active_, new_bypass);
     }
 
@@ -1591,15 +1653,34 @@ void AmsState::sync_from_backend() {
     // bypass while a file's detail view is already open and the false
     // "T0 has no filament loaded" block still fires on Print.
     //
-    // Tracked off any_bypass_active() rather than the bypass_active_ subject
-    // above — that one is derived from current_slot == -2, which later writes in
-    // the same status frame can clobber.
+    // Still tracked off any_bypass_active() rather than the bypass_active_
+    // subject above, but for a different reason now that both read
+    // is_bypass_active(): the subject reports backend 0 only, while this walks
+    // every backend, and the pre-print check it refreshes is whole-printer.
     const bool bypass_now = any_bypass_active();
     if (bypass_now != last_bypass_active_) {
         last_bypass_active_ = bypass_now;
         spdlog::debug("[AmsState] Bypass -> {}, bumping slots_version for the pre-print check",
                       bypass_now);
         bump_slots_version();
+        // Notification only — the bypass⇄sensor policy (arm/restore runout
+        // sensors at the firmware level) lives entirely in
+        // FilamentSensorManager, the sensor abstraction layer.
+        FilamentSensorManager::instance().on_bypass_active_changed(bypass_now);
+
+        // Publish the external spool as an extra lane_data entry for slicer
+        // sync (OrcaSlicer) when bypass engages. Capability question via the
+        // backend virtual — only backends that own a lane_data mirror and
+        // support bypass answer; AmsState names no system.
+        if (bypass_now) {
+            const auto spool = get_external_spool_info();
+            for (auto& backend : backends_) {
+                if (backend) {
+                    backend->publish_external_spool_lane(spool.has_value() ? &spool.value()
+                                                                           : nullptr);
+                }
+            }
+        }
     }
     int new_supports_bypass = helix::bypass_available_for(info.supports_bypass) ? 1 : 0;
     if (lv_subject_get_int(&supports_bypass_) != new_supports_bypass) {
@@ -1612,6 +1693,8 @@ void AmsState::sync_from_backend() {
     if (lv_subject_get_int(&external_spool_color_) != new_ext_color) {
         lv_subject_set_int(&external_spool_color_, new_ext_color);
     }
+    lv_subject_copy_string(&external_spool_material_,
+                           ext_spool.has_value() ? ext_spool->material.c_str() : "");
     if (lv_subject_get_int(&ams_slot_count_) != info.total_slots) {
         lv_subject_set_int(&ams_slot_count_, info.total_slots);
     }
@@ -2639,6 +2722,11 @@ void AmsState::recompute_action_detail() {
     } else if (action != AmsAction::IDLE) {
         new_detail = lv_tr(ams_action_to_string(action));
     } else {
+        // RAW_PRINT_STATE_OK: a label for what the printer reports. A
+        // "Preparing" arm would read better during a pre-print block, but there
+        // is no such translation key yet and this is the lowest-priority
+        // fallback in the chain - the AmsAction string wins whenever the AMS is
+        // doing anything at all.
         auto print_state = static_cast<PrintJobState>(
             lv_subject_get_int(get_printer_state().get_print_state_enum_subject()));
         switch (print_state) {
@@ -2750,6 +2838,32 @@ void AmsState::set_active_tool_port_present(bool present) {
             lv_subject_set_int(&active_tool_port_present_, v);
         }
     });
+}
+
+bool AmsState::consume_post_unload_runout_grace() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!post_unload_runout_grace_) {
+        return false;
+    }
+    post_unload_runout_grace_ = false;
+    const auto age = std::chrono::steady_clock::now() - post_unload_runout_grace_at_;
+    if (age >= POST_UNLOAD_RUNOUT_GRACE) {
+        spdlog::debug("[AmsState] Post-unload runout grace expired unused after {}s",
+                      std::chrono::duration_cast<std::chrono::seconds>(age).count());
+        return false;
+    }
+    return true;
+}
+
+bool AmsState::post_unload_runout_grace_armed() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!post_unload_runout_grace_) {
+        return false;
+    }
+    // Deliberately does NOT clear on expiry: only the consumer spends the shot,
+    // so a peek that also disarmed would be a second consumer by another name.
+    return (std::chrono::steady_clock::now() - post_unload_runout_grace_at_) <
+           POST_UNLOAD_RUNOUT_GRACE;
 }
 
 bool AmsState::is_filament_operation_active() {
@@ -3142,6 +3256,9 @@ void AmsState::notify_external_spool_changed(const SlotInfo& info) {
         lv_subject_set_int(&external_spool_color_, new_color ^ 1);
     }
     lv_subject_set_int(&external_spool_color_, new_color);
+    // Material string reflector — copy_string only notifies on change, and
+    // color observers re-read full spool info anyway, so no force-fire needed.
+    lv_subject_copy_string(&external_spool_material_, info.material.c_str());
 }
 
 void AmsState::clear_external_spool_info() {
@@ -3154,6 +3271,7 @@ void AmsState::clear_external_spool_info() {
         lv_subject_set_int(&external_spool_color_, 1);
     }
     lv_subject_set_int(&external_spool_color_, 0);
+    lv_subject_copy_string(&external_spool_material_, "");
 }
 
 // ============================================================================
@@ -3208,6 +3326,14 @@ void AmsState::apply_external_spool_store(const SlotInfo& info) {
         set_external_spool_info(info);
     } else {
         clear_external_spool_info();
+    }
+
+    // Keep the slicer-sync lane (OrcaSlicer lane_data mirror) fresh on every
+    // identity change — same capability dispatch as the bypass-engage hook.
+    for (auto& backend : backends_) {
+        if (backend) {
+            backend->publish_external_spool_lane(&info);
+        }
     }
 }
 

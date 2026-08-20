@@ -116,6 +116,12 @@ class PanelWidgetManager {
     /// Main-thread only — no synchronization on the cache maps.
     void clear_all_panel_configs();
 
+    /// Move grid_descriptors_ entries matching `prefix` (empty = all) into
+    /// retired_grid_descriptors_ instead of freeing them — the clear paths have
+    /// no container handle to unstyle, and LVGL's grid style still holds the raw
+    /// dsc pointers. See retired_grid_descriptors_ for the lifetime contract.
+    void retire_grid_descriptors_matching(const std::string& prefix);
+
     /// Get the PanelWidgetConfig for a panel (creates if needed).
     class PanelWidgetConfig& get_widget_config(const std::string& panel_id);
 
@@ -167,6 +173,17 @@ class PanelWidgetManager {
         std::vector<int32_t> row_dsc;
     };
     std::unordered_map<std::string, GridDescriptors> grid_descriptors_;
+
+    /// Descriptor arrays dropped by clear_panel_config()/clear_all_panel_configs().
+    /// LVGL's grid style stores the raw dsc pointers WITHOUT copying them, and the
+    /// clear paths have no handle to the container(s) to unstyle, so freeing the
+    /// vectors on the spot leaves every still-existing grid reading freed memory
+    /// (heap-use-after-free in grid_count_tracks via GridEditMode::current_metrics,
+    /// 2026-08-17 nightly). Keyed by the original cache key: a populate_page() for
+    /// that key re-points the container's style, which is the first moment the old
+    /// array is provably unreferenced, and that is exactly when the entry is
+    /// dropped. Bounded by the same panel×page count as grid_descriptors_ itself.
+    std::unordered_map<std::string, GridDescriptors> retired_grid_descriptors_;
 
     /// Track current widget configuration per panel to detect no-op rebuilds.
     /// When populate_widgets() is called and the ordered list of widget IDs

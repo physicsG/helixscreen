@@ -638,7 +638,17 @@ FilamentSlotOverrideStore::FilamentSlotOverrideStore(IMoonrakerAPI* api, std::st
       namespace_(std::move(ns)) {}
 
 std::filesystem::path FilamentSlotOverrideStore::cache_dir_effective() const {
-    return cache_dir_.empty() ? std::filesystem::path(helix::get_user_config_dir()) : cache_dir_;
+    if (!cache_dir_.empty()) {
+        return cache_dir_;
+    }
+    // Test-binary seam: the shared fixture points the process-wide fallback
+    // at its sandbox before main() (helix_test_fixture.cpp). Empty in
+    // production, where the user config dir below remains the answer.
+    const std::filesystem::path& process_default = detail::slot_override_cache_dir_ref();
+    if (!process_default.empty()) {
+        return process_default;
+    }
+    return std::filesystem::path(helix::get_user_config_dir());
 }
 
 std::filesystem::path FilamentSlotOverrideStore::cache_path() const {
@@ -1803,7 +1813,7 @@ MergeResult merge_override(SlotInfo& slot, const FilamentSlotOverride& o,
     // CFS firmware reports no ids at all, and flat-schema CFS parses a
     // per-slot id without giving 0 an eject meaning — so the rule stays
     // inert.
-    if (options.firmware_reports_spool_ids && slot.spoolman_id <= 0 && o.spoolman_id > 0 &&
+    if (options.printer_reports_spool_ids && slot.spoolman_id <= 0 && o.spoolman_id > 0 &&
         !options.keep_spool_info_on_eject) {
         MergeResult r;
         r.cleared_eject = true;
@@ -1838,6 +1848,59 @@ MergeResult merge_override(SlotInfo& slot, const FilamentSlotOverride& o,
     if (!o.product_name.empty())
         slot.product_name = o.product_name;
     return {};
+}
+
+bool publish_external_lane(FilamentSlotOverrideStore* store, int lane_index, const SlotInfo* spool,
+                           const std::string& log_tag) {
+    if (!store || lane_index < 0) {
+        return false;
+    }
+
+    // Identity = anything a slicer could map to: a Spoolman link, a material,
+    // or a picked color. SlotInfo's color default (AMS_DEFAULT_SLOT_COLOR
+    // gray) is the "never picked" sentinel — black (0x000000) is a real pick
+    // and must publish.
+    const bool color_picked = spool != nullptr && spool->color_rgb != AMS_DEFAULT_SLOT_COLOR;
+    const bool has_identity =
+        spool != nullptr && (spool->spoolman_id > 0 || !spool->material.empty() || color_picked);
+
+    if (!has_identity) {
+        // Clear, not publish: an identity-less record would squat the lane
+        // with an empty phantom a slicer renders as an unknown tray.
+        store->clear_async(lane_index, [log_tag, lane_index](bool ok, std::string err) {
+            if (!ok) {
+                spdlog::warn("{} external-spool lane clear failed ({}): {}", log_tag, lane_index,
+                             err);
+            }
+        });
+        return false;
+    }
+
+    FilamentSlotOverride ovr;
+    ovr.material = spool->material;
+    ovr.brand = spool->brand;
+    ovr.spool_name = spool->spool_name;
+    ovr.spoolman_id = spool->spoolman_id;
+    ovr.spoolman_vendor_id = spool->spoolman_vendor_id;
+    ovr.remaining_weight_g = spool->remaining_weight_g;
+    ovr.total_weight_g = spool->total_weight_g;
+    ovr.catalog_id = spool->catalog_id;
+    ovr.product_name = spool->product_name;
+    // User-set data (settings store / Spoolman), same sentinel rule as
+    // has_identity: default gray = never picked, black = picked.
+    ovr.color_rgb = spool->color_rgb;
+    ovr.color_set = color_picked;
+    populate_temps_from_slot_info(ovr, *spool);
+
+    store->save_async(lane_index, ovr, [log_tag, lane_index](bool ok, std::string err) {
+        if (!ok) {
+            spdlog::warn("{} external-spool lane publish failed ({}): {}", log_tag, lane_index,
+                         err);
+        }
+    });
+    spdlog::debug("{} published external spool as lane {} (material={}, color=#{:06X})", log_tag,
+                  lane_index, spool->material, spool->color_rgb);
+    return true;
 }
 
 } // namespace helix::ams

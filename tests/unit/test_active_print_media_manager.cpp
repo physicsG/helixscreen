@@ -1733,3 +1733,142 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
 
     REQUIRE(files().pending_count() == 1); // no reload fired against the dead manager
 }
+
+// ============================================================================
+// Preparing-job identity
+// ============================================================================
+
+TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
+                 "Media adopts the preparing job's identity at commit",
+                 "[active_print_media][preparing]") {
+    // The thumbnail source used to be set from the Moonraker-confirmed callback,
+    // which on a printer with a host-side pre-start block lands minutes after the
+    // user pressed Print. In between, print_stats still names the PREVIOUS job,
+    // so the panel resolved and loaded the wrong file's preview.
+    set_print_filename("previous.gcode");
+    REQUIRE(get_display_filename() == "previous");
+
+    state().begin_preparing(helix::PrintJobRef{"next.gcode", "", ""});
+    UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+
+    REQUIRE(get_display_filename() == "next");
+}
+
+TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
+                 "A superseded preparing job releases its media claim",
+                 "[active_print_media][preparing]") {
+    // Somebody started a different print while ours was preparing. Our override
+    // must go, including thumbnail_origin_ - a stale PreSet skips the thumbnail
+    // fetch, which is the mechanism behind #526.
+    state().begin_preparing(helix::PrintJobRef{"mine.gcode", "", ""});
+    UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    REQUIRE(get_display_filename() == "mine");
+
+    state().retire_preparing(helix::PreparingExit::Superseded);
+    set_print_filename("someone_elses.gcode");
+
+    REQUIRE(get_display_filename() == "someone_elses");
+}
+
+TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
+                 "A confirmed preparing job keeps its media claim",
+                 "[active_print_media][preparing]") {
+    // Confirmed means the printer took OUR job. The override must survive,
+    // because the printer may report a rewritten temp file standing in for the
+    // file the user actually chose.
+    state().begin_preparing(helix::PrintJobRef{"mine.gcode", "", ""});
+    UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+
+    state().retire_preparing(helix::PreparingExit::Confirmed);
+    set_print_filename(".helix_temp/modified_mine.gcode");
+
+    REQUIRE(get_display_filename() == "mine");
+}
+
+// ============================================================================
+// Commit-time media loads must not strand the job without metadata
+//
+// Adopting identity at commit moves the metadata fetch to a moment when the
+// file may not be uploaded or scanned yet. Its failures consume a bounded retry
+// ladder (~217s), and process_filename() early-returns forever after on the
+// unchanged effective filename - so without an explicit re-arm at print start,
+// a pre-start block longer than the ladder leaves layers 0/0 for the whole job.
+// That is #526's symptom reached by a new route.
+// ============================================================================
+
+TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
+                 "A confirmed print re-arms media that failed to load while preparing",
+                 "[active_print_media][preparing][metadata]") {
+    state().begin_preparing(helix::PrintJobRef{"job.gcode", "", ""});
+    drain();
+    REQUIRE(files().pending_count() == 1); // commit issued the first attempt
+
+    MoonrakerError err;
+    err.message = "file not found";
+    files().fire_error_last(err);
+    drain();
+    REQUIRE(get_layer_total() == 0);
+
+    // The printer takes the job. The effective filename has not changed, so
+    // nothing in the filename path will ever ask again.
+    state().retire_preparing(helix::PreparingExit::Confirmed);
+    drain();
+
+    REQUIRE(files().pending_count() == 2); // re-armed
+
+    files().fire_last(make_metadata(42));
+    drain();
+    REQUIRE(get_layer_total() == 42);
+}
+
+TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
+                 "A confirmed print does not re-fetch media it already has",
+                 "[active_print_media][preparing][metadata]") {
+    // The re-arm is for recovery, not a second unconditional fetch. Firing it
+    // when the data is already present would waste an RPC on every print start.
+    state().begin_preparing(helix::PrintJobRef{"job.gcode", "", ""});
+    drain();
+    REQUIRE(files().pending_count() == 1);
+
+    files().fire_last(make_metadata_with_thumb(17, unique_thumb_path("confirm_no_refetch")));
+    drain();
+    REQUIRE(get_layer_total() == 17);
+
+    const size_t before = files().pending_count();
+    state().retire_preparing(helix::PreparingExit::Confirmed);
+    drain();
+
+    REQUIRE(files().pending_count() == before);
+}
+
+TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
+                 "A print that never reached the printer is not re-armed",
+                 "[active_print_media][preparing][metadata]") {
+    // Superseded/Cancelled/Failed release the identity instead. Re-arming there
+    // would fetch metadata for a job that is not going to run.
+    state().begin_preparing(helix::PrintJobRef{"job.gcode", "", ""});
+    drain();
+    MoonrakerError err;
+    err.message = "file not found";
+    files().fire_error_last(err);
+    drain();
+
+    const size_t before = files().pending_count();
+    state().retire_preparing(helix::PreparingExit::Cancelled);
+    drain();
+
+    REQUIRE(files().pending_count() == before);
+}
+
+TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
+                 "Reprint of a modified file displays the original name, not the temp one",
+                 "[active_print_media][preparing]") {
+    // Reprint replays whatever print_stats last reported, which for a modified
+    // print is the rewritten temp path. Recording that raw as the thumbnail
+    // source also suppressed process_filename()'s auto-resolve, which is guarded
+    // on the source being empty - so the panel showed `modified_1748_orig`.
+    state().begin_preparing(helix::PrintJobRef{".helix_temp/modified_1748_orig.gcode", "", ""});
+    UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+
+    REQUIRE(get_display_filename() == "orig");
+}

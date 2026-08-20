@@ -69,6 +69,23 @@ struct LaneDataAnomalies {
 [[nodiscard]] std::optional<std::pair<int, FilamentSlotOverride>>
 from_lane_data_record(const nlohmann::json& j);
 
+/// Process-wide fallback dir for the store's on-disk read-cache, consulted
+/// by cache_dir_effective() when an instance has no per-instance cache_dir_
+/// pinned. Production leaves it empty (instances then resolve
+/// helix::get_user_config_dir()). The shared test fixture points it at its
+/// per-PID sandbox before main() so AMS backend tests — which construct real
+/// backends, and thus real stores, without pinning a dir — cannot write
+/// filament_slot_overrides.json into the repo's config/ dir. Same role
+/// ToolState::set_config_dir() plays for tool_spools.json, and mutable for
+/// the same reason AppConstants::Update::detail::state_dir_ref() is.
+/// Write it before threads exist; afterwards it is read-only.
+namespace detail {
+inline std::filesystem::path& slot_override_cache_dir_ref() {
+    static std::filesystem::path dir;
+    return dir;
+}
+} // namespace detail
+
 class FilamentSlotOverrideStore {
   public:
     // key_style defaults to Lane so the many lane-based construction sites and
@@ -237,6 +254,26 @@ bool mirror_firmware_to_lane_data(FilamentSlotOverrideStore* store,
                                   const std::string& firmware_material, bool slot_has_filament,
                                   MirrorPolicy policy, const std::string& log_tag);
 
+/// Publish (or clear) the external / bypass spool as an extra lane one past
+/// the last physical slot, so slicers (OrcaSlicer's MoonrakerPrinterAgent)
+/// can select it as the "next tool over" (T4 beside T0-T3). The record rides
+/// the same lane_data format as every other lane; readers (Orca) key off the
+/// inner 0-based `lane` field, which is `lane_index`.
+///
+/// Who calls this: AmsBackend::publish_external_spool_lane overrides — the
+/// backend gates on its own supports_bypass + store, then hands off here.
+/// Backends whose firmware owns the lane_data namespace (AFC, Happy Hare)
+/// must pass a store constructed on the SHARED "lane_data" namespace, not
+/// their private override namespace.
+///
+/// `spool` null or identity-less (no Spoolman id, no material, default-gray
+/// color) CLEARS the lane instead of publishing an empty phantom. Pure black
+/// (0x000000) is a real pick and publishes.
+///
+/// Returns true if a record was published (false for the clear path).
+bool publish_external_lane(FilamentSlotOverrideStore* store, int lane_index, const SlotInfo* spool,
+                           const std::string& log_tag);
+
 // =============================================================================
 // Shared override-wins merge (filament_slots.md §5)
 // =============================================================================
@@ -255,7 +292,7 @@ struct MergeOptions {
     /// 0/null means "ejected". Elsewhere 0 is the everyday reading and MUST
     /// NOT be treated as eject — flat-schema CFS does parse a per-slot spool
     /// id (arming Rule 1's re-bind) but gives 0 no eject meaning.
-    bool firmware_reports_spool_ids = false;
+    bool printer_reports_spool_ids = false;
     /// Own-write echo suppression for Rule 1, mirroring
     /// SlotFingerprintTracker::expect() semantics. When HelixScreen itself
     /// just (re)linked a spool id on this slot, in-flight status frames keep

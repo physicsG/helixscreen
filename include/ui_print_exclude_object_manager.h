@@ -24,6 +24,10 @@
 
 #include "async_lifetime_guard.h"
 
+namespace helix {
+enum class PrintJobState;
+} // namespace helix
+
 #include <lvgl.h>
 #include <string>
 #include <unordered_set>
@@ -266,7 +270,7 @@ class PrintExcludeObjectManager {
      * silently. Prevents a stuck red-ghosted object from lingering into the next
      * print if Klipper's status push never arrived (crash, disconnect, etc).
      */
-    void on_print_state_changed(int state_enum);
+    void on_print_state_changed(helix::PrintJobState state);
 
     /**
      * @brief Handle an RPC error from EXCLUDE_OBJECT.

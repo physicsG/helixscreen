@@ -124,7 +124,32 @@ class LifetimeToken {
     }
 
     /**
+     * @brief Liveness check whose background-thread use is already audited
+     * @return true if the owning object has been invalidated/destroyed
+     *
+     * `expired()` minus the Mechanism C report. Reach for this ONLY where the
+     * code after the check mutates no LVGL state — a loop condition on a
+     * thread the owner joins, a buffer exclusive to that thread, or a sweep
+     * over some *other* object's token. Anything that goes on to touch a
+     * widget still owes you `expired()` + `defer()`; renaming the call to
+     * quiet a warning is how Mechanism C comes back. Pair each use with a
+     * `// L081_OK: <why>` note — the static gate in
+     * scripts/check_l081_anti_pattern.py reads this spelling too.
+     *
+     * Why it exists: the runtime detector cannot tell these apart from the
+     * real anti-pattern, so every one of them reported. Over the 2026-08-09..18
+     * telemetry window they were ~67% of all `bg_tok_expired_check` volume,
+     * which left no room for a genuine hit to stand out.
+     */
+    inline bool expired_no_lvgl() const {
+        return gen_->load(std::memory_order_acquire) != snapshot_;
+    }
+
+    /**
      * @brief Convenience: true if NOT expired (object still alive)
+     *
+     * Routes through expired(), so `if (tok)` on a background thread reports
+     * the same way a bare `tok.expired()` does.
      */
     explicit operator bool() const {
         return !expired();

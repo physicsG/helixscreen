@@ -1,12 +1,16 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_ams_tool_text.h"
 #include "ui_update_queue.h"
 
 #include "ams_backend.h"
 #include "ams_state.h"
 #include "lvgl_test_fixture.h"
+#include "static_subject_registry.h"
 #include "tool_state.h"
+
+#include <string>
 
 #include "../catch_amalgamated.hpp"
 
@@ -437,4 +441,113 @@ TEST_CASE_METHOD(ToolStateFixture, "nozzle_label still names the tool on a real 
     UpdateQueue::instance().drain();
     REQUIRE(ts.active_tool_index() == 2);
     REQUIRE(ts.nozzle_label() == "Nozzle T2");
+}
+
+// ============================================================================
+// Tool badge staleness — the badge index must follow an AMS-driven toolchange
+// ============================================================================
+
+namespace {
+
+// Brings up the real badge observers from src/ui/ui_ams_tool_text.cpp over the
+// real ToolState subjects, so nothing here reimplements the badge's gate or its
+// format string. Teardown mirrors AfcToolchangeRenderFixture in
+// test_afc_toolchange.cpp: deinit_one() releases the observers before the
+// subjects they watch die AND clears the file-static "already initialized"
+// latch, without disturbing registry entries other fixtures own.
+struct ToolBadgeFixture : public LVGLTestFixture {
+    ToolBadgeFixture() {
+        AmsState::instance().init_subjects(/*register_xml=*/false);
+        ToolState::instance().init_subjects(/*register_xml=*/false);
+        helix::ui::init_ams_tool_text_observers();
+    }
+    ~ToolBadgeFixture() override {
+        StaticSubjectRegistry::instance().deinit_one("AmsToolTextObservers");
+        AmsState::instance().deinit_subjects();
+        ToolState::instance().deinit_subjects();
+    }
+
+    static std::string badge_text() {
+        return lv_subject_get_string(ToolState::instance().get_tool_badge_text_subject());
+    }
+    static int badge_shown() {
+        return lv_subject_get_int(ToolState::instance().get_show_tool_badge_subject());
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(ToolBadgeFixture,
+                 "tool badge index follows an AMS toolchange that does not rebuild the tool list",
+                 "[tool-state][ams][ams-topology][tool-badge][regression]") {
+    // set_ams_topology() bumps tools_version_ only when the topology SHAPE
+    // changes; a plain active-tool move publishes active_tool_ alone. A badge
+    // observer watching only tools_version_ therefore never re-ran, leaving the
+    // index frozen at whatever the last rebuild produced.
+    auto& ts = helix::ToolState::instance();
+    auto disc = make_toolchanger_discovery();
+
+    ts.init_tools(disc);
+    UpdateQueue::instance().drain();
+    REQUIRE(ts.extruder_count() == 4); // Badge only shows on real multi-nozzle hardware
+
+    helix::ToolTopology topo;
+    topo.tool_count = 4;
+    topo.active_tool = 0;
+    topo.tool_to_slot = {0, 1, 2, 3};
+    topo.tool_name_prefix = "T";
+    ts.set_ams_topology(topo);
+    UpdateQueue::instance().drain();
+    REQUIRE(badge_shown() == 1);
+    REQUIRE(badge_text() == "0");
+
+    const int version_before = lv_subject_get_int(ts.get_tools_version_subject());
+
+    // Same shape, different active tool — the AMS-driven toolchange.
+    topo.active_tool = 2;
+    ts.set_ams_topology(topo);
+    UpdateQueue::instance().drain();
+
+    // Guard the premise: if this ever bumps, the test stops covering the bug
+    // because the tools_version_ observer would mask the missing active_tool one.
+    REQUIRE(lv_subject_get_int(ts.get_tools_version_subject()) == version_before);
+    REQUIRE(ts.active_tool_index() == 2);
+    REQUIRE(badge_text() == "2");
+    REQUIRE(badge_shown() == 1);
+
+    // And back down, so a fix that only ever counts upward still fails.
+    topo.active_tool = 1;
+    ts.set_ams_topology(topo);
+    UpdateQueue::instance().drain();
+    REQUIRE(badge_text() == "1");
+}
+
+TEST_CASE_METHOD(ToolBadgeFixture, "tool badge stays hidden and empty on a single-hotend AMS",
+                 "[tool-state][ams][ams-topology][tool-badge]") {
+    // The AFC shape: many lanes, one nozzle. Expanding tools_ to one entry per
+    // lane must not make the badge appear — annotating the single hotend those
+    // lanes share with an index says nothing. This is the case that rendered an
+    // empty disc over the nozzle glyph on the temp_stack widget.
+    auto& ts = helix::ToolState::instance();
+
+    helix::ToolTopology topo;
+    topo.tool_count = 4;
+    topo.active_tool = 0;
+    topo.tool_to_slot = {0, 1, 2, 3};
+    topo.tool_name_prefix = "T";
+    ts.set_ams_topology(topo);
+    UpdateQueue::instance().drain();
+
+    REQUIRE(ts.tool_count() == 4);
+    REQUIRE(badge_shown() == 0);
+    REQUIRE(badge_text().empty());
+
+    // A lane change on that single hotend must not light it up either — the new
+    // active_tool_ observer runs the same gate, so this pins that it re-checks
+    // has_multiple_extruders() rather than blindly writing the index.
+    topo.active_tool = 3;
+    ts.set_ams_topology(topo);
+    UpdateQueue::instance().drain();
+    REQUIRE(badge_shown() == 0);
+    REQUIRE(badge_text().empty());
 }

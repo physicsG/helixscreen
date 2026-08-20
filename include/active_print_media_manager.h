@@ -128,6 +128,16 @@ class ActivePrintMediaManager {
     void load_thumbnail_for_file(const std::string& filename);
     void clear_print_info();
 
+    /**
+     * @brief Drop the current print's identity without touching the subjects
+     *
+     * Resets the override, the idempotence key and thumbnail_origin_ - a stale
+     * ThumbnailOrigin::PreSet skips the thumbnail fetch (#526). Leaves the
+     * published subjects alone so an incoming filename repopulates them without
+     * a blank flash.
+     */
+    void release_identity();
+
     // --- Bounded thumbnail retry (metadata/thumbnail fetch failures) ---
     // Moonraker may not have finished scanning a just-uploaded file when the
     // print starts (OrcaSlicer upload-and-print), so the first metadata query
@@ -147,6 +157,16 @@ class ActivePrintMediaManager {
                                   int max_retries = MAX_THUMBNAIL_ATTEMPTS - 1);
     /// Cancel any pending retry timer and clear retry bookkeeping filename.
     void cancel_thumbnail_retry();
+
+    /**
+     * @brief Give the media load a fresh retry budget when the print starts
+     *
+     * The commit-time attempt can run before Moonraker has scanned the file.
+     * Its failures consume the bounded retry ladder, and no other path refunds
+     * it, so without this a job whose pre-start block outlasts the ladder shows
+     * layers 0/0 for its entire duration.
+     */
+    void rearm_media_if_incomplete();
     /// Body of the retry timer: re-validates filename + generation, then reloads.
     void on_retry_timer_fired();
     static void retry_timer_cb(lv_timer_t* timer);
@@ -171,6 +191,7 @@ class ActivePrintMediaManager {
     PrinterState& printer_state_;
     IMoonrakerAPI* api_ = nullptr;
     ObserverGuard print_filename_observer_;
+    ObserverGuard preparing_epoch_observer_;
     std::string thumbnail_source_filename_;
     std::string last_effective_filename_;
     std::string last_loaded_thumbnail_filename_;

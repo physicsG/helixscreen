@@ -111,6 +111,11 @@ static const HelpEntry HELP[] = {
      "scope defaults to 'globals'."},
     {nullptr, "text <target>", "Read a widget's text (label/textarea/dropdown)",
      "Descends into a composite (e.g. a button) to find it."},
+    {nullptr, "state <target>", "Read a widget's LVGL states and flags",
+     "checked/disabled/focused/pressed as booleans + an active-states\n"
+     "array, plus hidden/clickable/scrollable flags. Descends a composite\n"
+     "row to its control, matching what click/set_value act on. A hidden\n"
+     "widget still resolves — assert bind_flag_if contracts here."},
     {nullptr, "click <target>", "Click (toggles switches/checkboxes)",
      "On a composite row, descends to the control inside it."},
     {nullptr, "set_value <target> <v>", "Set value (slider, switch, dropdown, textarea)", nullptr},
@@ -691,6 +696,12 @@ static nlohmann::json build_request_from_tokens(const std::vector<std::string>& 
             return {};
         }
         return build_request("text", target_param(tokens[1]));
+    } else if (cmd == "state") {
+        if (tokens.size() < 2) {
+            fprintf(stderr, "Error: state requires a widget name/@path\n");
+            return {};
+        }
+        return build_request("state", target_param(tokens[1]));
     } else if (cmd == "set_text") {
         if (tokens.size() < 3) {
             fprintf(stderr, "Error: set_text requires a widget name/@path and text\n");
@@ -785,6 +796,7 @@ static const char* REPL_COMMANDS[] = {"ping",
                                       "reset",
                                       "geom",
                                       "text",
+                                      "state",
                                       "set_text",
                                       "get_const",
                                       "quit",
@@ -865,8 +877,8 @@ static void repl_completion(const char* buf, linenoiseCompletions* lc) {
         } else if (cmd == "navigate") {
             candidates = &g_cached_panels;
         } else if (cmd == "cd" || cmd == "ls" || cmd == "click" || cmd == "focus" ||
-                   cmd == "text" || cmd == "set_text" || cmd == "geom" || cmd == "set_value" ||
-                   cmd == "scroll" || cmd == "resolve") {
+                   cmd == "text" || cmd == "set_text" || cmd == "state" || cmd == "geom" ||
+                   cmd == "set_value" || cmd == "scroll" || cmd == "resolve") {
             // Widget names are re-read every time rather than cached: the tree
             // changes under the REPL constantly (navigation, hot reload, the
             // printer's own state), so a cache would offer completions for
@@ -900,6 +912,8 @@ static char* repl_hints(const char* buf, int* color, int* bold) {
     if (input == "click")
         return strdup(" <widget>");
     if (input == "text")
+        return strdup(" <widget>");
+    if (input == "state")
         return strdup(" <widget>");
     if (input == "set_text")
         return strdup(" <widget> <text>");

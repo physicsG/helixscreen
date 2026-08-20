@@ -1637,14 +1637,14 @@ void AmsBackendAce::apply_overrides(SlotInfo& slot, int slot_index) {
     // with the override (AFC, Happy Hare, flat-schema CFS). ACE's firmware
     // never reports one, so Rule 1 cannot fire here today — but that is a
     // fact about this firmware, not what the capability gates. Rule 2
-    // (eject) IS what firmware_reports_spool_ids() gates (base false here:
+    // (eject) IS what printer_reports_spool_ids() gates (base false here:
     // 0 is ACE's everyday reading, never an eject), and the erase branch is
     // correct tomorrow if a firmware ever starts reporting ids.
     auto it = overrides_.find(slot_index);
     if (it == overrides_.end())
         return;
     helix::ams::MergeOptions opts;
-    opts.firmware_reports_spool_ids = firmware_reports_spool_ids();
+    opts.printer_reports_spool_ids = printer_reports_spool_ids();
     opts.keep_spool_info_on_eject = SettingsManager::instance().get_ams_keep_spool_info_on_eject();
     // Own-write echo suppression (SlotFingerprintTracker::expect()
     // semantics): Rule 1 must not read an in-flight stale firmware id as an

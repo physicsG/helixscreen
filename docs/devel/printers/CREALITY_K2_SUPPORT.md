@@ -596,6 +596,34 @@ These are the **stock K2** commands (`CfsMacroVariant::K2`). Two other dialects 
 | `BOX_QUIT_MATERIAL` | Heat → Cut → Retract → Park | Same issue |
 | `BOX_INFO_REFRESH` | Pre-load → Get RFID → Get Remain Len | Safe to use, [usage](#refresh-spool-info) |
 
+#### The external-spool pair: `LOAD_MATERIAL` / `QUIT_MATERIAL`
+
+Separate from the `BOX_`-prefixed bay macros above, and easy to miss because the names differ
+by a prefix. These are Creality's **non-CFS spool-holder** operations, provided by the
+`[filament_rack]` module (`filament_rack_wrapper.cpython-39.so`, loaded on a stock K2 Plus —
+`filament_rack` appears in `printer.objects/list`). They are what a bypass / external spool
+load and unload should use, and HelixScreen's stock-dialect bypass paths do:
+
+| Macro | Sequence | Feed gated on |
+|-------|----------|---------------|
+| `LOAD_MATERIAL` | `BOX_GO_TO_EXTRUDE_POS` → `FILAMENT_RACK_SAVE_FAN` → `FILAMENT_RACK_PRE_FLUSH` → `FILAMENT_RACK_SET_TEMP` → `FILAMENT_RACK_FLUSH` → `FILAMENT_RACK_RESTORE_FAN` → `SET_COOL_TEMP` → park | toolhead switch |
+| `QUIT_MATERIAL` | `BOX_GO_TO_EXTRUDE_POS` → `FILAMENT_RACK_SET_TEMP` → `BOX_MOVE_TO_CUT` → `G0 E-10 F360` → `SET_COOL_TEMP` → park | toolhead switch |
+
+Both gate their extruder work on `filament_switch_sensor filament_sensor`, so the vendor's
+intended workflow is "the user feeds to the sensor and the macro takes it from there". A
+consequence worth knowing: with nothing at the sensor, `LOAD_MATERIAL` moves, cools and parks
+while reporting success, having loaded nothing.
+
+**Only `LOAD_MATERIAL` is self-sufficient.** Measured on a K2 Plus 2026-08-19 by watching the
+extruder axis: `LOAD_MATERIAL` moved **+370 mm** (a complete load and purge), while
+`QUIT_MATERIAL` moved **-13.99 mm** and left the filament still gripped by the extruder gears.
+The reason is in `[box]` itself — `tn_extrude = 140` against `tn_retrude = -10` — because a bay
+unload only needs the extruder to break its grip and the box's feeder reels the rest, and a
+bypass spool has no feeder. HelixScreen therefore appends its own 80 mm retract to
+`QUIT_MATERIAL` and sends `LOAD_MATERIAL` bare. Full rationale, and why an auto-detected
+`QUIT_MATERIAL` must not outrank the CFS backend, in
+[`FILAMENT_MANAGEMENT.md` § CFS bypass: why the two vendor macros are not symmetric](../FILAMENT_MANAGEMENT.md#cfs-bypass-why-the-two-vendor-macros-are-not-symmetric).
+
 #### Refresh Spool Info
 
 ```gcode

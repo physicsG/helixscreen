@@ -186,15 +186,13 @@ bool AmsToolheadMenu::show_at(lv_obj_t* parent, lv_obj_t* anchor, lv_point_t cli
     slot_index_ = slot_index;
 
     // Same predicate the per-slot menu greys its buttons with, and the mirror of
-    // the backend's own refusal: PRINTING always blocks, PAUSED only on a
-    // backend whose filament macro homes itself. Reading the raw print_active
-    // subject instead would suppress the menu through the runout pause that is
-    // precisely when these actions are needed.
-    const auto job_state = static_cast<helix::PrintJobState>(
-        lv_subject_get_int(get_printer_state().get_print_state_enum_subject()));
-    const bool print_blocks_ops = helix::ui::print_blocks_filament_op(
-        job_state == helix::PrintJobState::PRINTING, job_state == helix::PrintJobState::PAUSED,
-        backend && backend->filament_ops_self_home());
+    // the backend's own refusal: a job that holds the machine always blocks,
+    // PAUSED only on a backend whose filament macro homes itself. Reading the
+    // raw print_active subject instead would suppress the menu through the
+    // runout pause that is precisely when these actions are needed.
+    const bool print_blocks_ops =
+        helix::ui::print_blocks_filament_op(get_printer_state().get_print_lifecycle(),
+                                            backend && backend->filament_ops_self_home());
 
     // Same question the per-slot menu asks: is this position's filament
     // described by another unit? On multiACE an ACE-fed head answers with the

@@ -1001,6 +1001,27 @@ Located in the `standard_macros` section. These pick which built-in actions appe
 **Values:** `"clean_nozzle"`, `"bed_level"`, `"heat_soak"`, `"purge"`, `"bed_mesh"`, or `""` (empty = hide the button)
 **Description:** Assigns a built-in action to each of the four Controls-panel quick buttons. An empty string hides that button. The action runs the matching macro on your printer (auto-detected from your Klipper config). Configured most easily via **Settings > Printer > Macro Buttons** rather than by editing JSON.
 
+### `load_filament`, `unload_filament`, `purge`, `pause`, `resume`, `cancel`, `bed_mesh`, `bed_level`, `clean_nozzle`, `heat_soak`
+**Type:** string
+**Default:** `""` (empty = use auto-detection)
+**Description:** Overrides which macro HelixScreen runs for each standard action. An empty
+string means "auto-detect from your Klipper config"; a macro name pins that slot to your
+choice. Written by **Settings > Printer > Macro Buttons**, which is the easier way to set them
+because it lists the macros your printer actually defines.
+
+```json
+{
+  "standard_macros": {
+    "unload_filament": "MY_UNLOAD_ROUTINE"
+  }
+}
+```
+
+On a printer with a multi-filament system, `load_filament` and `unload_filament` also decide
+*who* performs the operation. Left empty, the filament system does it. Set to a macro, your
+macro does it instead and the filament system's own handling is skipped for that operation —
+see [Customizing which macro runs](guide/filament.md#customizing-which-macro-runs).
+
 > **Note:** This is separate from `printer.default_macros`, which customizes the Load/Unload/cooldown/custom-macro buttons elsewhere in the UI. See [Printer Settings › default_macros](#printer-settings).
 
 ---
@@ -1118,7 +1139,7 @@ All four have UI equivalents in **Settings > Hardware & Devices > Multi-Filament
 #### `force_bypass_controls`
 **Type:** boolean
 **Default:** `false`
-**Description:** Show the bypass controls and the external spool on the filament path even when the firmware reports no bypass position. Applies to Creality CFS, Anycubic ACE Pro, Snapmaker U1, tool changers, QIDI Box, and Happy Hare configs where `[mmu_machine] has_bypass` is `0`. The matching UI row is hidden whenever the firmware *does* report a bypass.
+**Description:** Show the bypass controls and the external spool on the filament path even when the firmware reports no bypass position. Applies to Anycubic ACE Pro, Snapmaker U1, tool changers, QIDI Box, and Happy Hare configs where `[mmu_machine] has_bypass` is `0`. The matching UI row is hidden whenever the firmware *does* report a bypass - including the Creality CFS, whose bypass always works.
 
 On Happy Hare, `MMU_SELECT_BYPASS` ignores `has_bypass` and works either way, so this setting makes the bypass usable on `mmu_vendor: Other` setups and on uncalibrated type-A selectors. On the other systems there is no bypass command to send: the Bypass toggle reports that the operation is not supported, and the setting controls only whether the external spool is displayed and tracked.
 
@@ -1132,7 +1153,7 @@ See [Filament → When Bypass Doesn't Appear](guide/filament.md#when-bypass-does
 #### `keep_spool_info_on_eject`
 **Type:** boolean
 **Default:** `true`
-**Description:** Keep a lane's spool details after it empties, so reloading the same spool after maintenance needs no re-selection. Turn it off to start fresh whenever a lane empties. The matching toggle (**Keep Spool Info on Eject**, in the AMS Management overlay) is shown only on systems whose firmware tracks spool ids per lane (AFC, Happy Hare); systems that detect spool swaps by tag always refresh on a swap regardless of this setting.
+**Description:** Keep a lane's spool details after it empties, so reloading the same spool after maintenance needs no re-selection. Turn it off to start fresh whenever a lane empties. Applies only to spools selected in HelixScreen; a spool assigned elsewhere (such as Mainsail) clears with the lane. To have every assigned spool remembered no matter where it was picked, use the firmware's own retention instead (AFC: `remember_spool` in AFC.cfg) - HelixScreen follows the spool the firmware reports. When that firmware retention covers every lane, it takes precedence and the matching toggle shows as disabled. The toggle (**Keep Spool Info on Eject**, in the AMS Management overlay) is shown only on systems whose firmware tracks spool ids per lane (AFC, Happy Hare); systems that detect spool swaps by tag always refresh on a swap regardless of this setting.
 
 #### `afc_unload_after_print`
 **Type:** boolean

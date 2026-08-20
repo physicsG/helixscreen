@@ -338,6 +338,7 @@ void RemoteControlServer::register_builtin_handlers() {
     };
     handlers_["geom"] = [this](const nlohmann::json& p) { return handle_geom(p); };
     handlers_["text"] = [this](const nlohmann::json& p) { return handle_text(p); };
+    handlers_["state"] = [this](const nlohmann::json& p) { return handle_state(p); };
     handlers_["set_text"] = [this](const nlohmann::json& p) { return handle_set_text(p); };
     handlers_["get_const"] = [this](const nlohmann::json& p) { return handle_get_const(p); };
     handlers_["wake"] = [this](const nlohmann::json& p) { return handle_wake(p); };
@@ -1211,16 +1212,18 @@ static std::string active_screen_label() {
 
 // Collect every visible widget with this exact resolved name. Mirrors
 // collect_glob_matches: hidden subtrees are skipped, because a widget the user
-// cannot see is never what `click <name>` meant.
-static void collect_by_name(lv_obj_t* parent, const std::string& name,
-                            std::vector<lv_obj_t*>& out) {
+// cannot see is never what `click <name>` meant. `state` asks
+// include_hidden=true for its retry: asking "is it hidden?" requires finding
+// the hidden widget first.
+static void collect_by_name(lv_obj_t* parent, const std::string& name, std::vector<lv_obj_t*>& out,
+                            bool include_hidden = false) {
     if (!parent) {
         return;
     }
     uint32_t count = lv_obj_get_child_count(parent);
     for (uint32_t i = 0; i < count; ++i) {
         lv_obj_t* child = lv_obj_get_child(parent, i);
-        if (!child || lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN)) {
+        if (!child || (!include_hidden && lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN))) {
             continue;
         }
         // Unnamed widgets match on LVGL's crafted "<class>_<index>" — see the
@@ -1232,7 +1235,7 @@ static void collect_by_name(lv_obj_t* parent, const std::string& name,
         if (candidate && name == candidate) {
             out.push_back(child);
         }
-        collect_by_name(child, name, out);
+        collect_by_name(child, name, out, include_hidden);
     }
 }
 
@@ -2008,6 +2011,89 @@ nlohmann::json RemoteControlServer::handle_set_text(const nlohmann::json& params
         // which comes from a backend field rather than a subject).
         lv_label_set_text(holder, text.c_str());
         return {{"set", text}, {"path", path_of(holder)}};
+    });
+}
+
+nlohmann::json RemoteControlServer::handle_state(const nlohmann::json& params) {
+    if (!params.contains("name") && !params.contains("path")) {
+        throw std::invalid_argument("Missing required parameter: name or path");
+    }
+
+    return execute_on_ui_thread([params]() -> nlohmann::json {
+        lv_obj_t* target = resolve_widget(params);
+        if (!target && params.contains("name") && params["name"].is_string()) {
+            // Name lookup skips hidden subtrees so `click <name>` never hits an
+            // invisible widget — but "is it hidden?" is a question `state`
+            // exists to answer. Retry with hidden matches included (plain
+            // names only: a @path already resolves hidden widgets, and a glob
+            // is a discovery aid like `ls`, which also filters).
+            const std::string name = params["name"].get<std::string>();
+            if (!is_glob(name)) {
+                std::vector<lv_obj_t*> matches;
+                if (lv_obj_t* scope = scope_root(params)) {
+                    collect_by_name(scope, name, matches, /*include_hidden=*/true);
+                } else {
+                    if (lv_obj_t* screen = lv_screen_active()) {
+                        collect_by_name(screen, name, matches, /*include_hidden=*/true);
+                    }
+                    collect_by_name(lv_layer_top(), name, matches, /*include_hidden=*/true);
+                }
+                if (!matches.empty()) {
+                    target = topmost_visible(matches);
+                }
+            }
+        }
+        if (!target) {
+            throw std::invalid_argument("Widget not found: " + target_label(params));
+        }
+        // Same container-to-control descent as click/set_value: `state <row>`
+        // reports on the switch/slider the row wraps, because that is what
+        // those commands would act on.
+        lv_obj_t* descended = nullptr;
+        lv_obj_t* widget = resolve_actionable(target, &descended, nullptr);
+
+        nlohmann::json result;
+        nlohmann::json states = nlohmann::json::array();
+        const struct {
+            lv_state_t bit;
+            const char* name;
+        } state_table[] = {
+            {LV_STATE_CHECKED, "checked"}, {LV_STATE_DISABLED, "disabled"},
+            {LV_STATE_FOCUSED, "focused"}, {LV_STATE_FOCUS_KEY, "focus_key"},
+            {LV_STATE_PRESSED, "pressed"}, {LV_STATE_HOVERED, "hovered"},
+            {LV_STATE_EDITED, "edited"},
+        };
+        for (const auto& entry : state_table) {
+            const bool on = lv_obj_has_state(widget, entry.bit);
+            result[entry.name] = on; // flat booleans for jq-friendly assertions
+            if (on) {
+                states.push_back(entry.name);
+            }
+        }
+        result["states"] = states; // and the set form for human eyes in the REPL
+
+        result["path"] = path_of(widget);
+        if (descended) {
+            result["descended_to"] = path_of(descended);
+        }
+        // Flags answer "why won't it show up / respond": a HIDDEN widget is
+        // still resolvable by name (only `ls` filters hidden subtrees), so
+        // bind_flag_if contracts are assertable here.
+        auto flags_of = [](lv_obj_t* w) {
+            return nlohmann::json{
+                {"hidden", lv_obj_has_flag(w, LV_OBJ_FLAG_HIDDEN)},
+                {"clickable", lv_obj_has_flag(w, LV_OBJ_FLAG_CLICKABLE)},
+                {"scrollable", lv_obj_has_flag(w, LV_OBJ_FLAG_SCROLLABLE)},
+            };
+        };
+        result["flags"] = flags_of(widget);
+        if (descended) {
+            // What you named vs what was driven can differ in visibility: a
+            // row hides itself while its inner switch carries no flag of its
+            // own, so `flags` alone would call a hidden row's control visible.
+            result["target"] = {{"path", path_of(target)}, {"flags", flags_of(target)}};
+        }
+        return result;
     });
 }
 

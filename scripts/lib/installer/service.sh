@@ -573,15 +573,24 @@ deploy_platform_hooks() {
 fix_install_ownership() {
     local user="${KLIPPER_USER:-}"
     local group="${KLIPPER_GROUP:-$user}"
-    if [ -n "$user" ] && [ "$user" != "root" ] && [ -d "$INSTALL_DIR" ]; then
-        log_info "Setting ownership to ${user}:${group}..."
-        # Try without sudo first: during self-update under NoNewPrivileges,
-        # sudo is blocked but files are already user-owned so chown succeeds
-        # without it (or is a no-op).  Fall back to sudo for fresh installs
-        # where root may own the directory.
-        chown -Rh "${user}:${group}" "${INSTALL_DIR}" 2>/dev/null || \
-            $SUDO chown -Rh "${user}:${group}" "${INSTALL_DIR}" 2>/dev/null || true
-    fi
+
+    [ -n "$user" ] || return 0
+    [ -d "$INSTALL_DIR" ] || return 0
+
+    # Root-run platforms (ad5m/ad5x/k1/k2/cc1/u1) still need normalising, and
+    # used to be skipped entirely.  Root's tar extract restores the uid/gid
+    # baked into the release archive, so the tree ends up owned by the build
+    # machine's numeric ids — a measured K2 had 890 of 915 files owned by uid
+    # 1001, which has no /etc/passwd entry there.  The extract now passes -o so
+    # fresh installs land as root, and this repairs installs made before that.
+    log_info "Setting ownership to ${user}:${group}..."
+
+    # Try without sudo first: during self-update under NoNewPrivileges,
+    # sudo is blocked but files are already user-owned so chown succeeds
+    # without it (or is a no-op).  Fall back to sudo for fresh installs
+    # where root may own the directory.
+    chown -Rh "${user}:${group}" "${INSTALL_DIR}" 2>/dev/null || \
+        $SUDO chown -Rh "${user}:${group}" "${INSTALL_DIR}" 2>/dev/null || true
 }
 
 # Stop service for update

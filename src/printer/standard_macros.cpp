@@ -7,6 +7,8 @@
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "printer_discovery.h"
+#include "state/subject_macros.h"
+#include "static_subject_registry.h"
 
 #include <spdlog/spdlog.h>
 
@@ -144,14 +146,62 @@ void StandardMacros::init_slot_definitions() {
     }
 }
 
+void StandardMacros::init_subjects(bool register_xml) {
+    if (subjects_initialized_) {
+        spdlog::debug("[StandardMacros] Subjects already initialized, skipping");
+        return;
+    }
+
+    INIT_SUBJECT_INT(macros_version, 0, subjects_, register_xml);
+
+    subjects_initialized_ = true;
+
+    // Self-register cleanup — ensures deinit runs before lv_deinit()
+    StaticSubjectRegistry::instance().register_deinit(
+        "StandardMacros", []() { StandardMacros::instance().deinit_subjects(); });
+
+    spdlog::trace("[StandardMacros] Subjects initialized (register_xml={})", register_xml);
+}
+
+void StandardMacros::deinit_subjects() {
+    if (!subjects_initialized_) {
+        return;
+    }
+
+    // Death signal BEFORE the subjects go away: deinit frees every observer node
+    // on them, so outside ObserverGuards must learn they are gone or their next
+    // reset() calls lv_observer_remove() on freed memory.
+    if (subjects_lifetime_) {
+        *subjects_lifetime_ = false;
+    }
+    subjects_lifetime_ = std::make_shared<bool>(true);
+
+    subjects_.deinit_all();
+    subjects_initialized_ = false;
+
+    spdlog::trace("[StandardMacros] Subjects deinitialized");
+}
+
+void StandardMacros::bump_version() {
+    if (!subjects_initialized_) {
+        return;
+    }
+    // init() runs inside a queue_update() drain on the main thread (see
+    // PrinterDiscovery), so setting the subject here is main-thread safe.
+    lv_subject_set_int(&macros_version_, lv_subject_get_int(&macros_version_) + 1);
+}
+
 void StandardMacros::reset() {
     spdlog::debug("[StandardMacros] Resetting");
     for (auto& slot : slots_) {
         slot.detected_macro.clear();
         // Don't clear configured_macro - that's user config
         // Don't clear fallback_macro - that's static
+        // Don't clear missing_macro - it still holds user config the last
+        // connected printer could not resolve; the next init() re-decides.
     }
     initialized_ = false;
+    bump_version();
 }
 
 const StandardMacroInfo& StandardMacros::get(StandardMacroSlot slot) const {
@@ -190,9 +240,14 @@ void StandardMacros::set_macro(StandardMacroSlot slot, const std::string& macro)
 
     auto& info = slots_[index];
     info.configured_macro = macro;
+    // Settings > Macro Buttons offers only names read off this printer
+    // (api->hardware().macros()), so a fresh pick resolves by construction. The
+    // next init() re-validates it against whatever the printer reports then.
+    info.missing_macro.clear();
 
     spdlog::info("[StandardMacros] Set {} = '{}'", info.slot_name, macro);
     save_to_config();
+    bump_version();
 }
 
 void StandardMacros::load_from_config() {
@@ -205,6 +260,9 @@ void StandardMacros::load_from_config() {
     for (auto& slot : slots_) {
         std::string path = "/standard_macros/" + slot.slot_name;
         slot.configured_macro = config->get<std::string>(path, "");
+        // The stored name is a candidate again until validate_configured() has
+        // checked it against the printer that is connected now.
+        slot.missing_macro.clear();
         if (!slot.configured_macro.empty()) {
             spdlog::debug("[StandardMacros] Loaded config: {} = {}", slot.slot_name,
                           slot.configured_macro);
@@ -221,7 +279,11 @@ void StandardMacros::save_to_config() {
 
     for (const auto& slot : slots_) {
         std::string path = "/standard_macros/" + slot.slot_name;
-        config->set<std::string>(path, slot.configured_macro);
+        // Persist what the user asked for, not what resolved: init() demotes a
+        // configured macro the printer lacks into missing_macro, and this writes
+        // every slot, so using configured_macro alone would silently delete the
+        // other slots' settings the first time any one of them is changed.
+        config->set<std::string>(path, slot.requested_macro());
     }
 
     if (!config->save()) {
@@ -277,6 +339,9 @@ void StandardMacros::init(const helix::PrinterDiscovery& hardware) {
     // Load user configuration
     load_from_config();
 
+    // A configured name is only usable if this printer defines it
+    validate_configured(hardware);
+
     // Run auto-detection
     auto_detect(hardware);
 
@@ -313,6 +378,35 @@ void StandardMacros::init(const helix::PrinterDiscovery& hardware) {
     }
     spdlog::debug("[StandardMacros] Initialized: {} configured, {} detected, {} fallback, {} empty",
                   configured, detected, fallback, empty);
+
+    bump_version();
+}
+
+void StandardMacros::validate_configured(const helix::PrinterDiscovery& hardware) {
+    // Printer presets seed the configured macros from a template machine, so a
+    // Voron set up from the FlashForge AD5M preset carries CLEAR_NOZZLE,
+    // AUTO_FULL_BED_LEVEL, LOAD_FILAMENT and UNLOAD_FILAMENT — none of which its
+    // Klipper defines. Taken at face value those names outrank auto-detection,
+    // the HELIX fallbacks and (for load/unload) the whole dispatch ladder, so
+    // the buttons rendered as working and the only feedback on a tap was an
+    // "Unknown command" rejection from the printer.
+    //
+    // Mirrors the fallback check further down init(): the printer's own macro
+    // list is the authority for every source, not just the HELIX_* ones.
+    for (auto& slot : slots_) {
+        if (slot.configured_macro.empty()) {
+            continue;
+        }
+        if (hardware.has_macro(slot.configured_macro)) {
+            continue;
+        }
+
+        spdlog::warn("[StandardMacros] Configured {} macro '{}' is not defined on this printer — "
+                     "treating the slot as unassigned",
+                     slot.slot_name, slot.configured_macro);
+        slot.missing_macro = slot.configured_macro;
+        slot.configured_macro.clear();
+    }
 }
 
 void StandardMacros::auto_detect(const helix::PrinterDiscovery& hardware) {

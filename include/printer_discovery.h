@@ -56,6 +56,20 @@ class PrinterDiscovery {
             return;
         }
 
+        // Keep the raw list. Detection's object_exists / macro_match /
+        // macro_exclude heuristics read printer_objects(), which 73 of the 94
+        // database entries depend on, so a caller that parses an object list
+        // and never calls set_printer_objects() would score blind against the
+        // strongest signals in the database. The discovery sequence still calls
+        // the setter afterwards with the same strings, which is an idempotent
+        // overwrite rather than a second copy.
+        printer_objects_.reserve(objects.size());
+        for (const auto& obj : objects) {
+            if (obj.is_string()) {
+                printer_objects_.push_back(obj.template get<std::string>());
+            }
+        }
+
         // AFC_stepper names collected separately — only used as lane source when
         // no AFC_lane objects exist (Box Turtle compat). Vivid uses AFC_stepper for
         // motor components (drive/selector), not lanes.
@@ -692,6 +706,58 @@ class PrinterDiscovery {
                 spdlog::debug("[PrinterDiscovery] screws_tilt_adjust detected from config");
             }
         }
+    }
+
+    /**
+     * @brief Derive the build volume from the configfile [stepper_*] sections
+     *
+     * The X/Y travel limits and the Z height are the most discriminating
+     * evidence PrinterDetector has: 63 of the 94 database entries carry a
+     * build_volume_range heuristic. configfile.settings reports the resolved
+     * value for every stepper key, so this is available as soon as the
+     * configfile query returns — long before the safety-limits fetch that is
+     * the other writer of this field.
+     *
+     * Every field is presence-checked: Klipper emits nulls for keys a printer
+     * does not define, and a bare .get<float>() on one throws type_error.302.
+     *
+     * @param settings JSON object from a configfile.settings response
+     * @return true when a usable X or Y extent was found and stored
+     */
+    bool parse_build_volume(const nlohmann::json& settings) {
+        if (!settings.is_object()) {
+            return false;
+        }
+
+        BuildVolume volume{};
+        auto read = [&settings](const char* section, const char* field, float& out) {
+            const auto s = settings.find(section);
+            if (s == settings.end() || !s->is_object()) {
+                return;
+            }
+            const auto f = s->find(field);
+            if (f != s->end() && f->is_number()) {
+                out = f->get<float>();
+            }
+        };
+        read("stepper_x", "position_min", volume.x_min);
+        read("stepper_x", "position_max", volume.x_max);
+        read("stepper_y", "position_min", volume.y_min);
+        read("stepper_y", "position_max", volume.y_max);
+        read("stepper_z", "position_max", volume.z_max);
+
+        // An all-zero volume is worse than none: build_volume_range heuristics
+        // would score it against every printer's window. Only a real extent is
+        // worth storing.
+        if (volume.x_max <= 0.0f && volume.y_max <= 0.0f) {
+            return false;
+        }
+
+        build_volume_ = volume;
+        spdlog::debug("[PrinterDiscovery] Build volume from config: X[{:.0f},{:.0f}] "
+                      "Y[{:.0f},{:.0f}] Z[0,{:.0f}]",
+                      volume.x_min, volume.x_max, volume.y_min, volume.y_max, volume.z_max);
+        return true;
     }
 
     /**

@@ -685,6 +685,8 @@
     <str name="icon_chart_line" value="󰄪"/>
     <str name="icon_check" value="󰄬"/>
     <str name="icon_check_bold" value="󰸞"/>
+    <str name="icon_check_box" value="󰄲"/>
+    <str name="icon_check_box_outline_blank" value="󰄱"/>
     <str name="icon_check_circle" value="󰗡"/>
     <str name="icon_chevron_down" value="󰅀"/>
     <str name="icon_chevron_left" value="󰅁"/>
@@ -698,6 +700,7 @@
     <str name="icon_cog" value="󰒓"/>
     <str name="icon_console" value="󰆍"/>
     <str name="icon_content_copy" value="󰆏"/>
+    <str name="icon_coolant_temperature" value="󰏈"/>
     <str name="icon_cooldown" value="󰜗"/>
     <str name="icon_crosshairs_gps" value="󰆤"/>
     <str name="icon_cube" value="󰆧"/>
@@ -705,9 +708,11 @@
     <str name="icon_cursor_move" value="󰆾"/>
     <str name="icon_dashboard" value="󰕮"/>
     <str name="icon_database" value="󰆼"/>
+    <str name="icon_debug_step_over" value="󰆷"/>
     <str name="icon_delete" value="󰆴"/>
     <str name="icon_dots_vertical" value="󰇙"/>
     <str name="icon_download" value="󰇚"/>
+    <str name="icon_eject" value="󰇪"/>
     <str name="icon_electric_switch" value="󰺟"/>
     <str name="icon_engine" value="󰇺"/>
     <str name="icon_engine_off" value="󰩆"/>
@@ -719,11 +724,13 @@
     <str name="icon_fan_off" value="󰠝"/>
     <str name="icon_filament" value="󰹛"/>
     <str name="icon_filament_alert" value="󱇀"/>
+    <str name="icon_filter" value="󰈲"/>
     <str name="icon_fine_tune" value="󰘮"/>
     <str name="icon_fire" value="󰈸"/>
     <str name="icon_flash" value="󰉁"/>
     <str name="icon_folder" value="󰉋"/>
     <str name="icon_folder_arrow_up" value="󱧰"/>
+    <str name="icon_folder_home" value="󱂵"/>
     <str name="icon_folder_open" value="󰝰"/>
     <str name="icon_folder_upload" value="󰉙"/>
     <str name="icon_fridge_industrial" value="󱗮"/>
@@ -736,6 +743,7 @@
     <str name="icon_help_circle" value="󰋗"/>
     <str name="icon_home" value="󰋜"/>
     <str name="icon_home_import" value="󰾜"/>
+    <str name="icon_home_thermometer" value="󰽔"/>
     <str name="icon_hourglass" value="󰔟"/>
     <str name="icon_image_area" value="󰋫"/>
     <str name="icon_image_broken_variant" value="󰋮"/>
@@ -746,6 +754,7 @@
     <str name="icon_info_outline" value="󰋽"/>
     <str name="icon_inputshaper" value="󰥛"/>
     <str name="icon_inventory" value="󰏖"/>
+    <str name="icon_keyboard" value="󰌌"/>
     <str name="icon_lan" value="󰌗"/>
     <str name="icon_layers" value="󰌨"/>
     <str name="icon_leaf" value="󰌪"/>
@@ -784,7 +793,23 @@
     <str name="icon_plus" value="󰐕"/>
     <str name="icon_power" value="󰐥"/>
     <str name="icon_power_cycle" value="󰤁"/>
+    <str name="icon_power_off" value="󰤂"/>
+    <str name="icon_power_on" value="󰤃"/>
     <str name="icon_power_plug" value="󰚥"/>
+    <str name="icon_power_plug_battery" value="󱰻"/>
+    <str name="icon_power_plug_off" value="󰚦"/>
+    <str name="icon_power_plug_outline" value="󱐥"/>
+    <str name="icon_power_socket" value="󰐧"/>
+    <str name="icon_power_socket_au" value="󰤅"/>
+    <str name="icon_power_socket_ch" value="󰾳"/>
+    <str name="icon_power_socket_de" value="󱄇"/>
+    <str name="icon_power_socket_eu" value="󰟧"/>
+    <str name="icon_power_socket_fr" value="󱄈"/>
+    <str name="icon_power_socket_it" value="󱓿"/>
+    <str name="icon_power_socket_jp" value="󱄉"/>
+    <str name="icon_power_socket_uk" value="󰟨"/>
+    <str name="icon_power_socket_us" value="󰟩"/>
+    <str name="icon_power_standby" value="󰤆"/>
     <str name="icon_print" value="󰐪"/>
     <str name="icon_printer" value="󰐪"/>
     <str name="icon_printer_3d" value="󰐫"/>
@@ -816,7 +841,9 @@
     <str name="icon_speed" value="󰓅"/>
     <str name="icon_speed_down" value="󰾆"/>
     <str name="icon_speed_up" value="󰾅"/>
+    <str name="icon_spirit_level" value="󱓱"/>
     <str name="icon_spoolman" value="󰈯"/>
+    <str name="icon_star" value="󰓎"/>
     <str name="icon_stop" value="󰓛"/>
     <str name="icon_swap_vertical" value="󰓢"/>
     <str name="icon_sync" value="󰓦"/>
@@ -824,8 +851,12 @@
     <str name="icon_target" value="󰓾"/>
     <str name="icon_television_classic" value="󰟴"/>
     <str name="icon_thermometer" value="󰔏"/>
+    <str name="icon_thermometer_lines" value="󰔐"/>
     <str name="icon_thermometer_minus" value="󰸄"/>
+    <str name="icon_thermometer_off" value="󱔱"/>
     <str name="icon_thermometer_plus" value="󰸅"/>
+    <str name="icon_thermometer_probe" value="󱬫"/>
+    <str name="icon_toolbox_outline" value="󰦭"/>
     <str name="icon_tortoise" value="󰴻"/>
     <str name="icon_toy_brick_outline" value="󱊍"/>
     <str name="icon_train_flatbed" value="󱬵"/>
@@ -833,7 +864,6 @@
     <str name="icon_trash_can_outline" value="󰩺"/>
     <str name="icon_tray_arrow_up" value="󰄝"/>
     <str name="icon_triangle_exclamation" value="󰀦"/>
-    <str name="icon_toolbox_outline" value="󰦭"/>
     <str name="icon_tune" value="󰘮"/>
     <str name="icon_tune_variant" value="󱕂"/>
     <str name="icon_tune_vertical_variant" value="󱕃"/>
@@ -842,6 +872,7 @@
     <str name="icon_usb" value="󰕓"/>
     <str name="icon_vibrate" value="󰕦"/>
     <str name="icon_video" value="󰕧"/>
+    <str name="icon_video_off" value="󰕨"/>
     <str name="icon_view_dashboard" value="󰕮"/>
     <str name="icon_view_grid" value="󰕰"/>
     <str name="icon_view_list" value="󰕲"/>

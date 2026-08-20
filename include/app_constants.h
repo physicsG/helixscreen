@@ -76,14 +76,9 @@ constexpr int DEFAULT_LOAD_PREHEAT_TEMP = 220;
 /**
  * @brief Startup timing constants
  *
- * Grace periods for suppressing notifications during initial boot.
- * On embedded devices, Moonraker connection may take 10+ seconds.
+ * Grace periods for behavior that must settle during initial boot.
  */
 namespace Startup {
-/// Grace period for suppressing initial state notifications (Klipper ready toast)
-/// Used from app startup - accounts for slow Moonraker connection on embedded devices
-constexpr std::chrono::seconds NOTIFICATION_GRACE_PERIOD{10};
-
 /// Grace period for filament sensor state stabilization after Moonraker connects
 /// Allows time for initial sensor state to arrive after discovery
 constexpr std::chrono::seconds SENSOR_STABILIZATION_PERIOD{5};

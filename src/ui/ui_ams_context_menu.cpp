@@ -14,6 +14,7 @@
 #include "app_globals.h"
 #include "filament_database.h"
 #include "filament_op_slot_resolver.h"
+#include "filament_variants.h"
 #include "printer_state.h"
 #include "static_subject_registry.h"
 
@@ -222,11 +223,10 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // only on a backend whose filament macro homes itself (AD5X IFS). Reading
     // the raw print_active subject here — which is 1 for both — would keep the
     // menu greyed through the runout pause that is the whole recovery workflow.
-    const auto job_state = static_cast<helix::PrintJobState>(
-        lv_subject_get_int(get_printer_state().get_print_state_enum_subject()));
+    const auto lifecycle = static_cast<PrintState>(
+        lv_subject_get_int(get_printer_state().get_print_lifecycle_subject()));
     const bool print_blocks_op = helix::ui::print_blocks_filament_op(
-        job_state == helix::PrintJobState::PRINTING, job_state == helix::PrintJobState::PAUSED,
-        backend_ && backend_->filament_ops_self_home());
+        lifecycle, backend_ && backend_->filament_ops_self_home());
 
     // Check if system is busy (operation in progress). AmsSystemInfo::is_busy()
     // is the same predicate AmsSubscriptionBackend::check_preconditions() uses to
@@ -782,7 +782,7 @@ void AmsContextMenu::handle_backup_changed() {
         // "PLA cannot use PLA as backup" would be nonsense.
         std::string msg;
         if (!current_material.empty() && !backup_material.empty() &&
-            !filament::are_materials_compatible(current_material, backup_material)) {
+            !filament::materials_compatible(current_material, backup_material)) {
             msg = fmt::format(lv_tr("Incompatible materials: {} cannot use {} as backup"),
                               current_material, backup_material);
         } else {
@@ -943,10 +943,10 @@ AmsContextMenu::BackupEligibleFn AmsContextMenu::backend_eligible_fn() const {
     if (backend == nullptr) {
         // No backend: tag nothing and refuse nothing. Matches the old code, which
         // skipped every compatibility check when backend_ was null.
-        return [](int, int) { return true; };
+        return [](int, int) { return helix::printer::BackupEligibility::Eligible; };
     }
     return [backend](int slot, int candidate) {
-        return backend->is_endless_spool_backup_eligible(slot, candidate);
+        return backend->endless_spool_backup_eligibility(slot, candidate);
     };
 }
 
@@ -978,11 +978,20 @@ std::string AmsContextMenu::build_backup_options_for(int total_slots, int item_i
         // badge reads 8 names nothing the user can point at.
         const int shown = display_number ? display_number(i) : i + 1;
         options += "\n" + fmt::format(lv_tr("Slot {}"), shown);
-        // The base virtual is the old are_materials_compatible() rule, with an
-        // unknown material on either side counting as eligible, so nothing is
-        // tagged that was not tagged before on AFC / Happy Hare / CFS.
-        if (item_index >= 0 && eligible && !eligible(item_index, i)) {
-            options += std::string(" ") + lv_tr("(incompatible)");
+        if (item_index >= 0 && eligible) {
+            switch (eligible(item_index, i)) {
+            case helix::printer::BackupEligibility::Incompatible:
+                options += std::string(" ") + lv_tr("(incompatible)");
+                break;
+            case helix::printer::BackupEligibility::GradeDiffers:
+                // Selectable, and labelled so the choice is an informed one:
+                // same polymer, but a filled grade that prints slower and wears
+                // a brass nozzle.
+                options += std::string(" ") + lv_tr("(different grade)");
+                break;
+            case helix::printer::BackupEligibility::Eligible:
+                break;
+            }
         }
     }
     return options;
@@ -993,7 +1002,11 @@ bool AmsContextMenu::decide_backup_refused(int item_index, int backup_slot,
     if (backup_slot < 0 || item_index < 0) {
         return false; // "None" clears a backup; nothing to be compatible with.
     }
-    return eligible && !eligible(item_index, backup_slot);
+    // Only the hard verdict refuses. A grade difference is tagged in the option
+    // list and then allowed: the print surviving its runout is worth more than
+    // the grade being exact, and the user has been told which lane it is.
+    return eligible &&
+           eligible(item_index, backup_slot) == helix::printer::BackupEligibility::Incompatible;
 }
 
 int AmsContextMenu::get_current_tool_for_slot() const {

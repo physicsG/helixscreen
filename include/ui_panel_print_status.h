@@ -218,7 +218,6 @@ class PrintStatusPanel : public OverlayBase {
      * @brief Set print state
      * @param state New print state
      */
-    void set_state(PrintState state);
 
     /**
      * @brief Get current print state
@@ -239,7 +238,6 @@ class PrintStatusPanel : public OverlayBase {
      *
      * @param success If true, transitions to Printing; if false, transitions to Idle
      */
-    void end_preparing(bool success);
 
     /**
      * @brief Get current progress percentage
@@ -450,6 +448,23 @@ class PrintStatusPanel : public OverlayBase {
     // One-shot timer for deferred G-code loading (5s delay after print start)
     // Prevents memory spike during homing/heating phase
     lv_timer_t* gcode_load_timer_ = nullptr;
+
+    /**
+     * @brief Withholds the preparing overlay until preparation is worth showing
+     *
+     * A print with no host-side pre-start block can pass through Preparing in
+     * well under a second, and flashing the overlay for that is worse than not
+     * showing it. Debouncing on ELAPSED time rather than a predicted duration is
+     * deliberate: a prediction can fail closed - predict "fast", reality is a
+     * ten-minute mesh, and the overlay never appears at all.
+     */
+    lv_timer_t* preparing_show_timer_ = nullptr;
+
+    /// Shared by cleanup() and the destructor - see CLAUDE.md threading rule 5.
+    void cancel_preparing_show_timer();
+
+    /// How long Preparing must persist before the overlay is shown.
+    static constexpr uint32_t PREPARING_SHOW_DELAY_MS = 750;
     void schedule_deferred_gcode_load();
 
     // Reconcile the preview widgets against the current print state. Reads the
@@ -559,8 +574,16 @@ class PrintStatusPanel : public OverlayBase {
 #endif
     void
     load_gcode_for_viewing(const std::string& filename); ///< Download and load G-code into viewer
-    void update_button_states(); ///< Enable/disable buttons based on current print state
-    void update_objects_text();  ///< Update "X of Y obj" display from exclude state
+    void update_button_states();
+
+    /// The two per-job resets, shared by the job-state edge and the
+    /// exit-from-Preparing edge. A print started in-app only ever reaches the
+    /// second one: the panel is Preparing before Moonraker reports printing, so
+    /// the job-state handler derives no transition and returns early.
+    void apply_new_print_resets(
+        bool reset_progress_bar,
+        bool clear_excluded_objects); ///< Enable/disable buttons based on current print state
+    void update_objects_text();       ///< Update "X of Y obj" display from exclude state
     void
     update_view_toggle_position(bool objects_visible); ///< Shift view toggle when objects btn shown
     void animate_badge_pop_in(lv_obj_t* badge, const char* label); ///< Pop-in animation for badges

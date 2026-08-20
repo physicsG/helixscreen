@@ -78,6 +78,8 @@ LIBHV_PATCHED_FILES := \
 	Makefile.in \
 	http/client/requests.h \
 	base/hsocket.c \
+	base/hplatform.h \
+	base/hlog.c \
 	base/dns_resolv.c \
 	base/dns_resolv.h \
 	cpputil/hthreadpool.h \
@@ -821,6 +823,18 @@ $(PATCHES_STAMP): $(PATCH_FILES) $(LVGL_HEAD) $(LIBHV_HEAD)
 		fi \
 	else \
 		echo "$(GREEN)✓ libhv HThreadPool wait() lock patch already applied$(RESET)"; \
+	fi
+	$(Q)if ! grep -q "PATCH NOTE(helixscreen)" "$(LIBHV_DIR)/base/hlog.c" 2>/dev/null; then \
+		echo "$(YELLOW)→ Applying libhv hlog localtime_r patch...$(RESET)"; \
+		if git -C $(LIBHV_DIR) apply --check $(PATCH_DIR)/libhv-hlog-thread-safe-localtime.patch 2>/dev/null; then \
+			git -C $(LIBHV_DIR) apply $(PATCH_DIR)/libhv-hlog-thread-safe-localtime.patch && \
+			echo "$(GREEN)✓ libhv hlog localtime_r patch applied$(RESET)"; \
+		else \
+			echo "$(RED)✗ Cannot apply hlog localtime_r patch — run 'make reapply-patches'. Until then every logging thread races on localtime()'s shared struct tm and on tzset's TZ string (nightly TSAN, two reports in logger_print)$(RESET)"; \
+			exit 1; \
+		fi \
+	else \
+		echo "$(GREEN)✓ libhv hlog localtime_r patch already applied$(RESET)"; \
 	fi
 	$(Q)if ! grep -q "PATCH NOTE(helixscreen)" "$(LIBHV_DIR)/http/HttpMessage.h" 2>/dev/null; then \
 		echo "$(YELLOW)→ Applying libhv HttpRequest cancel atomic patch...$(RESET)"; \

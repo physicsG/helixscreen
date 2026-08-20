@@ -65,6 +65,7 @@
 #include "probe_sensor_manager.h"
 #include "settings_manager.h"
 #include "spoolman_manager.h"
+#include "standard_macros.h"
 #include "system/telemetry_manager.h"
 #include "temperature_controller.h"
 #include "temperature_sensor_manager.h"
@@ -328,6 +329,10 @@ void SubjectInitializer::init_ams_subjects() {
     // Initialize ToolState subjects (tool changer state tracking)
     helix::ToolState::instance().init_subjects();
 
+    // Macro-slot resolution version. Published before any panel is built so
+    // surfaces that gate buttons on macro availability can observe it.
+    StandardMacros::instance().init_subjects();
+
     // Initialize sensor manager subjects BEFORE panels so XML bindings can work
     // Note: Each manager self-registers cleanup with StaticSubjectRegistry in init_subjects()
     helix::FilamentSensorManager::instance().init_subjects();
@@ -505,6 +510,7 @@ void SubjectInitializer::init_observers() {
 
     // Print completion notification observer
     m_observers.push_back(helix::init_print_completion_observer());
+    m_observers.push_back(helix::init_preparing_exit_observer());
 
     // Print start navigation observer (auto-navigate to print status)
     m_observers.push_back(helix::init_print_start_navigation_observer());

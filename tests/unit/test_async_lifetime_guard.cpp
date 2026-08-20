@@ -336,6 +336,68 @@ TEST_CASE_METHOD(BgDetectorFixture, "expired() under tight bg-thread loop doesn'
     bg.join();
 }
 
+// ---------------------------------------------------------------------------
+// expired_no_lvgl() — the audited-callsite spelling
+// ---------------------------------------------------------------------------
+//
+// These deliberately run WITHOUT BgDetectorFixture. Strict mode is on for the
+// suite, so any call that still routes through report_bg_expired_check()
+// aborts the process — which is exactly the regression to catch. A test that
+// merely asserts the boolean would pass just as happily if someone "simplified"
+// expired_no_lvgl() into a call to expired().
+
+TEST_CASE("expired_no_lvgl() on a bg thread does not trip the detector",
+          "[lifetime_guard][bg_detector]") {
+    helix::internal::set_main_thread_id();
+    helix::internal::set_strict_bg_check(true);
+    AsyncLifetimeGuard guard;
+    auto tok = guard.token();
+
+    // Alive token + bg thread is precisely the combination expired() reports
+    // (and aborts on under strict mode). Reaching the assert proves we did not.
+    std::atomic<bool> saw_alive{false};
+    std::thread bg([&]() { saw_alive.store(!tok.expired_no_lvgl()); });
+    bg.join();
+    REQUIRE(saw_alive.load());
+}
+
+TEST_CASE("expired_no_lvgl() still reports expiry correctly on a bg thread",
+          "[lifetime_guard][bg_detector]") {
+    helix::internal::set_main_thread_id();
+    helix::internal::set_strict_bg_check(true);
+    AsyncLifetimeGuard guard;
+    auto tok = guard.token();
+    guard.invalidate();
+
+    std::atomic<bool> saw_expired{false};
+    std::thread bg([&]() { saw_expired.store(tok.expired_no_lvgl()); });
+    bg.join();
+    REQUIRE(saw_expired.load());
+}
+
+TEST_CASE("expired_no_lvgl() agrees with expired() on the main thread",
+          "[lifetime_guard][bg_detector]") {
+    helix::internal::set_main_thread_id();
+    AsyncLifetimeGuard guard;
+    auto tok = guard.token();
+
+    REQUIRE(tok.expired_no_lvgl() == tok.expired());
+    guard.invalidate();
+    REQUIRE(tok.expired_no_lvgl() == tok.expired());
+    REQUIRE(tok.expired_no_lvgl());
+}
+
+TEST_CASE("expired_no_lvgl() tracks generation cycling", "[lifetime_guard][bg_detector]") {
+    helix::internal::set_main_thread_id();
+    AsyncLifetimeGuard guard;
+    auto old_tok = guard.token();
+    guard.invalidate();
+    auto new_tok = guard.token();
+
+    REQUIRE(old_tok.expired_no_lvgl());
+    REQUIRE_FALSE(new_tok.expired_no_lvgl());
+}
+
 TEST_CASE("on_main_thread() reflects current thread", "[lifetime_guard][bg_detector]") {
     helix::internal::set_main_thread_id();
     REQUIRE(helix::internal::on_main_thread());

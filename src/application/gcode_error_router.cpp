@@ -361,6 +361,10 @@ void GcodeErrorRouter::process_line(const std::string& line) {
     // notify body to main), so these synchronous getters are safe.
     ClassifyContext ctx;
     ctx.is_paused = get_printer_state().is_paused();
+    // RAW_PRINT_STATE_OK: classifiers offer resume/retry actions off this flag.
+    // A failure inside a host-side pre-start block is PrintPreparationManager's
+    // to report, and claiming a print is running would offer a Resume that has
+    // nothing to resume.
     ctx.is_printing = get_printer_state().get_print_job_state() == PrintJobState::PRINTING;
 
     // Ask the active AMS backend first (domain-aware); else the generic

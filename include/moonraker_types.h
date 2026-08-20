@@ -85,6 +85,13 @@ struct FileRoot {
     [[nodiscard]] bool writable() const {
         return permissions.find('w') != std::string::npos;
     }
+
+    /// True when Moonraker said the root can be read. Same conservative rule as
+    /// writable(): an absent permissions field claims nothing, so a fork that
+    /// omits it keeps callers on the HTTP path rather than reading a guess.
+    [[nodiscard]] bool readable() const {
+        return permissions.find('r') != std::string::npos;
+    }
 };
 
 namespace helix {
@@ -102,6 +109,27 @@ inline std::string writable_root_path(const std::vector<FileRoot>& roots, const 
     for (const auto& r : roots) {
         if (r.name == name)
             return r.writable() ? r.path : std::string();
+    }
+    return "";
+}
+
+/**
+ * @brief Absolute path of the named root when it can be READ
+ *
+ * The writable_root_path() sibling above gates on "w" because its callers write
+ * into the root. Reading a file Moonraker already serves needs no such gate: a
+ * root marked read-only is still readable, and refusing it would send the caller
+ * back to an HTTP round-trip for a file sitting on the same disk.
+ *
+ * Returns "" for a name that is not in the list, or one Moonraker reports with
+ * no permissions at all.
+ */
+inline std::string readable_root_path(const std::vector<FileRoot>& roots, const std::string& name) {
+    if (name.empty())
+        return "";
+    for (const auto& r : roots) {
+        if (r.name == name)
+            return r.readable() ? r.path : std::string();
     }
     return "";
 }

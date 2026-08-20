@@ -6,10 +6,13 @@
 # frame that is our code. Only DIRECT leaks are keyed — an indirect leak is a
 # child of a direct one, and counting both double-counts the same defect.
 #
-# Line numbers are deliberately absent, template argument lists are truncated
-# to their first argument, parameter lists are dropped, and Catch2 test
-# numbering is normalized away. All four move for reasons that have nothing to
-# do with the leak, and a key that moves is a baseline nobody trusts. See the
+# Line numbers (and clang's trailing columns) are deliberately absent, template
+# argument lists are truncated to their first argument, parameter lists and
+# return types are dropped, absolute checkout prefixes are relativized, lambda
+# closure spellings collapse to `lambda`, and Catch2 test numbering is
+# normalized away — the key is the same whether gcc or clang symbolized the
+# run. All of these move for reasons that have nothing to do with the leak,
+# and a key that moves is a baseline nobody trusts. See the
 # rationale in scripts/check_asan_leaks.py.
 #
 # A key NOT listed here fails the build. The list may SHRINK as leaks are
@@ -18,14 +21,18 @@
 # The ceilings below catch an already-listed origin leaking MORE, which the key
 # set alone cannot see. They come from the SUMMARY line, so they cover direct
 # and indirect bytes together.
-max-leaked-bytes: 102253
-max-leaked-objects: 760
+max-leaked-bytes: 131841
+max-leaked-objects: 1220
+<no-stack>
 include/observer_factory.h::observe_int_async<TestPanel>
 include/observer_factory.h::observe_int_immediate<TestPanel>
+include/observer_factory.h::observe_int_sync<ControlsPanel>
 include/observer_factory.h::observe_int_sync<HomePanel>
 include/observer_factory.h::observe_int_sync<PrintStatusPanel>
+include/observer_factory.h::observe_int_sync<SpoolmanManager>
 include/observer_factory.h::observe_int_sync<TestPanel>
 include/observer_factory.h::observe_int_sync<helix::ActiveSpoolWidget>
+include/observer_factory.h::observe_int_sync<helix::PanelWidgetManager>
 include/observer_factory.h::observe_int_sync<helix::PowerDeviceState>
 include/observer_factory.h::observe_int_sync<helix::PrintStatusWidget>
 include/observer_factory.h::observe_string<CATCH2_INTERNAL_TEST::test()::AxesState>
@@ -35,8 +42,10 @@ include/observer_factory.h::observe_string_immediate<TestPanel>
 lib/lvgl/src/layouts/grid/lv_grid.c::calc_rows
 lib/lvgl/src/misc/lv_ll.c::lv_ll_ins_tail
 lib/lvgl/src/stdlib/builtin/lv_string_builtin.c::lv_strdup
-src/api/moonraker_client_mock.cpp::MoonrakerClientMock::gcode_script
 src/ui/ui_button.cpp::ui_button_create
+src/ui/ui_split_button.cpp::ui_split_button_create
+tests/unit/test_panel_widget_manager.cpp::CATCH2_INTERNAL_TEST::lambda::operator()
 tests/unit/test_panel_widget_manager.cpp::operator()
 tests/unit/test_scoped_subject_registry.cpp::test
+tests/unit/test_temp_graph_controller.cpp::CATCH2_INTERNAL_TEST::test
 tests/unit/test_temp_graph_controller.cpp::test

@@ -39,7 +39,15 @@ class TemperatureService;
  * - Extruder: 3-5 minutes
  * - Heated Bed: 5-10 minutes (larger thermal mass)
  */
+namespace helix {
+namespace ui {
+struct PIDCalibrationPanelTestAccess; // test-only friend (tests/test_helpers/)
+} // namespace ui
+} // namespace helix
+
 class PIDCalibrationPanel : public OverlayBase {
+    friend struct helix::ui::PIDCalibrationPanelTestAccess;
+
   public:
     /**
      * @brief Calibration state machine states

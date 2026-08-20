@@ -9,10 +9,12 @@
 #include "ams_fault_event.h"
 #include "ams_tool_map_sync.h"
 #include "filament_catalog.h"
+#include "filament_op_dispatch.h" // EXTERNAL_SPOOL_SLOT — the shared bypass sentinel
 #include "filament_slot_override.h"
 #include "filament_slot_override_store.h"
 #include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "macro_param_cache.h"
 #include "moonraker_error.h"
 #include "operation_patterns.h" // helix::contains_ci
 #include "post_op_cooldown_manager.h"
@@ -1463,17 +1465,33 @@ void AmsBackendCfs::handle_status_update(const nlohmann::json& notification) {
                 system_info_.supports_bypass = true;
             }
 
-            // Cross-UI drift guard: the box re-arming (enable=1) while a
-            // declaration is latched means someone re-enabled the CFS through
-            // Creality's own screen — the box is an active agent again, so the
-            // declaration is stale. In-memory clear only; this runs on the
-            // libhv thread and the persisted flag is idempotently re-cleared
-            // on the next boot's restore. Only an explicit 1 acts — a missing
-            // or sentinel (-1) enable means "unknown", not "re-armed".
-            if (bypass_declared_ && helix::json_util::safe_int(box, "enable", -1) == 1) {
+            // Cross-UI drift guard: has the CFS taken the feed back? The box
+            // naming an ACTIVE BAY is that signal, and it is the only one that
+            // means it.
+            //
+            // `enable` is not, because the box re-arms itself. Verified on a K2
+            // Plus: bypass was declared (ENABLE=0) and restored cleanly across
+            // one restart with the box still reporting enable=0, but by the next
+            // restart enable had returned to 1 with no host command in between —
+            // no BOX_ENABLE_CFS_PRINT anywhere in klippy.log, no disable_bypass()
+            // in ours, and the prints in that window were plain Moonraker
+            // start_print calls from a third-party client, which runs nothing
+            // vendor-specific. Keying the drop on enable therefore discarded the
+            // declaration on the first full frame after every restart (partial
+            // frames omit the field, so it only ever bit at startup) and took
+            // bypass down with it while the external spool was still feeding the
+            // nozzle.
+            //
+            // current_slot >= 0 keys on the feed instead: an armed box with every
+            // bay empty has taken nothing back, and a stood-down box with a lane
+            // threaded and named active has. In-memory clear only; this runs on
+            // the libhv thread and the persisted flag is re-evaluated by this
+            // same rule after the next boot's restore.
+            if (bypass_declared_ && new_info.current_slot >= 0) {
                 bypass_declared_ = false;
-                spdlog::info("[AMS CFS] Bypass declaration dropped — box reports enable=1 "
-                             "(re-armed outside HelixScreen)");
+                spdlog::info("[AMS CFS] Bypass declaration dropped — bay {} is loaded, the "
+                             "CFS has the feed back",
+                             new_info.current_slot);
             }
 
             // Deliberately do NOT touch filament_loaded here. box.filament is a
@@ -1768,7 +1786,27 @@ AmsError AmsBackendCfs::do_load_filament(int slot_index) {
     auto err = reject_if_flat_schema("Load");
     if (err.result != AmsResult::SUCCESS)
         return err;
-    auto gcode = load_gcode(slot_index, macro_variant_);
+
+    // The bypass sentinel is a target, not a bad slot. load_gcode() resolves
+    // through CfsMaterialDb::slot_to_tnn(), which has no TNN for it, so this
+    // used to fall straight into invalid_slot — there was no way to load an
+    // external spool through the app, which also meant no way to reach a state
+    // where the bypass UNLOAD could be exercised. Fork excluded: its own
+    // T<external> command owns the attended load (see enable_bypass()).
+    const bool bypass =
+        slot_index == helix::ui::EXTERNAL_SPOOL_SLOT && macro_variant_ != CfsMacroVariant::Fork;
+
+    std::string gcode;
+    if (bypass) {
+        const bool has_load_material =
+            helix::MacroParamCache::instance().has_macro("load_material");
+        gcode = bypass_load_gcode(macro_variant_, has_load_material);
+        spdlog::info("[AMS CFS] Bypass load — external spool, via {}",
+                     has_load_material ? "LOAD_MATERIAL" : "fallback feed");
+    } else {
+        gcode = load_gcode(slot_index, macro_variant_);
+    }
+
     if (gcode.empty()) {
         return AmsErrorHelper::invalid_slot(slot_index, 15);
     }
@@ -1785,17 +1823,39 @@ AmsError AmsBackendCfs::do_load_filament(int slot_index) {
     return dispatch_action_script(std::move(gcode));
 }
 
-AmsError AmsBackendCfs::do_unload_filament(int) {
+AmsError AmsBackendCfs::do_unload_filament(int slot_index) {
     auto err = reject_if_flat_schema("Unload");
     if (err.result != AmsResult::SUCCESS)
         return err;
+
+    // The slot used to be discarded here, on the premise that CFS ignores it and
+    // runs one unload script. True for a bay, wrong for the bypass sentinel: the
+    // bay script's retract is keyed on a TNN and no-ops with the box stood down.
+    // Fork is excluded because its BOX_UNLOAD selects the external branch itself
+    // from loaded_slot — the same split disable_bypass() already makes.
+    const bool bypass =
+        slot_index == helix::ui::EXTERNAL_SPOOL_SLOT && macro_variant_ != CfsMacroVariant::Fork;
+
+    std::string gcode;
+    if (bypass) {
+        const bool has_quit_material =
+            helix::MacroParamCache::instance().has_macro("quit_material");
+        gcode = bypass_unload_gcode(macro_variant_, has_quit_material);
+        spdlog::info("[AMS CFS] Bypass unload — external spool, via {}",
+                     has_quit_material ? "QUIT_MATERIAL" : "fallback cut+retract");
+    } else {
+        gcode = unload_gcode(macro_variant_);
+    }
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
         system_info_.action = AmsAction::UNLOADING;
         begin_phase_tracking();
+        // After begin_phase_tracking(), which resets the tracker wholesale.
+        phase_tracker_.bypass_unload = bypass;
         apply_synthesized_action_locked();
     }
-    return dispatch_action_script(unload_gcode(macro_variant_));
+    return dispatch_action_script(std::move(gcode));
 }
 
 AmsError AmsBackendCfs::do_select_slot(int) {
@@ -2686,6 +2746,111 @@ std::string AmsBackendCfs::unload_gcode(CfsMacroVariant variant) {
                           /*wipe_after=*/false);
 }
 
+namespace {
+
+/// Back the filament out of the toolhead with the extruder alone.
+///
+/// With the box stood down the extruder is the only motor left in the path, so
+/// it has to cover the whole distance itself. `[box]` sizes the two halves it
+/// normally splits: `tn_retrude = -10` at the extruder against `tn_extrude =
+/// 140` for the path, with the box's feeder reeling the difference.
+///
+/// 80 mm because that is what the filament actually needs. Measured on a K2 Plus
+/// 2026-08-18: QUIT_MATERIAL's own -13.99 mm left it gripped, and another 50 mm
+/// by hand freed it — a release point near 64 mm. Past that the stub is clear of
+/// the gears and further travel just spins them, so the margin costs nothing but
+/// a few seconds. Also the length filament_unload_fallback_gcode() already uses
+/// for a printer with no AMS at all, which is the same physical job.
+/// `tn_retrude_velocity = 600` is the box's own retract speed.
+///
+/// Relative (G91) and restored, so it composes with any caller's positioning
+/// mode. M400 so the caller's park does not overlap the pull.
+std::string feed_gcode(bool retract) {
+    constexpr int FEED_MM = 80;
+    constexpr int FEED_RATE = 600; // [box] tn_retrude_velocity
+    return "G91\nG0 E" + std::string(retract ? "-" : "") + std::to_string(FEED_MM) + " F" +
+           std::to_string(FEED_RATE) + "\nG90\nM400";
+}
+
+/// The unload direction, named for its call sites.
+std::string long_retract_gcode() {
+    return feed_gcode(/*retract=*/true);
+}
+
+} // namespace
+
+std::string AmsBackendCfs::bypass_load_gcode(CfsMacroVariant variant, bool has_load_material) {
+    if (has_load_material) {
+        // Creality's own external-spool load, verified in the K2 Plus config
+        // dump: SAVE_GCODE_STATE / BOX_GO_TO_EXTRUDE_POS / FILAMENT_RACK_SAVE_FAN
+        // / FILAMENT_RACK_PRE_FLUSH / FILAMENT_RACK_SET_TEMP (guarded on the
+        // toolhead switch) / FILAMENT_RACK_FLUSH (same guard) /
+        // FILAMENT_RACK_RESTORE_FAN / SET_COOL_TEMP / BOX_MOVE_TO_SAFE_POS /
+        // RESTORE_GCODE_STATE. Heat, feed and park all live inside it.
+        return "LOAD_MATERIAL";
+    }
+
+    // Fallback for a CFS printer that does not define LOAD_MATERIAL. The
+    // mirror of the unload fallback, using only primitives this dialect already
+    // emits, and the same 80 mm at 600 mm/min run the other way: the unload
+    // backs the filament out of the toolhead path, so the load pushes it back
+    // down the same path. The panel preheats before dispatching either op, so
+    // temperature is not this script's job.
+    //
+    // No purge: the caller has no material temperature to purge at here, and a
+    // load that leaves the previous colour in the nozzle is recoverable from the
+    // Extrusion panel, while a blind purge at the wrong temperature is not.
+    return std::string("SAVE_GCODE_STATE NAME=helix_cfs_bypass\n"
+                       "BOX_GO_TO_EXTRUDE_POS\n") +
+           feed_gcode(/*retract=*/false) +
+           "\nBOX_MOVE_TO_SAFE_POS\n"
+           "RESTORE_GCODE_STATE NAME=helix_cfs_bypass";
+}
+
+std::string AmsBackendCfs::bypass_unload_gcode(CfsMacroVariant variant, bool has_quit_material) {
+    if (has_quit_material) {
+        // Creality's own external-spool unload, plus the retract it leaves out.
+        //
+        // QUIT_MATERIAL is SAVE_GCODE_STATE / BOX_GO_TO_EXTRUDE_POS /
+        // FILAMENT_RACK_SET_TEMP (guarded on the toolhead switch) /
+        // BOX_MOVE_TO_CUT + M400 / G91 G0 E-10 F360 G90 M400 (same guard) /
+        // BOX_MOVE_TO_SAFE_POS / SET_COOL_TEMP / RESTORE_GCODE_STATE. Heat, cut
+        // and park all live inside it, so it goes out bare.
+        //
+        // Its 10 mm is not a full unload and is not meant to be: `[box]` on a
+        // K2 Plus carries `tn_retrude = -10` against `tn_extrude = 140`, so the
+        // extruder only ever breaks the grip and the box's feeder motors reel
+        // the rest back down the tube. A bypass spool has no feeder. Measured on
+        // a K2 Plus 2026-08-18: QUIT_MATERIAL alone moved E by -13.99 mm and
+        // left the filament still gripped by the gears.
+        //
+        // The tail runs on a nozzle SET_COOL_TEMP has already targeted to 0.
+        // Accepted: the hotend is still within a few degrees of the panel's
+        // preheat for the ~14 s the retract takes.
+        return "QUIT_MATERIAL\n" + long_retract_gcode();
+    }
+
+    // Fallback for a CFS printer that does not define QUIT_MATERIAL. Same shape
+    // as the vendor macro, built only from primitives this dialect's own unload
+    // already emits, so it introduces no new command-presence risk:
+    // BOX_GO_TO_EXTRUDE_POS and BOX_MOVE_TO_SAFE_POS on both, and the dialect's
+    // cut (BOX_CUT_MATERIAL on K1, CR_BOX_CUT on K2 — the latter observed
+    // working under bypass on a K2 Plus, since the cutter is toolhead-side and
+    // needs no bay).
+    //
+    // Deliberately NOT wrap_with_park()/wrap_with_envelope_k1(): those envelopes
+    // exist to hand the box a bay operation (BOX_MODE_WAIT, CR_BOX_PRE_OPT /
+    // CR_BOX_END_OPT, BOX_CHECK_MATERIAL), and a stood-down box is exactly what
+    // has no answer for any of them. The vendor macro skips them too.
+    //
+    const char* cut = variant == CfsMacroVariant::K1 ? "BOX_CUT_MATERIAL" : "CR_BOX_CUT";
+    return std::string("SAVE_GCODE_STATE NAME=helix_cfs_bypass\n"
+                       "BOX_GO_TO_EXTRUDE_POS\n") +
+           cut + "\nM400\n" + long_retract_gcode() +
+           "\nBOX_MOVE_TO_SAFE_POS\n"
+           "RESTORE_GCODE_STATE NAME=helix_cfs_bypass";
+}
+
 std::string AmsBackendCfs::swap_gcode(int idx, CfsMacroVariant variant) {
     if (variant == CfsMacroVariant::Fork) {
         // T<n> — box.py registers one per physical slot plus the external bay
@@ -2945,7 +3110,8 @@ void AmsBackendCfs::apply_synthesized_action_locked() {
 }
 
 AmsBackendCfs::PhaseVerdict AmsBackendCfs::verify_phase_outcome(AmsAction op, bool sensor_ever_read,
-                                                                bool filament_at_end) {
+                                                                bool filament_at_end,
+                                                                bool bypass_unload) {
     // Only the two operations that carry a filament end-state contract are
     // judged. The synthesized sub-phases (CUTTING/PURGING) reach system_info_
     // but never PhaseTracker::intent, and everything else (SELECTING,
@@ -2966,6 +3132,13 @@ AmsBackendCfs::PhaseVerdict AmsBackendCfs::verify_phase_outcome(AmsAction op, bo
         return PhaseVerdict::LoadDidNotReachNozzle;
     }
     if (op == AmsAction::UNLOADING && filament_at_end) {
+        // A bypass unload is finished when the tip is clear of the melt zone,
+        // which is well short of the toolhead switch. Filament still detected is
+        // the expected end state, not a failure — the manual-pull prompt is what
+        // closes the operation out.
+        if (bypass_unload) {
+            return PhaseVerdict::Ok;
+        }
         return PhaseVerdict::UnloadLeftFilament;
     }
     return PhaseVerdict::Ok;
@@ -3011,8 +3184,8 @@ void AmsBackendCfs::finish_action() {
     // drains and every RPC succeeds while nothing moved (#968). Check the
     // toolhead switch, which is the one witness the box cannot fake.
     const AmsAction intent = phase_tracker_.intent;
-    const PhaseVerdict verdict =
-        verify_phase_outcome(intent, filament_sensor_seen_, last_filament_detected_);
+    const PhaseVerdict verdict = verify_phase_outcome(
+        intent, filament_sensor_seen_, last_filament_detected_, phase_tracker_.bypass_unload);
     const std::string failure = phase_verdict_message(verdict);
 
     end_phase_tracking();
@@ -3395,7 +3568,7 @@ void AmsBackendCfs::apply_overrides(SlotInfo& slot, int slot_index) {
     // has no override — safe in the hot parse path. The whole spec §5 policy
     // + the re-bind/eject rules live in helix::ams::merge_override — the
     // single implementation every backend shares. Rule 1 (re-bind) is NOT
-    // gated by firmware_reports_spool_ids(): flat-schema CFS (the community
+    // gated by printer_reports_spool_ids(): flat-schema CFS (the community
     // fork) parses a per-slot spoolman_id, so a firmware id disagreeing with
     // the override fires Rule 1 there — fork users get the #1281 fix. Rule 2
     // (eject) IS what the capability gates, and it stays inert here (base
@@ -3406,7 +3579,7 @@ void AmsBackendCfs::apply_overrides(SlotInfo& slot, int slot_index) {
     if (it == overrides_.end())
         return;
     helix::ams::MergeOptions opts;
-    opts.firmware_reports_spool_ids = firmware_reports_spool_ids();
+    opts.printer_reports_spool_ids = printer_reports_spool_ids();
     opts.keep_spool_info_on_eject = SettingsManager::instance().get_ams_keep_spool_info_on_eject();
     // Read the override BEFORE any erase — the CFS presence tail below needs it.
     const auto& o = it->second;
@@ -3604,6 +3777,29 @@ void AmsBackendCfs::clear_box_slot_profile(int slot_index) {
     if (macro_variant_ == CfsMacroVariant::Fork) {
         execute_gcode("_BOX_SLOT_CLEAR SLOT=" + std::to_string(slot_index));
     }
+}
+
+void AmsBackendCfs::publish_external_spool_lane(const SlotInfo* spool) {
+    // The external spool as an extra OrcaSlicer-selectable lane. Index is the
+    // 0-based slot count → format_lane_key emits lane{N+1}, one past the last
+    // physical bay — no collision with real lanes (16 on a 4-unit CFS), and a
+    // stable key however many units are attached.
+    //
+    // Deliberately NOT routed through overrides_ (the per-bay override map):
+    // hardware-event clearing and stale-override logic walk that map by real
+    // slot index, and the external spool is not a bay. A one-shot record built
+    // by the shared helper keeps the mirror map untouched.
+    int lane_index = 0;
+    bool supported = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        supported = system_info_.supports_bypass && override_store_ != nullptr;
+        lane_index = system_info_.total_slots;
+    }
+    if (!supported || lane_index <= 0) {
+        return;
+    }
+    helix::ams::publish_external_lane(override_store_.get(), lane_index, spool, backend_log_tag());
 }
 
 } // namespace helix::printer

@@ -551,6 +551,32 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     }
 
     /**
+     * @brief Stage the input_shaper values the mock reports (for testing)
+     *
+     * Overrides the default mzv@36.7 / ei@47.6 pair served while the input
+     * shaper is configured, so a test can pin the live-before configuration
+     * a calibration run snapshots. Applies to both the query and the
+     * subscribe configfile payloads.
+     *
+     * @param type_x X shaper type (e.g. "ei")
+     * @param freq_x X shaper frequency in Hz
+     * @param type_y Y shaper type
+     * @param freq_y Y shaper frequency in Hz
+     */
+    void set_input_shaper_values(const std::string& type_x, double freq_x,
+                                 const std::string& type_y, double freq_y) {
+        shaper_type_x_ = type_x;
+        shaper_freq_x_ = freq_x;
+        shaper_type_y_ = type_y;
+        shaper_freq_y_ = freq_y;
+    }
+
+    /// The configfile "input_shaper" block as Klipper would report it (string
+    /// values, configfile style). Shared by the query and subscribe handlers
+    /// so both report identical staged values.
+    [[nodiscard]] json build_input_shaper_config() const;
+
+    /**
      * @brief Control whether SHAPER_CALIBRATE writes its CSV file for testing
      *
      * When false, the mock still dispatches the "calibration data written to
@@ -1388,6 +1414,12 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     bool mock_spoolman_enabled_{true};   ///< Controlled by HELIX_MOCK_SPOOLMAN env var
     bool accelerometer_available_{true}; ///< Accelerometer available for input shaper tests
     bool input_shaper_configured_{true}; ///< Input shaper configured for config query tests
+    /// Staged input shaper values served while configured (see
+    /// set_input_shaper_values); defaults mirror the mock's original payload.
+    std::string shaper_type_x_{"mzv"};
+    double shaper_freq_x_{36.7};
+    std::string shaper_type_y_{"ei"};
+    double shaper_freq_y_{47.6};
     bool shaper_csv_writable_{true};     ///< When false, SHAPER_CALIBRATE skips writing the CSV
     bool stepper_z_endstop_null_{false}; ///< When true, position_endstop is reported as JSON null
     double extruder_max_temp_{300.0};    ///< Extruder max_temp reported in configfile.settings
@@ -1403,8 +1435,16 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
 
     // Calibration simulation timers (PID, MPC, shaper) — must be cleaned up
     // in destructor to prevent use-after-free when mock is destroyed before
-    // LVGL timers fire in a subsequent test's process_lvgl().
-    std::vector<lv_timer_t*> calibration_timers_;
+    // LVGL timers fire in a subsequent test's process_lvgl(). Each entry also
+    // owns its heap payload: the timer callbacks self-delete at natural
+    // completion, but a forced teardown that only lv_timer_delete()s the timer
+    // leaks the payload (the 80-byte ShaperSimState the 2026-08-18 nightly's
+    // leak report showed surviving the suite).
+    struct CalibrationTimer {
+        lv_timer_t* timer = nullptr;
+        std::function<void()> free_payload;
+    };
+    std::vector<CalibrationTimer> calibration_timers_;
 };
 
 // ============================================================================

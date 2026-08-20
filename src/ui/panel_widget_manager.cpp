@@ -666,6 +666,10 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
     // Generate grid descriptors sized to actual content
     // Columns: use breakpoint column count (fills available width)
     // Rows: use max of current and cached row count for stable sizing
+    // Installing a fresh generation for this key is the first moment a
+    // previously-retired one is unreferenced (the container's style re-points
+    // to the new arrays at the end of this populate) — drop it now.
+    retired_grid_descriptors_.erase(make_cache_key(panel_id, page_index));
     auto& dsc = grid_descriptors_[make_cache_key(panel_id, page_index)];
     dsc.col_dsc = GridLayout::make_col_dsc(breakpoint);
     dsc.row_dsc.clear();
@@ -891,12 +895,26 @@ PanelWidgetManager::populate_widgets(const std::string& panel_id, lv_obj_t* cont
             if (slot.hardware_gated) {
                 lv_obj_set_style_opa(widget, LV_OPA_40, 0);
                 lv_obj_add_state(widget, LV_STATE_DISABLED);
+                // LV_STATE_DISABLED alone is not enough. A tile's tap handler is
+                // usually declared as an <event_cb> on its XML component root, so
+                // it is bound when the tile is PLACED - independent of gating -
+                // and a gated tile could still open a panel describing hardware
+                // that is not there. Clearing CLICKABLE takes it out of the
+                // indev hit test entirely, so the press walks up to the parent
+                // instead. Safe without a restore path: an un-gate rebuilds the
+                // tile from scratch (see the gate observers' rebuild).
+                lv_obj_remove_flag(widget, LV_OBJ_FLAG_CLICKABLE);
 
                 const auto* gated_def = find_widget_def(slot.widget_id);
                 const char* type_icon = (gated_def && gated_def->icon) ? gated_def->icon : "cancel";
 
+                // One step down from the badge (lg 48px vs xl 64px). Both glyphs
+                // are round, so at equal size they coincide almost exactly and
+                // the pair reads as one muddy shape rather than "this widget,
+                // unavailable" - the badge has to ring the type icon, not sit on
+                // top of it.
                 const char* type_icon_attrs[] = {
-                    "src",    type_icon,   "size",  "xl",           "variant", "muted", "align",
+                    "src",    type_icon,   "size",  "lg",           "variant", "muted", "align",
                     "center", "clickable", "false", "event_bubble", "true",    nullptr};
                 if (auto* type_overlay =
                         static_cast<lv_obj_t*>(lv_xml_create(widget, "icon", type_icon_attrs))) {
@@ -1163,14 +1181,12 @@ void PanelWidgetManager::clear_panel_config(const std::string& panel_id) {
             ++it;
         }
     }
-    // Also erase grid descriptors for all pages of this panel
-    for (auto it = grid_descriptors_.begin(); it != grid_descriptors_.end();) {
-        if (it->first.compare(0, prefix.size(), prefix) == 0) {
-            it = grid_descriptors_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    // Also erase grid descriptors for all pages of this panel. The vectors are
+    // RETIRED, not freed: the containers laid out with them may still exist and
+    // their grid style holds the raw dsc pointers (LVGL does not copy them).
+    // Freeing here was the 2026-08-17 nightly's heap-use-after-free —
+    // GridEditMode::current_metrics -> grid_count_tracks read the freed arrays.
+    retire_grid_descriptors_matching(prefix);
 }
 
 void PanelWidgetManager::clear_all_panel_configs() {
@@ -1183,9 +1199,29 @@ void PanelWidgetManager::clear_all_panel_configs() {
         config.mark_dirty();
     }
     // Drop the per-page derived caches wholesale — they key on "panel:page" and
-    // describe the old printer's resolved widget list / grid geometry.
+    // describe the old printer's resolved widget list / grid geometry. Descriptors
+    // are retired (see clear_panel_config) so grids laid out for the previous
+    // printer keep reading valid memory until their containers are destroyed.
     active_configs_.clear();
-    grid_descriptors_.clear();
+    retire_grid_descriptors_matching({});
+}
+
+void PanelWidgetManager::retire_grid_descriptors_matching(const std::string& prefix) {
+    // Move descriptor arrays whose cache key starts with `prefix` (empty prefix:
+    // all of them) out of grid_descriptors_ and into the retirement map. LVGL's
+    // grid style holds the raw dsc pointers without copying, and the clear paths
+    // have no container handle to unstyle, so an array must outlive every
+    // container still laid out with it. populate_page() drops the retired entry
+    // for a key at the same moment it installs a fresh one — the re-point of the
+    // container's style is what makes the old array unreferenced.
+    for (auto it = grid_descriptors_.begin(); it != grid_descriptors_.end();) {
+        if (prefix.empty() || it->first.compare(0, prefix.size(), prefix) == 0) {
+            retired_grid_descriptors_[it->first] = std::move(it->second);
+            it = grid_descriptors_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 PanelWidgetConfig& PanelWidgetManager::get_widget_config(const std::string& panel_id) {

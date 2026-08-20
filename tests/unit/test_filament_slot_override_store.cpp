@@ -3414,7 +3414,7 @@ TEST_CASE("merge_override rule matrix", "[ams][override-merge]") {
     SECTION("eject: firmware 0 on an id-reporting backend — retention ON keeps the record") {
         slot.spoolman_id = 0;
         helix::ams::MergeOptions opts;
-        opts.firmware_reports_spool_ids = true;
+        opts.printer_reports_spool_ids = true;
         opts.keep_spool_info_on_eject = true;
         auto r = merge_override(slot, ovr_with(42), opts);
         CHECK_FALSE(r.cleared_eject);
@@ -3425,7 +3425,7 @@ TEST_CASE("merge_override rule matrix", "[ams][override-merge]") {
     SECTION("eject: firmware 0 on an id-reporting backend — setting OFF clears") {
         slot.spoolman_id = 0;
         helix::ams::MergeOptions opts;
-        opts.firmware_reports_spool_ids = true;
+        opts.printer_reports_spool_ids = true;
         opts.keep_spool_info_on_eject = false;
         auto r = merge_override(slot, ovr_with(42), opts);
         CHECK(r.cleared_eject);
@@ -3448,7 +3448,7 @@ TEST_CASE("merge_override rule matrix", "[ams][override-merge]") {
     SECTION("eject rule needs a linked override — an unlinked record is never ejected") {
         slot.spoolman_id = 0;
         helix::ams::MergeOptions opts;
-        opts.firmware_reports_spool_ids = true;
+        opts.printer_reports_spool_ids = true;
         opts.keep_spool_info_on_eject = false;
         auto r = merge_override(slot, ovr_with(0), opts); // override holds color only
         CHECK_FALSE(r.cleared_eject);

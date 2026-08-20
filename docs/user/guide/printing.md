@@ -93,6 +93,28 @@ These options modify the G-code on-the-fly — if you disable "Auto Bed Mesh" bu
 
 The UI switches to the Print Status panel automatically.
 
+### Before the print actually begins
+
+Some printers do a lot of work before the first layer: homing, heating a bed to
+soak temperature, and on some machines a full bed mesh. Depending on the printer,
+that work runs either inside its own `PRINT_START` macro or ahead of the job. On a
+K2 Plus with **Auto Bed Mesh** enabled it regularly takes seven to ten minutes.
+
+The Print Status panel shows the pre-print steps and an estimated time for this
+whole period, with the new file's name and preview - the previous job's result is
+cleared the moment you tap Start Print.
+
+While the pre-print steps are showing:
+
+- **Cancel** is available and always stops the print from starting. If the printer
+  is mid-way through a leveling pass it will finish that motion first, because a
+  running macro cannot be interrupted - but the print will not begin, and the
+  screen reports it as cancelled rather than as a failure.
+- **Pause** is unavailable, since there is no print to pause yet.
+- **Tune** works. Speed and flow adjustments carry into the print. A Z-offset
+  change made here may be overwritten by the printer's own start macro, so it is
+  usually better to adjust once printing has begun.
+
 > **Note:** On a multi-color print, HelixScreen checks your loaded filament before it starts and will stop with a **Check filament** dialog if a required tool maps to an empty slot. Printing from bypass skips that check, since the filament never passes through a slot. On printers with camera-based failure detection, it can also react to a print going wrong mid-job. See [Print Monitoring & Failure Detection](print-monitoring.md).
 
 ---
@@ -226,7 +248,7 @@ This lets you salvage a print when one object fails without canceling the entire
 When a print completes, a **completion modal** appears showing:
 
 - **Total print time** and slicer estimate comparison
-- **Layers printed** (current / total)
+- **Layers printed** — the job's total layer count
 - **Filament consumed** (formatted as mm, meters, or km)
 - Notification sound plays (if enabled in Sound Settings)
 - Print is logged to history

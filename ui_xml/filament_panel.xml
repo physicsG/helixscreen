@@ -2,10 +2,10 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
-  <!-- Styles for reactive purge button state binding (L040: no inline bg attrs) -->
+  <!-- Styles for reactive extrude length button state binding (L040: no inline bg attrs) -->
   <styles>
-    <style name="purge_btn_selected" bg_color="#primary" bg_opa="255"/>
-    <style name="purge_btn_unselected" bg_color="#primary" bg_opa="40"/>
+    <style name="extrude_length_btn_selected" bg_color="#primary" bg_opa="255"/>
+    <style name="extrude_length_btn_unselected" bg_color="#primary" bg_opa="40"/>
   </styles>
   <consts>
     <!-- Temperature card spacing -->
@@ -204,6 +204,8 @@
         <lv_obj name="external_spool_row"
                 width="100%" height="content" style_pad_all="0" scrollable="false" clickable="true" flex_flow="row"
                 style_flex_main_place="center" style_flex_cross_place="center" style_pad_gap="#space_sm" hidden="true">
+          <!-- Pressed wash from the shared style library (ui_xml/styles.xml) -->
+          <style name="styles.press_wash" selector="pressed"/>
           <event_cb trigger="clicked" callback="on_external_spool_edit"/>
           <!-- Spool canvas container (C++ creates 48x48 canvas inside) -->
           <lv_obj name="external_spool_container"
@@ -344,26 +346,27 @@
           </ui_button>
         </lv_obj>
         <!-- Length Selector -->
-        <lv_obj name="purge_amount_row"
+        <lv_obj name="extrude_length_row"
                 width="100%" height="content" style_pad_all="0" scrollable="false" flex_flow="row"
                 style_flex_main_place="start" style_flex_cross_place="center" style_pad_gap="#space_sm">
           <text_small text="Length:" translation_tag="Length:"/>
-          <ui_button name="purge_5mm" height="#button_height_sm" flex_grow="1" text="5mm" style_text_font="#font_small">
-            <bind_style name="purge_btn_selected" subject="filament_purge_5mm_active" ref_value="1"/>
-            <bind_style name="purge_btn_unselected" subject="filament_purge_5mm_active" ref_value="0"/>
-            <event_cb trigger="clicked" callback="on_filament_purge_5mm"/>
+          <ui_button name="extrude_length_5mm"
+                     height="#button_height_sm" flex_grow="1" text="5mm" style_text_font="#font_small">
+            <bind_style name="extrude_length_btn_selected" subject="filament_extrude_length_5mm_active" ref_value="1"/>
+            <bind_style name="extrude_length_btn_unselected" subject="filament_extrude_length_5mm_active" ref_value="0"/>
+            <event_cb trigger="clicked" callback="on_filament_extrude_length_5mm"/>
           </ui_button>
-          <ui_button name="purge_10mm"
+          <ui_button name="extrude_length_10mm"
                      height="#button_height_sm" flex_grow="1" text="10mm" style_text_font="#font_small">
-            <bind_style name="purge_btn_selected" subject="filament_purge_10mm_active" ref_value="1"/>
-            <bind_style name="purge_btn_unselected" subject="filament_purge_10mm_active" ref_value="0"/>
-            <event_cb trigger="clicked" callback="on_filament_purge_10mm"/>
+            <bind_style name="extrude_length_btn_selected" subject="filament_extrude_length_10mm_active" ref_value="1"/>
+            <bind_style name="extrude_length_btn_unselected" subject="filament_extrude_length_10mm_active" ref_value="0"/>
+            <event_cb trigger="clicked" callback="on_filament_extrude_length_10mm"/>
           </ui_button>
-          <ui_button name="purge_25mm"
+          <ui_button name="extrude_length_25mm"
                      height="#button_height_sm" flex_grow="1" text="25mm" style_text_font="#font_small">
-            <bind_style name="purge_btn_selected" subject="filament_purge_25mm_active" ref_value="1"/>
-            <bind_style name="purge_btn_unselected" subject="filament_purge_25mm_active" ref_value="0"/>
-            <event_cb trigger="clicked" callback="on_filament_purge_25mm"/>
+            <bind_style name="extrude_length_btn_selected" subject="filament_extrude_length_25mm_active" ref_value="1"/>
+            <bind_style name="extrude_length_btn_unselected" subject="filament_extrude_length_25mm_active" ref_value="0"/>
+            <event_cb trigger="clicked" callback="on_filament_extrude_length_25mm"/>
           </ui_button>
         </lv_obj>
         <!-- Extrude/Retract Row (length-based operations) -->

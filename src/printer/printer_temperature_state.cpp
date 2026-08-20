@@ -409,7 +409,15 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
                 }
             }
 
-            if (chamber.contains("target") && chamber["target"].is_number()) {
+            // A temperature_fan's target is a cooling threshold, not a heating
+            // command: Klipper always reports its configured target_temp (40.0 on
+            // the K1C) even at speed 0. Wherever discovery resolves a
+            // temperature_fan into the heater slot (no heater_generic exists),
+            // that target flows through the cooling-fan branch below instead and
+            // is neutralized by the resting-target comparison in
+            // chamber_effective_setpoint().
+            if (chamber_heater_name_.rfind("temperature_fan ", 0) != 0 &&
+                chamber.contains("target") && chamber["target"].is_number()) {
                 int target_deci = helix::units::json_to_decidegrees(chamber, "target");
                 if (lv_subject_get_int(&chamber_target_) != target_deci) {
                     lv_subject_set_int(&chamber_target_, target_deci);

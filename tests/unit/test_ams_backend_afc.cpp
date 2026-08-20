@@ -4973,6 +4973,29 @@ TEST_CASE("AFC unload_filament sends TOOL_UNLOAD LANE=<lane> for specific slot (
     }
 }
 
+// Bypass: the external spool feeds the toolhead with no lane behind it, so
+// slots_.name_of(-2) resolves to "" and AFC unloads whatever is at the head via
+// its own user-configured macro. The backend has always done this correctly —
+// the UI decision layer refused to dispatch, treating -2 as "nothing resolved"
+// alongside -1. Pinned here so a future tightening of the lane lookup cannot
+// start rejecting the sentinel outright.
+TEST_CASE("AFC unload_filament under bypass sends bare TOOL_UNLOAD", "[ams][afc][bypass]") {
+    AmsBackendAfcTestHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+    helper.set_running(true);
+    helper.set_supports_bypass(true);
+    helper.set_filament_loaded(true);
+    helper.set_current_slot(-2); // bypass sentinel
+
+    auto result = helper.unload_filament(-2);
+
+    REQUIRE(result);
+    REQUIRE(helper.has_gcode("TOOL_UNLOAD"));
+    // No lane may be named: LANE=lane1 would make AFC select and unload bay 1,
+    // which is empty, while the external spool stayed threaded through the head.
+    REQUIRE_FALSE(helper.has_gcode_starting_with("TOOL_UNLOAD LANE="));
+}
+
 TEST_CASE("AFC unload_filament sends bare TOOL_UNLOAD in single-extruder mode (no slot)",
           "[ams][afc][toolchanger]") {
     AmsBackendAfcTestHelper helper;

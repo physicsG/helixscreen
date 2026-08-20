@@ -6,9 +6,9 @@ Counts, recounted 2026-08-17 (method included so you can re-run it):
 
 | What | Count | Method |
 |------|-------|--------|
-| Widget defs in the registry | 37 (36 + `camera` behind `HELIX_HAS_CAMERA`) | rows of `s_widget_defs` (`src/ui/panel_widget_registry.cpp:55`) |
+| Widget defs in the registry | 38 (37 + `camera` behind `HELIX_HAS_CAMERA`) | rows of `s_widget_defs` (`src/ui/panel_widget_registry.cpp:55`) |
 | `PanelWidget` subclasses | 31 | `rg -l 'public PanelWidget' include src -g '*.h'` — 28 in `src/ui/panel_widgets/`, plus `favorite_macro`, `power_device`, `preheat` headers in `include/` |
-| XML components | 40 | `ls ui_xml/components/panel_widget_*.xml \| wc -l` |
+| XML components | 41 | `ls ui_xml/components/panel_widget_*.xml \| wc -l` |
 | Factory-less (pure XML) defs | 4 | `ams`, `filament`, `notifications`, `firmware_restart` — no `register_*` call in `init_widget_registrations()` |
 | Hardware-gated defs | 11 (10 distinct gate subjects) | defs with a non-null `hardware_gate_subject` in the table below |
 | Multi-instance defs (`base_id:N`) | 6 | `power_device`, `fan_stack`, `fan`, `thermistor`, `temp_graph`, `favorite_macro` (`multi_instance = true`) |
@@ -35,7 +35,7 @@ flowchart TB
 |------|------|
 | `include/panel_widget.h` | `PanelWidget` base class — the widget contract — plus `PANEL_WIDGET_TILE_FLAG` and the LVGL user-flag ledger |
 | `include/panel_widget_registry.h` | `PanelWidgetDef` (id, icon, spans, gate subject, factory) + registry free functions |
-| `src/ui/panel_widget_registry.cpp` | The 37-row def table; `init_widget_registrations()` wiring; multi-instance `:N` suffix resolution |
+| `src/ui/panel_widget_registry.cpp` | The 38-row def table; `init_widget_registrations()` wiring; multi-instance `:N` suffix resolution |
 | `include/panel_widget_manager.h` | `PanelWidgetManager` singleton API: populate, gate observers, rebuild callbacks, shared resources |
 | `src/ui/panel_widget_manager.cpp` | The coordinator: config load, gate checks, grid placement, tile creation, attach, reuse, coalesced rebuilds |
 | `include/panel_widget_config.h` | `PanelWidgetConfig` / `PanelWidgetEntry` — per-printer layout JSON (pages, enabled flags, grid positions, per-widget config) |

@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iomanip>
 #include <memory>
 #include <regex>
@@ -865,11 +866,11 @@ class InputShaperCollector : public std::enable_shared_from_this<InputShaperColl
     static constexpr float DEFAULT_MIN_FREQ = 5.0f;
     static constexpr float DEFAULT_MAX_FREQ = 135.0f;
 
-    /// Sweep progress spans 3..SWEEP_MAX_PERCENT. Deliberately below the
-    /// analyzing band so a sweep that runs past its expected ceiling can never
-    /// masquerade as the analysis phase.
-    static constexpr int SWEEP_MAX_PERCENT = 54;
-    static constexpr int ANALYZING_START_PERCENT = 55;
+    /// Sweep progress spans the whole 0..100 bar. The analysis phase that
+    /// follows has no percent at all - the UI swaps the bar for an indeterminate
+    /// spinner plus an elapsed-seconds label, so the phase alone carries the
+    /// handover. A sweep that runs past its expected ceiling clamps at 100
+    /// while the phase stays Sweeping, so it can never masquerade as analysis.
 
     /// How close to max_freq a sweep line must land to count as the last one.
     /// Klipper stops one step short of the configured ceiling (a 135 Hz
@@ -961,6 +962,13 @@ class InputShaperCollector : public std::enable_shared_from_this<InputShaperColl
     }
 
     void on_gcode_response(const json& msg) {
+        // Ordering assumption: everything this collector needs (fits,
+        // recommendation, the copy_TestAxis_y_to_x marker, and the CSV-write
+        // line that completes the run) arrives BEFORE the CSV line. The
+        // captured K1C transcript (2026-08-19) shows the marker preceding the
+        // "calibration data written to" line, so completing on the CSV line
+        // cannot race the marker away. A fork emitting the marker after the
+        // CSV line would lose it here.
         if (completed_.load()) {
             return;
         }
@@ -995,7 +1003,11 @@ class InputShaperCollector : public std::enable_shared_from_this<InputShaperColl
 
         // End of sweep, start of the offline fit. Klipper and Kalico both emit
         // "Calculating the best input shaper parameters for <axis> axis";
-        // "Wait for calculations.." is the older wording some forks still use.
+        // "Wait for calculations.." is the older wording some forks still use -
+        // and some (e.g. Creality's K1C build) repeat it every few seconds as
+        // a heartbeat through the whole analysis. Only the first occurrence
+        // reports; repeats fall through enter_analyzing()'s idempotence guard
+        // and do nothing but stamp the activity watchdog above.
         if (line.find("Calculating the best") != std::string::npos ||
             line.find("Wait for calculations") != std::string::npos) {
             enter_analyzing();
@@ -1012,6 +1024,21 @@ class InputShaperCollector : public std::enable_shared_from_this<InputShaperColl
         // Parse max_accel lines: "suggested max_accel <= 4000 mm/sec^2"
         if (line.find("suggested max_accel") != std::string::npos) {
             parse_max_accel_line(line);
+            return;
+        }
+
+        // Firmware copy-marker: at the end of a Y-axis run some klippy forks
+        // (Creality's K1C build) overwrite the staged X result with Y's values,
+        // discarding the measured X recommendation, and announce it with a line
+        // starting "copy_TestAxis_y_to_x Recommended shaper_type_x = ...".
+        // Must be matched BEFORE the recommendation parser: the marker embeds
+        // a real "Recommended shaper_type_x" wording that would otherwise be
+        // parsed as this axis's recommendation and clobber it.
+        if (line.find("copy_TestAxis_y_to_x") != std::string::npos) {
+            x_overwritten_by_firmware_ = true;
+            spdlog::warn("[InputShaperCollector] Firmware overwrote the staged X result with Y's "
+                         "values ({} axis run)",
+                         axis_);
             return;
         }
 
@@ -1096,8 +1123,9 @@ class InputShaperCollector : public std::enable_shared_from_this<InputShaperColl
             return;
         }
         collector_state_ = CollectorState::CALCULATING;
-        emit_progress(ANALYZING_START_PERCENT, ShaperCalibrationPhase::Analyzing,
-                      "Calculating results...");
+        // The percent is meaningless in this phase (the UI shows a spinner plus
+        // elapsed time); the report exists to carry the phase change itself.
+        emit_progress(0, ShaperCalibrationPhase::Analyzing, "Calculating results...");
     }
 
     void parse_sweep_line(const std::string& line) {
@@ -1124,18 +1152,17 @@ class InputShaperCollector : public std::enable_shared_from_this<InputShaperColl
 
                 collector_state_ = CollectorState::SWEEPING;
 
-                // Progress: 3..SWEEP_MAX_PERCENT mapped across min_freq..max_freq.
+                // Progress: 0..100 mapped across min_freq..max_freq.
                 // A sweep that runs past the expected ceiling (configfile query
                 // missed, or TEST_RESONANCES was given explicit bounds) sits at
-                // SWEEP_MAX_PERCENT until it ends. That is still honest — the
+                // 100 until it ends. That is still honest — the
                 // phase stays Sweeping, so the UI keeps saying "measuring"
                 // rather than claiming the analysis has started.
                 const float min_freq = min_freq_.load();
                 const float range = max_freq_.load() - min_freq;
                 const float progress_frac = (range > 0) ? (freq - min_freq) / range : 0.0f;
-                constexpr int span = SWEEP_MAX_PERCENT - 3;
-                int percent = 3 + static_cast<int>(progress_frac * static_cast<float>(span));
-                percent = std::clamp(percent, 3, SWEEP_MAX_PERCENT);
+                int percent = static_cast<int>(std::lround(progress_frac * 100.0f));
+                percent = std::clamp(percent, 0, 100);
 
                 char status[64];
                 snprintf(status, sizeof(status), "Testing frequency %.0f Hz", freq);
@@ -1194,17 +1221,12 @@ class InputShaperCollector : public std::enable_shared_from_this<InputShaperColl
             shaper_fits_.push_back(fit);
 
             // A "Fitted shaper" line means the sweep is over even if the
-            // phase marker line was absent or reworded by a fork.
-            collector_state_ = CollectorState::CALCULATING;
-
-            // Emit progress in CALCULATING phase: 55-95% range, 8% per shaper fitted
-            // Standard Klipper has 5 shapers (reaches 95%), Kalico may have 10+ (caps at 95%)
-            int calc_progress = ANALYZING_START_PERCENT + static_cast<int>(shaper_fits_.size()) * 8;
-            calc_progress = std::min(calc_progress, 95);
-            char status[64];
-            snprintf(status, sizeof(status), "Fitted %s at %.1f Hz", fit.type.c_str(),
-                     fit.frequency);
-            emit_progress(calc_progress, ShaperCalibrationPhase::Analyzing, status);
+            // phase marker line was absent or reworded by a fork. When this is
+            // the first analysis signal, enter_analyzing() emits the phase
+            // change; when a marker line got there first, it no-ops and the
+            // fit only accumulates data - the analysis phase reports no
+            // percent, so there is nothing to emit per fit.
+            enter_analyzing();
         }
     }
 
@@ -1287,6 +1309,7 @@ class InputShaperCollector : public std::enable_shared_from_this<InputShaperColl
             result.shaper_type = recommended_type_;
             result.shaper_freq = recommended_freq_;
             result.csv_path = csv_path_;
+            result.x_overwritten_by_firmware = x_overwritten_by_firmware_;
 
             // Find recommended shaper's details and populate all_shapers
             for (const auto& fit : shaper_fits_) {
@@ -1384,6 +1407,8 @@ class InputShaperCollector : public std::enable_shared_from_this<InputShaperColl
     std::vector<ShaperFitData> shaper_fits_;
     std::string recommended_type_;
     float recommended_freq_ = 0.0f;
+    /// Set by the copy_TestAxis_y_to_x marker line (see on_gcode_response).
+    bool x_overwritten_by_firmware_ = false;
 };
 
 /**

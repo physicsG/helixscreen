@@ -54,11 +54,14 @@ struct PrintFileData {
     std::vector<std::string>
         filament_types; ///< Per-tool filament types parsed from semicolon-separated metadata
     std::vector<std::string>
-        filament_names;       ///< Per-tool filament names parsed from semicolon-separated metadata
-    uint32_t layer_count = 0; ///< Total layer count from slicer
-    double object_height = 0.0; ///< Object height in mm
-    double layer_height = 0.0;  ///< Layer height in mm (e.g., 0.24)
-    bool is_dir = false;        ///< True if this is a directory
+        filament_names; ///< Per-tool filament names parsed from semicolon-separated metadata
+    uint64_t gcode_end_byte = 0; ///< Offset where the G-code body ends (0 = not reported).
+                                 ///< Everything past it is the slicer footer, which carries
+                                 ///< the per-tool usage + color lines.
+    uint32_t layer_count = 0;    ///< Total layer count from slicer
+    double object_height = 0.0;  ///< Object height in mm
+    double layer_height = 0.0;   ///< Layer height in mm (e.g., 0.24)
+    bool is_dir = false;         ///< True if this is a directory
     std::vector<std::string>
         filament_colors; ///< Hex colors per tool (e.g., ["#ED1C24", "#00C1AE"])
 

@@ -217,10 +217,7 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                 config_section.merge_patch(get_mock_accel_config());
 
                 if (self->is_input_shaper_configured()) {
-                    config_section["input_shaper"] = {
-                        {"shaper_type_x", "mzv"},   {"shaper_freq_x", "36.7"},
-                        {"shaper_type_y", "ei"},    {"shaper_freq_y", "47.6"},
-                        {"damping_ratio_x", "0.1"}, {"damping_ratio_y", "0.1"}};
+                    config_section["input_shaper"] = self->build_input_shaper_config();
                 }
 
                 // Bed screws. PrinterDiscovery detects the capability from
@@ -706,10 +703,7 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                     {"config", [&]() {
                          json cfg = get_mock_accel_config();
                          if (self->is_input_shaper_configured()) {
-                             cfg["input_shaper"] = {
-                                 {"shaper_type_x", "mzv"},   {"shaper_freq_x", "36.7"},
-                                 {"shaper_type_y", "ei"},    {"shaper_freq_y", "47.6"},
-                                 {"damping_ratio_x", "0.1"}, {"damping_ratio_y", "0.1"}};
+                             cfg["input_shaper"] = self->build_input_shaper_config();
                          }
                          // LED effect configs for mock testing
                          cfg["led_effect breathing"] = {{"leds", "neopixel:chamber_light"},

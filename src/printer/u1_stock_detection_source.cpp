@@ -20,6 +20,8 @@ void U1StockSource::start() {
     // would read a stale exception code on the paused edge. Deferring via the
     // UpdateQueue runs on_print_state() after the whole frame is parsed, so the
     // exception is latched. The callback fires on the main thread (queue drain).
+    // RAW_PRINT_STATE_OK: subscribes to the WIRE deliberately - U1 stock firmware raises
+    // defect detection by pausing, so the edge is the printer's own.
     state_observer_ = helix::ui::observe_int_sync<U1StockSource>(
         state_->get_print_state_enum_subject(), this,
         [](U1StockSource* self, int value) { self->on_print_state(value); });
@@ -34,6 +36,8 @@ void U1StockSource::on_print_state(int state_enum) {
     // (and detection never fires) on non-U1 printers.
     if (!capable_)
         return;
+    // RAW_PRINT_STATE_OK: an edge INTO the printer's own paused state, which is
+    // what U1 stock firmware raises when it trips defect detection.
     if (state_enum != static_cast<int>(PrintJobState::PAUSED))
         return;
     if (prev == static_cast<int>(PrintJobState::PAUSED))

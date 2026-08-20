@@ -92,6 +92,14 @@ class PrintControlButtons {
     ~PrintControlButtons();
 
     void recompute();
+
+    /**
+     * @brief Gather every input and decide both buttons
+     *
+     * Public so the stop handler can ask the same question the enablement
+     * asked, rather than re-deriving the routing condition beside it.
+     */
+    [[nodiscard]] helix::ui::ControlButtonView current_view() const;
     void start_pending_action(PendingAction action);
     void clear_pending_action();
 
@@ -134,6 +142,11 @@ class PrintControlButtons {
     // SubjectLifetime is only required for dynamic per-fan/sensor/extruder
     // subjects that can be destroyed and recreated during rediscovery.
     ObserverGuard print_state_observer_;
+    /// The UI lifecycle axis. Pause/Cancel affordance is a function of
+    /// PrintState, and PrintState changes without print_state_enum changing at
+    /// all - a host-side pre-start block leaves the printer reporting the
+    /// PREVIOUS job for its whole duration.
+    ObserverGuard print_lifecycle_observer_;
     PrintCancelModal cancel_modal_;
 
     friend struct PrintControlButtonsTestAccess;

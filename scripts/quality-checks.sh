@@ -116,9 +116,28 @@ fi
 
 echo ""
 
+
+# Every staged path, including deletions - a removed .cpp can invalidate a doc
+# that cites it, so the doc gate has to see D as well as ACMR.
+QC_STAGED_ALL=""
+if [ "$STAGED_ONLY" = true ]; then
+  QC_STAGED_ALL="$(git diff --cached --name-only --diff-filter=ACMRD 2>/dev/null || true)"
+fi
+
+# Resolved here rather than inside a check: the checks run as separate
+# subshells, so a variable one of them assigns is invisible to the next.
+# VENV_PYTHON was set in the formatting section and read by the translation
+# one; TRANS_FMT_PY was set there and read by the base-locale one.
+VENV_PYTHON=".venv/bin/python"
+TRANS_FMT_PY="${VENV_PYTHON:-python3}"
+[ -x "$TRANS_FMT_PY" ] || TRANS_FMT_PY=python3
+
+
 # ====================================================================
 # Phase 1: Critical Checks
 # ====================================================================
+qc_phase1() {
+  local EXIT_CODE=0
 
 # Merge Conflict Markers Check
 echo "⚠️  Checking for merge conflict markers..."
@@ -196,8 +215,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # XML Constant Set Validation
 # ====================================================================
+qc_xml_const() {
+  local EXIT_CODE=0
 echo "🔤 Validating XML constant sets..."
 
 if [ -x "build/bin/validate-xml-constants" ]; then
@@ -218,8 +247,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # XML Attribute Validation
 # ====================================================================
+qc_xml_attr() {
+  local EXIT_CODE=0
 echo "📄 Validating XML attributes..."
 
 if [ -x "build/bin/validate-xml-attributes" ]; then
@@ -256,8 +295,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Duplicate XML widget names
 # ====================================================================
+qc_dup_names() {
+  local EXIT_CODE=0
 # Background: lv_obj_find_by_name() returns the FIRST depth-first match and
 # warns about nothing, so a name declared twice in one file makes the second
 # element unreachable — built, then silently never configured (#1136,
@@ -289,8 +338,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # helix-xml-linter (mirrors the "XML Lint" CI gate)
 # ====================================================================
+qc_xml_linter() {
+  local EXIT_CODE=0
 # The linter resolves every #const reference against a committed snapshot,
 # tools/xml-linter/schema/schema.json. Adding a <px>/<color>/<string> to an XML
 # file without regenerating that snapshot leaves the new name unknown, so every
@@ -465,8 +524,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # helix-xml submodule test suite (CMake + Unity + ctest)
 # ====================================================================
+qc_xml_subtests() {
+  local EXIT_CODE=0
 # lib/helix-xml is our own submodule and carries its own standalone suite,
 # which `make test` does NOT build: helix-tests only reaches the engine through
 # the app. A pointer bump that regresses the parser is therefore invisible to
@@ -530,8 +599,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Hidden test set (make test-hidden)
 # ====================================================================
+qc_hidden_tests() {
+  local EXIT_CODE=0
 # The 89 [.]-tagged tests are excluded from `make test-run`: they need ui_xml/
 # on a relative path, own destructive global state, or are timing-sensitive
 # stress harnesses. Nothing else runs them, which is how six of them rotted red
@@ -586,8 +665,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Overlay width is decided at push time, never in XML (#1178)
 # ====================================================================
+qc_overlay_width() {
+  local EXIT_CODE=0
 # The two width constants encode destination-vs-transient-layer, and which one
 # an overlay gets depends on how the user reached it — the same
 # fan_control_overlay is a transient layer from Controls and a drill-down from
@@ -616,8 +705,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Spacing and sizing go through design tokens, not raw pixel literals
 # ====================================================================
+qc_design_pixels() {
+  local EXIT_CODE=0
 # HelixScreen ships on 480x272 through 1440p. A literal style_pad_all="12" is
 # 12px on all of them, so a layout tuned in a 1024x600 dev window is cramped on
 # a Snapmaker U1 and lost in whitespace on a 1280x720 panel. The ladders in
@@ -790,6 +889,24 @@ else
   echo "⚠️  esp32 app_srcs manifest or gate not found — skipping"
 fi
 
+# android/app/src/main/assets/ is a Gradle build output (the copyAssets task
+# wipes and re-copies it from ui_xml/, assets/ and config/). It is ignored
+# wholesale, so a snapshot from an old build lingers on disk looking exactly like
+# source: one went 4 months stale and cost four separate lint gates a
+# hand-written exclusion apiece. This fails on a tracked file under that tree, or
+# on a build rule writing into it behind Gradle's back (mk/filaments.mk did).
+if [ -f "scripts/check_android_asset_staging.py" ]; then
+  if python3 scripts/check_android_asset_staging.py >/tmp/android_staging.out 2>&1; then
+    cat /tmp/android_staging.out
+  else
+    cat /tmp/android_staging.out
+    echo "   Run: python3 scripts/check_android_asset_staging.py --list"
+    EXIT_CODE=1
+  fi
+else
+  echo "⚠️  check_android_asset_staging.py not found — skipping"
+fi
+
 # A printer_database.json entry naming an image that does not exist is silent at
 # runtime: the lookup falls through to generic-corexy and logs nothing above debug,
 # so a bed-slinger just quietly shows a CoreXY frame. Twenty entries had drifted
@@ -843,8 +960,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Phase 2: Code Quality Checks
 # ====================================================================
+qc_phase2() {
+  local EXIT_CODE=0
 
 # Code Formatting Check (clang-format) - WARNING ONLY
 # NOTE: clang-format versions differ between local (macOS Homebrew) and CI (Ubuntu)
@@ -872,35 +999,47 @@ done
 if [ -n "$FILES" ]; then
   if [ -n "$CF_BIN" ]; then
     if [ -f ".clang-format" ]; then
+      # This probe was the single slowest thing in the script - 41s of a 44s
+      # run - because it spawned one clang-format (plus one head+grep) per
+      # source file, strictly serially. The probe is read-only, so it fans out;
+      # --auto-fix then rewrites only the files that came back dirty, which is
+      # normally a handful, and stays serial so its output keeps a stable order.
       FORMAT_ISSUES=""
-      for file in $FILES; do
-        if [ -f "$file" ]; then
-          # Skip auto-generated sources: their on-disk format is owned by the
-          # generator (e.g. src/generated/lv_i18n_translations.c from
-          # generate_translations.py). Running clang-format on them fights the
-          # generator on every build, producing perpetual post-build churn.
-          if head -5 "$file" | grep -qiE 'auto-generated|DO NOT EDIT'; then
-            continue
-          fi
-          # Check if file needs formatting
-          if ! "$CF_BIN" --dry-run --Werror "$file" >/dev/null 2>&1; then
-            FORMAT_ISSUES="$FORMAT_ISSUES $file"
-            if [ "$AUTO_FIX" = true ]; then
-              case "$CF_VER" in
-                18.*)
-                  "$CF_BIN" -i "$file"
-                  echo "   ✓ Auto-formatted: $file"
-                  ;;
-                *)
-                  echo "   ⚠️  Skipping auto-format of $file: resolved clang-format $CF_VER != 18"
-                  echo "       (auto-formatting with a non-CI version would reflow the whole file)"
-                  echo "       Install v18: pip install 'clang-format==18.1.8' into .venv, or set CLANG_FORMAT=clang-format-18"
-                  ;;
-              esac
-            fi
-          fi
-        fi
-      done
+      CF_CAND="$(mktemp)"
+      CF_DIRTY="$(mktemp)"
+      printf '%s
+' $FILES > "$CF_CAND"
+      # Skipping auto-generated sources is part of the parallel pass: their
+      # on-disk format is owned by the generator (e.g.
+      # src/generated/lv_i18n_translations.c from generate_translations.py), and
+      # reformatting them fights the generator on every build.
+      xargs -a "$CF_CAND" -P "${QC_JOBS:-4}" -I{} sh -c '
+        f="$1"
+        [ -f "$f" ] || exit 0
+        head -5 "$f" | grep -qiE "auto-generated|DO NOT EDIT" && exit 0
+        "$0" --dry-run --Werror "$f" >/dev/null 2>&1 || printf "%s
+" "$f"
+      ' "$CF_BIN" {} 2>/dev/null | sort > "$CF_DIRTY"
+      # Leading space is load-bearing: a message below prints "git add$FORMAT_ISSUES".
+      FORMAT_ISSUES="$(sed 's|^| |' "$CF_DIRTY" | tr -d '
+')"
+      if [ -n "$FORMAT_ISSUES" ] && [ "$AUTO_FIX" = true ]; then
+        case "$CF_VER" in
+          18.*)
+            while IFS= read -r file; do
+              [ -n "$file" ] || continue
+              "$CF_BIN" -i "$file"
+              echo "   ✓ Auto-formatted: $file"
+            done < "$CF_DIRTY"
+            ;;
+          *)
+            echo "   ⚠️  Skipping auto-format: resolved clang-format $CF_VER != 18"
+            echo "       (auto-formatting with a non-CI version would reflow whole files)"
+            echo "       Install v18: pip install 'clang-format==18.1.8' into .venv, or set CLANG_FORMAT=clang-format-18"
+            ;;
+        esac
+      fi
+      rm -f "$CF_CAND" "$CF_DIRTY"
 
       if [ -n "$FORMAT_ISSUES" ]; then
         if [ "$AUTO_FIX" = true ]; then
@@ -1053,8 +1192,18 @@ if [ "$STAGED_ONLY" = true ]; then
 fi
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Icon Font Validation
 # ====================================================================
+qc_icon_font() {
+  local EXIT_CODE=0
 SECTION_START=$(date +%s)
 echo -n "🔤 Validating icon font codepoints..."
 
@@ -1085,8 +1234,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # MDI Codepoint Label Verification
 # ====================================================================
+qc_mdi_codepoints() {
+  local EXIT_CODE=0
 SECTION_START=$(date +%s)
 echo -n "🔤 Verifying MDI codepoint labels..."
 
@@ -1115,8 +1274,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Code Style Check
 # ====================================================================
+qc_code_style() {
+  local EXIT_CODE=0
 echo "🔍 Checking for TODO/FIXME markers..."
 
 # Check for TODO/FIXME/XXX comments (informational only)
@@ -1133,8 +1302,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Memory Safety Audit (Critical Patterns Only)
 # ====================================================================
+qc_mem_safety() {
+  local EXIT_CODE=0
 if [ "$STAGED_ONLY" = true ]; then
   # Get all staged .cpp and .xml files for audit
   AUDIT_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(cpp|xml)$' || true)
@@ -1160,8 +1339,18 @@ if [ "$STAGED_ONLY" = true ]; then
 fi
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Subscription Null-Safety Check
 # ====================================================================
+qc_null_safety() {
+  local EXIT_CODE=0
 # Background: Moonraker delivers JSON null for subscribed fields the underlying
 # Klipper object lacks. .value() and .get<T>() throw type_error.302 on null;
 # an uncaught throw inside a subscription handler exits 134 → watchdog crash
@@ -1196,8 +1385,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # L081 Mechanism C anti-pattern (cluster:pstat-async-delete)
 # ====================================================================
+qc_l081() {
+  local EXIT_CODE=0
 # Background: bg-thread `tok.expired()` followed by `this->`/`api_->` member
 # access races on owner destruction → UAF crashes that look unrelated in
 # backtraces. The runtime detector emits `cluster:pstat-async-delete Mechanism C`
@@ -1237,8 +1436,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Network PII: no SSID/BSSID/MAC logged above trace level
 # ====================================================================
+qc_net_pii() {
+  local EXIT_CODE=0
 # Background: the in-memory log ring is captured at debug regardless of the
 # user's configured verbosity, and leaves the machine three ways — the debug
 # bundle, the crash reporter's automatic upload, and the `ctl log` RPC. A set
@@ -1275,8 +1484,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Declarative UI: no XML-owned widget driven imperatively from C++
 # ====================================================================
+qc_decl_ui() {
+  local EXIT_CODE=0
 SECTION_START=$(date +%s)
 echo -n "🎨 Checking declarative UI (imperative XML-widget mutation)..."
 
@@ -1395,6 +1614,64 @@ else
   section_time $SECTION_START
   echo ""
   echo "⚠️  check_timer_destructor_cancel.py not found — skipping"
+fi
+
+echo ""
+
+SECTION_START=$(date +%s)
+echo -n "🔢 Checking print-state enum casts..."
+
+if [ -f "scripts/check_print_state_cast.py" ]; then
+  # lv_subject_get_int() returns int, so static_cast<PrintState>(...) compiles
+  # against whichever subject was named — and PrintJobState and PrintState do NOT
+  # share numbering past index 0 (COMPLETE=3 vs Paused=3). Pairing a cast with
+  # the wrong subject is silent: it compiles, runs, and answers a different
+  # question. Made twice while migrating guards onto the lifecycle. Use the typed
+  # accessors get_print_lifecycle() / get_print_job_state(), which own the
+  # pairing; annotate a genuine need `// PRINT_STATE_CAST_OK: <reason>`.
+  if python3 scripts/check_print_state_cast.py >/tmp/print_state_cast.out 2>&1; then
+    section_time $SECTION_START
+    echo ""
+    tail -1 /tmp/print_state_cast.out
+  else
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/print_state_cast.out
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  check_print_state_cast.py not found — skipping"
+fi
+
+SECTION_START=$(date +%s)
+echo -n "🧭 Checking raw print-state reads..."
+
+if [ -f "scripts/check_raw_print_job_state.py" ]; then
+  # helix::PrintJobState is the WIRE — what print_stats.state said. It cannot
+  # express a job the app has committed to but the printer has not reported yet,
+  # so a semantic question asked of it is blind for the whole of a pre-print
+  # window. That blindness shipped: 21 motion controls live while the toolhead
+  # homed, the home print card reading idle, a queue tap deleting the job it then
+  # failed to start. Plenty of sites DO want the wire — the parse, terminal
+  # formatting, telemetry's phase tracker, the PRINT_START collector — so this
+  # does not forbid it. It forbids reading it SILENTLY, because a deliberate wire
+  # read and a stale one look identical. Annotate: `// RAW_PRINT_STATE_OK: <why>`.
+  if python3 scripts/check_raw_print_job_state.py >/tmp/raw_print_state.out 2>&1; then
+    section_time $SECTION_START
+    echo ""
+    tail -1 /tmp/raw_print_state.out
+  else
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/raw_print_state.out
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  check_raw_print_job_state.py not found — skipping"
 fi
 
 echo ""
@@ -1544,8 +1821,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # spdlog only: no printf/cout/cerr/LV_LOG_ outside CLI subcommands
 # ====================================================================
+qc_spdlog_only() {
+  local EXIT_CODE=0
 SECTION_START=$(date +%s)
 echo -n "📢 Checking spdlog-only logging..."
 
@@ -1570,8 +1857,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Design tokens + no private LVGL APIs
 # ====================================================================
+qc_design_tokens() {
+  local EXIT_CODE=0
 SECTION_START=$(date +%s)
 echo -n "🎨 Checking design tokens and LVGL API surface..."
 
@@ -1618,8 +1915,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Agent-facing docs: references resolve, doc index is complete
 # ====================================================================
+qc_doc_refs() {
+  local EXIT_CODE=0
 SECTION_START=$(date +%s)
 echo -n "📚 Checking doc references and index..."
 
@@ -1644,8 +1951,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Translation format-specifier parity (crash #1073)
 # ====================================================================
+qc_translation_fmt() {
+  local EXIT_CODE=0
 # Background: format strings passed to snprintf/fmt::format via lv_tr() are
 # runtime-translated. If a translation adds an extra %s/%d (or {} field), the
 # format call reads an argument that was never passed → SIGSEGV (snprintf) or
@@ -1678,8 +1995,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Base-locale key identity (raw-key rendering in English UI)
 # ====================================================================
+qc_base_locale() {
+  local EXIT_CODE=0
 # English loads no translation pack (see src/system/translation_loader.cpp),
 # so lv_tr() returns the key itself — a key that is not its own English text
 # renders the raw key in the UI (v0.99.114: "pre_print_option.timelapse.label"
@@ -1711,8 +2038,18 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Shell Script Linting (shellcheck)
 # ====================================================================
+qc_shellcheck() {
+  local EXIT_CODE=0
 SECTION_START=$(date +%s)
 echo -n "🐚 Checking shell scripts (shellcheck)..."
 
@@ -1827,12 +2164,173 @@ fi
 echo ""
 
 # ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
+# Parallel driver
+# ====================================================================
+# The checks are independent greps and linters and the script ran strictly
+# serially: 67s wall for 54s user + 15s sys, i.e. one core of 32.
+#
+# Only two sections write to the tree, and only under --auto-fix:
+#   qc_phase2     clang-format -i + git add   (checks only, without --auto-fix)
+#   qc_xml_linter make regen-xml-schema       (always regenerates schema.json)
+# Those run alone, first - a formatter rewriting a file while another check
+# greps it is a race. Everything else fans out over $QC_JOBS workers.
+#
+# Output is buffered per section and replayed in declaration order, so the
+# transcript matches the serial one apart from timings.
+# Result stamp - full runs only.
+#
+# Path gating already handles "nothing relevant changed" for pre-commit. What is
+# left is redoing an identical full sweep: pre-push straight after a manual run,
+# or re-pushing with nothing touched in between. The stamp is the whole working
+# state (HEAD, staged diff, unstaged diff, untracked listing), so any edit
+# invalidates it. Set QC_NO_CACHE=1 to force, and note it only ever short-circuits
+# a run that previously PASSED - failures are never cached.
+QC_STAMP_DIR="build/.qc-stamps"
+qc_state_hash() {
+  {
+    git rev-parse HEAD 2>/dev/null || echo no-head
+    git diff --no-ext-diff 2>/dev/null || true
+    git diff --cached --no-ext-diff 2>/dev/null || true
+    # Names only: an untracked file's contents are not hashed, so a scratch file
+    # edited in place will not invalidate the stamp. Tracked work always does.
+    git ls-files --others --exclude-standard 2>/dev/null | sort || true
+  } | sha256sum 2>/dev/null | cut -d' ' -f1
+}
+QC_STAMP=""
+if [ "$STAGED_ONLY" != true ] && [ -z "${QC_NO_CACHE:-}" ]; then
+  QC_STAMP="$QC_STAMP_DIR/$(qc_state_hash)"
+  if [ -n "$QC_STAMP" ] && [ -f "$QC_STAMP" ]; then
+    echo "✅ Quality checks passed! (cached - working tree unchanged since the last full run)"
+    echo "   Force a re-run with QC_NO_CACHE=1"
+    exit 0
+  fi
+fi
+
+QC_TMP="$(mktemp -d)"
+trap 'rm -rf "$QC_TMP"' EXIT
+QC_JOBS="${QC_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+
+qc_run_buffered() {
+  local fn="$1" t0 t1
+  t0=$(date +%s)
+  set +e
+  "$fn" > "$QC_TMP/$fn.out" 2>&1
+  echo $? > "$QC_TMP/$fn.rc"
+  set -e
+  t1=$(date +%s)
+  echo $((t1 - t0)) > "$QC_TMP/$fn.time"
+}
+
+# qc_xml_linter always regenerates the schema; qc_phase2 only rewrites files
+# when asked to fix them.
+QC_SERIAL="qc_xml_linter"
+if [ "$AUTO_FIX" = true ]; then QC_SERIAL="$QC_SERIAL qc_phase2"; fi
+QC_ALL="qc_phase1 qc_xml_const qc_xml_attr qc_dup_names qc_xml_linter qc_xml_subtests qc_hidden_tests qc_overlay_width qc_design_pixels qc_phase2 qc_icon_font qc_mdi_codepoints qc_code_style qc_mem_safety qc_null_safety qc_l081 qc_net_pii qc_decl_ui qc_spdlog_only qc_design_tokens qc_doc_refs qc_translation_fmt qc_base_locale qc_shellcheck"
+
+QC_PARALLEL=""
+for fn in $QC_ALL; do
+  case " $QC_SERIAL " in *" $fn "*) ;; *) QC_PARALLEL="$QC_PARALLEL $fn" ;; esac
+done
+
+# Path gating - pre-commit only.
+#
+# A one-file commit paid for every repo-wide gate: the declarative-UI scan alone
+# is ~9s and greps all of src/ even when you touched a .md. In --staged-only we
+# skip a check when nothing it inspects was staged. The full run (pre-push, CI)
+# gates nothing, so this can only defer work to the push, never drop it.
+#
+# Deliberately absent from the table = always runs.
+qc_trigger_re() {
+  case "$1" in
+    qc_xml_const|qc_xml_attr|qc_dup_names|qc_xml_linter|qc_xml_subtests)
+                        echo '\.xml$|^src/ui/|^tools/xml-linter/' ;;
+    qc_overlay_width)   echo '\.xml$|\.(cpp|h)$' ;;
+    qc_design_pixels)   echo '\.xml$' ;;
+    qc_phase2)          echo '\.(cpp|c|h|mm|xml)$' ;;
+    qc_icon_font|qc_mdi_codepoints)
+                        echo '\.xml$|icon|font' ;;
+    qc_hidden_tests)    echo '^tests/|\.(cpp|h)$' ;;
+    qc_mem_safety|qc_null_safety|qc_l081|qc_net_pii|qc_decl_ui|qc_spdlog_only)
+                        echo '\.(cpp|c|h|mm)$' ;;
+    qc_design_tokens)   echo '\.(cpp|h|xml)$' ;;
+    qc_doc_refs)        echo '\.md$|^scripts/check_doc_refs\.py$' ;;
+    qc_translation_fmt) echo '^translations/|^ui_xml/|\.py$' ;;
+    qc_base_locale)     echo '^translations/' ;;
+    qc_shellcheck)      echo '\.(sh|bats)$' ;;
+    *)                  echo '' ;;
+  esac
+}
+
+QC_SKIPPED=""
+qc_wanted() {
+  local re
+  [ "$STAGED_ONLY" = true ] || return 0
+  re="$(qc_trigger_re "$1")"
+  [ -n "$re" ] || return 0
+  # A deletion can invalidate a doc citation, so doc_refs also wakes on any D.
+  if [ "$1" = "qc_doc_refs" ] && git diff --cached --name-only --diff-filter=D 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if printf '%s\n' "$QC_STAGED_ALL" | grep -qE "$re"; then
+    return 0
+  fi
+  QC_SKIPPED="$QC_SKIPPED $1"
+  return 1
+}
+
+for fn in $QC_SERIAL; do
+  if qc_wanted "$fn"; then qc_run_buffered "$fn"; fi
+done
+
+running=0
+for fn in $QC_PARALLEL; do
+  qc_wanted "$fn" || continue
+  qc_run_buffered "$fn" &
+  running=$((running + 1))
+  if [ "$running" -ge "$QC_JOBS" ]; then wait -n 2>/dev/null || wait; running=$((running - 1)); fi
+done
+wait
+
+for fn in $QC_ALL; do
+  [ -f "$QC_TMP/$fn.out" ] && cat "$QC_TMP/$fn.out"
+  rc=$(cat "$QC_TMP/$fn.rc" 2>/dev/null || echo 0)
+  [ "$rc" != "0" ] && EXIT_CODE=1
+done
+
+if [ -n "$QC_SKIPPED" ]; then
+  echo ""
+  echo "⏭️  Skipped (nothing staged that they inspect):$QC_SKIPPED"
+  echo "   The pre-push hook runs all of them ungated."
+fi
+
+if [ -n "${QC_PROFILE:-}" ]; then
+  echo ""; echo "slowest checks:"
+  for fn in $QC_ALL; do
+    printf "%5ss  %s\n" "$(cat "$QC_TMP/$fn.time" 2>/dev/null || echo 0)" "$fn"
+  done | sort -rn | head -8
+fi
+true
+
+# ====================================================================
 # Final Result
 # ====================================================================
 SCRIPT_END=$(date +%s)
 TOTAL_SEC=$((SCRIPT_END - SCRIPT_START))
 
 if [ $EXIT_CODE -eq 0 ]; then
+  # Only a pass is cached; a failure must always re-run.
+  if [ -n "$QC_STAMP" ]; then
+    mkdir -p "$QC_STAMP_DIR" 2>/dev/null || true
+    : > "$QC_STAMP" 2>/dev/null || true
+  fi
   echo "✅ Quality checks passed! (${TOTAL_SEC}s total)"
   exit 0
 else

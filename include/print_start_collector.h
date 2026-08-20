@@ -64,6 +64,19 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     void start();
 
     /**
+     * @brief Declare that a host-side pre-start block is part of this window
+     *
+     * Called when HelixScreen dispatches blocking pre-start gcode in front of
+     * the job (a forced bed mesh, a printer setup macro). That work sits inside
+     * the measured window, which on some printers is several minutes, so its
+     * timings must not be averaged with printer-edge measurements.
+     *
+     * Safe to call after start(): it re-filters the loaded history in place.
+     * Idempotent.
+     */
+    void note_host_side_pre_start();
+
+    /**
      * @brief Stop monitoring
      *
      * Unregisters callback and resets state. Called when print
@@ -395,6 +408,10 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     std::map<int, std::chrono::steady_clock::time_point> phase_enter_times_;
     helix::PreprintPredictor predictor_;
     int loaded_temp_bucket_{0};
+    /// Which window this run is measuring. Defaults to PrinterEdge: an
+    /// externally started print never announces a host-side block, and neither
+    /// does a screen-started print on a printer that runs none.
+    helix::PreprintWindow window_{helix::PreprintWindow::PrinterEdge};
 
     // Duration-proportional progress weights (protected by state_mutex_)
     std::map<int, float> predicted_phase_weights_; ///< Phase -> fraction of total (0.0-1.0)

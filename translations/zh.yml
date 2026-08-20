@@ -20,6 +20,7 @@ translations:
   '%zu changes': '%zu 项更改'
   '%zu events queued': '%zu 个事件已排队'
   '%zu plugins failed to load': '%zu 个插件加载失败'
+  (different grade): ''
   (incompatible): (不兼容)
   (multi-tool): (多工具)
   (none detected): (未检测到)
@@ -178,7 +179,9 @@ translations:
     — 如果反复出现，请从设置 > 关于发送调试捆绑包。
   An unexpected printer error occurred.: 发生了意外的打印机错误。
   An update is available: 有可用更新
+  Analyzing data...: ''
   Analyzing data... {}%: '正在分析数据... {}%'
+  Analyzing data... {}s: ''
   Android logcat: Android logcat
   Animations: 动画
   Anonymous data to help improve HelixScreen: 匿名数据以帮助改进 HelixScreen
@@ -310,6 +313,9 @@ translations:
   Bypass: 旁路
   Bypass Is Active: ''
   Bypass Mode: 旁路模式
+  Bypass active — this print runs on the external spool, not on the lanes below.: ''
+  Bypass active — this print runs on the external spool.: ''
+  Bypass cannot be changed while printing: ''
   Bypass controlled by hardware sensor: 旁路由硬件传感器控制
   Bypass controlled by sensor: 旁通由传感器控制
   Bypass disabled: 旁通已禁用
@@ -445,6 +451,8 @@ translations:
   Choose rendering mode for G-code visualization: 选择 G-code 可视化的渲染模式
   Choose rendering mode for bed mesh visualization: 选择热床网格可视化的渲染模式
   Choose sound style: 选择声音风格
+  ? Choose the model that matches your printer. This sets the print macros, fan roles and calibration behaviour HelixScreen uses.
+  : ''
   Choose what to power off or restart.: 选择要关闭或重启的对象。
   Clean Brush: '清洁刷子'
   Clean Nozzle: 清洁喷嘴
@@ -955,6 +963,7 @@ translations:
   Filament: 耗材
   Filament Detected: 检测到耗材
   Filament Environment: 耗材环境
+  Filament Grade Mismatch: ''
   Filament In The Toolhead: ''
   Filament Mapping: 耗材映射
   Filament Runout: 耗材用尽
@@ -966,6 +975,7 @@ translations:
   Filament clog/flow detection meter: '耗材堵塞／流量检测仪表'
   Filament deleted: 耗材已删除
   Filament diameter sensors for flow compensation: 耗材直径传感器用于流量补偿
+  Filament is clear of the toolhead. Pull it out the rest of the way.: ''
   Filament is loose: 耗材松弛
   Filament is pulling tight: 耗材拉紧
   ? Filament is still at the nozzle after unloading. The cut or retract may not have completed. Clear the toolhead before loading another spool.
@@ -1001,6 +1011,7 @@ translations:
   Firmware Restart: 固件重启
   Firmware reports no bypass. Enable if you feed filament straight to the extruder: 固件报告未配置旁路。如果您将耗材直接送入挤出机，请启用此选项
   Firmware restarting...: 固件重启中...
+  Firmware saved X = Y's value; the measured X result was discarded: ''
   FlashForge Adventurer 5M: FlashForge Adventurer 5M
   FlashForge Adventurer 5X: FlashForge Adventurer 5X
   FlashForge IFS: FlashForge IFS
@@ -1404,6 +1415,7 @@ translations:
   Measure and compare belt path frequencies: 测量和比较皮带路径频率
   Measure belt path frequencies: 测量皮带路径频率
   Measured: 已测量
+  Measured (shaper off): ''
   Measurement Failed: 测量失败
   Measuring Path A... %d%%: 正在测量路径 A... %d%%
   Measuring Path B... %d%%: 正在测量路径 B... %d%%
@@ -1622,6 +1634,7 @@ translations:
   Objects: 对象
   'Off': 关
   'Off:': '关:'
+  "Old setting on today's data: {} residual - now: {}": ''
   'On': 开
   On and Off macros must be different: 开和关的宏必须不同
   On-screen Alerts: '屏幕提醒'
@@ -1770,6 +1783,7 @@ translations:
   Press Scan to search: 按扫描搜索
   'Pressure:': '压力:'
   Preview Sounds: 预览声音
+  Previous: ''
   Price: 价格
   Primary: 主要
   Priming...: 正在预挤...
@@ -1796,6 +1810,8 @@ translations:
   Print Time: 打印时间
   Print Tuning: 打印调优
   Print Was Terminated: 打印已终止
+  Print cancelled: ''
+  Print did not start: ''
   Print didn't start — printer may be busy or offline (B3 polls={}, status=0x{:02X}, error=0x{:02X}): 打印未开始
     — 打印机可能繁忙或离线 (B3 polls={}, status=0x{:02X}, error=0x{:02X})
   Print error: 打印错误
@@ -1813,6 +1829,7 @@ translations:
   Printer Firmware Disconnected: 打印机固件已断开
   Printer Image: 打印机图片
   Printer Manager: 打印机管理
+  Printer Model: ''
   Printer Name: 打印机名称
   'Printer Setup: Connection': 打印机设置：连接
   'Printer Setup: Fans': 打印机设置：风扇
@@ -1920,6 +1937,7 @@ translations:
   Re-read spool RFID tags and remaining length: '重新读取料盘 RFID 标签与剩余长度'
   Re-syncs Happy Hare's tracked state with the hardware.: 将 Happy Hare 跟踪的状态与硬件重新同步。
   Ready: 就绪
+  Ready for filament operations: ''
   Ready to Apply: 准备应用
   Ready to load: 准备装载
   Reason: 原因
@@ -1950,6 +1968,7 @@ translations:
   Refresh: 刷新
   Refresh Interval: 刷新间隔
   Refresh RFID: '刷新 RFID'
+  Relative vibration: ''
   Release all stepper motors. Position will be lost.: 释放所有步进电机。位置信息将丢失。
   Remaining (g): 剩余 (g)
   Remaining Weight (g): 剩余重量（克）
@@ -1978,6 +1997,7 @@ translations:
   Requires Moonraker power device: '需要 Moonraker 电源设备'
   Requires Moonraker-Timelapse plugin: 需要 Moonraker-Timelapse 插件
   Requires Multi-Filament System or MMU hardware: '需要多耗材系统或 MMU 硬件'
+  Requires a filament system with bypass: ''
   Requires clog detection hardware: '需要堵塞检测硬件'
   Resend write failed at chunk {}: 区块 {} 重发写入失败
   Reset: 重置
@@ -2433,6 +2453,8 @@ translations:
   : ''
   The filament system reported an error: 耗材系统报告错误
   The heater will cycle on and off several times.: 加热器将多次开关循环。
+  ? The loaded spool is {}, but this file was sliced for {}. Filled filament runs at a lower flow rate and needs a hardened nozzle.
+  : ''
   ? "The motor vibrates the belt while a strobe light flashes at the same frequency. When the belt appears to stand still (frozen), you have found the resonant frequency.\n\nUse the frequency buttons to sweep through values until the belt looks stationary, then lock the reading."
   : "电机振动皮带的同时,频闪灯以相同频率闪烁。当皮带看起来静止不动(冻结)时,即找到了共振频率。\n\n使用频率按钮扫描各数值,直到皮带看起来静止,然后锁定读数。"
   ? The print is paused. Changing tools now moves the toolhead and swaps the filament at the nozzle. Resume the print once the change finishes.
@@ -2455,6 +2477,7 @@ translations:
   Theme changes apply after restart.: 主题更改在重启后生效。
   Theme reset to defaults: 主题已重置为默认值
   'Theme: ': '主题: '
+  'These tools have a different filament grade loaded:': ''
   'These tools have incompatible materials loaded:': 这些工具加载了不兼容的材料：
   'These tools have no filament loaded:': '以下工具未加载耗材:'
   'These tools have no matching filament loaded:': 以下工具未加载匹配的耗材：
@@ -2469,7 +2492,9 @@ translations:
   ? This device has very little RAM. Resonance calibration is memory-intensive and may cause a "Timer Too Close" error. Continue anyway?
   : 此设备内存极少。共振校准会占用大量内存，可能导致 "Timer Too Close" 错误。仍要继续吗？
   This doesn't match the linked Spoolman spool. Add it as a new spool, or update the linked one to match?: 这与关联的 Spoolman 料盘不匹配。是否添加为新料盘，或更新关联料盘以匹配？
+  This filament system does not report buffer or flow data.: ''
   This file was sliced for {} but {} is loaded.: 此文件为 {} 切片，但当前加载的是 {}。
+  This file was sliced for {}, but {} is loaded. It will print slower and hotter than the loaded spool needs.: ''
   This is exactly the data that will be sent: 这正是将要发送的数据
   This is what data would be sent if enabled: 这是启用后将发送的数据
   This may take up to 30 seconds: 这可能需要 30 秒
@@ -2531,6 +2556,7 @@ translations:
   Toggle Auto-Refill: '切换自动续料'
   Toggle Moonraker power devices: '切换 Moonraker 电源设备'
   Toggle Quiet Mode: '切换静音模式'
+  Toggle external spool bypass: ''
   Toggle toolhead LED for an extruder: '切换某个挤出机的工具头 LED'
   'Toggle:': '切换:'
   Too humid: 湿度过高
@@ -2810,6 +2836,7 @@ translations:
   of: 的
   'off': 关闭
   Monitor for print abnormalities (K2 Plus camera-based): 监测打印异常（基于 K2 Plus 摄像头）
+  AFC's remember_spool is retaining spool info in firmware; that takes precedence over this toggle: ''
   AI detection: AI 检测
   prints: 打印次数
   remaining: 剩余
@@ -2854,6 +2881,7 @@ translations:
   '{} heater turned off': '{} 加热器已关闭'
   '{} is installed but its backup-spool switching is turned off, so no automatic swap will happen.': '{} 已安装，但其备用料盘切换已关闭，因此不会自动切换。'
   '{} is installed, but its backup-spool setting could not be read - do not count on an automatic swap.': '{} 已安装，但无法读取其备用料盘设置 - 请勿指望自动切换。'
+  '{} is not set up on this printer': ''
   '{} lanes': '{} 个料仓'
   '{} macro not configured': '{} 宏未配置'
   '{} may cause unintended changes. Are you sure?': '{} 可能导致意外更改。确定吗？'

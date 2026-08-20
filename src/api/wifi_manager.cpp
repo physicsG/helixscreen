@@ -769,10 +769,16 @@ void WiFiManager::set_enabled_async(bool enabled, helix::LifetimeToken token,
             }
 
             {
+                // Notify under the lock, not after it. wait_for_radio_ops() wakes
+                // as soon as the count reaches zero, and ~WiFiManager() destroys
+                // radio_op_cv_ right after it returns -- which would be while this
+                // thread was still inside notify_all(). Holding the mutex across
+                // the notify keeps the waiter blocked on reacquiring it until we
+                // are done touching the condition variable.
                 std::lock_guard<std::mutex> lock(radio_op_mutex_);
                 --radio_ops_inflight_;
+                radio_op_cv_.notify_all();
             }
-            radio_op_cv_.notify_all();
         });
 }
 
@@ -1251,9 +1257,14 @@ void WiFiManager::notify_state_observers() {
     std::vector<StateObserver> snapshot;
     {
         std::lock_guard<std::mutex> lock(state_observers_mutex_);
+        // L081_OK: sweeping *observers'* tokens to drop dead entries, not
+        // gating our own `this` access — structurally not Mechanism C, and
+        // the backend fires READY from its init worker on nearly every
+        // launch, which made this the single largest bg_tok_expired_check
+        // emitter in the field.
         state_observers_.erase(
             std::remove_if(state_observers_.begin(), state_observers_.end(),
-                           [](const StateObserver& obs) { return obs.token.expired(); }),
+                           [](const StateObserver& obs) { return obs.token.expired_no_lvgl(); }),
             state_observers_.end());
         snapshot = state_observers_;
     }

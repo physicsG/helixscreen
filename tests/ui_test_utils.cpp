@@ -527,6 +527,7 @@ helix::TemperatureController* get_temperature_controller() {
 namespace {
 std::function<void(const std::string&)> g_test_warning_hook;
 std::function<void(const std::string&)> g_test_error_hook;
+std::function<void(const std::string&)> g_test_info_hook;
 } // namespace
 
 namespace helix {
@@ -536,6 +537,9 @@ void set_test_notification_warning_hook(std::function<void(const std::string&)> 
 }
 void set_test_notification_error_hook(std::function<void(const std::string&)> hook) {
     g_test_error_hook = std::move(hook);
+}
+void set_test_notification_info_hook(std::function<void(const std::string&)> hook) {
+    g_test_info_hook = std::move(hook);
 }
 } // namespace ui
 } // namespace helix
@@ -547,11 +551,17 @@ void ui_notification_init() {
 
 void ui_notification_info(const char* message) {
     spdlog::debug("[Test Stub] ui_notification_info: {}", message ? message : "(null)");
+    if (g_test_info_hook) {
+        g_test_info_hook(message ? message : "");
+    }
 }
 
 void ui_notification_info(const char* title, const char* message) {
     spdlog::debug("[Test Stub] ui_notification_info: {} - {}", title ? title : "(null)",
                   message ? message : "(null)");
+    if (g_test_info_hook) {
+        g_test_info_hook(message ? message : "");
+    }
 }
 
 void ui_notification_info_with_action(const char* title, const char* message, const char* action) {
@@ -636,6 +646,20 @@ void ui_notification_warning_with_detail(const char* message, const char* detail
 // Stub ToastManager class for tests
 #include "ui_toast_manager.h"
 
+// Fed by the ToastManager stub below, for tests asserting on direct
+// ToastManager::show() calls. See set_test_toast_hook in the header.
+static std::function<void(ToastSeverity, const std::string&)> g_test_toast_hook;
+
+namespace helix {
+namespace ui {
+
+void set_test_toast_hook(std::function<void(ToastSeverity, const std::string&)> hook) {
+    g_test_toast_hook = std::move(hook);
+}
+
+} // namespace ui
+} // namespace helix
+
 // Stub ToastManager class for tests
 // The real ToastManager is excluded from test build, so we need a stub singleton
 static ToastManager* s_test_toast_manager_instance = nullptr;
@@ -656,29 +680,35 @@ void ToastManager::init() {
 }
 
 void ToastManager::show(ToastSeverity severity, const char* message, uint32_t duration_ms) {
-    (void)severity;
     (void)duration_ms;
     spdlog::debug("[Test Stub] ToastManager::show: {}", message ? message : "(null)");
+    if (g_test_toast_hook) {
+        g_test_toast_hook(severity, message ? message : "");
+    }
 }
 
 void ToastManager::show_with_detail(ToastSeverity severity, const char* message, const char* detail,
                                     uint32_t duration_ms) {
-    (void)severity;
     (void)duration_ms;
-    spdlog::debug("[Test Stub] ToastManager::show_with_detail: {} | {}",
-                  message ? message : "(null)", detail ? detail : "");
+    const std::string joined = join_detail(message, detail);
+    spdlog::debug("[Test Stub] ToastManager::show_with_detail: {}", joined);
+    if (g_test_toast_hook) {
+        g_test_toast_hook(severity, joined);
+    }
 }
 
 void ToastManager::show_with_action(ToastSeverity severity, const char* message,
                                     const char* action_text,
                                     toast_action_callback_t action_callback, void* user_data,
                                     uint32_t duration_ms) {
-    (void)severity;
     (void)action_text;
     (void)action_callback;
     (void)user_data;
     (void)duration_ms;
     spdlog::debug("[Test Stub] ToastManager::show_with_action: {}", message ? message : "(null)");
+    if (g_test_toast_hook) {
+        g_test_toast_hook(severity, message ? message : "");
+    }
 }
 
 void ToastManager::hide() {

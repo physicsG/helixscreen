@@ -34,7 +34,6 @@ namespace helix {
  * @param host Hostname to check (e.g., "localhost", "127.0.0.1", "::1")
  * @return true if the host is localhost
  */
-[[nodiscard]] bool is_local_host(const std::string& host);
 
 /**
  * @brief Extract hostname from a WebSocket URL

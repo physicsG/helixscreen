@@ -16,6 +16,7 @@
 #include "gcode_error_router.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
+#include "print_lifecycle_state.h"
 #include "printer_recovery_service.h"
 #include "static_panel_registry.h"
 
@@ -149,7 +150,6 @@ void EmergencyStopOverlay::deinit_subjects() {
     // re-runnable (soft restart after Add Printer). Releasing here makes the
     // pair symmetric.
     print_state_observer_.reset();
-    print_start_phase_observer_.reset();
     klippy_state_observer_.reset();
 
     // Same reasoning as the dialog pointers above, one level up: init() stored
@@ -185,18 +185,15 @@ void EmergencyStopOverlay::create() {
     // Subscribe to print state changes for automatic visibility updates
     // The estop_visible subject drives XML bindings in home_panel, controls_panel,
     // and print_status_panel (no FAB - buttons are embedded in each panel)
+    // One observer, on print_lifecycle. It already merges both axes this used to
+    // watch separately: the raw job state does not move during a host-side
+    // pre-start block, and print_start_phase does not move on PRINTING->PAUSED,
+    // so covering the button needed two subscriptions and a hand-rolled OR.
+    // derive_print_state() does that merge once, for everyone.
     print_state_observer_ = observe_int_sync<EmergencyStopOverlay>(
-        printer_state_->get_print_state_enum_subject(), this,
-        [](EmergencyStopOverlay* self, int /*state*/) { self->update_visibility(); }, ps_subjects);
-
-    // The pre-print preparing phase (homing, heating, leveling) is physical
-    // movement during which Moonraker still reports STANDBY — so the job-state
-    // observer above does not fire. print_start_phase is non-zero throughout
-    // preparing; treating it as active keeps the contextual e-stop reachable
-    // from the moment motion starts, not just after PRINTING begins.
-    print_start_phase_observer_ = observe_int_sync<EmergencyStopOverlay>(
-        printer_state_->get_print_start_phase_subject(), this,
-        [](EmergencyStopOverlay* self, int /*phase*/) { self->update_visibility(); }, ps_subjects);
+        printer_state_->get_print_lifecycle_subject(), this,
+        [](EmergencyStopOverlay* self, int /*lifecycle*/) { self->update_visibility(); },
+        ps_subjects);
 
     // Reset the initial-fire guard so each (re)subscription — including
     // soft-restart after Add Printer — drops the subject's placeholder
@@ -229,14 +226,28 @@ void EmergencyStopOverlay::create() {
             } else if (klippy_state == KlippyState::ERROR) {
                 self->show_recovery_for(RecoveryReason::ERROR);
             } else if (klippy_state == KlippyState::READY) {
-                // Reset restart flag - operation complete
-                self->restart_in_progress_ = false;
-
                 // Auto-dismiss recovery dialog when Klipper is back to READY
                 // NOTE: Must defer to main thread - observer may fire from WebSocket thread
                 helix::ui::async_call(
                     [](void*) {
                         auto& inst = EmergencyStopOverlay::instance();
+
+                        // Sampled before the flag reset below. An expected
+                        // restart (recovery Restart button, a panel's
+                        // SAVE_CONFIG, power/host flows) suppresses the
+                        // recovery dialog by design, so the dialog-dismiss
+                        // path below cannot signal completion for those flows
+                        // - the restart flag and suppression window are the
+                        // record that this READY ends a UI-initiated restart.
+                        // Mutual coverage: if the suppression window expires
+                        // before klippy returns, the recovery dialog shows and
+                        // the dialog path below fires instead. The flag is
+                        // atomic and klippy is READY here, so the extra tick
+                        // of trueness cannot swallow a real SHUTDOWN.
+                        const bool expected_restart = inst.is_expected_restart();
+
+                        // Reset restart flag - operation complete
+                        inst.restart_in_progress_ = false;
 
                         // Klipper is back, so any "Printer Error" alert raised
                         // while it was down describes a condition that no longer
@@ -260,6 +271,17 @@ void EmergencyStopOverlay::create() {
                                 ToastManager::instance().show(ToastSeverity::SUCCESS,
                                                               lv_tr("Printer ready"), 3000);
                             }
+                        } else if (expected_restart) {
+                            // The restart completed with the dialog suppressed
+                            // by its initiating flow, so still say so. Direct
+                            // ToastManager call, deliberately not
+                            // ui_notification_*: every severity there writes a
+                            // history row, and klippy-being-ready is not
+                            // history. A READY with nothing expected (first
+                            // ready at app start) stays silent - the status
+                            // icon already carries it.
+                            ToastManager::instance().show(ToastSeverity::SUCCESS,
+                                                          lv_tr("Printer ready"), 3000);
                         }
                     },
                     nullptr);
@@ -278,21 +300,24 @@ void EmergencyStopOverlay::update_visibility() {
         return;
     }
 
-    // Check if print is active (PRINTING, PAUSED, or in the pre-print preparing
-    // phase). The estop_visible subject drives XML bindings in each panel.
-    PrintJobState state = printer_state_->get_print_job_state();
-    bool is_printing = (state == PrintJobState::PRINTING || state == PrintJobState::PAUSED);
-    const int start_phase = lv_subject_get_int(printer_state_->get_print_start_phase_subject());
-    const bool preparing = (start_phase != 0);
-    const bool is_active = is_printing || preparing;
+    // The contextual E-Stop must be reachable from the moment the machine starts
+    // moving, which is BEFORE Moonraker reports a print: a host-side pre-start
+    // block homes and probes while print_stats still reads standby (or the
+    // previous job's terminal state).
+    //
+    // This used to hand-OR the raw job state with `start_phase != 0` and watch
+    // both subjects to catch each half. That is job_holds_machine() spelled out,
+    // so it asks the lifecycle once instead - one predicate, one observer, and
+    // no second spelling to drift.
+    const auto lifecycle = printer_state_->get_print_lifecycle();
 
-    int new_value = is_active ? 1 : 0;
+    int new_value = job_holds_machine(lifecycle) ? 1 : 0;
     int current_value = lv_subject_get_int(&estop_visible_);
 
     if (new_value != current_value) {
         lv_subject_set_int(&estop_visible_, new_value);
-        spdlog::debug("[EmergencyStop] Visibility changed: {} (state={}, phase={})", is_active,
-                      static_cast<int>(state), start_phase);
+        spdlog::debug("[EmergencyStop] Visibility changed: {} (lifecycle={})", new_value,
+                      static_cast<int>(lifecycle));
     }
 }
 
@@ -705,3 +730,21 @@ void EmergencyStopOverlay::home_firmware_restart_clicked(lv_event_t* e) {
             nullptr, nullptr);
     }
 }
+
+namespace helix {
+namespace ui {
+
+void begin_expected_klippy_restart(const char* message) {
+    // The suppression writes are atomic deadline stores, safe right here on
+    // any thread; the toast is LVGL-facing so it hops to the main thread.
+    EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::LONG);
+    if (auto* api = get_moonraker_api()) {
+        api->suppress_disconnect_modal(EXPECTED_RESTART_DISCONNECT_MODAL_MS);
+    }
+    queue_update("begin_expected_klippy_restart", [message]() {
+        ToastManager::instance().show(ToastSeverity::INFO, lv_tr(message), 3000);
+    });
+}
+
+} // namespace ui
+} // namespace helix
