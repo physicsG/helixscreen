@@ -14,10 +14,10 @@ Two tiers live here:
   production widget through its C API against a small stub layer. Faster to
   build, useful when iterating on one canvas.
 
-> This branch (`tooling/lvgl-web-emulator`) carries **only the tooling** — it
-> builds whatever widget code is on the branch it's merged into. Feature branches
-> enhance the widgets (e.g. the multiACE distance-proportional filament fill on
-> `feat/lvgl-web-preview`); merge this tooling onto them to preview those changes.
+> The tooling builds whatever widget code is on the branch it sits on, so a
+> feature branch previews its own changes with no extra setup — this branch
+> carries the multiACE distance-proportional filament fill described under
+> [Load / unload / swap](#load--unload--swap).
 
 ---
 
@@ -129,6 +129,63 @@ So the three operations are the app's, not the harness's:
 That third row is the case the disjoint `LOAD_PHASE_BASE` / `UNLOAD_PHASE_BASE`
 id spaces exist for, and it is worth watching: a swap is one user gesture and
 two firmware sequences.
+
+### Watching the filament fill
+
+The path canvas fills its tube in proportion to real bowden travel, and the
+harness feeds it the **actual numbers from a live multiACE install** — `[ace]`
+defaults of 2100/1950 mm, overridden by `[ace 0]` to 1600/1500 mm, at 80 mm/s.
+On a device those arrive from Klipper's `configfile`; there is no Moonraker
+behind this harness, so `ScriptedU1::begin()` seeds them through
+`apply_feed_kinematics()` — the same protected hook the config fetch calls. The
+canvas asks `AmsBackend::get_feed_kinematics()` and cannot tell the difference,
+so this exercises the production path, not a preview-only one.
+
+The **lengths are real, the rate is scaled** (`FEED_TIME_SCALE`, 5x — the same
+bargain `HEAT_MS` makes for heating). A true 1600 mm at 80 mm/s is a
+twenty-second stare at one step; scaling the rate and leaving the lengths alone
+puts a full fill at about four seconds while preserving every ratio the
+animation depends on — a load still takes longer than an unload (1600 vs
+1500 mm), and ACE 1's longer tube still takes longer than ACE 0's.
+
+The scripted feed step is derived from those same numbers
+(`SCRIPT_FEED_MS = load_length / (feed_speed * scale)`), so the fill reaches the
+nozzle exactly as the step bar hands over. Change one and the other follows;
+they are not two hand-tuned constants that have to be kept in sync.
+
+**A step holds for the NEXT step's delay.** `enqueue({delay_ms, fn, label})`
+waits `delay_ms` and *then* applies `fn`, so putting a duration on a step
+lengthens the one before it. `SCRIPT_RETRACT_MS` sits on the step that follows
+`unload_doing`, not on `unload_doing` itself — the other way round stretched
+"Heat nozzle" and left the retract 700 ms long, which looked exactly like a fill
+that was too fast.
+
+The seeded `swap_retract_length` (1300 mm on ACE 0) is why a swap drains to
+**133‰ and stops** rather than to zero — the filament parks in the tube and the
+load half resumes from there. `SCRIPT_SWAP_RETRACT_MS` is derived from the same
+number, so the step and the animation end together.
+
+The fill runs only during **step 4 "Retract filament"** / **step 5 "Feed
+filament"**, never during Home, Select or Heat — those move nothing. Both
+`set_detected(head, …, in_toolhead)` calls sit on the same edges, so the sensor
+checkpoint (`resync_fill_to_segment`) confirms rather than corrects here; with
+the seeded values it lands within ~2‰. Halve the seeded `feed_speed_mms` and the
+log shows it correcting a real gap instead.
+
+Where to look: open the **multiACE** screen (`ams_unit_card[1]`), then Load or
+Unload a bay. The tube between the combiner and the nozzle is what fills.
+`wasm/fill_shot.py` samples it through a whole swap:
+
+```bash
+FILL_SAMPLE_MS=400 FILL_SAMPLES=26 \
+  /tmp/pwvenv/bin/python wasm/fill_shot.py http://127.0.0.1:8080/index.html /tmp/fill
+```
+
+**Animations are forced on here.** `PlatformCapabilities` reads RAM and core
+count, both of which come back 0 under Emscripten, so the tier lands on EMBEDDED
+and `DisplaySettingsManager` defaults animations OFF — which silently disables
+every `lv_anim` in the app, not just this one. `app_main.cpp` writes
+`/display/animations_enabled` into the config before that read.
 
 The frame vocabulary is the firmware's own `channel_state` (39 states, mapped by
 `classify_channel_state()`), and the seed frame is shaped after the live capture

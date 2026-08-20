@@ -952,6 +952,123 @@ warnings each, plus a permanently dark badge with nothing in the log explaining
 it. `AmsState` owns the cap and the registrations, so it owns the naming as well;
 raising `MAX_UNITS` stays a one-constant change.
 
+### Distance-proportional load/unload fill
+
+The path canvas fills its tube in proportion to how far the filament has
+physically travelled, so a load creeps down the bowden at the rate the hardware
+actually feeds instead of jumping between the segments the firmware reports.
+
+**Why a fill and not just the segment tip.** A backend reports segment
+*arrivals* — `LANE`, `HUB`, `OUTPUT`, `TOOLHEAD`, `NOZZLE`. On an ACE's 1600 mm
+tube at 80 mm/s that is one event every several seconds with twenty seconds of
+nothing in between, and the existing tip animation only interpolates the 400 ms
+*after* an arrival. The fill spans the gaps.
+
+**Four layers, each answering one question:**
+
+| Layer | Question | Where |
+|---|---|---|
+| `FeedMotion` | is filament moving *right now*, and which way? | `ams_types.h`, answered by `AmsBackend::get_feed_motion()` |
+| `FeedKinematics` | how far and how fast does this unit feed? | `ams_types.h`, answered by `AmsBackend::get_feed_kinematics(unit)` |
+| `pathgeo::path_subrange()` | what is the first *N* mm of this path? | `filament_path_geometry.cpp` |
+| the fill overlay | paint filled behind the front, idle ahead of it | `ui_filament_path_topology.cpp`, `DRAW_POST` |
+
+**`FeedMotion` is not `AmsAction`, and the difference is the whole point.** The
+action is `LOADING` from the instant the operation starts — but a U1 spends the
+first several seconds homing, selecting a lane and heating the nozzle with the
+filament completely stationary. Keying the ramp on the action made it play out
+during "Heat nozzle" and sit full before "Feed filament" was reached. The default
+`get_feed_motion()` still derives from the action (the best a backend with no
+sub-operation detail can do); `AmsBackendSnapmaker` overrides it against its
+phase ids, where `MOVE_PHASE_OFFSET` (3) is the only travel phase in either
+direction — `LOAD_PHASE_BASE + 3` (Feed) and `UNLOAD_PHASE_BASE + 3` (Retract).
+
+Because the phase changes without the action changing, `AmsOverviewPanel`
+observes **both** `ams_action` and `ams_operation_phase`; watching only the
+former never delivers the edge that starts the fill.
+
+**Sensor checkpoints correct the dead reckoning.** The ramp assumes the hardware
+feeds at its configured rate and started on time. A `PathSegment` change is a
+*measurement* — the toolhead sensor tripping, the lane sensor clearing — so
+`resync_fill_to_segment()` snaps the front to the reported position whenever the
+two disagree. It may only ever nudge the front the way it is already going (a
+load forward, an unload back): sensors report arrivals, so "reached the toolhead"
+is a floor on progress, and clamping the other way would drag a correctly-running
+fill backwards each time a segment behind it was re-reported. `segment_path_fraction()`
+is the single definition of where a segment sits, shared with the segment-transition
+tip so the two cannot land in different places.
+
+`FeedKinematics` names the **capability**, never a firmware: any system that
+configures a tube length and a feed rate answers it identically. A backend that
+does not know returns the default-constructed value (`valid()` false) and the
+canvas falls back to a fixed travel time. Adding a second system with the same
+capability must only mean overriding `get_feed_kinematics()`.
+
+**Precedence.** A firmware that reports its own position wins.
+`get_bowden_progress()` (Happy Hare v4) is a *measurement*; `get_feed_kinematics()`
+is the input for *deriving* progress when there is no measurement, and
+`ui_ams_detail.cpp` only starts the derived ramp when `get_bowden_progress() < 0`.
+
+**Where multiACE gets the numbers.** `AmsBackendMultiAce` reads Klipper's
+`configfile` on the first `ace` frame — `[ace]` carries `load_length`,
+`retract_length`, `feed_speed` and `retract_speed`, and an `[ace N]` section
+overrides the lengths for that unit, which is the normal case since tube runs
+differ per unit. Note the index shift: `get_feed_kinematics()` takes a **global**
+unit index and unit 0 is the U1's own heads on their stock feeders, so ACE *n* is
+unit *n+1* and unit 0 correctly answers "unknown".
+
+Values arrive as **strings** (`"1600"`, not `1600`) because that is what
+`configfile.config` reports; `configfile.settings` reports the same keys as
+numbers, so the parser accepts both.
+
+**A swap does not send the filament home.** It backs out `swap_retract_length`
+— far short of the whole bowden — and parks the filament in the tube, because
+the rest of the trip would only have to be re-fed. `AmsBackend::feed_motion_end_fraction()`
+is where that lives: 1 for a load, 0 for a full unload, and `1 - swap_retract/unload_length`
+for a swap's retract. On a real `[ace 0]` (1300 of 1500 mm) the fill drains to
+133‰ and the load half resumes *from there*, so the animation never claims the
+unit was reached. Draining to 0 and re-filling from 0 is a lie about where the
+filament is, and it costs an extra second of animation each way.
+
+Between the two halves the fill is **paused, not cleared** — `pause_fill_animation()`
+keeps the front where it is. Every operation is mostly stationary phases (homing,
+selecting, heating, purging) and clearing at any of them dropped the tube back to
+whatever segment the firmware had confirmed: a flicker to empty, then a snap when
+the segment caught up. `stop_fill_animation()` is only for the end of the whole
+operation.
+
+**The recorded path is the ROUTE, not the filled part of it.** Each section used
+to append itself to `FilamentPathData::path_cache` only when the reported segment
+already covered it, which capped the path at whatever the state layer already
+believed — during a swap's load half that was the lane alone, 132 units of a
+276-unit route, so the fill physically could not draw past the hub. Recording now
+keys on `is_active_slot` and styling still keys on `is_segment_active()`; the two
+decisions were conflated. Flow particles are clipped to the wet fraction instead,
+which is what the truncated path used to encode implicitly.
+
+**The hub run is recorded but never stroked.** The path crosses the hub box on a
+hidden segment that exists so flow particles stay continuous; the box is drawn
+over it. Anything that *strokes* the path has to skip that window or it paints a
+line straight across the box, so `PathCache::hub_span_start/end` record its
+arc-length range and the fill strokes either side of it.
+
+**Rendering.** The ramp is an `lv_anim` on the widget — a sixth animation system
+alongside segment/error/heat/flow/output-x — and paints in `DRAW_POST`, *not*
+into the layered canvases: re-rendering both backing surfaces on every tick of a
+twenty-second ramp is exactly the cost the layered split exists to avoid. The
+overlay repaints the path ahead of the front as idle PTFE before painting the
+filled prefix, because on an *unload* the state layer keeps a segment coloured
+until the firmware reports it cleared — without the erase the shrinking prefix
+would be invisible inside a tube that is still solid.
+
+Both directions use the same prefix convention: the filled region is always
+`[0, fill]`, growing toward 1000‰ on a load and shrinking toward 0 on an unload.
+Progress is permille, not percent — over a twenty-second travel, 100 steps is one
+step per fifth of a second, which reads as stair-stepping.
+
+The browser preview drives the whole path with the real config values; see
+`wasm/README.md`.
+
 ### Error State Visualization
 
 Per-slot error indicators and per-unit error badges, driven by `SlotInfo.error` and `AmsUnit::buffer_health` from the backend layer. (The original 2026-02-15 error-state-visualization design doc is no longer in-tree; the data model below is the surviving summary.)

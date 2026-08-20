@@ -24,6 +24,9 @@ constexpr float MIN_FILLET = 2.0f;
 // guarantees the corner can sweep at (close to) the full radius instead of
 // collapsing to a starved arc or a sharp miter.
 constexpr float FILLET_SLACK = 4.0f;
+// Sub-pixel arc-length below which a path_subrange() slice is not worth a
+// segment — it would stroke as a degenerate dot inside the neighbouring cap.
+constexpr float SUBRANGE_EPS = 0.01f;
 } // namespace
 
 void FilamentPath::add_line(float x0, float y0, float x1, float y1) {
@@ -138,6 +141,54 @@ PathPoint path_point_at(const FilamentPath& p, float d, PathPoint* tangent_out) 
     // p1 is the segment endpoint for both LINE and ARC (add_arc precomputes the
     // ARC's end point into p1), so it's the correct trailing point either way.
     return s.p1;
+}
+
+void path_subrange(FilamentPath& out, const FilamentPath& in, float d0, float d1) {
+    out.clear();
+    if (in.count <= 0)
+        return;
+
+    const float total = path_length(in);
+    d0 = std::clamp(d0, 0.0f, total);
+    d1 = std::clamp(d1, 0.0f, total);
+    if (d1 - d0 <= SUBRANGE_EPS)
+        return;
+
+    float accum = 0.0f;
+    for (int i = 0; i < in.count; ++i) {
+        const PathSeg& s = in.segs[i];
+        const float len = seg_length(s);
+        const float seg_start = accum;
+        accum += len;
+
+        // Overlap of [d0,d1] with this segment's own [seg_start, accum].
+        const float a = std::fmax(d0, seg_start);
+        const float b = std::fmin(d1, accum);
+        if (b - a <= SUBRANGE_EPS)
+            continue;
+
+        // Distance INTO this segment, so a fully covered segment copies verbatim.
+        const float from = a - seg_start;
+        const float to = b - seg_start;
+
+        if (s.type == PathSeg::LINE) {
+            const float t0 = (len > 0.0f) ? (from / len) : 0.0f;
+            const float t1 = (len > 0.0f) ? (to / len) : 0.0f;
+            const float dx = s.p1.x - s.p0.x;
+            const float dy = s.p1.y - s.p0.y;
+            out.add_line(s.p0.x + dx * t0, s.p0.y + dy * t0, s.p0.x + dx * t1, s.p0.y + dy * t1);
+        } else {
+            // Angle advances at unit rate per centerline arc length, in the
+            // sweep's direction — the same parametrization path_point_at walks.
+            const float sgn = (s.sweep >= 0.0f) ? 1.0f : -1.0f;
+            const float per_len = (s.radius > 0.0f) ? (sgn / s.radius) : 0.0f;
+            // Sweep is an ANGLE: the trimmed arc LENGTH divided by the radius.
+            // seg_length() is |sweep| * radius, so passing the length straight
+            // through here inflates every trimmed arc by a factor of the radius.
+            out.add_arc(s.center.x, s.center.y, s.radius, s.start_angle + per_len * from,
+                        per_len * (to - from));
+        }
+    }
 }
 
 void route_orthogonal(FilamentPath& out, float x0, float y0, float x1, float y1, float fillet_r) {

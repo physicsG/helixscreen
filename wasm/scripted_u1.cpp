@@ -37,6 +37,39 @@ constexpr double FULL_HEAT_SPAN = 220.0;
 /// Floor for a heat dwell, so the step is still legible when there is no ramp.
 constexpr uint32_t MIN_HEAT_DWELL_MS = 350;
 
+/// Bowden travel of the seeded ACEs, verbatim from a real multiACE install's
+/// `ace.cfg` — the `[ace]` defaults are 2100/1950 mm and `[ace 0]` overrides to
+/// 1600/1500. Read on a device from `configfile`; there is no Moonraker behind
+/// this harness, so the same numbers are seeded straight into the backend.
+constexpr float SEED_LOAD_MM[2] = {1600.0f, 2100.0f};
+constexpr float SEED_UNLOAD_MM[2] = {1500.0f, 1950.0f};
+/// `feed_speed` / `retract_speed` from the same file, in mm/s.
+constexpr float SEED_FEED_MMS = 80.0f;
+/// `swap_retract_length` — how far a swap actually backs the filament out. Well
+/// short of a full unload: the tube between the junction and the unit stays
+/// full, because that stretch would only have to be re-fed. `[ace]` defaults to
+/// 900 mm, `[ace 0]` overrides to 1300.
+constexpr float SEED_SWAP_MM[2] = {1300.0f, 900.0f};
+
+/// Time compression for the bowden feed, the same bargain HEAT_MS makes: a real
+/// 1600 mm at 80 mm/s is a twenty-second stare at one step. Scaling the RATE and
+/// leaving the LENGTHS real keeps every ratio the fill animation depends on —
+/// load still takes longer than unload, and ACE 1's longer tube still takes
+/// longer than ACE 0's — while putting a full fill at about four seconds.
+constexpr float FEED_TIME_SCALE = 5.0f;
+
+/// Milliseconds the scripted feed step holds, derived from the same numbers the
+/// backend reports, so the fill animation finishes exactly as the step ends.
+/// Both scripts run on head 0, which the seed feeds from ACE 0.
+constexpr uint32_t SCRIPT_FEED_MS =
+    static_cast<uint32_t>(SEED_LOAD_MM[0] / (SEED_FEED_MMS * FEED_TIME_SCALE) * 1000.0f);
+constexpr uint32_t SCRIPT_RETRACT_MS =
+    static_cast<uint32_t>(SEED_UNLOAD_MM[0] / (SEED_FEED_MMS * FEED_TIME_SCALE) * 1000.0f);
+/// A swap's retract is SHORTER than a full one, and the script has to be too or
+/// the step bar would outlast an animation that correctly stops early.
+constexpr uint32_t SCRIPT_SWAP_RETRACT_MS =
+    static_cast<uint32_t>(SEED_SWAP_MM[0] / (SEED_FEED_MMS * FEED_TIME_SCALE) * 1000.0f);
+
 /// Which ACE feeds which head in the seeded machine, -1 = stock feeder.
 /// Heads 0 and 1 are ACE-fed, 2 and 3 are on their own spools, so one screen
 /// shows both kinds of position — the same split the captured fixture has, at
@@ -197,6 +230,19 @@ void ScriptedU1::begin() {
     // (the hotter of the material temp and the last non-zero target).
     set_nozzle(0, LOAD_TEMP, LOAD_TEMP);
     publish();
+
+    // What a device reads out of `configfile` on the first `ace` frame. Seeding
+    // it here exercises the real capability path — AmsBackend::get_feed_kinematics()
+    // is what the path canvas asks, and it cannot tell where the answer came from.
+    AceKinematics k{};
+    for (size_t i = 0; i < k.size() && i < 2; ++i) {
+        k[i].load_length_mm = SEED_LOAD_MM[i];
+        k[i].unload_length_mm = SEED_UNLOAD_MM[i];
+        k[i].feed_speed_mms = SEED_FEED_MMS * FEED_TIME_SCALE;
+        k[i].retract_speed_mms = SEED_FEED_MMS * FEED_TIME_SCALE;
+        k[i].swap_retract_length_mm = SEED_SWAP_MM[i];
+    }
+    apply_feed_kinematics(k);
 
     heater_timer_ = lv_timer_create(
         [](lv_timer_t* t) { static_cast<ScriptedU1*>(lv_timer_get_user_data(t))->tick_heaters(); },
@@ -431,9 +477,15 @@ void ScriptedU1::script_load(int head, int settle_ms) {
     // One frame, HEAT_MS long: the heater owns the readout in between, so the
     // Heat step ends exactly when the ramp lands.
     enqueue({HEAT_MS, [this, head] { set_channel(head, "load_feeding"); }, "load_feeding"});
-    enqueue({1200,
+    // The long move. `load_feeding` holds for SCRIPT_FEED_MS because THIS step's
+    // delay is what bounds it (see the note in script_unload), so the path
+    // canvas's fill reaches the nozzle exactly as the feed hands over — and the
+    // toolhead sensor below trips on the same edge.
+    enqueue({SCRIPT_FEED_MS,
              [this, head] {
                  set_channel(head, "load_extruding");
+                 // Filament has reached the toolhead sensor — the bowden feed is
+                 // done, which is where the fill should have just arrived.
                  set_detected(head, true, true);
              },
              "load_extruding"});
@@ -449,6 +501,10 @@ void ScriptedU1::script_load(int head, int settle_ms) {
 }
 
 void ScriptedU1::script_unload(int head, bool ends_at_preload_finish) {
+    // An ACE-fed unload that ends at preload_finish IS the swap's first half, and
+    // a swap retracts only swap_retract_length. Timing it as a full unload made
+    // the step outlast the fill, which correctly stops partway.
+    const uint32_t retract_ms = ends_at_preload_finish ? SCRIPT_SWAP_RETRACT_MS : SCRIPT_RETRACT_MS;
     enqueue({250, [this, head] { set_channel(head, "unload_prepare"); }, "unload_prepare"});
     enqueue({500, [this, head] { set_channel(head, "unload_homing"); }, "unload_homing"});
     enqueue({600, [this, head] { set_channel(head, "unload_picking"); }, "unload_picking"});
@@ -461,9 +517,16 @@ void ScriptedU1::script_unload(int head, bool ends_at_preload_finish) {
              "unload_heating"});
     enqueue(
         {HEAT_MS, [this, head] { set_channel(head, "unload_heat_finish"); }, "unload_heat_finish"});
-    enqueue({1200,
+    // A step's delay is the wait BEFORE it is applied, so a step HOLDS for the
+    // NEXT step's delay. The retract therefore gets its duration from the step
+    // that follows it, not from its own entry — putting SCRIPT_RETRACT_MS here
+    // stretched "Heat nozzle" and left the retract itself 700 ms long.
+    enqueue({400,
              [this, head] {
                  set_channel(head, "unload_doing");
+                 // Filament has left the toolhead sensor: the long retract
+                 // through the bowden starts here, which is exactly when the
+                 // path canvas should begin draining.
                  set_detected(head, true, false);
              },
              "unload_doing"});
@@ -472,7 +535,7 @@ void ScriptedU1::script_unload(int head, bool ends_at_preload_finish) {
         // stops here and `unload_finish` never arrives. Mid-swap the backend
         // treats this as a boundary rather than an end
         // (AmsBackendMultiAce::preload_finish_ends_unload).
-        enqueue({700,
+        enqueue({retract_ms,
                  [this, head] {
                      set_channel(head, "preload_finish");
                      set_filament_exist(head, false);
@@ -480,7 +543,7 @@ void ScriptedU1::script_unload(int head, bool ends_at_preload_finish) {
                  },
                  "preload_finish"});
     } else {
-        enqueue({700,
+        enqueue({retract_ms,
                  [this, head] {
                      set_channel(head, "unload_finish");
                      set_detected(head, false, false);

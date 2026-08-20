@@ -45,6 +45,34 @@ std::optional<uint32_t> color_array_to_rgb(const nlohmann::json& c) {
     return (ch(0) << 16) | (ch(1) << 8) | ch(2);
 }
 
+/// Read one numeric option out of a `configfile.config` section.
+///
+/// Klipper reports every config value as a STRING ("1600", not 1600), but
+/// `configfile.settings` reports the same key as a number — so accept both and
+/// no caller has to care which object it was handed. Returns nullopt for a
+/// missing key or unparseable text, which the caller reads as "not configured"
+/// and resolves against the next fallback rather than as zero.
+std::optional<float> config_number(const nlohmann::json& section, const char* key) {
+    if (!section.is_object()) {
+        return std::nullopt;
+    }
+    auto it = section.find(key);
+    if (it == section.end() || it->is_null()) {
+        return std::nullopt;
+    }
+    if (it->is_number()) {
+        return it->get<float>();
+    }
+    if (it->is_string()) {
+        try {
+            return std::stof(it->get<std::string>());
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
 /// Split multiACE's `"<ace>_<slot>"` bay key, bounds-checked.
 ///
 /// Used by BOTH `slot_overrides.json` and the `spool_binding` map — they share
@@ -110,6 +138,67 @@ PathTopology AmsBackendMultiAce::get_unit_topology(int unit_index) const {
     return system_info_.units[unit_index].topology;
 }
 
+FeedKinematics AmsBackendMultiAce::get_feed_kinematics(int unit_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Unit 0 is the U1's own four heads on their stock side feeders. They have
+    // no ACE bowden and the `ace` config says nothing about them, so the honest
+    // answer is "unknown" -- callers then use a fixed animation duration rather
+    // than a length that belongs to different hardware.
+    const int ace_index = unit_index - 1;
+    if (ace_index < 0 || ace_index >= MAX_ACE_UNITS) {
+        return {};
+    }
+    return ace_kinematics_[static_cast<size_t>(ace_index)];
+}
+
+int AmsBackendMultiAce::operating_slot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Only while something is actually running. A stale target outlives its
+    // operation otherwise, and the path canvas would keep highlighting the lane
+    // of the last swap long after the machine went idle.
+    switch (system_info_.action) {
+    case AmsAction::IDLE:
+    case AmsAction::ERROR:
+        return -1;
+    case AmsAction::UNLOADING: {
+        // A swap is two directions on one gesture, and they act on DIFFERENT
+        // lanes: the retract empties whatever is SEATED, the feed fills the bay
+        // the user picked. Answering the target for both animated the incoming
+        // lane while the outgoing filament was the thing actually moving.
+        //
+        // Reads the locked helper DIRECTLY: slot_identity_owner_slot() takes
+        // mutex_ again, and it is not recursive.
+        if (const auto seated = seated_global_slot_locked(op_target_head_)) {
+            return *seated;
+        }
+        return op_target_slot_;
+    }
+    default:
+        return op_target_slot_;
+    }
+}
+
+float AmsBackendMultiAce::feed_motion_end_fraction() const {
+    if (get_feed_motion() == FeedMotion::LOADING) {
+        return 1.0f; // a load always finishes at the nozzle
+    }
+    int ace_index = -1;
+    bool swapping = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        swapping = (swap_in_flight_head_ >= 0);
+        if (const auto bay = bay_source_locked(op_target_slot_)) {
+            ace_index = bay->ace_index;
+        }
+    }
+    if (!swapping || ace_index < 0 || ace_index >= MAX_ACE_UNITS) {
+        return 0.0f; // a plain unload really does go all the way back
+    }
+    // get_feed_kinematics() takes a GLOBAL unit index; ACE n is unit n+1.
+    const FeedKinematics feed = get_feed_kinematics(ace_index + 1);
+    return 1.0f - feed.swap_retract_fraction();
+}
+
 std::optional<int> AmsBackendMultiAce::slot_identity_owner_unit(int slot_index) const {
     std::lock_guard<std::mutex> lock(mutex_);
     // Only the U1's own heads (unit 0) can be fed from elsewhere. An ACE bay is
@@ -137,6 +226,10 @@ std::optional<int> AmsBackendMultiAce::slot_identity_owner_unit(int slot_index) 
 
 std::optional<int> AmsBackendMultiAce::slot_identity_owner_slot(int slot_index) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    return seated_global_slot_locked(slot_index);
+}
+
+std::optional<int> AmsBackendMultiAce::seated_global_slot_locked(int slot_index) const {
     // Same gate as slot_identity_owner_unit: only a seated ACE-fed head views a
     // spool it does not hold.
     if (slot_index < 0 || slot_index >= NUM_TOOLS) {
@@ -230,10 +323,12 @@ void AmsBackendMultiAce::handle_status_update(const nlohmann::json& notification
 
     bool changed = false;
     bool want_overrides = false;
+    bool want_kinematics = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (status.contains("ace") && status["ace"].is_object()) {
             parse_ace_object_locked(status["ace"], changed);
+            want_kinematics = !kinematics_fetched_;
             // Read, NOT cleared: only the fetch that actually goes out consumes
             // the flag. Clearing it here lost every refetch that landed while a
             // download was in flight (see the member comment).
@@ -248,6 +343,11 @@ void AmsBackendMultiAce::handle_status_update(const nlohmann::json& notification
     // Outside the lock on purpose: fetch_slot_overrides() takes mutex_ itself.
     if (want_overrides) {
         fetch_slot_overrides();
+    }
+    // Once per session, on the first frame that proves an ACE is present.
+    // fetch_feed_kinematics() takes mutex_ itself and self-guards on repeats.
+    if (want_kinematics) {
+        fetch_feed_kinematics();
     }
     if (changed) {
         emit_event(EVENT_STATE_CHANGED);
@@ -563,6 +663,108 @@ void AmsBackendMultiAce::download_slot_overrides(
     }
     api_->transfers().download_file("config", "extended/multiace/slot_overrides.json",
                                     std::move(on_success), std::move(on_error));
+}
+
+AmsBackendMultiAce::AceKinematics
+AmsBackendMultiAce::parse_feed_kinematics(const nlohmann::json& config) {
+    AceKinematics out{};
+    if (!config.is_object()) {
+        return out;
+    }
+
+    // Moonraker lower-cases section headers, so `[ACE 0]` arrives as "ace 0".
+    const auto section = [&config](const std::string& name) -> const nlohmann::json* {
+        auto it = config.find(name);
+        return (it != config.end() && it->is_object()) ? &*it : nullptr;
+    };
+
+    const nlohmann::json* global = section("ace");
+    if (!global) {
+        return out; // no ACE config on this printer -- nothing to say
+    }
+
+    // The `[ace]` values are the defaults for every unit; an `[ace N]` section
+    // overrides only the keys it names, so each option resolves per unit
+    // independently. Speeds have no per-unit form in the config schema.
+    const auto pick = [](const nlohmann::json* unit, const nlohmann::json& fallback,
+                         const char* key) -> std::optional<float> {
+        if (unit) {
+            if (auto v = config_number(*unit, key)) {
+                return v;
+            }
+        }
+        return config_number(fallback, key);
+    };
+
+    const auto feed = config_number(*global, "feed_speed");
+    const auto retract = config_number(*global, "retract_speed");
+
+    for (int i = 0; i < MAX_ACE_UNITS; ++i) {
+        const nlohmann::json* unit = section("ace " + std::to_string(i));
+        FeedKinematics k;
+        k.load_length_mm = pick(unit, *global, "load_length").value_or(0.0f);
+        k.unload_length_mm = pick(unit, *global, "retract_length").value_or(0.0f);
+        k.feed_speed_mms = feed.value_or(0.0f);
+        // A config that sets feed_speed but not retract_speed retracts at the
+        // feed rate; taking 0 here would make the whole struct invalid and lose
+        // the load direction too.
+        k.retract_speed_mms = retract.value_or(k.feed_speed_mms);
+        // Per-unit like the lengths: a swap's retract is a property of the tube
+        // run, so `[ace N]` overrides it the same way.
+        k.swap_retract_length_mm = pick(unit, *global, "swap_retract_length").value_or(0.0f);
+        out[static_cast<size_t>(i)] = k;
+    }
+    return out;
+}
+
+void AmsBackendMultiAce::apply_feed_kinematics(const AceKinematics& k) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ace_kinematics_ = k;
+    kinematics_fetched_ = true;
+    for (int i = 0; i < MAX_ACE_UNITS; ++i) {
+        const FeedKinematics& u = k[static_cast<size_t>(i)];
+        if (u.valid()) {
+            spdlog::info("[AMS multiACE] ACE {} feed: load {:.0f}mm @ {:.0f}mm/s ({:.1f}s), "
+                         "unload {:.0f}mm @ {:.0f}mm/s ({:.1f}s), swap retract {:.0f}mm ({:.0f}%)",
+                         i, u.load_length_mm, u.feed_speed_mms, u.load_seconds(),
+                         u.unload_length_mm, u.retract_speed_mms, u.unload_seconds(),
+                         u.swap_retract_length_mm, u.swap_retract_fraction() * 100.0f);
+        }
+    }
+}
+
+void AmsBackendMultiAce::fetch_feed_kinematics() {
+    if (!api_) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (kinematics_fetched_) {
+            return;
+        }
+        // Claim the slot BEFORE the request goes out. Frames arrive faster than
+        // the round trip, so gating on the reply instead would put one request
+        // per frame on the wire until the first came back.
+        kinematics_fetched_ = true;
+    }
+
+    auto token = lifetime_.token();
+    api_->query_configfile(
+        [this, token](const nlohmann::json& config) {
+            // BG THREAD: parse_feed_kinematics is static and touches no member.
+            AceKinematics parsed = parse_feed_kinematics(config);
+            token.defer("AmsBackendMultiAce::feed_kinematics_apply",
+                        [this, parsed]() { apply_feed_kinematics(parsed); });
+        },
+        [this, token](const MoonrakerError& err) {
+            spdlog::debug("[AMS multiACE] configfile query failed ({}) -- feed animation "
+                          "falls back to a fixed duration",
+                          err.message);
+            token.defer("AmsBackendMultiAce::feed_kinematics_retry", [this]() {
+                std::lock_guard<std::mutex> lock(mutex_);
+                kinematics_fetched_ = false; // let a later frame try again
+            });
+        });
 }
 
 void AmsBackendMultiAce::fetch_slot_overrides() {
@@ -1222,12 +1424,14 @@ AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
             // decision. They used to be two hand-written copies of it.
             needs_unload = bay_load_needs_unload_locked(slot_index);
             op_target_head_ = bay->head;
+            op_target_slot_ = slot_index;
             // Arm BEFORE the gcode goes out: the two commands are queued back to
             // back and the first channel_state can land before we return.
             swap_in_flight_head_ = needs_unload ? bay->head : -1;
         } else if (!bay && slot_index >= 0 && slot_index < NUM_TOOLS) {
             head_kind = head_kind_[slot_index];
             op_target_head_ = slot_index;
+            op_target_slot_ = slot_index;
             swap_in_flight_head_ = -1;
         }
     }
@@ -1298,6 +1502,11 @@ AmsError AmsBackendMultiAce::do_unload_filament(int slot_index) {
         // A standalone unload, whichever entry point asked for it: name the head
         // for the step model, and make sure no stale swap latch survives into it.
         op_target_head_ = bay && bay->head >= 0 ? bay->head : head;
+        // Only a BAY index names a lane. Every entry point that reaches an ACE
+        // unit passes one; a caller naming the head directly (the U1's own
+        // Unload button) leaves this -1, and the canvas falls back to resolving
+        // the lane from what is currently seated.
+        op_target_slot_ = bay ? slot_index : -1;
         swap_in_flight_head_ = -1;
     }
 

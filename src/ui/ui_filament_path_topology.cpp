@@ -517,6 +517,9 @@ struct LinearHubFrame {
     // Per-slot derived state + the recorded active filament path
     SlotRenderStates states;
     pg::FilamentPath active_path;
+    // Arc-length window of the hidden hub-interior run inside active_path.
+    float hub_span_start = 0.0f;
+    float hub_span_end = 0.0f;
 };
 
 // Layout, colors, and state resolution. Mirrors the layout ratios at the top
@@ -737,7 +740,7 @@ void draw_lane_entry_segment(const RenderCtx& ctx, LinearHubFrame& f, int i, con
         LaneStyle st =
             lane_style(ls.has_filament, ls.lane_color, f.idle_color, f.bg_color, ls.lane_width);
         draw_lane_vline(ctx.layer, ls.slot_x, f.entry_y, line_end_y, st,
-                        (ls.has_filament && ls.is_active_slot) ? &f.active_path : nullptr);
+                        ls.is_active_slot ? &f.active_path : nullptr);
     }
 
     // Draw prep sensor dot (per-slot capability flag)
@@ -775,7 +778,7 @@ void draw_hub_lane_merge(const RenderCtx& ctx, LinearHubFrame& f, int i, const L
         pg::FilamentPath path;
         pg::route_polyline_filleted(path, pts, 4, 8.0f);
         draw_lane(ctx.layer, path, st,
-                  (!ls.merge_is_idle && ls.is_active_slot) ? &f.active_path : nullptr);
+                  ls.is_active_slot ? &f.active_path : nullptr);
     }
 
     // Draw hub sensor dot - colored with filament color if loaded to hub
@@ -789,10 +792,15 @@ void draw_hub_lane_merge(const RenderCtx& ctx, LinearHubFrame& f, int i, const L
     }
     draw_sensor_dot(ctx.layer, hub_dot_x, hub_top, dot_color, dot_filled, f.sensor_r);
 
-    // Record hidden hub interior segment for flow dot path
-    if (ls.is_active_slot && dot_active) {
+    // Record hidden hub interior segment for flow dot path. HIDDEN is the
+    // operative word: it is never stroked, because the hub box is drawn on top
+    // and the tube is supposed to vanish behind it. Its arc-length window is
+    // recorded so the fill can skip it instead of painting across the box.
+    if (ls.is_active_slot) {
+        f.hub_span_start = pg::path_length(f.active_path);
         f.active_path.add_line(hub_dot_x, hub_top - f.sensor_r, f.center_x,
                                f.output_y + f.sensor_r);
+        f.hub_span_end = pg::path_length(f.active_path);
     }
 }
 
@@ -810,7 +818,7 @@ void draw_lane_merge_segment(const RenderCtx& ctx, LinearHubFrame& f, int i, con
         LaneStyle st = lane_style(!ls.merge_is_idle, ls.merge_line_color, f.idle_color, f.bg_color,
                                   ls.lane_width);
         draw_lane_route(ctx.layer, ls.slot_x, start_y_other, f.center_x, f.merge_y, FILLET_RADIUS,
-                        st, (!ls.merge_is_idle && ls.is_active_slot) ? &f.active_path : nullptr);
+                        st, ls.is_active_slot ? &f.active_path : nullptr);
     }
 }
 
@@ -978,7 +986,7 @@ void draw_selector_tube(const RenderCtx& ctx, LinearHubFrame& f) {
     }
     LaneStyle st = lane_style(hub_active, tube_color, f.idle_color, f.bg_color, f.line_active);
     draw_lane_vline(ctx.layer, f.output_x, sel_top, sel_bot, st,
-                    hub_active ? &f.active_path : nullptr);
+                    (data->active_slot >= 0) ? &f.active_path : nullptr);
 }
 
 // Hub/selector box: state-tinted fill, label, optional gear affordance, the
@@ -1123,13 +1131,13 @@ void draw_output_section(const RenderCtx& ctx, LinearHubFrame& f) {
         LaneStyle st =
             lane_style(ams_output_active, seg_color, f.idle_color, f.bg_color, f.line_active);
         draw_lane_route(ctx.layer, f.output_x, oc_start_y, f.center_x, seg_end_y, FILLET_RADIUS, st,
-                        ams_output_active ? &f.active_path : nullptr);
+                        (data->active_slot >= 0 && !data->bypass_active) ? &f.active_path : nullptr);
     } else {
         // HUB or LINEAR with output at center: straight vertical.
         LaneStyle st =
             lane_style(ams_output_active, seg_color, f.idle_color, f.bg_color, f.line_active);
         draw_lane_vline(ctx.layer, f.center_x, f.output_y + f.sensor_r, seg_end_y, st,
-                        ams_output_active ? &f.active_path : nullptr);
+                        (data->active_slot >= 0 && !data->bypass_active) ? &f.active_path : nullptr);
     }
 
     draw_buffer_element(ctx, f, output_end_y);
@@ -1162,7 +1170,7 @@ void draw_toolhead_section(const RenderCtx& ctx, LinearHubFrame& f) {
             lane_style(toolhead_active, toolhead_color, f.idle_color, f.bg_color, f.line_active);
         draw_lane_vline(ctx.layer, f.center_x, f.bypass_merge_y + f.sensor_r,
                         f.toolhead_y - f.sensor_r, st,
-                        (toolhead_active && !data->bypass_active) ? &f.active_path : nullptr);
+                        (data->active_slot >= 0 && !data->bypass_active) ? &f.active_path : nullptr);
     }
 
     // Toolhead sensor
@@ -1208,7 +1216,7 @@ void draw_nozzle_section(const RenderCtx& ctx, LinearHubFrame& f) {
             lane_style(nozzle_has_filament, noz_color, f.idle_color, f.bg_color, f.line_active);
         draw_lane_vline(ctx.layer, f.center_x, f.toolhead_y + f.sensor_r,
                         f.nozzle_y - extruder_half_height, st,
-                        (nozzle_has_filament && !data->bypass_active) ? &f.active_path : nullptr);
+                        (data->active_slot >= 0 && !data->bypass_active) ? &f.active_path : nullptr);
     }
 
     // Cache the recorded active path + geometry locals so the animation
@@ -1221,6 +1229,8 @@ void draw_nozzle_section(const RenderCtx& ctx, LinearHubFrame& f) {
     // under FilamentPath::MAX_SEGS (16). add_line/add_arc silently no-op past
     // the cap, so an overrun would only truncate the tail, never corrupt.
     data->path_cache.path = f.active_path;
+    data->path_cache.hub_span_start = f.hub_span_start;
+    data->path_cache.hub_span_end = f.hub_span_end;
     data->path_cache.center_x = f.center_x;
     data->path_cache.nozzle_y = f.nozzle_y;
     data->path_cache.sensor_r = f.sensor_r;
@@ -1287,9 +1297,11 @@ void render_linear_hub(lv_obj_t* obj, lv_layer_t* layer, FilamentPathData* data)
 // DRAW_POST animation overlays
 // ============================================================================
 
-// Animation overlay for LINEAR/HUB — flow particles, heat glow, segment
-// transition filament tip. Reads the active path cached by the state-tied
-// renderer (populated in draw_nozzle_section).
+// Animation overlay for LINEAR/HUB — the distance-proportional fill, flow
+// particles, heat glow, and the segment transition tip, painted in that order:
+// the fill is the tube itself, so anything meant to read as ON the tube has to
+// come after it. Reads the active path cached by the state-tied renderer
+// (populated in draw_nozzle_section).
 void draw_animation_linear_hub(lv_layer_t* layer, FilamentPathData* data) {
     if (!data->path_cache.valid)
         return;
@@ -1300,10 +1312,87 @@ void draw_animation_linear_hub(lv_layer_t* layer, FilamentPathData* data) {
     int32_t nozzle_y = data->path_cache.nozzle_y;
     auto& path = data->path_cache.path;
 
-    // Flow particles along the active filament path.
+    // Distance-proportional fill: the tube is full up to the front and idle
+    // beyond it, so a load visibly creeps down the bowden at the rate the
+    // hardware actually feeds instead of snapping segment to segment.
+    if (data->anim.fill_active && data->active_slot >= 0 && !data->hub_only && path.count > 0) {
+        const float total = pg::path_length(path);
+        const float filled = total * (float)data->anim.fill_permille / 1000.0f;
+
+        // The path's run through the hub box is recorded but never stroked, so
+        // every stroke below is split around it. Without the split the fill
+        // paints a line straight across a box the tube is meant to vanish behind.
+        const auto& pc = data->path_cache;
+        const float gap0 = pc.has_hub_span() ? pc.hub_span_start : total;
+        const float gap1 = pc.has_hub_span() ? pc.hub_span_end : total;
+        auto stroke_split = [&](float from, float to, const LaneStyle& style) {
+            pg::FilamentPath seg;
+            // Before the hub…
+            pg::path_subrange(seg, path, from, LV_MIN(to, gap0));
+            if (seg.count > 0) {
+                draw_lane(layer, seg, style);
+            }
+            // …and after it. LV_MAX keeps a range wholly on one side from being
+            // drawn twice.
+            pg::path_subrange(seg, path, LV_MAX(from, gap1), to);
+            if (seg.count > 0) {
+                draw_lane(layer, seg, style);
+            }
+        };
+
+        // AHEAD of the front, repaint idle. The state layer colours whole
+        // segments the moment the firmware reports them reached, and on an
+        // unload it keeps them coloured until it reports them cleared — without
+        // this erase the shrinking prefix would be drawn inside a tube that is
+        // still solid, and nothing would appear to move.
+        //
+        // Exactly the idle tube, nothing wider: an earlier version laid a
+        // background-coloured pass at width + GLOW_WIDTH_EXTRA first to wipe the
+        // solid style's glow, which punched a visible scar wherever the path
+        // crossed a filled element. The 3px of surviving glow reads as a faint
+        // halo and is much the lesser evil.
+        LaneStyle idle = lane_style(false, data->theme.color_idle, data->theme.color_idle,
+                                    data->theme.color_bg, data->theme.line_width_active);
+        stroke_split(filled, total, idle);
+
+        // BEHIND the front, paint the filament. Where the state layer already
+        // drew this solid it repaints the same tube and nothing changes; where
+        // it drew idle PTFE, this is the fill growing into it.
+        LaneStyle solid = lane_style(true, active_color, data->theme.color_idle,
+                                     data->theme.color_bg, data->theme.line_width_active);
+        stroke_split(0.0f, filled, solid);
+
+        // Cap the column with the same tip the segment transition uses, so the
+        // two animations read as one moving front — but not while the front is
+        // inside the hub, where it would be the one mark still drawn on top of
+        // the box.
+        const bool front_in_hub = pc.has_hub_span() && filled > gap0 && filled < gap1;
+        if (filled > 0.0f && filled < total && !front_in_hub) {
+            pg::PathPoint front = pg::path_point_at(path, filled);
+            draw_filament_tip(layer, (int32_t)lroundf(front.x), (int32_t)lroundf(front.y),
+                              active_color, sensor_r);
+        }
+    }
+
+    // Flow particles along the active filament path. Painted AFTER the fill so
+    // they sit on the tube rather than under it — and, while a fill is running,
+    // only over the part that actually holds filament: particles drifting along
+    // empty PTFE ahead of the front is the one thing that gives the illusion away.
     if (data->anim.flow_active && data->active_slot >= 0 && !data->hub_only) {
         bool reverse = (data->anim.direction == AnimDirection::UNLOADING);
-        draw_flow_dots_path(layer, path, active_color, data->anim.flow_offset, reverse);
+        // The recorded path is the whole ROUTE now, not just the filled part of
+        // it, so particles have to be clipped to where filament actually is —
+        // otherwise they drift down empty PTFE ahead of the front. The fill
+        // knows that position precisely; without one, the reported segment is
+        // the best available answer and is what the path used to encode.
+        const float wet_fraction = data->anim.fill_active
+                                       ? (float)data->anim.fill_permille / 1000.0f
+                                       : segment_path_fraction(data->filament_segment);
+        pg::FilamentPath wet;
+        pg::path_subrange(wet, path, 0.0f, pg::path_length(path) * wet_fraction);
+        if (wet.count > 0) {
+            draw_flow_dots_path(layer, wet, active_color, data->anim.flow_offset, reverse);
+        }
     }
 
     // Heat glow halo around the nozzle tip.
@@ -1312,16 +1401,21 @@ void draw_animation_linear_hub(lv_layer_t* layer, FilamentPathData* data) {
         draw_heat_glow(layer, center_x, tip_y, sensor_r, data->anim.heat_pulse_opa);
     }
 
-    // Segment transition tip — interpolated along the path.
-    if (data->anim.segment_active && data->active_slot >= 0 && !data->hub_only && path.count > 0) {
+    // Segment transition tip — interpolated along the path. Suppressed while a
+    // fill is running: that draws its own tip at the front, and the two disagree
+    // (this one interpolates between REPORTED segments, the fill tracks real
+    // travel), so both on screen reads as two tips racing.
+    if (data->anim.segment_active && !data->anim.fill_active && data->active_slot >= 0 &&
+        !data->hub_only && path.count > 0) {
         PathSegment prev_seg = static_cast<PathSegment>(data->anim.prev_segment);
         PathSegment fil_seg = static_cast<PathSegment>(data->filament_segment);
         float progress_factor = data->anim.progress / 100.0f;
-        const float NUM_INTERVALS = static_cast<float>(static_cast<int>(PathSegment::NOZZLE) -
-                                                       static_cast<int>(PathSegment::SPOOL));
-        float base = static_cast<float>(static_cast<int>(prev_seg) - 1);
-        float target = static_cast<float>(static_cast<int>(fil_seg) - 1);
-        float tip_fraction = (base + (target - base) * progress_factor) / NUM_INTERVALS;
+        // segment_path_fraction() is the shared answer to "where does this
+        // segment sit"; the fill's sensor checkpoint uses the same one, so the
+        // tip and the fill front cannot land in different places for one segment.
+        const float base = segment_path_fraction(static_cast<int>(prev_seg));
+        const float target = segment_path_fraction(static_cast<int>(fil_seg));
+        float tip_fraction = base + (target - base) * progress_factor;
         tip_fraction = LV_CLAMP(tip_fraction, 0.0f, 1.0f);
         float tip_distance = tip_fraction * pg::path_length(path);
         pg::PathPoint tip = pg::path_point_at(path, tip_distance);

@@ -156,6 +156,58 @@ void ui_filament_path_canvas_set_error_segment(lv_obj_t* obj, int segment);
 void ui_filament_path_canvas_set_anim_progress(lv_obj_t* obj, int progress);
 
 /**
+ * @brief Set how far the filament has physically travelled along the path
+ *
+ * Paints the active path as a partially filled tube: the prefix [0, fill] is
+ * the filament color, the rest stays idle PTFE. Drives the load/unload fill
+ * animation, and is DISTINCT from set_anim_progress() — that one slides a tip
+ * dot between two segments over a fixed duration, this one says how full the
+ * tube is and is normally ramped over the real bowden travel time
+ * (length / feed speed, from AmsBackend::get_feed_kinematics()).
+ *
+ * Both directions use the same prefix convention: a load grows it toward 1000,
+ * an unload shrinks it toward 0.
+ *
+ * Expressed in PERMILLE, not percent: a full bowden takes tens of seconds, over
+ * which 100 steps is one step per fifth of a second — visible stair-stepping.
+ *
+ * @param obj The filament_path_canvas widget
+ * @param permille Fill 0-1000, or negative to disable the fill overlay entirely
+ *                 (the path then renders purely from its segment state)
+ */
+void ui_filament_path_canvas_set_fill_progress(lv_obj_t* obj, int permille);
+
+/**
+ * @brief Start (or stop) a distance-proportional load/unload fill
+ *
+ * Ramps the fill from where it currently stands to the end of the requested
+ * travel, at a constant rate. Idempotent: calling it repeatedly with the same
+ * direction while the ramp runs does nothing, so a panel can push it from every
+ * status refresh without restarting the animation.
+ *
+ * @param obj The filament_path_canvas widget
+ * @param direction +1 to fill toward the nozzle, -1 to drain back toward the
+ *                  spool, 0 to HOLD the front where it is (a stationary phase —
+ *                  homing, heating, purging, or the pause between a swap's two
+ *                  halves). Holding is not the same as clearing: use
+ *                  ui_filament_path_canvas_set_fill_progress(obj, -1) to drop
+ *                  the overlay entirely when the operation ends.
+ * @param target_permille Where this motion ENDS, 0-1000. Normally 1000 for a
+ *                  load and 0 for an unload — but a swap retracts only
+ *                  `swap_retract_length`, far short of the whole bowden, and
+ *                  parks the filament partway. Passing that partial target is
+ *                  what stops the animation claiming the spool was reached.
+ * @param full_travel_ms Time a FULL spool-to-nozzle travel takes — normally the
+ *                  real bowden time from AmsBackend::get_feed_kinematics(). The
+ *                  actual ramp is scaled from this by the distance it covers, so
+ *                  the rate stays constant however short the trip. Pass 0 when
+ *                  the backend cannot say and the widget substitutes a plausible
+ *                  default rather than the caller inventing one.
+ */
+void ui_filament_path_canvas_set_fill_travel(lv_obj_t* obj, int direction, int target_permille,
+                                             uint32_t full_travel_ms);
+
+/**
  * @brief Set the active filament color
  *
  * @param obj The filament_path_canvas widget

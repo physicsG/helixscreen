@@ -78,6 +78,22 @@ float path_length(const FilamentPath& p);
 PathPoint path_point_at(const FilamentPath& p, float d, PathPoint* tangent_out = nullptr);
 
 /**
+ * @brief Extract the sub-path spanning arc-length [@p d0, @p d1] into @p out.
+ *
+ * @p out is CLEARED first (unlike the route_* builders, which append). Both
+ * bounds are clamped to [0, path_length]; a reversed or empty range yields an
+ * empty path. Partially covered segments are trimmed in place — a LINE is
+ * re-interpolated between its cut endpoints, an ARC keeps its center and radius
+ * and gets a shortened start_angle/sweep — so the result traces exactly the same
+ * curve as the source, just shorter.
+ *
+ * Used to paint a partially filled filament tube: stroke [0, fill*len] in the
+ * filament color over the idle PTFE run. Truncation can only ever drop segments,
+ * so the result always fits FilamentPath::MAX_SEGS.
+ */
+void path_subrange(FilamentPath& out, const FilamentPath& in, float d0, float d1);
+
+/**
  * @brief Orthogonal lane routing from (x0,y0) DOWN to (x1,y1), y1 > y0.
  *
  * Produces: vertical drop -> quarter-arc fillet -> horizontal run at mid-height

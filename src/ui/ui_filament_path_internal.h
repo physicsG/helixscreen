@@ -119,6 +119,16 @@ inline constexpr int FLOW_DOT_RADIUS = 1;            // Radius of each flow part
 inline constexpr lv_opa_t FLOW_DOT_OPA = 90;         // Opacity of flow dots
 inline constexpr int OUTPUT_X_ANIM_DURATION_MS = 250;
 
+// Floor on a fill ramp. Backends report a load's start and its arrival close
+// together when the travel is short, and a sub-frame ramp just teleports —
+// this keeps the shortest fill legible as motion.
+inline constexpr uint32_t MIN_FILL_ANIM_MS = 200;
+// Fallback full-travel time when the backend cannot say how long the real feed
+// takes (AmsBackend::get_feed_kinematics() invalid). Roughly a mid-size bowden
+// at a typical feed rate; the point is that it is plausible, not that it is
+// anyone's actual machine.
+inline constexpr uint32_t DEFAULT_FILL_TRAVEL_MS = 6000;
+
 // ============================================================================
 // Widget state
 // ============================================================================
@@ -181,6 +191,21 @@ struct AnimState {
     bool flow_active = false;
     int32_t flow_offset = 0; // 0 → FLOW_DOT_SPACING, cycles continuously
 
+    // Distance-proportional fill of the active path. Unlike `progress` above
+    // (which slides a tip DOT between two segments over a fixed 400 ms), this
+    // is how much of the tube is actually full, ramped over the time the real
+    // bowden travel takes — so a 1600 mm feed at 80 mm/s fills over 20 s.
+    // Load grows it 0 → 1000; unload shrinks it 1000 → 0. Either way the filled
+    // region is the path PREFIX [0, fill].
+    bool fill_active = false;
+    int fill_permille = 0;         // 0..1000 of the active path's arc length
+    int fill_direction = 0;        // +1 loading, -1 unloading, 0 = no ramp running
+    uint32_t fill_travel_ms = 0;   // full-travel time of the running ramp, so a
+                                   // sensor checkpoint can re-arm at the same rate
+    int fill_target = 0;           // 0..1000 endpoint of the running ramp; a swap
+                                   // parks short of both ends, so this is not
+                                   // implied by the direction
+
     // Output-X slide (LINEAR: output exits beneath active slot)
     int32_t output_x_current = 0;
     int32_t output_x_target = 0;
@@ -227,6 +252,21 @@ struct PathCache {
     int32_t nozzle_y = 0; // last state-tied draw's nozzle_y
     int32_t sensor_r = 0; // last state-tied draw's sensor radius
     bool valid = false;
+
+    // Arc-length window of the run that passes THROUGH the hub box, or a zero
+    // -width window when the path has none.
+    //
+    // That run is recorded into the path but never stroked — the hub is a filled
+    // box drawn over it, and the tube is meant to disappear behind it. Flow dots
+    // deliberately traverse it so particles stay continuous; anything that
+    // STROKES the path (the fill) has to skip it, or it paints a line straight
+    // across the box.
+    float hub_span_start = 0.0f;
+    float hub_span_end = 0.0f;
+
+    [[nodiscard]] bool has_hub_span() const {
+        return hub_span_end > hub_span_start;
+    }
 };
 
 // All per-widget state. Plain fields are the widget's CONFIG (pushed in via
@@ -437,6 +477,20 @@ void draw_flow_dots_path(lv_layer_t* layer, const pg::FilamentPath& path, lv_col
 void draw_toolhead(lv_layer_t* layer, int32_t cx, int32_t cy, lv_color_t color, int32_t scale,
                    lv_opa_t opa = LV_OPA_COVER);
 
+/// Fraction along the drawn path at which @p segment sits, 0..1.
+///
+/// SPOOL is the path's start and NOZZLE its end, so the intervals between them
+/// divide it evenly. Shared by the segment-transition tip and the fill's sensor
+/// checkpoint so the two cannot disagree about where a segment is.
+inline float segment_path_fraction(int segment) {
+    constexpr float INTERVALS =
+        static_cast<float>(static_cast<int>(PathSegment::NOZZLE) -
+                           static_cast<int>(PathSegment::SPOOL));
+    const float f =
+        static_cast<float>(segment - static_cast<int>(PathSegment::SPOOL)) / INTERVALS;
+    return LV_CLAMP(f, 0.0f, 1.0f);
+}
+
 /// Y of the nozzle tip for the configured toolhead style (heat glow anchor).
 int32_t toolhead_tip_y(int32_t nozzle_y, int32_t extruder_scale);
 
@@ -458,6 +512,35 @@ void stop_heat_pulse(lv_obj_t* obj, FilamentPathData* data);
 void start_flow_animation(lv_obj_t* obj, FilamentPathData* data);
 void stop_flow_animation(lv_obj_t* obj, FilamentPathData* data);
 void start_output_x_animation(lv_obj_t* obj, FilamentPathData* data, int32_t from_x, int32_t to_x);
+
+/// Ramp the distance-proportional fill from where it stands now to the end of
+/// @p direction's travel (+1 load → 1000, -1 unload → 0) over @p duration_ms.
+/// A LINEAR path, not the ease-out the segment transition uses: filament moves
+/// at a constant feed rate, and easing it makes a correctly-timed fill look
+/// like it stalls at both ends.
+void start_fill_animation(lv_obj_t* obj, FilamentPathData* data, int direction,
+                          int target_permille, uint32_t full_travel_ms);
+/// Correct a running fill against a REPORTED filament position.
+///
+/// The ramp is dead reckoning — it knows how fast the hardware feeds and assumes
+/// it started on time. A segment report is a measurement: the toolhead sensor
+/// tripping says the filament really is at the extruder, whatever the estimate
+/// thought. This snaps the fill to that position when the two disagree in the
+/// direction that matters (a load may only be nudged FORWARD, an unload only
+/// BACK — a checkpoint can confirm progress, never undo it) and re-arms the
+/// remaining travel at the original rate.
+void resync_fill_to_segment(lv_obj_t* obj, FilamentPathData* data, int segment);
+/// Halt the ramp but KEEP the front where it is.
+///
+/// Not the same as stopping. An operation is full of stationary phases — homing,
+/// selecting, heating, purging — and a swap parks the filament partway between
+/// its two halves. Clearing the fill at any of those drops the tube back to
+/// whatever segment the firmware has confirmed, which is a visible flicker to
+/// empty followed by a snap when the segment finally catches up. The filament is
+/// still physically where the fill last drew it, so the fill should be too.
+void pause_fill_animation(lv_obj_t* obj, FilamentPathData* data);
+/// Cancel the ramp and clear the fill overlay (back to pure segment rendering).
+void stop_fill_animation(lv_obj_t* obj, FilamentPathData* data);
 
 /// Delete every lv_anim this widget may have running (widget teardown).
 void delete_all_animations(lv_obj_t* obj);

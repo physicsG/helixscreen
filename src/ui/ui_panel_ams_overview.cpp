@@ -155,6 +155,30 @@ void AmsOverviewPanel::init_subjects() {
                 }
             });
 
+        // Observe ams_action so the detail path canvas learns that a load or
+        // unload STARTED. slots_version only bumps on slot data (and bypass), and
+        // an operation beginning changes neither — so without this the
+        // distance-proportional fill never got its start edge, and the path only
+        // moved when some slot field happened to change underneath it.
+        ams_action_observer_ = observe_int_sync<AmsOverviewPanel>(
+            AmsState::instance().get_ams_action_subject(), this, [](AmsOverviewPanel* self, int) {
+                if (!self->panel_ || self->detail_unit_index_ < 0)
+                    return;
+                self->refresh_detail_if_needed();
+            });
+
+        // ...and the operation PHASE, which is what actually gates the fill. The
+        // action stays LOADING across Home, Select, Heat, Feed and Purge, so
+        // watching it alone never tells the canvas that the feed step — the only
+        // one during which filament moves — has begun.
+        ams_phase_observer_ = observe_int_sync<AmsOverviewPanel>(
+            AmsState::instance().get_ams_operation_phase_subject(), this,
+            [](AmsOverviewPanel* self, int) {
+                if (!self->panel_ || self->detail_unit_index_ < 0)
+                    return;
+                self->refresh_detail_if_needed();
+            });
+
         // Observe current_slot to reactively update lane highlights when the active
         // slot changes (e.g., slot selected without load/unload).
         current_slot_observer_ = observe_int_sync<AmsOverviewPanel>(
@@ -1212,6 +1236,8 @@ void AmsOverviewPanel::clear_panel_reference() {
     // Clear observer guards before clearing widget pointers
     slots_version_observer_.reset();
     current_slot_observer_.reset();
+    ams_action_observer_.reset();
+    ams_phase_observer_.reset();
     external_spool_observer_.reset();
 
     // Clean up sidebar before clearing panel references

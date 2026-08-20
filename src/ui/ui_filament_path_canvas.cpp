@@ -555,6 +555,13 @@ void ui_filament_path_canvas_set_filament_segment(lv_obj_t* obj, int segment) {
     data->filament_segment = new_segment;
     spdlog::debug("[FilamentPath] Segment changed: {} -> {} (animating)", old_segment, new_segment);
 
+    // A segment change is a MEASUREMENT — the toolhead sensor tripping, the lane
+    // sensor clearing — so it is also the one chance to correct a fill that has
+    // drifted from where the filament actually is. Cheap and self-limiting: it
+    // only ever nudges the front the way it is already going, and does nothing
+    // when no fill is running.
+    helix::ui::fpath::resync_fill_to_segment(obj, data, new_segment);
+
     // Stop flow animation when filament reaches a terminal position via a
     // single-step transition (normal operation). Big jumps (e.g., 0->7 initial
     // setup) are not real flow operations -- don't stop flow for those.
@@ -605,6 +612,44 @@ void ui_filament_path_canvas_set_anim_progress(lv_obj_t* obj, int progress) {
         return;
     data->anim.progress = clamped;
     layered_mark_dirty(obj, true, true);
+}
+
+void ui_filament_path_canvas_set_fill_progress(lv_obj_t* obj, int permille) {
+    auto* data = get_data(obj);
+    if (!data)
+        return;
+
+    const bool active = (permille >= 0);
+    const int clamped = active ? LV_CLAMP(permille, 0, 1000) : 0;
+    if (data->anim.fill_active == active && data->anim.fill_permille == clamped)
+        return;
+    data->anim.fill_active = active;
+    data->anim.fill_permille = clamped;
+
+    // Deliberately NOT layered_mark_dirty(): the fill is painted per frame in
+    // the DRAW_POST overlay, so a plain invalidate is all it needs. Re-rendering
+    // the two backing canvases on every tick of a 20-second ramp is exactly the
+    // cost the layered split exists to avoid.
+    lv_obj_invalidate(obj);
+}
+
+void ui_filament_path_canvas_set_fill_travel(lv_obj_t* obj, int direction, int target_permille,
+                                             uint32_t full_travel_ms) {
+    auto* data = get_data(obj);
+    if (!data)
+        return;
+    if (direction == 0) {
+        // Hold, do not clear — see the header. The filament is stationary, not
+        // absent, and the tube should keep showing where it actually reaches.
+        helix::ui::fpath::pause_fill_animation(obj, data);
+        return;
+    }
+    // 0 = "the backend has no bowden figure" — substitute here rather than
+    // making every caller carry its own idea of a plausible travel time.
+    if (full_travel_ms == 0) {
+        full_travel_ms = helix::ui::fpath::DEFAULT_FILL_TRAVEL_MS;
+    }
+    helix::ui::fpath::start_fill_animation(obj, data, direction, target_permille, full_travel_ms);
 }
 
 void ui_filament_path_canvas_set_filament_color(lv_obj_t* obj, uint32_t color) {

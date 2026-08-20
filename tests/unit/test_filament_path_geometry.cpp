@@ -13,6 +13,7 @@ using namespace helix::ui::pathgeo;
 namespace {
 
 constexpr float PI = 3.14159265358979323846f;
+constexpr float HALF_PI_F = PI / 2.0f;
 
 float dist(const PathPoint& a, const PathPoint& b) {
     float dx = a.x - b.x;
@@ -233,6 +234,109 @@ static void check_continuity_and_endpoints(const FilamentPath& p, float x0, floa
         REQUIRE(prevT.x == Catch::Approx(nextT.x).margin(1e-3));
         REQUIRE(prevT.y == Catch::Approx(nextT.y).margin(1e-3));
     }
+}
+
+// ============================================================================
+// path_subrange — the partial-fill slice behind the load/unload animation
+// ============================================================================
+
+TEST_CASE("path_subrange full range reproduces the path", "[filament-path][geometry]") {
+    FilamentPath p;
+    p.add_line(0.0f, 0.0f, 0.0f, 30.0f);
+    p.add_arc(10.0f, 30.0f, 10.0f, PI, HALF_PI_F);
+    p.add_line(10.0f, 40.0f, 50.0f, 40.0f);
+    const float total = path_length(p);
+
+    FilamentPath out;
+    path_subrange(out, p, 0.0f, total);
+    REQUIRE(out.count == p.count);
+    REQUIRE(path_length(out) == Catch::Approx(total).margin(0.01f));
+}
+
+TEST_CASE("path_subrange prefix length matches the request", "[filament-path][geometry]") {
+    FilamentPath p;
+    p.add_line(0.0f, 0.0f, 0.0f, 40.0f);
+    p.add_line(0.0f, 40.0f, 60.0f, 40.0f);
+    // 100 total: a prefix that ends mid-second-segment must trim it, not drop it.
+    FilamentPath out;
+    path_subrange(out, p, 0.0f, 70.0f);
+    REQUIRE(path_length(out) == Catch::Approx(70.0f).margin(0.01f));
+    REQUIRE(out.count == 2);
+    // The cut endpoint is where path_point_at says 70 lands.
+    PathPoint expected = path_point_at(p, 70.0f);
+    REQUIRE(dist(out.segs[1].p1, expected) < 0.01f);
+}
+
+TEST_CASE("path_subrange trims an arc without leaving its circle",
+          "[filament-path][geometry]") {
+    FilamentPath p;
+    p.add_arc(0.0f, 0.0f, 20.0f, 0.0f, HALF_PI_F);
+    const float total = path_length(p);
+
+    FilamentPath out;
+    path_subrange(out, p, 0.0f, total * 0.5f);
+    REQUIRE(out.count == 1);
+    REQUIRE(out.segs[0].type == PathSeg::ARC);
+    REQUIRE(path_length(out) == Catch::Approx(total * 0.5f).margin(0.01f));
+    // Half the sweep, same center and radius — a trimmed arc must still trace
+    // the original curve, which is what keeps the fill aligned with the tube.
+    REQUIRE(out.segs[0].radius == Catch::Approx(20.0f));
+    REQUIRE(std::fabs(out.segs[0].sweep) == Catch::Approx(HALF_PI_F * 0.5f).margin(0.001f));
+    REQUIRE(dist(out.segs[0].p1, path_point_at(p, total * 0.5f)) < 0.01f);
+}
+
+TEST_CASE("path_subrange walks the same curve as path_point_at",
+          "[filament-path][geometry]") {
+    FilamentPath p;
+    p.add_line(5.0f, 0.0f, 5.0f, 25.0f);
+    p.add_arc(15.0f, 25.0f, 10.0f, PI, HALF_PI_F);
+    p.add_line(15.0f, 35.0f, 45.0f, 35.0f);
+    p.add_arc(45.0f, 45.0f, 10.0f, -HALF_PI_F, HALF_PI_F);
+    const float total = path_length(p);
+
+    // Every prefix must END exactly where the same distance lands on the source.
+    for (int i = 1; i <= 20; ++i) {
+        const float d = total * static_cast<float>(i) / 20.0f;
+        FilamentPath out;
+        path_subrange(out, p, 0.0f, d);
+        REQUIRE(out.count > 0);
+        REQUIRE(path_length(out) == Catch::Approx(d).margin(0.05f));
+        const PathSeg& last = out.segs[out.count - 1];
+        REQUIRE(dist(last.p1, path_point_at(p, d)) < 0.05f);
+    }
+}
+
+TEST_CASE("path_subrange clamps and rejects empty ranges", "[filament-path][geometry]") {
+    FilamentPath p;
+    p.add_line(0.0f, 0.0f, 100.0f, 0.0f);
+
+    FilamentPath out;
+    // Zero-width, reversed, and wholly negative ranges all yield nothing —
+    // a fill at 0 permille must draw no tube at all, not a stray dot.
+    path_subrange(out, p, 50.0f, 50.0f);
+    REQUIRE(out.count == 0);
+    path_subrange(out, p, 80.0f, 20.0f);
+    REQUIRE(out.count == 0);
+    path_subrange(out, p, -50.0f, -10.0f);
+    REQUIRE(out.count == 0);
+
+    // Over-long ranges clamp to the path rather than extrapolating.
+    path_subrange(out, p, -20.0f, 500.0f);
+    REQUIRE(path_length(out) == Catch::Approx(100.0f).margin(0.01f));
+
+    // A suffix is a suffix, not a re-based prefix.
+    path_subrange(out, p, 60.0f, 100.0f);
+    REQUIRE(path_length(out) == Catch::Approx(40.0f).margin(0.01f));
+    REQUIRE(out.segs[0].p0.x == Catch::Approx(60.0f).margin(0.01f));
+}
+
+TEST_CASE("path_subrange on an empty path yields an empty path",
+          "[filament-path][geometry]") {
+    FilamentPath empty;
+    FilamentPath out;
+    out.add_line(0.0f, 0.0f, 1.0f, 1.0f); // must be cleared, not appended to
+    path_subrange(out, empty, 0.0f, 10.0f);
+    REQUIRE(out.count == 0);
 }
 
 TEST_CASE("route_orthogonal dx>0 full S with arcs", "[filament-path][geometry]") {

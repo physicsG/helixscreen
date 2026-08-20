@@ -67,7 +67,23 @@ class MultiAceTestAccess {
     static AmsBackendMultiAce::OverrideMap parse_slot_overrides(const std::string& content) {
         return AmsBackendMultiAce::parse_slot_overrides(content);
     }
+    static AmsBackendMultiAce::AceKinematics parse_feed_kinematics(const json& config) {
+        return AmsBackendMultiAce::parse_feed_kinematics(config);
+    }
 };
+
+// The `ace` half of a real `configfile.config`, values as Klipper reports them:
+// STRINGS, and section headers lower-cased. `[ace 0]` overrides only the two
+// lengths, which is the shape a per-unit tube run actually takes.
+json live_ace_config() {
+    return json{{"ace",
+                 {{"feed_speed", "80"},
+                  {"retract_speed", "80"},
+                  {"load_length", "2100"},
+                  {"retract_length", "1950"},
+                  {"swap_retract_length", "900"}}},
+                {"ace 0", {{"load_length", "1600"}, {"retract_length", "1500"}}}};
+}
 
 TEST_CASE_METHOD(HelixTestFixture, "multiACE reads head source kinds off the live frame",
                  "[ams][multiace]") {
@@ -1579,3 +1595,100 @@ TEST_CASE_METHOD(LVGLTestFixture, "a refused pre-unload leaves no swap latch beh
     CHECK(backend.get_current_action() == AmsAction::IDLE);
     helix::ui::UpdateQueue::instance().drain();
 }
+
+// ============================================================================
+// Feed kinematics — the bowden figures behind the path canvas's fill animation
+// ============================================================================
+
+TEST_CASE_METHOD(HelixTestFixture, "multiACE reads bowden travel from the ace config",
+                 "[ams][multiace]") {
+    const auto k = MultiAceTestAccess::parse_feed_kinematics(live_ace_config());
+
+    SECTION("a per-unit section overrides the global lengths for that unit only") {
+        CHECK(k[0].load_length_mm == Catch::Approx(1600.0f));
+        CHECK(k[0].unload_length_mm == Catch::Approx(1500.0f));
+        // Units with no [ace N] section of their own inherit [ace].
+        CHECK(k[1].load_length_mm == Catch::Approx(2100.0f));
+        CHECK(k[1].unload_length_mm == Catch::Approx(1950.0f));
+    }
+
+    SECTION("speeds are global — there is no per-unit form in the schema") {
+        for (const auto& u : k) {
+            CHECK(u.feed_speed_mms == Catch::Approx(80.0f));
+            CHECK(u.retract_speed_mms == Catch::Approx(80.0f));
+        }
+    }
+
+    SECTION("the derived durations are what the animation is timed against") {
+        CHECK(k[0].valid());
+        CHECK(k[0].load_seconds() == Catch::Approx(20.0f));
+        CHECK(k[0].unload_seconds() == Catch::Approx(18.75f));
+        // The longer tube must read as the longer travel, or the per-unit
+        // override was silently dropped and every unit animates identically.
+        CHECK(k[1].load_seconds() > k[0].load_seconds());
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "multiACE accepts numeric config values too",
+                 "[ams][multiace]") {
+    // configfile.config reports strings, configfile.settings reports numbers.
+    // Reading only one shape silently finds nothing on the other.
+    const auto k = MultiAceTestAccess::parse_feed_kinematics(
+        json{{"ace", {{"feed_speed", 80}, {"retract_speed", 80}, {"load_length", 2100},
+                      {"retract_length", 1950}}}});
+    CHECK(k[0].valid());
+    CHECK(k[0].load_length_mm == Catch::Approx(2100.0f));
+    CHECK(k[0].load_seconds() == Catch::Approx(26.25f));
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "multiACE reports unknown kinematics rather than zeros",
+                 "[ams][multiace]") {
+    SECTION("no ace section at all") {
+        const auto k = MultiAceTestAccess::parse_feed_kinematics(json{{"extruder", {{"max_temp", "300"}}}});
+        for (const auto& u : k) {
+            CHECK_FALSE(u.valid());
+            // valid() false is the contract the canvas branches on; a zero
+            // duration would divide the fill ramp by nothing.
+            CHECK(u.load_seconds() == Catch::Approx(0.0f));
+        }
+    }
+
+    SECTION("lengths present but no speed") {
+        const auto k = MultiAceTestAccess::parse_feed_kinematics(
+            json{{"ace", {{"load_length", "2100"}, {"retract_length", "1950"}}}});
+        CHECK_FALSE(k[0].valid());
+    }
+
+    SECTION("garbage text is not a length") {
+        const auto k = MultiAceTestAccess::parse_feed_kinematics(
+            json{{"ace", {{"feed_speed", "fast"}, {"load_length", "2100"},
+                          {"retract_length", "1950"}}}});
+        CHECK_FALSE(k[0].valid());
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "multiACE retract speed falls back to the feed speed",
+                 "[ams][multiace]") {
+    // A config that sets feed_speed but omits retract_speed is legal. Taking 0
+    // for the missing one would invalidate the whole struct and lose the LOAD
+    // direction as well, which is configured perfectly well.
+    const auto k = MultiAceTestAccess::parse_feed_kinematics(
+        json{{"ace", {{"feed_speed", "80"}, {"load_length", "1600"},
+                      {"retract_length", "1500"}}}});
+    CHECK(k[0].valid());
+    CHECK(k[0].retract_speed_mms == Catch::Approx(80.0f));
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "unit 0 is the U1 itself and has no ACE bowden",
+                 "[ams][multiace]") {
+    // get_feed_kinematics() takes a GLOBAL unit index: unit 0 is the U1's four
+    // heads on their stock feeders, so ACE n lives at unit n+1. Answering unit 0
+    // with ACE 0's tube length would time the U1's own feeder animation against
+    // hardware it is not attached to.
+    CapturingMultiAce backend;
+    backend.handle_status_update(wrap(live_ace_object()));
+    CHECK_FALSE(backend.get_feed_kinematics(0).valid());
+    CHECK_FALSE(backend.get_feed_kinematics(-1).valid());
+    CHECK_FALSE(backend.get_feed_kinematics(99).valid());
+}
+

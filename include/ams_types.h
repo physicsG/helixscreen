@@ -594,6 +594,78 @@ enum class PathSegment {
 constexpr int PATH_SEGMENT_COUNT = 8;
 
 /**
+ * @brief Whether filament is physically travelling right now, and which way.
+ *
+ * Distinct from AmsAction, which names the whole OPERATION. A load spends most
+ * of its wall clock homing, selecting a lane and heating the nozzle — during all
+ * of which nothing moves down the tube — and only actually feeds during one
+ * phase near the end. Anything that animates travel has to key on this, or it
+ * plays out while the machine is still warming up and is finished before the
+ * filament starts moving.
+ */
+enum class FeedMotion {
+    NONE = 0,  ///< Filament is stationary (idle, homing, heating, purging…)
+    LOADING,   ///< Travelling toward the nozzle
+    UNLOADING, ///< Travelling back toward the spool
+};
+
+/**
+ * @brief How far and how fast a unit moves filament along its supply path.
+ *
+ * The capability question behind a distance-proportional load/unload fill: a
+ * backend that knows its tube length and feed rate can say how long the travel
+ * actually takes, so the UI paints the fill at the real rate instead of a
+ * made-up one. Lengths are the full spool-to-nozzle travel, not one segment.
+ *
+ * Deliberately NOT per-firmware: any system that configures a bowden length and
+ * a feed speed answers this the same way. Backends that do not know return the
+ * default-constructed value, for which valid() is false and callers fall back to
+ * a fixed animation duration.
+ */
+struct FeedKinematics {
+    float load_length_mm = 0.0f;    ///< Travel of a full load (spool → nozzle)
+    float unload_length_mm = 0.0f;  ///< Travel of a full unload (nozzle → spool)
+    float feed_speed_mms = 0.0f;    ///< Forward feed rate
+    float retract_speed_mms = 0.0f; ///< Reverse (retract) rate
+
+    /// How far a SWAP retracts, when that is less than a full unload.
+    ///
+    /// Swapping between two lanes of the same unit does not send the filament
+    /// all the way home — it backs out far enough to clear the junction and no
+    /// further, because the rest of the trip would just have to be re-fed. 0
+    /// means "not configured", for which callers should assume a full unload.
+    float swap_retract_length_mm = 0.0f;
+
+    /// True when both a length and a rate are known, i.e. a duration is derivable.
+    [[nodiscard]] bool valid() const {
+        return load_length_mm > 0.0f && unload_length_mm > 0.0f && feed_speed_mms > 0.0f &&
+               retract_speed_mms > 0.0f;
+    }
+
+    /// Seconds a full load takes, or 0 when unknown.
+    [[nodiscard]] float load_seconds() const {
+        return valid() ? load_length_mm / feed_speed_mms : 0.0f;
+    }
+
+    /// Seconds a full unload takes, or 0 when unknown.
+    [[nodiscard]] float unload_seconds() const {
+        return valid() ? unload_length_mm / retract_speed_mms : 0.0f;
+    }
+
+    /// Fraction of a full unload that a swap's retract covers, 0..1.
+    ///
+    /// 1.0 when no swap distance is configured (or it exceeds a full unload),
+    /// which degrades to "a swap retracts all the way" — the old behaviour.
+    [[nodiscard]] float swap_retract_fraction() const {
+        if (!valid() || swap_retract_length_mm <= 0.0f) {
+            return 1.0f;
+        }
+        const float f = swap_retract_length_mm / unload_length_mm;
+        return (f >= 1.0f) ? 1.0f : f;
+    }
+};
+
+/**
  * @brief Get string name for path segment
  * @param segment The segment enum value
  * @return Human-readable string for the segment

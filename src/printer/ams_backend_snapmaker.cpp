@@ -133,11 +133,13 @@ struct ChannelStateInfo {
         constexpr int U0 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 0; // Home
         constexpr int U1 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 1; // Select
         constexpr int U2 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 2; // Heat
-        constexpr int U3 = AmsBackendSnapmaker::UNLOAD_PHASE_BASE + 3; // Retract
+        constexpr int U3 =
+            AmsBackendSnapmaker::UNLOAD_PHASE_BASE + AmsBackendSnapmaker::MOVE_PHASE_OFFSET;
         constexpr int L0 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 0;   // Home
         constexpr int L1 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 1;   // Select
         constexpr int L2 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 2;   // Heat
-        constexpr int L3 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 3;   // Feed
+        constexpr int L3 =
+            AmsBackendSnapmaker::LOAD_PHASE_BASE + AmsBackendSnapmaker::MOVE_PHASE_OFFSET;
         constexpr int L4 = AmsBackendSnapmaker::LOAD_PHASE_BASE + 4;   // Purge
         // {action, phase, is_terminal, is_fail, sets_loaded, clears_loaded, ignore}
         // --- idle / init ---
@@ -395,6 +397,21 @@ lv_subject_t* AmsBackendSnapmaker::get_operation_step_index_subject(StepOperatio
 // ============================================================================
 // Path Visualization
 // ============================================================================
+
+FeedMotion AmsBackendSnapmaker::get_feed_motion() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const int phase = system_info_.operation_phase;
+    if (phase == LOAD_PHASE_BASE + MOVE_PHASE_OFFSET) {
+        return FeedMotion::LOADING;
+    }
+    if (phase == UNLOAD_PHASE_BASE + MOVE_PHASE_OFFSET) {
+        return FeedMotion::UNLOADING;
+    }
+    // Includes -1 (no operation) and every non-move phase of a live one. The
+    // two spaces are disjoint precisely so a swap's retract cannot be mistaken
+    // for its feed here.
+    return FeedMotion::NONE;
+}
 
 PathSegment AmsBackendSnapmaker::get_filament_segment() const {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -82,6 +82,22 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// enough; it has to be answered here too.
     [[nodiscard]] PathTopology get_unit_topology(int unit_index) const override;
 
+    /// Bowden travel and feed rate for @p unit_index, read from the printer's
+    /// `ace` config. The `[ace]` section carries the defaults; an `[ace N]`
+    /// section overrides them for that unit, which is the normal case — tube
+    /// runs differ per unit, so unit 0's 1600 mm says nothing about unit 1's.
+    /// Unit 0 is the U1 itself and has no ACE bowden, so it answers unknown.
+    [[nodiscard]] FeedKinematics get_feed_kinematics(int unit_index) const override;
+
+    /// The ACE bay the live load/unload names. Held for the whole operation
+    /// INCLUDING a swap's boundary, where the head's seat has been cleared and
+    /// nothing else can say which lane the filament is in.
+    [[nodiscard]] int operating_slot() const override;
+
+    /// A swap's retract stops at `swap_retract_length`, not at the unit. See the
+    /// base declaration for why animating it as a full unload is wrong.
+    [[nodiscard]] float feed_motion_end_fraction() const override;
+
     /// An ACE-fed head's spool is described by the ACE, not by the U1 — see the
     /// base declaration. Returns the ACE's global unit index for such a head,
     /// nullopt for a feeder head or any ACE bay (those describe themselves).
@@ -243,7 +259,22 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     virtual void download_slot_overrides(std::function<void(const std::string&)> on_success,
                                          std::function<void(const MoonrakerError&)> on_error);
 
+    /// Per-unit bowden travel, indexed by ACE unit (0..MAX_ACE_UNITS-1) — NOT by
+    /// the global unit index, which offsets by 1 for the U1 itself.
+    using AceKinematics = std::array<FeedKinematics, MAX_ACE_UNITS>;
+
+    /// Install parsed kinematics. Protected, not private, so a harness with no
+    /// Moonraker behind it (the WASM browser preview) can seed the same values
+    /// the config fetch would have brought back rather than model them again.
+    void apply_feed_kinematics(const AceKinematics& k);
+
   private:
+    /// Global slot index of the bay seated on head @p slot_index, or nullopt.
+    /// The body of slot_identity_owner_slot(), split out so callers that already
+    /// hold mutex_ can ask — it is not a recursive mutex, and taking it twice
+    /// deadlocked the main thread the last time this backend did that.
+    [[nodiscard]] std::optional<int> seated_global_slot_locked(int slot_index) const;
+
     /// Which head ACE @p ace_index actually FEEDS, or -1. Caller must hold mutex_.
     ///
     /// multiACE's own `aceHeadForAce()` reverse lookup, and it MUST test the
@@ -283,6 +314,11 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// bay *s* feeds head *s*, so acting on a bay whose head is not mounted
     /// consulted the wrong head's source kind and mislabelled the bar.
     int op_target_head_ = -1;
+
+    /// ...and the BAY it named. op_target_head_ answers "which head", which is
+    /// enough for the step model but not for the path canvas: a unit-scoped view
+    /// of the ACE needs the lane, and a head index is not one.
+    int op_target_slot_ = -1;
 
     /// Has the firmware confirmed the in-flight swap is actually running?
     /// Guards the latch against the pre-start lag; see apply_swap_phase_locked().
@@ -336,6 +372,18 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     /// Ask Moonraker for the file. Main thread; applies its result via the
     /// lifetime token.
     void fetch_slot_overrides();
+
+    /// Pure: pull `[ace]` + `[ace N]` out of a `configfile.config` object. Static
+    /// so it can run on the WebSocket thread without touching `this`.
+    ///
+    /// Klipper lower-cases section headers and reports every value as a STRING,
+    /// so "1600" not 1600 — reading these as numbers finds nothing and every
+    /// unit looks unconfigured.
+    [[nodiscard]] static AceKinematics parse_feed_kinematics(const nlohmann::json& config);
+
+    /// Ask Moonraker for configfile.config once. Main thread; applies its result
+    /// via the lifetime token.
+    void fetch_feed_kinematics();
     /// Rebuild units 1..N from the parsed ACE inventory. Caller must hold mutex_.
     void rebuild_ace_units_locked();
 
@@ -479,6 +527,13 @@ class AmsBackendMultiAce : public AmsBackendSnapmaker {
     OverrideMap slot_overrides_{};
     int64_t overrides_fetched_seq_ = -1;
     bool override_fetch_in_flight_ = false;
+
+    /// Per-ACE bowden travel + feed rates, guarded by mutex_. Default-constructed
+    /// entries are "not known yet", for which FeedKinematics::valid() is false.
+    AceKinematics ace_kinematics_{};
+    /// One config fetch per session — `ace.cfg` does not change under a running
+    /// Klipper, and a re-read per frame would be a request storm.
+    bool kinematics_fetched_ = false;
     /// "A fetch is owed." Set under mutex_ when a frame's event_seq outruns
     /// overrides_fetched_seq_, and CONSUMED only by the fetch that actually goes
     /// out (fetch_slot_overrides(), which must be called with the lock dropped).

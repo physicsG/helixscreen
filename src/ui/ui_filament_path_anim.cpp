@@ -111,6 +111,31 @@ void heat_pulse_anim_cb(void* var, int32_t value) {
     invalidate_async(obj);
 }
 
+void fill_anim_cb(void* var, int32_t value) {
+    lv_obj_t* obj = static_cast<lv_obj_t*>(var);
+    FilamentPathData* data = get_data(obj);
+    if (!data)
+        return;
+
+    data->anim.fill_permille = LV_CLAMP(value, 0, 1000);
+
+    // Done only at THIS ramp's own endpoint. Testing "at either extreme" instead
+    // fires on the very first tick, which lv_anim delivers at the START value: a
+    // load starts at 0 and an unload at 1000, so both cleared the direction
+    // immediately and the next panel refresh restarted a ramp that was already
+    // running. The endpoint is stored rather than derived from the direction
+    // because a swap's halves stop partway.
+    if (data->anim.fill_direction != 0 && data->anim.fill_permille == data->anim.fill_target) {
+        // Travel finished. The overlay STAYS active at the terminal value —
+        // clearing it here would drop the tube back to whatever segment the
+        // firmware has confirmed so far, which on a load that has arrived but
+        // not yet been reported is a visible flicker back to empty. The panel
+        // clears it when the operation goes idle.
+        data->anim.fill_direction = 0;
+    }
+    invalidate_async(obj);
+}
+
 void flow_anim_cb(void* var, int32_t value) {
     lv_obj_t* obj = static_cast<lv_obj_t*>(var);
     FilamentPathData* data = get_data(obj);
@@ -287,6 +312,124 @@ void start_flow_animation(lv_obj_t* obj, FilamentPathData* data) {
              /*infinite=*/true, /*playback=*/false);
 }
 
+void start_fill_animation(lv_obj_t* obj, FilamentPathData* data, int direction,
+                          int target_permille, uint32_t full_travel_ms) {
+    if (!obj || !data)
+        return;
+    if (direction == 0) {
+        pause_fill_animation(obj, data);
+        return;
+    }
+    direction = (direction > 0) ? 1 : -1;
+    const int32_t to = LV_CLAMP(target_permille, 0, 1000);
+
+    // Already travelling this way to this endpoint — leave the ramp alone. This
+    // is called from the panel's per-refresh push, which runs on every status
+    // frame, so restarting here would reset the fill several times a second. The
+    // TARGET is part of the identity: a swap's two halves are both "loading" in
+    // the sense of direction, but they end in different places.
+    if (data->anim.fill_direction == direction && data->anim.fill_target == to)
+        return;
+
+    // With animations off there is no honest partial state to show, so fall
+    // back to plain segment rendering rather than freezing a half-full tube.
+    if (!animations_enabled()) {
+        stop_fill_animation(obj, data);
+        return;
+    }
+
+    // Where the filament already is, when we know: mid-swap the fill is paused
+    // partway and the next half continues from there, NOT from an end.
+    const int32_t from =
+        data->anim.fill_active ? data->anim.fill_permille : (direction > 0 ? 0 : 1000);
+
+    lv_anim_delete(obj, fill_anim_cb);
+    data->anim.fill_active = true;
+    data->anim.fill_direction = direction;
+    data->anim.fill_target = static_cast<int>(to);
+    data->anim.fill_permille = static_cast<int>(from);
+    data->anim.fill_travel_ms = full_travel_ms;
+
+    if (from == to) {
+        invalidate_async(obj);
+        return;
+    }
+
+    // full_travel_ms is a whole spool-to-nozzle trip; scale by the distance this
+    // ramp actually covers so the front moves at the configured feed rate
+    // whatever fraction of the bowden it has to cross.
+    const uint32_t span = static_cast<uint32_t>(std::abs(to - from));
+    uint32_t ms = static_cast<uint32_t>(static_cast<uint64_t>(full_travel_ms) * span / 1000u);
+    ms = LV_MAX(ms, MIN_FILL_ANIM_MS);
+
+    spdlog::info("[FilamentPath] Fill {} {}‰ -> {}‰ over {} ms",
+                 direction > 0 ? "LOAD" : "UNLOAD", from, to, ms);
+    run_anim(obj, fill_anim_cb, from, to, ms, lv_anim_path_linear, /*infinite=*/false,
+             /*playback=*/false);
+}
+
+void resync_fill_to_segment(lv_obj_t* obj, FilamentPathData* data, int segment) {
+    if (!obj || !data || !data->anim.fill_active || data->anim.fill_direction == 0) {
+        return;
+    }
+    const int direction = data->anim.fill_direction;
+    const int reported =
+        static_cast<int>(lroundf(segment_path_fraction(segment) * 1000.0f));
+    const int current = data->anim.fill_permille;
+
+    // A checkpoint may only move the front the way it is already travelling.
+    // Sensors report ARRIVALS, so on a load "reached the toolhead" is a floor on
+    // how far we are, not a position to fall back to — clamping the other way
+    // would drag a correctly-running fill backwards every time a segment behind
+    // it was re-reported.
+    int corrected = (direction > 0) ? LV_MAX(current, reported) : LV_MIN(current, reported);
+    // ...and never past where this motion is going to stop. A swap parks the
+    // filament partway, so a segment report that reads as "further than the
+    // target" is coarser than the target, not newer than it.
+    corrected = (direction > 0) ? LV_MIN(corrected, data->anim.fill_target)
+                                : LV_MAX(corrected, data->anim.fill_target);
+    if (corrected == current) {
+        return; // the estimate already agrees, or is ahead of the checkpoint
+    }
+
+    spdlog::debug("[FilamentPath] Fill resync on segment {}: {}‰ -> {}‰", segment, current,
+                  corrected);
+    data->anim.fill_permille = corrected;
+    // Clearing the direction is what lets start_fill_animation re-arm rather
+    // than treat this as a repeat push; it reads fill_permille as the new start
+    // and rescales the duration to the travel that is actually left.
+    const int target = data->anim.fill_target;
+    data->anim.fill_direction = 0;
+    start_fill_animation(obj, data, direction, target, data->anim.fill_travel_ms);
+}
+
+void pause_fill_animation(lv_obj_t* obj, FilamentPathData* data) {
+    if (!obj || !data || !data->anim.fill_active) {
+        return;
+    }
+    lv_anim_delete(obj, fill_anim_cb);
+    // fill_active and fill_permille survive: the tube stays drawn exactly as far
+    // as the filament actually reaches. Only the direction is cleared, so the
+    // next motion re-arms from here instead of being taken for a repeat push.
+    data->anim.fill_direction = 0;
+    invalidate_async(obj);
+}
+
+void stop_fill_animation(lv_obj_t* obj, FilamentPathData* data) {
+    if (!obj || !data)
+        return;
+    lv_anim_delete(obj, fill_anim_cb);
+    if (data->anim.fill_active) {
+        spdlog::debug("[FilamentPath] Fill animation STOPPED");
+    }
+    data->anim.fill_active = false;
+    data->anim.fill_direction = 0;
+    data->anim.fill_permille = 0;
+    data->anim.fill_travel_ms = 0;
+    data->anim.fill_target = 0;
+    invalidate_async(obj);
+}
+
 void stop_flow_animation(lv_obj_t* obj, FilamentPathData* data) {
     if (!obj || !data)
         return;
@@ -352,6 +495,7 @@ void delete_all_animations(lv_obj_t* obj) {
     lv_anim_delete(obj, error_pulse_anim_cb);
     lv_anim_delete(obj, heat_pulse_anim_cb);
     lv_anim_delete(obj, flow_anim_cb);
+    lv_anim_delete(obj, fill_anim_cb);
 }
 
 } // namespace helix::ui::fpath

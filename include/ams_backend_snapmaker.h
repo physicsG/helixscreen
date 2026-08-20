@@ -110,6 +110,11 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// bar can carry both halves and a mismatched phase is *recognisably*
     /// foreign rather than silently plausible.
     static constexpr int LOAD_PHASE_BASE = 10;
+    /// Offset of the MOVE phase within either space — the one phase of an
+    /// operation during which filament is actually travelling down the tube
+    /// (Feed on a load, Retract on an unload). Home/Select/Heat precede it and
+    /// Purge follows it, and none of those move anything.
+    static constexpr int MOVE_PHASE_OFFSET = 3;
     // Operation step bar. The U1 firmware reports a granular channel_state that
     // classify_channel_state maps to a per-direction step index published via the
     // ams_operation_phase subject, so the step model and its driving index live in
@@ -137,6 +142,13 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     // is PARALLEL, so slot_has_independent_path() is true for all of them and the
     // serial rule never applies. See AmsBackend for why, including the `T{n}`
     // load this backend used to dispatch.
+    /// Only the MOVE phase counts as travel. The coarse action is LOADING from
+    /// the moment the operation starts, which on this firmware is a Home, a lane
+    /// Select and a full nozzle heat before anything moves — several seconds
+    /// during which a travel animation keyed on the action would play out and
+    /// finish before the filament had budged.
+    [[nodiscard]] FeedMotion get_feed_motion() const override;
+
     [[nodiscard]] PathSegment get_filament_segment() const override;
     [[nodiscard]] PathSegment get_slot_filament_segment(int slot_index) const override;
     [[nodiscard]] PathSegment infer_error_segment() const override;

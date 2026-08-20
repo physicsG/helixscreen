@@ -79,6 +79,19 @@ void init_filesystem() {
     ::mkdir("/config", 0755);
     helix::set_asset_root("/");
     helix::Config::get_instance()->init("/config/settings.json");
+
+    // Present as a device that can animate. PlatformCapabilities reads RAM and
+    // core count, and under Emscripten both come back 0 -- so the tier lands on
+    // EMBEDDED and DisplaySettingsManager defaults animations OFF. That silently
+    // disables every lv_anim in the app: the filament fill, the flow particles,
+    // the heat pulse, panel transitions. A browser preview whose whole job is
+    // watching widgets move is the one target where that default is wrong.
+    //
+    // Written as a CONFIG value rather than via set_animations_enabled() because
+    // an explicit setting is exactly what the tier default is documented to
+    // yield to -- this is the same path a user toggling the switch takes, and it
+    // lands before DisplaySettingsManager reads it.
+    helix::Config::get_instance()->set<bool>("/display/animations_enabled", true);
 }
 
 /// Phase 4/6: fonts and images must be registered before globals.xml is parsed

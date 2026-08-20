@@ -511,10 +511,34 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
         ui_filament_path_canvas_set_slot_overlap(canvas, layout.overlap);
     }
 
-    // Map active slot to local index for unit-scoped views
-    int active_slot = info.current_slot;
+    // Map active slot to local index for unit-scoped views.
+    //
+    // current_slot names the slot the operation is ABOUT, which on a system
+    // where one unit SUPPLIES another unit's head is that head — and a head
+    // belongs to unit 0. A unit-scoped view of the supplying unit therefore
+    // subtracted its own offset from a foreign index, landed outside its range
+    // and drew NO active lane at all: on a multiACE swap the ACE page showed an
+    // entirely idle path while its own bay was feeding the nozzle.
+    //
+    // So ask the backend which slot actually holds that filament. The supplying
+    // bay is both the lane the filament physically moves through and the only
+    // one this view can draw. Backends with no such relation answer nullopt and
+    // are completely unaffected.
+    // An operation in flight names its own lane; ask for that first. Mid-swap
+    // the head's seat is cleared, so current_slot names nothing useful exactly
+    // when the animation has the most to show.
+    int operating_slot = backend->operating_slot();
+    if (operating_slot < 0) {
+        operating_slot = info.current_slot;
+        if (operating_slot >= 0) {
+            if (auto supplier = backend->slot_identity_owner_slot(operating_slot)) {
+                operating_slot = *supplier;
+            }
+        }
+    }
+    int active_slot = operating_slot;
     if (unit_index >= 0) {
-        int local_active = info.current_slot - slot_offset;
+        int local_active = operating_slot - slot_offset;
         active_slot = (local_active >= 0 && local_active < slot_count) ? local_active : -1;
     }
     ui_filament_path_canvas_set_active_slot(canvas, active_slot);
@@ -540,6 +564,63 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
     // Set filament and error segments
     PathSegment segment = backend->get_filament_segment();
     ui_filament_path_canvas_set_filament_segment(canvas, static_cast<int>(segment));
+
+    // Distance-proportional load/unload fill. The backend reports segment
+    // ARRIVALS, which on a long bowden is one jump every several seconds with
+    // nothing in between; the fill spans those gaps at the rate the hardware
+    // actually feeds. Direction alone is decided here — the canvas owns the ramp
+    // and ignores a repeat of the direction it is already travelling, which
+    // matters because this runs on every status frame.
+    //
+    // Keyed on get_feed_motion(), NOT on the coarse AmsAction. The action is
+    // LOADING from the instant the operation starts, and a U1 spends the first
+    // several seconds of that homing, selecting a lane and heating the nozzle
+    // with the filament stationary — a ramp started there ran out during "Heat
+    // nozzle" and sat full before "Feed filament" was even reached.
+    //
+    // A firmware that reports its own bowden progress (Happy Hare v4) is the
+    // better source and stays authoritative; only derive the ramp without one.
+    {
+        int direction = 0;
+        switch (backend->get_feed_motion()) {
+        case FeedMotion::LOADING:
+            direction = 1;
+            break;
+        case FeedMotion::UNLOADING:
+            direction = -1;
+            break;
+        case FeedMotion::NONE:
+            break;
+        }
+
+        const bool op_running = (backend->get_current_action() != AmsAction::IDLE &&
+                                 backend->get_current_action() != AmsAction::ERROR);
+
+        if (direction != 0 && backend->get_bowden_progress() < 0) {
+            const FeedKinematics feed = backend->get_feed_kinematics(unit_index);
+            const float seconds = (direction > 0) ? feed.load_seconds() : feed.unload_seconds();
+            // 0 => the backend has no bowden figure; the widget substitutes
+            // its own default travel time.
+            const uint32_t travel_ms =
+                (seconds > 0.0f) ? static_cast<uint32_t>(seconds * 1000.0f) : 0u;
+            // Where this motion STOPS. A swap's retract parks the filament in
+            // the tube rather than returning it, so the endpoint is the
+            // backend's to state, not 0/1000 by assumption.
+            const int target = static_cast<int>(
+                lroundf(LV_CLAMP(backend->feed_motion_end_fraction(), 0.0f, 1.0f) * 1000.0f));
+            ui_filament_path_canvas_set_fill_travel(canvas, direction, target, travel_ms);
+        } else if (op_running) {
+            // Stationary phase (homing, selecting, heating, purging) or the pause
+            // between a swap's halves: HOLD the front. Clearing here dropped the
+            // tube to whatever segment the firmware had confirmed — a flicker to
+            // empty, then a snap once it caught up.
+            ui_filament_path_canvas_set_fill_travel(canvas, 0, 0, 0);
+        } else {
+            // Operation over: drop the overlay and let segment rendering own the
+            // path again.
+            ui_filament_path_canvas_set_fill_progress(canvas, -1);
+        }
+    }
 
     PathSegment error_seg = backend->infer_error_segment();
     ui_filament_path_canvas_set_error_segment(canvas, static_cast<int>(error_seg));

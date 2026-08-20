@@ -615,6 +615,82 @@ class AmsBackend {
     }
 
     /**
+     * @brief Where the CURRENT motion ends, as a fraction of the supply path
+     *
+     * 0 = back at the unit, 1 = at the nozzle. A load ends at 1 and a full
+     * unload at 0 — but a SWAP does not send the filament home. It backs out
+     * only far enough to clear the junction (`swap_retract_length`, typically a
+     * few hundred mm short of the whole bowden) and parks it in the tube,
+     * because the rest of the trip would only have to be re-fed. An animation
+     * that always drains to 0 tells the user the spool was reached when it was
+     * not, and then has to teleport the filament back for the load half.
+     *
+     * Backends that never move filament partway keep the default.
+     */
+    [[nodiscard]] virtual float feed_motion_end_fraction() const {
+        return get_feed_motion() == FeedMotion::LOADING ? 1.0f : 0.0f;
+    }
+
+    /**
+     * @brief How far and how fast this unit moves filament (see FeedKinematics)
+     *
+     * Lets the path canvas fill at the rate the hardware actually feeds, rather
+     * than over a fixed duration. Answer it from whatever the system configures
+     * — a bowden length and a feed rate — and never from a firmware name; a
+     * second system with the same capability must only have to override this.
+     *
+     * Distinct from get_bowden_progress(), which is a firmware-REPORTED position
+     * and always wins when available. This is the input for DERIVING progress
+     * when no such report exists.
+     *
+     * @param unit_index Unit to answer for; units commonly differ (per-unit tube
+     *                   lengths), so callers must not reuse one unit's answer.
+     * @return Kinematics, or a default-constructed value when unknown.
+     */
+    /**
+     * @brief Global slot the IN-FLIGHT operation is acting on, or -1 for none.
+     *
+     * AmsSystemInfo::current_slot names what is *loaded*. During an operation the
+     * slot that matters is the one filament is moving to or from, and those are
+     * not the same thing — mid-swap nothing is loaded at all, so current_slot
+     * stops naming any lane precisely when there is the most to animate.
+     *
+     * Default -1: backends that do not track it keep the current_slot behaviour.
+     */
+    [[nodiscard]] virtual int operating_slot() const {
+        return -1;
+    }
+
+    /**
+     * @brief Is filament in transit right now, and which way (see FeedMotion)
+     *
+     * The companion to get_feed_kinematics(): that says how long a full travel
+     * takes, this says whether one is happening. Together they are enough to
+     * animate the supply path at the rate the hardware actually feeds.
+     *
+     * Default: derived from get_current_action(), which is the best a backend
+     * with no sub-operation detail can do. A backend that resolves its operation
+     * into phases SHOULD override this — the coarse action is true for the whole
+     * operation including the homing and heating that precede any movement, so
+     * using it makes a correctly-timed animation start far too early.
+     */
+    [[nodiscard]] virtual FeedMotion get_feed_motion() const {
+        switch (get_current_action()) {
+        case AmsAction::LOADING:
+            return FeedMotion::LOADING;
+        case AmsAction::UNLOADING:
+            return FeedMotion::UNLOADING;
+        default:
+            return FeedMotion::NONE;
+        }
+    }
+
+    [[nodiscard]] virtual FeedKinematics get_feed_kinematics(int unit_index) const {
+        (void)unit_index;
+        return {};
+    }
+
+    /**
      * @brief Check if a specific slot has a prep/pre-gate sensor
      *
      * Returns whether the given slot has a prep sensor that can detect
