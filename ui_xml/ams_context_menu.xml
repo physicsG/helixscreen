@@ -116,9 +116,8 @@
                (multiACE: an ACE-fed U1 head). Replaces the edit actions above
                rather than sitting beside them — see AmsContextMenu::on_created. -->
           <ui_button name="btn_open_source"
-                     height="#button_height_sm" icon="arrow_right" text="Open in ACE"
-                     translation_tag="Open in ACE" variant="ghost" clickable="true"
-                     style_flex_main_place="start">
+                     height="#button_height_sm" icon="arrow_right" text="Open in ACE" translation_tag="Open in ACE"
+                     variant="ghost" clickable="true" style_flex_main_place="start">
             <bind_flag_if_eq subject="ams_slot_source_external" flag="hidden" ref_value="0"/>
             <event_cb trigger="clicked" callback="ams_context_open_source_cb"/>
           </ui_button>
