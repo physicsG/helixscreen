@@ -29,12 +29,12 @@ Stock HelixScreen models the U1 as a four-head parallel toolchanger. This fork a
 separate units with their own slot counts, and a filament path that traces which
 spool actually feeds which tool.
 
-<img src="docs/images/u1/ams-overview.png" alt="Multi-filament overview: SnapSwap and ACE 2 Pro" width="480"/>
+<img src="docs/images/u1/ams-overview.png" alt="Multi-filament overview: SnapSwap and ACE 2 Pro" width="800"/>
 
 Per-unit drying comes with it — live temperature and humidity, material presets, and
 auto-dry with its own thresholds:
 
-<img src="docs/images/u1/filament-environment.png" alt="ACE 2 Pro drying controls" width="480"/>
+<img src="docs/images/u1/filament-environment.png" alt="ACE 2 Pro drying controls" width="800"/>
 
 ### LAN pairing for Snapmaker Orca and the Snapmaker App
 
@@ -44,7 +44,7 @@ Orca and the phone app hang at *"requesting connection"* until they time out.
 
 This fork answers it:
 
-<img src="docs/images/u1/pairing-prompt.png" alt="Connection Request prompt" width="480"/>
+<img src="docs/images/u1/pairing-prompt.png" alt="Connection Request prompt" width="800"/>
 
 Deny goes on the wire too, so a refused client fails immediately instead of waiting.
 Details in [`docs/devel/LAN_CLIENT_AUTHORIZATION.md`](docs/devel/LAN_CLIENT_AUTHORIZATION.md).
