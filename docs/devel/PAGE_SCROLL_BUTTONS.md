@@ -104,7 +104,7 @@ separated by a `#space_2xl` gap, in a `#button_height`-wide column:
 The cut is a **subtree** cut, not a "is this tile scrollable" test, and that
 distinction is load-bearing. 37 of the 40 `panel_widget_*.xml` roots already set
 `scrollable="false"`, and two more inherit the clear from `ui_card`
-(`src/ui/ui_card.cpp:53`). So testing the tile root would find almost nothing -
+(`src/ui/ui_card.cpp:60`). So testing the tile root would find almost nothing -
 the walk was sailing straight through those innocent-looking roots and
 attaching to whatever was scrollable inside. Marking the root and returning
 there is what actually stops it.

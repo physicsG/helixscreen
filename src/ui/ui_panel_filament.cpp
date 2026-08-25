@@ -406,6 +406,12 @@ void FilamentPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     // Find status icon for dynamic updates
     status_icon_ = lv_obj_find_by_name(panel_, "status_icon");
 
+    // These are fresh widgets with no status on them, and this panel instance
+    // outlives its widget tree (hot reload, panel rebuild). Forget which arm
+    // update_status() last rendered so the constant-text arms repaint instead of
+    // early-returning against the tree that is already gone.
+    last_status_branch_ = StatusBranch::None;
+
     // Find temperature labels for color updates
     nozzle_current_label_ = lv_obj_find_by_name(panel_, "nozzle_current_temp");
     bed_current_label_ = lv_obj_find_by_name(panel_, "bed_current_temp");
@@ -597,6 +603,15 @@ void FilamentPanel::update_status() {
 
     // First check if nozzle is ready for extrusion (highest priority for filament operations)
     if (helix::ui::temperature::is_extrusion_safe(nozzle_current_, min_extrude_temp_)) {
+        // Constant text: once rendered, re-rendering it cannot change anything
+        // on screen, and this runs on every chamber temperature tick. See
+        // StatusBranch. A printer whose min_extrude_temp is set low enough to
+        // allow cold extrusion sits in this arm permanently, so without the
+        // early-out it is the steady state, not a transient.
+        if (last_status_branch_ == StatusBranch::Ready) {
+            return;
+        }
+        last_status_branch_ = StatusBranch::Ready;
         // Hot enough for any extruder move — load, unload and purge all sit on
         // this panel, so the wording names the state rather than one of them.
         status_msg = lv_tr("Ready for filament operations");
@@ -609,6 +624,7 @@ void FilamentPanel::update_status() {
         std::snprintf(status_buf_, sizeof(status_buf_), lv_tr("Heating: %d / %d°C"),
                       nozzle_current_, nozzle_target_);
         lv_subject_copy_string(&status_subject_, status_buf_);
+        last_status_branch_ = StatusBranch::NozzleHeating;
         update_status_icon("flash", "warning");
         return; // Already updated, exit early
     } else if (chamber_target_ > 0 && chamber_current_ < deci_to_degrees(chamber_target_) - 5) {
@@ -616,6 +632,7 @@ void FilamentPanel::update_status() {
         std::snprintf(status_buf_, sizeof(status_buf_), lv_tr("Chamber heating to %d°C..."),
                       deci_to_degrees(chamber_target_));
         lv_subject_copy_string(&status_subject_, status_buf_);
+        last_status_branch_ = StatusBranch::ChamberHeating;
         update_status_icon("fire", "warning");
         return;
     } else if (chamber_target_ > 0 && chamber_current_ >= deci_to_degrees(chamber_target_) - 5 &&
@@ -624,10 +641,16 @@ void FilamentPanel::update_status() {
         std::snprintf(status_buf_, sizeof(status_buf_), lv_tr("Chamber at %d°C"),
                       deci_to_degrees(chamber_target_));
         lv_subject_copy_string(&status_subject_, status_buf_);
+        last_status_branch_ = StatusBranch::ChamberAtTarget;
         update_status_icon("check", "success");
         return;
     } else {
-        // Cold - needs material selection
+        // Cold - needs material selection. Constant text, same early-out as the
+        // Ready arm above: this is the steady state of an idle printer.
+        if (last_status_branch_ == StatusBranch::Cold) {
+            return;
+        }
+        last_status_branch_ = StatusBranch::Cold;
         status_msg = lv_tr("Select material to begin");
         update_status_icon("cooldown", "secondary");
     }
@@ -2655,6 +2678,10 @@ void FilamentPanel::execute_load() {
         caps.needs_unload_before_load = backend->needs_unload_before_load(sys, target_slot);
         caps.change_tool_completes_load = backend->change_tool_completes_load(target_slot);
         caps.is_tool_changer = backend->get_type() == AmsType::TOOL_CHANGER;
+        // Distinct from !requires_slot_selection_for_load(): plan_load() needs to
+        // tell "bypass is suppressing the lane tier" apart from "this backend
+        // never wanted a slot", because a named lane wants opposite treatment.
+        caps.bypass_active = backend->is_bypass_active();
     }
 
     const auto& info = StandardMacros::instance().get(StandardMacroSlot::LoadFilament);
@@ -2704,6 +2731,15 @@ void FilamentPanel::execute_load() {
             // but say so, the user did press the button.
             spdlog::info("[{}] Selected tool is already mounted — refusing load", get_name());
             NOTIFY_INFO(lv_tr("That tool is already loaded"));
+            break;
+        case helix::ui::FilamentRefusal::BypassLoaded:
+            // The bypass spool is still across the toolhead switch. That switch
+            // sits above the cutter and reads the upstream piece, so no unload
+            // gcode can clear it — only the user's hand (36205eb27). Feeding a
+            // lane into it would jam the hotend, so say what to do instead.
+            spdlog::info("[{}] Bypass spool still at the toolhead — refusing lane load",
+                         get_name());
+            NOTIFY_INFO(lv_tr("Remove the bypass spool from the toolhead first"));
             break;
         case helix::ui::FilamentRefusal::SelectSlot:
         default:

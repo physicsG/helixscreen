@@ -79,6 +79,7 @@ Klipper SHAPER_CALIBRATE
 | `tests/unit/test_input_shaper_calibrator.cpp` | Calibrator: state machine, callbacks, validation, error handling |
 | `tests/unit/test_input_shaper_cache.cpp` | Cache: save/load round-trip, TTL expiry, printer ID matching |
 | `tests/unit/test_input_shaper_panel_integration.cpp` | Panel integration tests |
+| `tests/unit/test_input_shaper_panel_progress_display.cpp` | Progress display across phases: determinate bar while sweeping, spinner + elapsed-seconds label while analyzing, bar restored on complete |
 | `tests/unit/test_input_shaper_chart.cpp` | Chart-specific integration tests |
 | `tests/unit/test_moonraker_api_input_shaper.cpp` | Moonraker API shaper endpoints |
 | `tests/unit/test_pid_calibrate_collector.cpp` | PID calibration data collection |
@@ -147,7 +148,7 @@ A custom LVGL widget for displaying frequency domain data from accelerometer mea
 ui_frequency_response_chart_t* ui_frequency_response_chart_create(lv_obj_t* parent);
 void ui_frequency_response_chart_destroy(ui_frequency_response_chart_t* chart);
 
-// Series management (max 8 series)
+// Series management (max 13 series)
 int  ui_frequency_response_chart_add_series(chart, "name", color);
 void ui_frequency_response_chart_remove_series(chart, series_id);
 void ui_frequency_response_chart_show_series(chart, series_id, visible);
@@ -194,7 +195,7 @@ struct ui_frequency_response_chart_t {
     size_t max_points;
     bool chart_mode;
     float freq_min/max, amp_min/max;
-    FrequencySeriesData series[8]; // Up to 8 series
+    FrequencySeriesData series[MAX_SERIES]; // Up to 13 series
 };
 ```
 
@@ -281,15 +282,23 @@ User taps chip -> input_shaper_chip_x_2_cb (XML event callback)
 
 ### Shaper Overlay Colors
 
-Each shaper type has a distinct color for chart lines and legend dots:
+Colors come from the 11-entry `SHAPER_OVERLAY_COLORS[]` array, shared by chart lines and legend dots. Assignment is positional — each shaper takes the color at its column index in the CSV (`index % 11`), so an 11-shaper Kalico CSV never reuses a color:
 
-| Index | Shaper | Color (hex) | Visual |
-|-------|--------|-------------|--------|
+| Index | Shaper (stock Klipper) | Color (hex) | Visual |
+|-------|------------------------|-------------|--------|
 | 0 | ZV | `0x4FC3F7` | Light blue |
 | 1 | MZV | `0x66BB6A` | Green |
 | 2 | EI | `0xFFA726` | Orange |
 | 3 | 2HUMP_EI | `0xAB47BC` | Purple |
 | 4 | 3HUMP_EI | `0xEF5350` | Red |
+| 5 | — | `0x26C6DA` | Cyan |
+| 6 | — | `0xFFEE58` | Yellow |
+| 7 | — | `0xEC407A` | Pink |
+| 8 | — | `0x7E57C2` | Deep purple |
+| 9 | — | `0x8D6E63` | Brown |
+| 10 | — | `0x78909C` | Blue-grey |
+
+The Shaper column above is the stock-Klipper mapping (five columns, indices 0-4). Kalico lists its smooth shapers (`smooth_zv` ... `smooth_si`) ahead of the discrete ones, so on a Kalico CSV the names shift down the palette while every column still gets a distinct color.
 
 ### Legend
 
@@ -306,13 +315,13 @@ When a calibration run starts, the panel snapshots the currently live `[input_sh
 
 Per axis, when a before-value exists and the result is valid:
 
-- **Was / delta rows** — `is_{axis}_was_text` ("ei @ 69.8 Hz") and `is_{axis}_delta_text` ("ei @ 69.8 Hz -> mzv @ 53.8 Hz"), gated by `is_{axis}_has_delta`.
+- **Delta row** — a single `is_{axis}_delta_text` string ("ei @ 69.8 Hz -> mzv @ 53.8 Hz"), gated by `is_{axis}_has_delta`. The live-before value appears only inside this string (`populate_axis_delta()` formats both halves); there is no separate "was" subject.
 - **Verdict row** — "Old setting on today's data: N% residual - now: M%": the old setting's transfer curve re-scored against the freshly measured PSD next to the new fit's residual (`residual_vibration_percent()`, which reproduces klippy's `_estimate_remaining_vibrations()` — thresholded at `psd.max()/20`, shaped spectrum `H*psd` linear — so the verdict is comparable to the vibrations% the comparison table shows). The new side prefers the curve the firmware fitted into the CSV column (the parser shapes it by the raw PSD, so the verdict divides that back out bin by bin); both sides hide via `is_{axis}_has_verdict` when the PSD is missing or a shaper type has no ported taps.
 - **Chart overlay** — the old setting's curve is added as a muted series (see `draw_muted_series_cb` above) so its notch is comparable against the fresh fit on the same spectrum.
 
 ### Firmware overwrite warning (Creality forks)
 
-Some klippy forks (Creality's K1C build) overwrite the staged X result with the Y-axis values at the end of a Y-axis run and announce it with a console line starting `copy_TestAxis_y_to_x Recommended shaper_type_x = ...`. The collector's marker matcher runs BEFORE the recommendation parser — the marker embeds a real `Recommended shaper_type_x` wording that would otherwise clobber the Y run's own recommendation — and sets `InputShaperResult::x_overwritten_by_firmware` on the Y result. The panel carries that onto the X results card (`is_x_fw_overwrite_warn`) with a warning row: the measured X recommendation shown on screen was discarded by the firmware and the saved config holds Y's values for both axes.
+Some klippy forks (Creality's K1C build) overwrite the staged X result with the Y-axis values at the end of a Y-axis run and announce it with a console line starting `copy_TestAxis_y_to_x Recommended shaper_type_x = ...`. The collector's marker matcher runs BEFORE the recommendation parser — the marker embeds a real `Recommended shaper_type_x` wording that would otherwise clobber the Y run's own recommendation — and sets `InputShaperResult::x_overwritten_by_firmware` on the Y result. The panel carries that onto the X results card (`fw_overwrite_warn_x`, gated on `is_x_fw_overwrite_warn`) with a warning row: the measured X recommendation shown on screen was discarded by the firmware and the saved config holds Y's values for both axes. A Y-only run has no X card to carry it, so the same warning also renders on the Y card (`fw_overwrite_warn_y`, gated `is_x_fw_overwrite_warn eq 1 and is_results_has_x eq 0`).
 
 The transfer math lives in `src/calibration/shaper_response.cpp` and reproduces the klippy shaper tap definitions plus the damping-aware `_estimate_shaper()` (pessimized over Klipper's `TEST_DAMPING_RATIOS`), which is what the firmware writes into a calibration CSV's fitted columns. `tests/unit/test_shaper_response.cpp` pins it against a real K1C CSV column so the port cannot silently drift from firmware output.
 
@@ -538,7 +547,7 @@ Set `INPUT_SHAPER_AUTO_START=1` to auto-start X axis calibration when the panel 
 
 ### Adding a New Shaper Type
 
-No code changes needed. The CSV parser auto-discovers shaper columns from the header. The UI dynamically creates chip toggles and comparison table rows for up to 5 shapers (configured via `MAX_SHAPERS`). To support more than 5, increase `MAX_SHAPERS` in `ui_panel_input_shaper.h` and add corresponding chip XML elements and callback registrations.
+The CSV parser auto-discovers shaper columns from the header, and the chip toggles and comparison table rows are pre-built for up to 11 shapers (`MAX_SHAPERS` in `ui_panel_input_shaper.h`) — stock Klipper's five plus Kalico's six smooth shapers fit with no code changes. To support more than 11, increase `MAX_SHAPERS` and add the corresponding chip XML elements and callback registrations. The exception is client-side re-scoring: a genuinely new shaper type still needs a new taps function in `shaper_response.h` (see "Adding Support for New Shaper Types" above), or its verdict row and live-before overlays stay hidden.
 
 ### Adding a New Calibration Metric
 
@@ -579,6 +588,7 @@ Run input shaper tests:
 
 Test tags:
 - `[shaper_csv]` -- CSV parser
+- `[shaper_response]` -- Client-side transfer math and residual scoring (pinned against firmware CSV output)
 - `[frequency_response_chart]` -- Chart widget lifecycle, series, data, downsampling, platform tiers
 - `[calibrator]` -- InputShaperCalibrator state machine
 - `[input_shaper]` -- Combined input shaper tests

@@ -222,6 +222,9 @@
     {
       "id": "flashforge_ad5m_pro",
       "name": "FlashForge Adventurer 5M Pro",
+      "aliases": [
+        "FlashForge AD5M Pro"
+      ],
       "manufacturer": "FlashForge",
       "image": "flashforge-adventurer-5m-pro.png",
       "preset": "ad5m_pro",
@@ -624,6 +627,9 @@
     {
       "id": "voron_0_1",
       "name": "Voron 0.2",
+      "aliases": [
+        "Voron 0.1"
+      ],
       "manufacturer": "Voron",
       "image": "voron-v0.png",
       "heuristics": [
@@ -1388,7 +1394,13 @@
           "confidence": 55,
           "reason": "Build volume ~350mm (K2 Plus size)"
         }
-      ]
+      ],
+      "_print_start_default_phases_comment": "Measured on a K2 Plus 2026-08-18 (three captured prints): three homing rail rounds ~15s; nozzle wipe plus both BOX_NOZZLE_CLEAN passes ~60s; the bed-mesh toggle is optional (emit_when_disabled: false) and its check-passed validation runs ~6s - a failed check re-meshes (67-pt adaptive) and the prediction history learns that after the first such print. Heating is omitted - the thermal model owns those.",
+      "print_start_default_phases": {
+        "HOMING": 15,
+        "CLEANING": 60,
+        "BED_MESH": 10
+      }
     },
     {
       "id": "creality_k2_pro",
@@ -1531,7 +1543,13 @@
           "confidence": 55,
           "reason": "Build volume ~300mm (K2 Pro size)"
         }
-      ]
+      ],
+      "_print_start_default_phases_comment": "Measured on a K2 Plus 2026-08-18 (three captured prints): three homing rail rounds ~15s; nozzle wipe plus both BOX_NOZZLE_CLEAN passes ~60s; the bed-mesh toggle is optional (emit_when_disabled: false) and its check-passed validation runs ~6s - a failed check re-meshes (67-pt adaptive) and the prediction history learns that after the first such print. Heating is omitted - the thermal model owns those.",
+      "print_start_default_phases": {
+        "HOMING": 15,
+        "CLEANING": 60,
+        "BED_MESH": 10
+      }
     },
     {
       "id": "creality_k1c",
@@ -1542,20 +1560,23 @@
       "probe_type": "prtouch_v2",
       "preset": "k1c",
       "print_start_profile": "creality_k1",
+      "_print_start_default_phases_comment": "Measured on a K1C 2026-08-19 (flowrate print, full prep chain): homing via CX_ROUGH_G28 ran 60s vs the 30s generic default; the nozzle wipe (CLEAR_NOZZLE_QUICK rounds) ran ~85s; a check-passed mesh (4-corner validation + 25-point sweep at 5.5s/point) ran 123s. Heating phases are omitted - the thermal model owns those.",
+      "print_start_default_phases": {
+        "HOMING": 60,
+        "CLEANING": 85,
+        "BED_MESH": 125
+      },
       "pre_print_options": {
         "macro_name": "START_PRINT",
-        "setup_gcode": "PRINT_PREPARED",
         "options": [
           {
             "id": "bed_mesh",
             "category": "mechanical",
             "order": 10,
             "default_enabled": true,
-            "strategy": "macro_param",
-            "param_name": "PREPARE",
-            "enable_value": "0",
-            "skip_value": "1",
-            "default_value": "0"
+            "strategy": "pre_start_gcode",
+            "gcode_template": "CX_ROUGH_G28{?ext} EXTRUDER_TEMP={extruder_temp}{/?} BED_TEMP={bed_temp}\nCX_NOZZLE_CLEAR\nACCURATE_G28\nBED_MESH_CALIBRATE\nPRINT_PREPARED",
+            "emit_when_disabled": false
           }
         ]
       },
@@ -1613,20 +1634,23 @@
       "probe_type": "prtouch_v2",
       "preset": "k1c",
       "print_start_profile": "creality_k1",
+      "_print_start_default_phases_comment": "Measured on a K1C 2026-08-19 (flowrate print, full prep chain): homing via CX_ROUGH_G28 ran 60s vs the 30s generic default; the nozzle wipe (CLEAR_NOZZLE_QUICK rounds) ran ~85s; a check-passed mesh (4-corner validation + 25-point sweep at 5.5s/point) ran 123s. Heating phases are omitted - the thermal model owns those.",
+      "print_start_default_phases": {
+        "HOMING": 60,
+        "CLEANING": 85,
+        "BED_MESH": 125
+      },
       "pre_print_options": {
         "macro_name": "START_PRINT",
-        "setup_gcode": "PRINT_PREPARED",
         "options": [
           {
             "id": "bed_mesh",
             "category": "mechanical",
             "order": 10,
             "default_enabled": true,
-            "strategy": "macro_param",
-            "param_name": "PREPARE",
-            "enable_value": "0",
-            "skip_value": "1",
-            "default_value": "0"
+            "strategy": "pre_start_gcode",
+            "gcode_template": "CX_ROUGH_G28{?ext} EXTRUDER_TEMP={extruder_temp}{/?} BED_TEMP={bed_temp}\nCX_NOZZLE_CLEAR\nACCURATE_G28\nBED_MESH_CALIBRATE\nPRINT_PREPARED",
+            "emit_when_disabled": false
           }
         ]
       },
@@ -5930,6 +5954,9 @@
     {
       "id": "zerog_nebula_255",
       "name": "Zero G Mercury One.1 Nebula",
+      "aliases": [
+        "Zero G Nebula 255"
+      ],
       "manufacturer": "Zero G",
       "image": "zerog-nebula.png",
       "heuristics": [
@@ -5976,6 +6003,9 @@
     {
       "id": "zerog_nebula_370",
       "name": "Zero G Mercury One.1 Plus Nebula",
+      "aliases": [
+        "Zero G Nebula 370"
+      ],
       "manufacturer": "Zero G",
       "image": "zerog-nebula-370.png",
       "heuristics": [
@@ -6016,6 +6046,52 @@
           "pattern": "chamber",
           "confidence": 60,
           "reason": "Chamber temperature sensor (enclosed Nebula)"
+        }
+      ]
+    },
+    {
+      "id": "duender_medusahc",
+      "name": "Duender (MedusaHC)",
+      "manufacturer": "Irbis3D",
+      "image": "generic-corexy.png",
+      "notes": "Duender CoreXY (Irbis3D) fitted with the MedusaHC hotend changer. MedusaHC is klipper-toolchanger plus its own pin_watch extra, so the AMS resolves to Tool Changer and AmsBackendToolChanger drives it. Scored on pin_watch and hostname ONLY: toolchanger/tool_count/corexy describe any multi-tool CoreXY and would claim machines that are not this one. The bare-Duender hostname deliberately does NOT appear here, or the 'duender' entry could never outscore this one.",
+      "heuristics": [
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "pin_watch",
+          "confidence": 92,
+          "reason": "MedusaHC ships its own pin_watch.py extra (not a stock Klipper module)"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "medusa",
+          "confidence": 85,
+          "reason": "Hostname contains 'medusa'"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "toolchanger",
+          "confidence": 20,
+          "reason": "Corroboration only: klipper-toolchanger drives the swap, but every toolchanger CoreXY has this. pin_watch is the discriminator"
+        }
+      ]
+    },
+    {
+      "id": "duender",
+      "name": "Duender",
+      "manufacturer": "Irbis3D",
+      "image": "generic-corexy.png",
+      "notes": "Ender-3 to CoreXY conversion (Irbis3D/Duender). The project ships no Klipper config, so a bare Duender has nothing in printer.objects.list that distinguishes it from any other CoreXY. Deliberately carries no object/kinematics heuristics: a 'corexy' match here would compete with the Voron and RatRig entries on every one of their machines. Hostname only, plus the wizard's manual pick.",
+      "heuristics": [
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "duender",
+          "confidence": 80,
+          "reason": "Hostname contains 'duender'"
         }
       ]
     }

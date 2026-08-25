@@ -16,7 +16,7 @@
 #   make build    # Clean build from scratch
 #   make help     # Show all available targets
 #
-# See: DEVELOPMENT.md for complete build instructions
+# See: docs/devel/DEVELOPMENT.md for complete build instructions
 
 # Use bash for all shell commands (needed for [[ ]] and read -n)
 SHELL := /bin/bash
@@ -1084,7 +1084,7 @@ MOCK_OBJS := $(patsubst $(TEST_MOCK_DIR)/%.cpp,$(OBJ_DIR)/tests/mocks/%.o,$(MOCK
 # Default target
 .DEFAULT_GOAL := all
 
-.PHONY: all build clean run test tests test-integration test-cards test-print-select test-size-content demo compile_commands compile_commands_full libhv-build apply-patches generate-fonts validate-fonts regen-fonts update-mdi-cache verify-mdi-codepoints help check-deps install-deps venv-setup icon format format-staged screenshots tools moonraker-inspector strict quality setup translations symbols strip dev install regen-filaments
+.PHONY: all build clean run test tests test-integration test-cards test-print-select test-size-content demo compile_commands compile_commands_full libhv-build apply-patches generate-fonts validate-fonts regen-fonts regen-doc-links check-doc-links update-mdi-cache verify-mdi-codepoints help check-deps install-deps venv-setup icon format format-staged screenshots tools moonraker-inspector strict quality setup translations symbols strip dev install regen-filaments
 
 # Fast development build: -O0 skips optimization passes (~2x faster compilation)
 # Library code still builds at -O2 (via SUBMODULE_CFLAGS) since it rarely changes
@@ -1095,9 +1095,12 @@ dev:
 setup:
 	@git config core.hooksPath .githooks
 	@git config commit.template .githooks/commit-template
+	@git config merge.recall-stats.name "recall lesson-stats union merge"
+	@git config merge.recall-stats.driver "python3 scripts/recall_stats_merge.py %O %A %B"
 	@echo "✓ Git configured:"
 	@echo "  - Pre-commit hook enabled (.githooks/)"
 	@echo "  - Commit template enabled (.githooks/commit-template)"
+	@echo "  - Lesson-stats merge driver enabled (.claude-recall/*.json)"
 
 # Help target - shows common commands, references topic-specific help
 help:
@@ -1128,6 +1131,7 @@ help:
 	echo "  $${G}moonraker-inspector$${X} - Query Moonraker printer metadata"; \
 	echo "  $${G}validate-fonts$${X}    - Check all icons are in compiled fonts"; \
 	echo "  $${G}regen-fonts$${X}       - Regenerate MDI icon fonts"; \
+	echo "  $${G}regen-doc-links$${X}   - Relink the architecture guide's file citations"; \
 	echo "  $${G}quality$${X}           - Run all quality checks"; \
 	echo "  $${G}icon$${X}              - Generate app icon from logo"; \
 	echo ""; \

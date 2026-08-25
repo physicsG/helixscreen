@@ -56,6 +56,16 @@ helix-screen ctl                      # no command → also drops into the REPL
 > shipped devices exclude it entirely (no code, no overhead). A plain `make -j`
 > builds it; to put it in a device dev image, build with
 > `make PLATFORM_TARGET=<t> ENABLE_REMOTE_CONTROL=yes`.
+>
+> **The matching deploy turns it on for you.** The build flag alone is only half
+> the story: the server still listens only under `--remote`, and the init scripts
+> exec the launcher with no arguments. The link rule records the choice in
+> `build/<platform>/bin/.build-features`, and every `make deploy-*` reads it and
+> sets `HELIX_REMOTE_CONTROL=1` in the device's `helixscreen.env` before starting
+> the app — so a device built with `ENABLE_REMOTE_CONTROL=yes` is reachable with
+> `ctl` as soon as the deploy finishes. `helixscreen.env` is excluded from every
+> deploy, so the setting survives redeploys; put `HELIX_REMOTE_CONTROL=0` there to
+> opt back out and it will be left alone.
 
 ### Machine-readable output — `--json`
 
@@ -779,8 +789,8 @@ transitions never animate to begin with — see "Golden corpus scope" in
 on. Wait for a transition to finish (or don't fight it — freeze right after a
 `navigate`/`click` rather than while one is still resolving) before freezing.
 
-See `docs/devel/specs/2026-07-25-helixctl-ui-test-harness-design.md`
-§ "Determinism model" for the full design rationale.
+See "Golden corpus scope" in `UI_TESTING.md` for the full determinism
+rationale.
 
 #### `screenshot --stable` / `--target` — the frame-hash gate
 
@@ -860,8 +870,9 @@ controls > quit
 ```
 
 Tab completion covers commands, subject names, panels and scenarios — and, for
-any command that takes a target (`cd`, `ls`, `click`, `focus`, `text`, `geom`,
-`set_value`, `scroll`, `resolve`), the **widget names in the current cwd**.
+any command that takes a target (`cd`, `ls`, `click`, `focus`, `text`,
+`set_text`, `state`, `geom`, `set_value`, `scroll`, `resolve`), the **widget
+names in the current cwd**.
 Those are re-read on every keypress rather than cached: the tree changes under
 the REPL constantly, and a cache would offer widgets that have left the screen.
 

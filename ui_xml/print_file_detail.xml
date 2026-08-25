@@ -30,31 +30,17 @@
         <!-- reactive updates when user selects different files.              -->
         <ui_card name="detail_card"
                  width="100%" flex_grow="1" style_radius="#border_radius" style_pad_all="0" style_clip_corner="true">
-          <!-- Pre-rendered gradient background (source updated by C++ on theme switch) -->
-          <!-- Hidden only in 3D mode (value=1) so the 3D viewer gets a clean black -->
-          <!-- background; shown behind the 2D viewer (mode=2) and thumbnail (mode=0). -->
-          <ui_gradient_canvas name="gradient_bg" width="100%" height="100%">
-            <bind_flag_if_eq subject="detail_gcode_viewer_mode" flag="hidden" ref_value="1"/>
-          </ui_gradient_canvas>
-          <!-- G-code viewer, shown whenever the viewer is active (mode 1=3D or 2=2D); -->
-          <!-- hidden only in thumbnail mode (0). -->
-          <gcode_viewer name="detail_gcode_viewer" width="100%" height="100%">
-            <bind_flag_if_eq subject="detail_gcode_viewer_mode" flag="hidden" ref_value="0"/>
-          </gcode_viewer>
-          <!-- Thumbnail with reactive binding - stays on top of the viewer
-               (higher z-order) until the viewer renders its first frame, then
-               hides to reveal the rendered preview. -->
-          <lv_image name="detail_thumbnail"
-                    width="100%" height="100%" bind_src="selected_detail_thumbnail" align="center" inner_align="contain"
-                    style_translate_y="#preview_offset_y">
-            <bind_flag_if_eq subject="detail_viewer_first_frame" flag="hidden" ref_value="1"/>
-          </lv_image>
-          <!-- Rotate hint icon (shown in 3D mode only) -->
-          <lv_label name="detail_rotate_hint"
-                    text="#icon_rotate_3d" style_text_font="mdi_icons_24" style_text_color="#text_muted"
-                    style_text_opa="180" align="top_right" style_translate_x="-12" style_translate_y="#space_md">
-            <bind_flag_if_not_eq subject="detail_gcode_viewer_mode" flag="hidden" ref_value="1"/>
-          </lv_label>
+          <!-- Shared preview stack (thumbnail / 2D / 3D + rotate hint) - the same
+               component print status uses, see components/preview_stack.xml.
+               The thumbnail stays on top of the viewer until the viewer renders its
+               first frame, so its hide condition keys off detail_viewer_first_frame
+               rather than the render mode; print status swaps on mode instead. -->
+          <preview_stack name="detail_preview_clear_area"
+                         gradient_name="gradient_bg" viewer_name="detail_gcode_viewer" thumbnail_name="detail_thumbnail"
+                         hint_name="detail_rotate_hint" thumbnail_src="selected_detail_thumbnail"
+                         thumbnail_offset_y="#preview_offset_y" gradient_hidden="detail_gcode_viewer_mode eq 1"
+                         viewer_hidden="detail_gcode_viewer_mode eq 0" thumbnail_hidden="detail_viewer_first_frame eq 1"
+                         hint_hidden="detail_gcode_viewer_mode ne 1"/>
           <!-- Loading spinner overlay - shown while G-code is downloading/parsing -->
           <lv_obj name="detail_loading_overlay"
                   width="100%" height="100%" align="center" style_bg_opa="120" style_bg_color="0x000000"
@@ -77,10 +63,11 @@
                cut off at the clip — 16px gives 4px breathing room above the 12px
                font on micro. -->
             <lv_obj name="detail_metadata_overlay"
-                    width="100%" height="content" style_bg_opa="160" style_radius="#border_radius"
-                    style_pad_left="#space_sm" style_pad_right="#space_sm" style_pad_top="16"
-                    style_pad_bottom="#space_sm" style_pad_gap="#space_xs" style_translate_y="-12" flex_flow="column"
-                    scrollable="false">
+                    width="100%" height="content" style_pad_top="16" style_pad_bottom="#space_sm"
+                    style_translate_y="-12" flex_flow="column" scrollable="false">
+              <!-- Translucency, radius, side padding and row gap come from the
+                   shared style - same strip as print status, different placement. -->
+              <style name="styles.metadata_strip"/>
               <!-- Filename with reactive binding - scrolls if too long for single line -->
               <!-- Uses selected_display_filename (without .gcode extension) for cleaner UI -->
               <text_body name="detail_filename_label"

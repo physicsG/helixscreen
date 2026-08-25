@@ -353,8 +353,16 @@ class GCodeViewerState {
     uint32_t watchdog_kicks_{0};         ///< Diagnostic counter (cumulative)
     uint32_t watchdog_last_kick_log_ms_{0}; ///< Rate-limit kick warns to ~one per print phase
 
-    /// Content offset (stored to apply when 2D renderer is lazily created)
+    /// Content offset (stored to apply when 2D renderer is lazily created).
+    /// Derived — recomputed each draw from bottom_occluder_ and the active
+    /// renderer's fitted content height; never set directly by callers.
     float content_offset_y_percent_{0.0f};
+
+    /// Widget covering the bottom of this viewer (the translucent metadata
+    /// strip), or null. Measured live rather than stored as a fraction so the
+    /// offset tracks breakpoints, orientation, and the strip growing at runtime.
+    /// Cleared by the occluder's own LV_EVENT_DELETE, so it can never dangle.
+    lv_obj_t* bottom_occluder_{nullptr};
 
     /// SSAO enabled at init (from HELIX_SSAO env var, applied when 2D renderer is created)
     bool ssao_enabled_at_init_{false};
@@ -441,6 +449,9 @@ static std::vector<lv_obj_t*>& active_viewers() {
 static gcode_viewer_state_t* get_state(lv_obj_t* obj) {
     return static_cast<gcode_viewer_state_t*>(lv_obj_get_user_data(obj));
 }
+
+static void gcode_viewer_refresh_content_offset(gcode_viewer_state_t* st, lv_obj_t* obj,
+                                                int canvas_height);
 
 // Helper: Check if viewer has any G-code data (full file or streaming)
 static bool has_gcode_data(const gcode_viewer_state_t* st) {
@@ -605,11 +616,6 @@ static void gcode_viewer_draw_cb(lv_event_t* e) {
 
             apply_2d_renderer_colors(st);
 
-            // Apply any stored content offset
-            if (st->content_offset_y_percent_ != 0.0f) {
-                st->layer_renderer_2d_->set_content_offset_y(st->content_offset_y_percent_);
-            }
-
             // Apply SSAO setting from env var or prior API call
             if (st->ssao_enabled_at_init_) {
                 st->layer_renderer_2d_->set_ssao_enabled(true);
@@ -629,6 +635,11 @@ static void gcode_viewer_draw_cb(lv_event_t* e) {
             current_layer = std::max(0, max_layer);
         }
         st->layer_renderer_2d_->set_current_layer(current_layer);
+
+        // Re-derive the vertical shift from the live metadata-strip overlap and
+        // the fit this renderer settled on. Cheap, and doing it here is what
+        // keeps the framing right across relayout without the panel repushing.
+        gcode_viewer_refresh_content_offset(st, obj, lv_area_get_height(&widget_coords));
 
         // Render 2D layer view
         st->layer_renderer_2d_->render(layer, &widget_coords);
@@ -699,6 +710,7 @@ static void gcode_viewer_draw_cb(lv_event_t* e) {
         if (!st->gcode_file) {
             return; // No ParsedGCodeFile (streaming mode) — 3D renderer needs full geometry
         }
+        gcode_viewer_refresh_content_offset(st, obj, lv_area_get_height(&widget_coords));
         st->renderer_->render(layer, *st->gcode_file, *st->camera_, &widget_coords);
 
 #ifdef ENABLE_3D_RENDERER
@@ -1470,7 +1482,15 @@ static void ui_gcode_viewer_load_file_async(lv_obj_t* obj, const char* file_path
         file_size = 0; // Fall through to full-load mode
     }
 
-    bool use_streaming = !st->streaming_disabled_ && helix::should_use_gcode_streaming(file_size);
+#ifdef ENABLE_3D_RENDERER
+    constexpr bool kBuildHas3D = true;
+#else
+    constexpr bool kBuildHas3D = false;
+#endif
+    // A screen's opt-out only counts when 3D is actually available to fall back
+    // on; see gcode_viewer_should_stream() for the K2 OOM this guards.
+    const bool use_streaming = helix::gcode_viewer_should_stream(
+        st->streaming_disabled_, kBuildHas3D, helix::should_use_gcode_streaming(file_size));
     spdlog::info("[GCode Viewer] File size: {}KB, streaming mode: {}", file_size / 1024,
                  use_streaming ? "ON" : "OFF");
 
@@ -1632,13 +1652,6 @@ static void ui_gcode_viewer_load_file_async(lv_obj_t* obj, const char* file_path
                     int height = lv_area_get_height(&coords);
                     st->layer_renderer_2d_->set_canvas_size(width, height);
                     st->layer_renderer_2d_->auto_fit();
-
-                    // Apply any stored content offset
-                    if (st->content_offset_y_percent_ != 0.0f) {
-                        st->layer_renderer_2d_->set_content_offset_y(st->content_offset_y_percent_);
-                        spdlog::debug("[GCode Viewer] Applied stored content offset: {}%",
-                                      st->content_offset_y_percent_ * 100);
-                    }
 
                     // Apply SSAO setting
                     if (st->ssao_enabled_at_init_) {
@@ -1886,11 +1899,6 @@ static void ui_gcode_viewer_load_file_async(lv_obj_t* obj, const char* file_path
 
                     // Fit camera to model bounds
                     st->camera_->fit_to_bounds(st->gcode_file->global_bounding_box);
-
-                    // Apply any stored content offset to 3D renderer
-                    if (st->content_offset_y_percent_ != 0.0f) {
-                        st->renderer_->set_content_offset_y(st->content_offset_y_percent_);
-                    }
 
                     st->viewer_state = GcodeViewerState::Loaded;
                     spdlog::debug("[GCode Viewer] State set to LOADED");
@@ -2488,31 +2496,98 @@ void ui_gcode_viewer_set_ghost_mode(lv_obj_t* obj, int mode) {
     lv_obj_invalidate(obj);
 }
 
-void ui_gcode_viewer_set_content_offset_y(lv_obj_t* obj, float offset_percent) {
+/// Drop the reference when the strip is destroyed, so a later draw cannot
+/// measure freed coordinates. Registered on the occluder, keyed to the viewer.
+static void gcode_viewer_occluder_delete_cb(lv_event_t* e) {
+    auto* obj = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
+    gcode_viewer_state_t* st = get_state(obj);
+    if (st) {
+        st->bottom_occluder_ = nullptr;
+    }
+}
+
+void ui_gcode_viewer_set_bottom_occluder(lv_obj_t* obj, lv_obj_t* occluder) {
     gcode_viewer_state_t* st = get_state(obj);
     if (!st)
         return;
 
-    // Store offset for later application (2D renderer may not exist yet)
-    st->content_offset_y_percent_ = offset_percent;
+    if (st->bottom_occluder_ == occluder) {
+        return;
+    }
 
-    // Apply to 2D renderer if it exists
+    // Stop listening to the widget we are letting go of, or its delete would
+    // clear a reference that now belongs to a different strip.
+    if (st->bottom_occluder_) {
+        lv_obj_remove_event_cb_with_user_data(st->bottom_occluder_, gcode_viewer_occluder_delete_cb,
+                                              obj);
+    }
+
+    st->bottom_occluder_ = occluder;
+
+    if (occluder) {
+        lv_obj_add_event_cb(occluder, gcode_viewer_occluder_delete_cb, LV_EVENT_DELETE, obj);
+    }
+
+    // The offset is recomputed on the next draw from live geometry; nothing to
+    // apply here, and the widgets may not be laid out yet.
+    lv_obj_invalidate(obj);
+    spdlog::debug("[GCode Viewer] Bottom occluder {}", occluder ? "set" : "cleared");
+}
+
+/// Fraction of the viewer's height that the occluder covers, 0 when they do not
+/// overlap (the strip is a sibling BELOW the preview in some layouts) or when
+/// either widget is hidden.
+static float measure_bottom_occlusion(gcode_viewer_state_t* st, lv_obj_t* obj) {
+    if (!st->bottom_occluder_ || lv_obj_has_flag(st->bottom_occluder_, LV_OBJ_FLAG_HIDDEN)) {
+        return 0.0f;
+    }
+
+    lv_area_t viewer_area;
+    lv_area_t occluder_area;
+    lv_obj_get_coords(obj, &viewer_area);
+    lv_obj_get_coords(st->bottom_occluder_, &occluder_area);
+
+    const int32_t viewer_h = lv_area_get_height(&viewer_area);
+    if (viewer_h <= 0) {
+        return 0.0f;
+    }
+
+    // Only the part of the strip that reaches into the viewer counts.
+    const int32_t overlap = viewer_area.y2 - std::max(occluder_area.y1, viewer_area.y1) + 1;
+    if (overlap <= 0) {
+        return 0.0f;
+    }
+
+    return std::min(1.0f, static_cast<float>(overlap) / static_cast<float>(viewer_h));
+}
+
+/// Push the live occlusion down to whichever renderer is active. Both the fit
+/// and the vertical shift derive from it, so the renderer owns that computation
+/// and re-fits when the number moves; this only has to keep it current. Cheap
+/// enough to run per draw, which is what keeps the framing right across
+/// relayout without the panel having to repush anything.
+static void gcode_viewer_refresh_content_offset(gcode_viewer_state_t* st, lv_obj_t* obj,
+                                                int canvas_height) {
+    (void)canvas_height;
+    const float occlusion = measure_bottom_occlusion(st, obj);
+
     if (st->layer_renderer_2d_) {
-        st->layer_renderer_2d_->set_content_offset_y(offset_percent);
+        st->layer_renderer_2d_->set_bottom_occlusion(occlusion);
     }
-
-    // Apply to 3D renderer if it exists
+#ifdef ENABLE_3D_RENDERER
+    if (st->camera_) {
+        st->camera_->set_bottom_occlusion(occlusion);
+    }
     if (st->renderer_) {
-        st->renderer_->set_content_offset_y(offset_percent);
+        // The GLES path applies the shift in build_mvp(); the camera has already
+        // absorbed the occlusion into its zoom.
+        const float content_height = st->camera_ ? st->camera_->get_content_height_fraction() *
+                                                       static_cast<float>(canvas_height)
+                                                 : 0.0f;
+        st->renderer_->set_content_offset_y(
+            helix::gcode::compute_content_offset_y(content_height, canvas_height, occlusion));
     }
-
-    if (st->layer_renderer_2d_ || st->renderer_) {
-        lv_obj_invalidate(obj);
-        spdlog::debug("[GCode Viewer] Applied content offset: {}%", offset_percent * 100);
-    } else {
-        spdlog::debug("[GCode Viewer] Stored content offset: {}% (renderer not ready)",
-                      offset_percent * 100);
-    }
+#endif
 }
 
 int ui_gcode_viewer_get_max_layer(lv_obj_t* obj) {
@@ -2856,7 +2931,7 @@ bool ui_gcode_viewer_get_ssao_enabled(lv_obj_t*) {
     return false;
 }
 
-void ui_gcode_viewer_set_content_offset_y(lv_obj_t*, float) {}
+void ui_gcode_viewer_set_bottom_occluder(lv_obj_t*, lv_obj_t*) {}
 
 int ui_gcode_viewer_get_max_layer(lv_obj_t*) {
     return -1;

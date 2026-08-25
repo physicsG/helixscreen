@@ -38,6 +38,15 @@ PowerPanel::PowerPanel(PrinterState& printer_state, IMoonrakerAPI* api)
 }
 
 PowerPanel::~PowerPanel() {
+    // The widget tree normally outlives this panel: StaticPanelRegistry::destroy_all()
+    // runs before lv_deinit(), so the LV_EVENT_DELETE hook setup() installed would
+    // fire on freed memory when lv_deinit() finally tears the tree down. Uninstall it
+    // while the object is still valid. A non-null panel_ means the tree is still
+    // alive — forget_widget_tree() nulls it when the tree dies first.
+    if (panel_ && lv_is_initialized()) {
+        lv_obj_remove_event_cb_with_user_data(panel_, on_panel_deleted, this);
+    }
+
     deinit_subjects();
     // Guard against static destruction order fiasco (spdlog may be gone)
     if (!StaticPanelRegistry::is_destroyed()) {

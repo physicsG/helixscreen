@@ -73,12 +73,44 @@ glm::ivec2 project(const ProjectionParams& params, float x, float y, float z) {
 }
 
 // ============================================================================
+// CONTENT OFFSET
+// ============================================================================
+
+float compute_content_offset_y(float content_height_px, int canvas_height_px,
+                               float bottom_occlusion) {
+    if (canvas_height_px <= 0) {
+        return 0.0f;
+    }
+
+    const float canvas_h = static_cast<float>(canvas_height_px);
+    const float occlusion = std::clamp(bottom_occlusion, 0.0f, 1.0f);
+    const float clear_h = canvas_h * (1.0f - occlusion);
+
+    // A caller that has not run auto-fit yet passes 0; clamping to the canvas
+    // also keeps a stale content height from a larger canvas from driving the
+    // top off screen.
+    const float content_h = std::clamp(content_height_px, 0.0f, canvas_h);
+
+    // Centre within the clear area while it fits, then pin the top edge.
+    const float top = std::max(0.0f, (clear_h - content_h) * 0.5f);
+
+    // project() adds this to the canvas-centred Y, so express it as the shift
+    // from centre rather than as an absolute position.
+    return (top + content_h * 0.5f - canvas_h * 0.5f) / canvas_h;
+}
+
+// ============================================================================
 // AUTO-FIT
 // ============================================================================
 
-AutoFitResult compute_auto_fit(const AABB& bb, ViewMode view_mode, int canvas_width,
-                               int canvas_height, float padding) {
+AutoFitResult compute_auto_fit(const AABB& raw_bb, ViewMode view_mode, int canvas_width,
+                               int canvas_height, float padding, float bottom_occlusion) {
     AutoFitResult result;
+
+    // Order any inverted axis before the emptiness test — one bad axis must not
+    // discard the others. Shared with GCodeCamera::fit_to_bounds so the 2D and
+    // 3D paths agree on which boxes are framable.
+    const AABB bb = raw_bb.normalized();
 
     // A default-constructed AABB is {+inf, -inf}: every range below goes to -inf,
     // trips the degeneracy clamp, and — worse — the offsets become
@@ -137,13 +169,34 @@ AutoFitResult compute_auto_fit(const AABB& bb, ViewMode view_mode, int canvas_wi
     range_x *= (1.0f + 2.0f * padding);
     range_y *= (1.0f + 2.0f * padding);
 
+    // Shape decides which vertical budget the model gets. A model that is not
+    // dramatically taller than it is wide is scaled to sit entirely above the
+    // bottom UI strip; a genuinely elongated one keeps the whole canvas and is
+    // allowed to run under it rather than shrinking by (1 - occlusion).
+    // Ratios of the padded ranges, so this is independent of canvas size.
+    result.elongated = range_y > ELONGATION_LIMIT * range_x;
+
+    const float occlusion = std::clamp(bottom_occlusion, 0.0f, 1.0f);
+    const float usable_height = result.elongated
+                                    ? static_cast<float>(canvas_height)
+                                    : static_cast<float>(canvas_height) * (1.0f - occlusion);
+
     // Scale to fit canvas (maintain aspect ratio)
     float scale_x = static_cast<float>(canvas_width) / range_x;
-    float scale_y = static_cast<float>(canvas_height) / range_y;
+    float scale_y = usable_height / range_y;
     result.scale = std::min(scale_x, scale_y);
 
     result.offset_x = (bb.min.x + bb.max.x) / 2.0f;
     result.offset_y = (bb.min.y + bb.max.y) / 2.0f;
+
+    // Projected extent at the chosen scale. The limiting axis lands exactly on
+    // its canvas dimension; the other is smaller. compute_content_offset_y()
+    // reads the shape of the model out of this rather than guessing from the
+    // bounding box.
+    result.content_width = range_x * result.scale;
+    result.content_height = range_y * result.scale;
+    result.content_offset_y_percent =
+        compute_content_offset_y(result.content_height, canvas_height, occlusion);
 
     return result;
 }

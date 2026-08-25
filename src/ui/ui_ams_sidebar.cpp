@@ -1283,6 +1283,15 @@ void AmsOperationSidebar::handle_check_gates() {
 
 void AmsOperationSidebar::handle_bypass_toggle() {
     bypass_toggle_.toggle();
+
+    // ui_switch flips its own CHECKED state before the handler runs, so a
+    // refusal (print active, hardware sensor, backend precondition) leaves the
+    // switch claiming a bypass state the backend never entered. Republish and
+    // force the binding to re-apply — lv_subject_set_int does not notify when
+    // the value is unchanged, which is precisely the refusal case. Same two
+    // lines as the Device Operations switch.
+    AmsState::instance().sync_from_backend();
+    lv_subject_notify(AmsState::instance().get_bypass_active_subject());
 }
 
 // ============================================================================
@@ -1326,10 +1335,21 @@ void AmsOperationSidebar::handle_load_with_preheat(int slot_index) {
                              macro_info.get_source() == MacroSource::CONFIGURED);
 
     if (plan.tier == helix::ui::FilamentTier::Refused) {
-        // Silent on THIS surface. The AMS panel already highlights the mounted
-        // slot and greys the ones that cannot be picked, so a toast here would
-        // narrate what the grid is showing. The Filament panel, where the user
-        // pressed a button with no other feedback, does toast.
+        // Mostly silent on THIS surface. The AMS panel already highlights the
+        // mounted slot and greys the ones that cannot be picked, so a toast here
+        // would narrate what the grid is showing. The Filament panel, where the
+        // user pressed a button with no other feedback, does toast.
+        //
+        // BypassLoaded is the exception: nothing in the grid shows that the
+        // bypass spool is still threaded, so staying silent here reproduces the
+        // exact "I tap Load and nothing happens" this refusal exists to end.
+        if (plan.refusal == helix::ui::FilamentRefusal::BypassLoaded) {
+            spdlog::info(
+                "[AmsSidebar] Load of slot {} refused — bypass spool still at the toolhead",
+                slot_index);
+            NOTIFY_INFO(lv_tr("Remove the bypass spool from the toolhead first"));
+            return;
+        }
         spdlog::debug("[AmsSidebar] Load of slot {} refused ({})", slot_index,
                       plan.refusal == helix::ui::FilamentRefusal::AlreadyMounted
                           ? "already mounted"
@@ -1512,6 +1532,10 @@ helix::ui::BackendCaps AmsOperationSidebar::read_backend_caps(AmsSystemInfo& inf
     caps.needs_unload_before_load = backend->needs_unload_before_load(info_out, target_slot);
     caps.change_tool_completes_load = backend->change_tool_completes_load(target_slot);
     caps.is_tool_changer = backend->get_type() == AmsType::TOOL_CHANGER;
+    // Distinct from !requires_slot_selection_for_load(): plan_load() needs to
+    // tell "bypass is suppressing the lane tier" apart from "this backend
+    // never wanted a slot", because a named lane wants opposite treatment.
+    caps.bypass_active = backend->is_bypass_active();
     return caps;
 }
 

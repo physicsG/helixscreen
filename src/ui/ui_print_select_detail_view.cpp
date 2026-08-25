@@ -22,6 +22,7 @@
 #include "display_settings_manager.h"
 #include "gcode_footer_summary.h"
 #include "gcode_parser.h"
+#include "gcode_preview_setup.h"
 #include "gcode_temp_reclaim.h"
 #include "host_identity.h"
 #include "http_executor.h"
@@ -228,33 +229,12 @@ lv_obj_t* PrintSelectDetailView::create(lv_obj_t* parent_screen) {
         spdlog::debug("[DetailView] G-code viewer widget found");
         ui_gcode_viewer_disable_streaming(gcode_viewer_);
 
-        // Apply render mode - priority: cmdline > env var > settings
-        const auto* config = get_runtime_config();
-        const char* env_mode = std::getenv("HELIX_GCODE_MODE");
+        helix::ui::apply_preview_render_mode(gcode_viewer_, "DetailView");
 
-        if (config && config->gcode_render_mode >= 0) {
-            auto render_mode = static_cast<helix::GcodeViewerRenderMode>(config->gcode_render_mode);
-            ui_gcode_viewer_set_render_mode(gcode_viewer_, render_mode);
-            spdlog::debug("[DetailView] Set G-code render mode: {} (cmdline)",
-                          config->gcode_render_mode);
-        } else if (env_mode) {
-            spdlog::debug("[DetailView] G-code render mode: {} (env var)",
-                          ui_gcode_viewer_is_using_2d_mode(gcode_viewer_) ? "2D" : "3D");
-        } else {
-            int render_mode_val = DisplaySettingsManager::instance().get_gcode_render_mode();
-            if (render_mode_val == 3) {
-                // Thumbnail Only mode - skip render mode setup, viewer won't be used
-                spdlog::debug("[DetailView] G-code render mode: Thumbnail Only (settings)");
-            } else {
-                auto render_mode = static_cast<helix::GcodeViewerRenderMode>(render_mode_val);
-                ui_gcode_viewer_set_render_mode(gcode_viewer_, render_mode);
-                spdlog::debug("[DetailView] Set G-code render mode: {} (settings)",
-                              render_mode_val);
-            }
-        }
-
-        // Vertical offset to match thumbnail positioning
-        ui_gcode_viewer_set_content_offset_y(gcode_viewer_, -0.10f);
+        // Here the strip IS an overlay over the preview's bottom, so this is a
+        // real occlusion (~a third of the card) and the render shifts to clear it.
+        helix::ui::set_preview_bottom_occluder(
+            gcode_viewer_, lv_obj_find_by_name(overlay_root_, "detail_metadata_clip"));
 
         // Start paused — will resume in on_activate()
         ui_gcode_viewer_set_paused(gcode_viewer_, true);
@@ -472,6 +452,7 @@ void PrintSelectDetailView::show(const std::string& filename, const std::string&
     // on_activate()'s scan kicks nothing and ready=1 publishes before the
     // first frame.
     headless_tools_used_.reset();
+    headless_tool_grams_.clear();
     headless_scan_done_ = false;
     headless_scan_settled_ = false;
     lv_subject_set_int(&detail_mapping_ready_, 0);
@@ -1805,6 +1786,11 @@ void PrintSelectDetailView::start_tail_summary_scan(LifetimeToken tok, std::set<
                 // footer says {0} where the scan (which sees no Tn at all)
                 // says {} — and {0} is the same answer the viewer parse
                 // produces, so the two paths agree rather than diverge.
+                // The same footer line that named the used tools also priced
+                // them, in grams the slicer labelled itself. Kept so the
+                // pre-print check can weigh each tool against the lane it is
+                // mapped to, instead of the whole file against one spool.
+                headless_tool_grams_ = summary.grams_per_tool;
                 apply_scan_result(summary.tools_used, /*authoritative=*/true);
             });
         },

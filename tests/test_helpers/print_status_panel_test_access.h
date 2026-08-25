@@ -45,6 +45,23 @@ class PrintStatusPanelTestAccess {
         return panel.cached_thumbnail_path_;
     }
 
+    /// The panel's own copy of the thumbnail source override. Distinct from the
+    /// media manager's: both go stale independently (#1339).
+    /// The identity override for the current print, now owned by PrinterState
+    /// rather than by the panel. Still reached through the panel so the cases
+    /// that assert it keep reading it from the object under test.
+    static const std::string& identity_override(const PrintStatusPanel& panel) {
+        return panel.printer_state_.get_print_identity_override();
+    }
+
+    static const std::string& current_print_filename(const PrintStatusPanel& panel) {
+        return panel.current_print_filename_;
+    }
+
+    static void set_filename(PrintStatusPanel& panel, const char* filename) {
+        panel.set_filename(filename);
+    }
+
     static lv_obj_t* thumbnail_widget(const PrintStatusPanel& panel) {
         return panel.print_thumbnail_;
     }

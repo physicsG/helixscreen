@@ -185,6 +185,17 @@ Creality:   power_loss key ──> one-shot probe ──> both ─┘
 other three inputs (`printer_idle`, `already_prompted`, `wizard_active`) are
 unchanged.
 
+The `printer_idle` input comes from the derived lifecycle, not the wire: the
+controller computes `idle = !job_holds_machine(get_print_lifecycle())`
+(`src/ui/ui_plr_offer_controller.cpp:88`). During a host-side pre-print block
+`print_stats` still reads `standby` — it describes the previous job — so an
+idle check derived from the wire would offer "Resume interrupted print?" on top
+of a start the user has already committed to, and the Resume button would start
+a different file than the one they chose. Anchoring idle to the lifecycle means
+a committed start never gets the offer. (`PRINT_STATE_MACHINE.md` § "Asking
+whether a job owns the machine" covers the predicate and why `print_active` is
+the wrong signal for this question.)
+
 The one-shot latch, the wizard-close re-evaluation, and the disconnect re-arm
 are documented at the decision site, `PlrOfferController::evaluate_offer()`.
 

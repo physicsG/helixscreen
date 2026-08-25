@@ -195,6 +195,18 @@ void GCodeLayerRenderer::set_canvas_size(int width, int height) {
     bounds_valid_ = false; // Recalculate fit on next render
 }
 
+void GCodeLayerRenderer::set_bottom_occlusion(float occlusion) {
+    const float clamped = std::clamp(occlusion, 0.0f, 1.0f);
+    if (std::abs(clamped - bottom_occlusion_) < 0.001f) {
+        return;
+    }
+    bottom_occlusion_ = clamped;
+    // The occlusion feeds the scale, not just the shift, so the framing has to
+    // be recomputed rather than adjusted.
+    bounds_valid_ = false;
+    invalidate_cache();
+}
+
 void GCodeLayerRenderer::set_content_offset_y(float offset_percent) {
     // Clamp to reasonable range
     content_offset_y_percent_ = std::clamp(offset_percent, -1.0f, 1.0f);
@@ -327,8 +339,15 @@ void GCodeLayerRenderer::auto_fit() {
         // cache churn, no blocking reads, on the auto-fit path.
         const auto& stats = streaming_controller_->get_index_stats();
 
-        bb.min.z = stats.min_z;
-        bb.max.z = stats.max_z;
+        if (stats.has_z_bounds()) {
+            bb.min.z = stats.min_z;
+            bb.max.z = stats.max_z;
+        } else {
+            // No extruding move in the whole file — leaving the sentinel pair in
+            // place would make the box read empty and discard the XY bounds too.
+            bb.min.z = 0.0f;
+            bb.max.z = 0.0f;
+        }
 
         if (stats.has_xy_bounds()) {
             bb.min.x = stats.min_x;
@@ -363,11 +382,13 @@ void GCodeLayerRenderer::auto_fit() {
 
     // Use shared auto-fit computation
     ViewMode current_view = get_view_mode();
-    auto fit = helix::gcode::compute_auto_fit(bb, current_view, canvas_width_, canvas_height_);
+    auto fit = helix::gcode::compute_auto_fit(bb, current_view, canvas_width_, canvas_height_,
+                                              0.05f, bottom_occlusion_);
     scale_ = fit.scale;
     offset_x_ = fit.offset_x;
     offset_y_ = fit.offset_y;
     offset_z_ = fit.offset_z;
+    content_offset_y_percent_ = fit.content_offset_y_percent;
 
     // Store bounds for reference (including Z for depth shading)
     bounds_min_x_ = bb.min.x;
@@ -380,9 +401,11 @@ void GCodeLayerRenderer::auto_fit() {
     bounds_valid_ = true;
 
     spdlog::debug("[GCodeLayerRenderer] auto_fit: canvas={}x{}, mode={}, "
-                  "scale={:.2f}, center=({:.1f},{:.1f},{:.1f})",
+                  "scale={:.2f}, center=({:.1f},{:.1f},{:.1f}), content_h={:.0f}, "
+                  "occlusion={:.0f}%, elongated={}, offset={:.1f}%",
                   canvas_width_, canvas_height_, static_cast<int>(current_view), scale_, offset_x_,
-                  offset_y_, offset_z_);
+                  offset_y_, offset_z_, fit.content_height, bottom_occlusion_ * 100.0f,
+                  fit.elongated, fit.content_offset_y_percent * 100.0f);
 }
 
 void GCodeLayerRenderer::fit_layer() {
@@ -410,11 +433,12 @@ void GCodeLayerRenderer::fit_layer() {
     bounds_min_y_ = bb.min.y;
     bounds_max_y_ = bb.max.y;
 
-    auto fit =
-        helix::gcode::compute_auto_fit(bb, ViewMode::TOP_DOWN, canvas_width_, canvas_height_);
+    auto fit = helix::gcode::compute_auto_fit(bb, ViewMode::TOP_DOWN, canvas_width_, canvas_height_,
+                                              0.05f, bottom_occlusion_);
     scale_ = fit.scale;
     offset_x_ = fit.offset_x;
     offset_y_ = fit.offset_y;
+    content_offset_y_percent_ = fit.content_offset_y_percent;
 
     bounds_valid_ = true;
 }

@@ -127,7 +127,7 @@ The `main()` function orchestrates this sequence:
 7. **Platform configuration** -- ForgeX: display mode, screen.sh patching, logged wrapper
 8. **Stop competing UIs** -- GuppyScreen, KlipperScreen, Xorg, stock FlashForge UI
 9. **Download release** -- R2 CDN primary (`releases.helixscreen.org`), GitHub Releases fallback
-10. **Extract with atomic swap** -- Validates ELF architecture, backs up config, `mv` old to `.old`, rollback on failure
+10. **Extract with atomic swap** -- Validates ELF architecture, backs up config, `mv` old to `.old`, re-checks free space when the swap crosses filesystems, rollback on failure
 11. **Platform hooks** -- Deploys `hooks-{platform}.sh` to `$INSTALL_DIR/platform/hooks.sh`
 12. **Install service** -- systemd unit or SysV init script (templated with `@@HELIX_USER@@`, etc.)
 13. **Moonraker integration** -- Adds `[update_manager helixscreen]` section, writes release_info.json
@@ -242,9 +242,23 @@ The `extract_release()` function in `release.sh` implements a safe upgrade path:
 1. Extract archive to a temp directory
 2. Validate the `helix-screen` binary exists and has correct ELF architecture
 3. Move existing `$INSTALL_DIR` to `$INSTALL_DIR.old`
-4. Move extracted content to `$INSTALL_DIR`
-5. Restore user config from backup
-6. If step 4 fails, automatically roll back from `.old`
+4. Re-check free space when the staging and install directories sit on different filesystems (`_check_swap_space`)
+5. Move extracted content to `$INSTALL_DIR`
+6. Restore user config from backup
+7. If step 5 fails, automatically roll back from `.old`
+
+**Cross-filesystem free-space re-check.** Step 4 exists because a `mv` within one
+filesystem is a rename and needs no space, but across filesystems it is a
+copy-then-delete that needs the whole tree's worth — and the staging dir is
+routinely on a different partition now (the K2 stages on `/mnt/UDISK` and installs
+to `/opt`, a ~240MB overlay). The earlier sizing pass measures *before* the old
+install is moved aside, and its tight path then relocates the old install
+off-partition assuming the freed space suffices — false whenever the new tree is
+materially larger than the old one. `_check_swap_space()` re-measures against
+real free space after the move-aside, so an impossible copy fails having written
+nothing instead of dying half-way through with ENOSPC. Refusal is not a partial
+state: `_restore_install_backup()` puts the previous install back first, then the
+installer exits. Pinned by `tests/shell/test_install_swap_space.bats`.
 
 ### Archive Ownership
 
@@ -570,7 +584,7 @@ This prevents installing a Pi binary on AD5M or vice versa.
 
 ## Shell Test Infrastructure (bats)
 
-The installer has **1149 test cases** across **71 bats files**, making it one of the most thoroughly tested shell installer systems for 3D printer firmware.
+The installer has on the order of **2000 test cases** across **100+ bats files**, making it one of the most thoroughly tested shell installer systems for 3D printer firmware.
 
 ### Running Tests
 
@@ -620,7 +634,7 @@ bats --verbose-run tests/shell/test_platform_detection.bats
 | `test_telemetry_pull_args.bats` / `test_telemetry_pull_download.bats` | Telemetry data pull scripts |
 | `test_resolve_backtrace.bats` | Backtrace symbol resolution |
 
-_The table above is a representative subset; the suite has 71 bats files in `tests/shell/`._
+_The table above is a representative subset; the suite has well over 100 bats files in `tests/shell/`._
 
 ### Test Helpers
 
@@ -768,6 +782,17 @@ platform-declared one -- goes through the same name guard: the final path compon
 contain `helixscreen-install`. The scratch dir is removed on **any** exit (EXIT/INT/TERM),
 not just the success path; the older `ERR`-only trap was a bash extension that silently did
 nothing under the ash/dash shells the embedded platforms run, which leaked the full download.
+
+That trap only ever cleans the **current** run's scratch dir. Directories leaked by
+*previous* installs are reclaimed separately: `cleanup_stale_cache_dirs()`
+(`scripts/lib/installer/release.sh`) removes the paths a platform declares in
+`STALE_CACHE_DIRS` — on the K2, the old `/usr/data/helixscreen/cache` thumbnail/gcode
+location (the app now caches on `/mnt/UDISK`), plus installer scratch dirs like
+`/usr/data/helixscreen-install` and `/opt/.helixscreen-install` left behind by pre-EXIT-trap
+installers (one unit held a 60MB archive for two months). It runs after the service starts,
+never touches the scratch dir this run is staging into, and applies the same shape of name
+guard: a declared path is only removed when its final component is exactly `cache` or names
+an installer scratch dir — never a top-level directory (the K2 `/mnt/UDISK` wipe incident).
 
 ### ForgeX: Screen flickers or goes blank after install
 

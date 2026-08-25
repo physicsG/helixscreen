@@ -43,7 +43,8 @@ struct PreprintEntry {
     int total_seconds;                  ///< Total pre-print duration
     int64_t timestamp;                  ///< Unix timestamp when entry was recorded
     std::map<int, int> phase_durations; ///< phase_enum -> seconds
-    int temp_bucket{0}; ///< Nozzle target temp rounded to nearest 25°C (0 = unknown)
+    int temp_bucket{
+        0}; ///< Bed temp at start: 1 = cold (<40°C), 2 = warm (≥40°C); 0 = unknown/legacy
     PreprintWindow window{PreprintWindow::Unknown}; ///< Which window this entry measured
 };
 

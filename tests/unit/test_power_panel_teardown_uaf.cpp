@@ -72,8 +72,11 @@ class PowerPanelTeardownFixture : public LVGLUITestFixture {
     }
 
     ~PowerPanelTeardownFixture() override {
-        // The panel outlives the tree in every test here; drain before the
-        // fixture tears LVGL down so no queued lambda outlives the panel.
+        // Drain before the fixture tears LVGL down so no queued lambda outlives
+        // the panel. Tests that leave the tree standing destroy the panel first,
+        // mirroring destroy_all()-before-lv_deinit(); ~PowerPanel() uninstalls its
+        // delete hook so the base fixture's screen teardown cannot reach it.
+        // reset() on an already-destroyed panel is a no-op.
         UpdateQueue::instance().drain();
         panel_.reset();
     }
@@ -83,6 +86,13 @@ class PowerPanelTeardownFixture : public LVGLUITestFixture {
     }
     lv_obj_t* root() {
         return root_;
+    }
+
+    /// Destroy the panel while its widget tree is still alive, the way
+    /// StaticPanelRegistry::destroy_all() does before lv_deinit().
+    void destroy_panel() {
+        UpdateQueue::instance().drain();
+        panel_.reset();
     }
 
     /// Delete the panel's widget tree the way a screen teardown would: the
@@ -218,4 +228,53 @@ TEST_CASE_METHOD(PowerPanelTeardownFixture,
     // LVGL's own async pass is where they actually die.
     process_lvgl(50);
     CHECK(g_row_deletes == 3);
+}
+
+namespace {
+
+/// Is on_panel_deleted still installed on `obj` for this panel instance?
+///
+/// Reaches into LVGL's event list rather than inferring from behaviour: the
+/// whole point is that the hook must be gone *before* anything fires it, and a
+/// behavioural probe would have to trigger the very use-after-free under test.
+bool delete_hook_installed(lv_obj_t* obj, const void* panel) {
+    for (uint32_t i = 0; i < lv_obj_get_event_count(obj); ++i) {
+        lv_event_dsc_t* dsc = lv_obj_get_event_dsc(obj, i);
+        if (dsc != nullptr && lv_event_dsc_get_user_data(dsc) == panel) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+// StaticPanelRegistry::destroy_all() runs before lv_deinit(), so in production
+// the panel is destroyed while its widget tree is still alive. If ~PowerPanel()
+// leaves its LV_EVENT_DELETE hook installed, lv_deinit()'s later teardown of
+// that tree calls on_panel_deleted() on freed memory.
+TEST_CASE_METHOD(PowerPanelTeardownFixture,
+                 "PowerPanel uninstalls its delete hook when destroyed before its tree",
+                 "[power][teardown][uaf]") {
+    PowerPanelTestAccess::populate_device_list(panel(), sample_devices());
+    UpdateQueue::instance().drain();
+    process_lvgl(50);
+
+    lv_obj_t* tree = root();
+    REQUIRE(tree != nullptr);
+    // Guards against the test passing for the wrong reason: if setup() never
+    // installed the hook, its absence after destruction would prove nothing.
+    REQUIRE(delete_hook_installed(tree, &panel()));
+
+    const void* dead = &panel();
+    destroy_panel();
+
+    CHECK_FALSE(delete_hook_installed(tree, dead));
+
+    // The tree outlives the panel exactly as it does under lv_deinit(). With the
+    // hook still installed this dereferences freed memory — a crash in a plain
+    // build, a heap-use-after-free report under ASAN/TSAN.
+    delete_widget_tree();
+    process_lvgl(50);
+    SUCCEED("widget tree torn down after the panel without touching freed memory");
 }

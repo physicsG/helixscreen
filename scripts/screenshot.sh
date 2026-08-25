@@ -115,7 +115,6 @@ BINARY_PATH="./build/bin/${BINARY}"
 HELIXCTL=("./build/bin/helix-screen" ctl)
 
 NAME="${2:-$(date +%s)}"
-BMP_FILE="/tmp/ui-screenshot-${NAME}.bmp"
 PNG_FILE="/tmp/ui-screenshot-${NAME}.png"
 
 # Third arg: TOKEN (a screen) unless it starts with '-', in which case it's a flag.

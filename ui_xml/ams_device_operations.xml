@@ -73,8 +73,16 @@
                             translation_tag="Feed filament directly to extruder"/>
               </lv_obj>
             </lv_obj>
+            <!-- Checked state follows the live ams_bypass_active subject (the
+                 one AmsState publishes from the backends), not an overlay-local
+                 snapshot: the enable can complete asynchronously behind an
+                 unload-first chain, and a snapshot written optimistically on
+                 "success" reports a fire-and-forget gcode as done. Dims while a
+                 job owns the toolhead, same binding as panel_widget_bypass.xml;
+                 the shared controller still enforces that guard on every tap. -->
             <ui_switch name="bypass_toggle" size="small">
-              <bind_state_if_eq subject="ams_device_ops_bypass_active" state="checked" ref_value="1"/>
+              <bind_state_if_eq subject="ams_bypass_active" state="checked" ref_value="1"/>
+              <bind_state_if_eq subject="job_holds_machine" state="disabled" ref_value="1"/>
               <event_cb trigger="value_changed" callback="on_ams_device_ops_bypass_toggled"/>
             </ui_switch>
           </lv_obj>

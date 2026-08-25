@@ -981,6 +981,7 @@ use_local_tarball() {
     # and the in-app update flow can find it regardless of the source path.
     # Prefer a symlink to avoid copying large files on constrained devices.
     mkdir -p "$TMP_DIR"
+    # shellcheck disable=SC2034  # consumed by common.sh error_handler (sibling module)
     CLEANUP_TMP=true
 
     local dest
@@ -1111,9 +1112,8 @@ validate_binary_architecture() {
     local elf_class
     elf_class=$(echo "$header" | awk '{print $5}')
 
-    local machine_lo machine_hi
+    local machine_lo
     machine_lo=$(echo "$header" | awk '{print $19}')
-    machine_hi=$(echo "$header" | awk '{print $20}')
 
     # Determine expected values based on platform
     local expected_class expected_machine_lo expected_desc

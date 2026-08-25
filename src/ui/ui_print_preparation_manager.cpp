@@ -729,6 +729,7 @@ void PrintPreparationManager::start_print(const std::string& filename,
         }
 
         auto token = lifetime_.token();
+        pre_start_sent_at_ = std::chrono::steady_clock::now();
         api_->execute_gcode(
             combined,
             [this, token, filename_to_print, ops_to_disable, on_navigate_to_status,
@@ -1218,6 +1219,26 @@ void PrintPreparationManager::continue_print_start(
         return;
     }
 
+    // Staleness guard. The preparing-job check above cannot catch a late ack
+    // to a cancelled print: the job can still be armed when klippy finally
+    // flushes a backed-up gcode request (K1C 2026-08-20: the ack landed 370s
+    // after the send, at cancel time, and relaunched the print the user had
+    // just stopped). A pre-start block completes in seconds - if we are only
+    // now hearing about one sent minutes ago, the intent behind it is gone.
+    if (pre_start_sent_at_ != std::chrono::steady_clock::time_point{}) {
+        constexpr auto STALE_PRE_START_BOUND = std::chrono::minutes(3);
+        const auto age = std::chrono::steady_clock::now() - pre_start_sent_at_;
+        if (age > STALE_PRE_START_BOUND) {
+            spdlog::warn("[PrintPreparationManager] Dropping stale pre-start completion "
+                         "({}s old, bound 180s) - not starting '{}'",
+                         std::chrono::duration_cast<std::chrono::seconds>(age).count(), filename);
+            if (on_completion) {
+                on_completion(false, "");
+            }
+            return;
+        }
+    }
+
     if (!ops_to_disable.empty()) {
         modify_and_print(filename, ops_to_disable, {}, on_navigate_to_status);
     } else {
@@ -1255,6 +1276,10 @@ void PrintPreparationManager::begin_pre_start_completion_wait(
     spdlog::warn("[PrintPreparationManager] Pre-start RPC timed out ({}) but Klipper is still "
                  "executing it - waiting for the busy->idle edge before starting the print",
                  timeout_error.message);
+    // This wait is measured in minutes by design (long pre-start macros), so
+    // the send-time staleness bound must no longer apply when the wait ends
+    // in continue_print_start - only the preparing-job guard judges this path.
+    pre_start_sent_at_ = {};
     pre_start_wait_active_ = true;
 
     // Backstop: the macro already had a full ceiling on the RPC side. If the
@@ -1559,15 +1584,13 @@ void PrintPreparationManager::modify_and_print_streaming(
                                             // Hide overlay now that print is starting
                                             BusyOverlay::hide();
 
-                                            // Set thumbnail source override for modified temp
-                                            // files. Uses original_path (e.g.,
-                                            // usb/flowrate_0.gcode) for metadata lookup
-                                            // - Panel: local gcode viewer and thumbnail display
-                                            // - Manager: shared subjects for HomePanel
-                                            get_global_print_status_panel().set_thumbnail_source(
+                                            // Name this print by the file the user chose, not
+                                            // the rewritten copy print_stats will report. One
+                                            // call: PrinterState is the single authority, so
+                                            // the panel and the media manager can no longer
+                                            // disagree about which print this is.
+                                            get_printer_state().set_print_identity_override(
                                                 d->original_path);
-                                            helix::get_active_print_media_manager()
-                                                .set_thumbnail_source(d->original_path);
 
                                             if (d->navigate_cb) {
                                                 d->navigate_cb();
@@ -1864,10 +1887,8 @@ void PrintPreparationManager::modify_and_print_with_remap(
                                             display_filename, file_path, on_navigate_to_status}),
                                         [](PrintStartedData* d) {
                                             BusyOverlay::hide();
-                                            get_global_print_status_panel().set_thumbnail_source(
+                                            get_printer_state().set_print_identity_override(
                                                 d->original_path);
-                                            helix::get_active_print_media_manager()
-                                                .set_thumbnail_source(d->original_path);
                                             if (d->navigate_cb)
                                                 d->navigate_cb();
                                         });

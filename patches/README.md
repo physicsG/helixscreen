@@ -50,6 +50,8 @@ Applied in order by `mk/patches.mk`. Grouped by subsystem.
 | `lvgl_refr_reshape_null_guard.patch` | `lv_refr.c` | NULL guard on draw_buf reshape failure, skip render gracefully | PR #9831 |
 | `lvgl_img_null_guard.patch` | `lv_draw_sw_img.c` | NULL guard after go_to_xy in image mask path | PR #9831 |
 | `lvgl_blur_null_guard.patch` | `lv_draw_sw_blur.c` | NULL checks after all ~15 lv_draw_buf_goto_xy() calls | PR #9831 |
+| `lvgl_draw_render_thread_acquire.patch` | `lv_draw.c`, `lv_draw_private.h` | Make `lv_draw_task_t.state` a real atomic handshake (`LV_DRAW_TASK_STATE_GET`/`SET`) instead of trusting `volatile`, and wait for the draw units to finish before destroying a layer's `draw_buf` | Project-specific (the `volatile == atomic` assumption is upstream's; candidate to submit) |
+| `lvgl-sw-draw-wait-for-finish.patch` | `lv_draw_sw.c` | Implement `wait_for_finish_cb` for the SW draw unit under `LV_USE_OS`, publish task completion with the release store above, and skip a task whose `draw_dsc` is NULL rather than dereferencing it | Project-specific |
 
 ### Widgets & Input
 
@@ -90,9 +92,15 @@ LVGL 9.5 removed the entire XML system from core. These patches are now in `lib/
 
 | Patch | Purpose |
 |-------|---------|
-| `libhv-dns-resolver-fallback.patch` | DNS resolver fallback for mDNS |
-| `libhv-streaming-upload.patch` | Streaming upload support |
+| `libhv-dns-resolver-fallback.patch` | Direct UDP DNS resolution fallback for statically-linked builds where `getaddrinfo()` fails |
+| `libhv-hlog-thread-safe-localtime.patch` | `_POSIX_C_SOURCE` define before the headers so `localtime_r()` is declared under `-std=c99` — the implicit-int return becomes a garbage pointer and the first `tm` dereference segfaults |
+| `libhv-hthreadpool-wait-lock.patch` | Take `task_mutex` in `hthreadpool` `wait()`/`commit()` — the unlocked `tasks` read raced a worker's pop (ThreadSanitizer via `ThumbnailProcessor`) |
+| `libhv-http-request-cancel-atomic.patch` | Dedicated `std::atomic` for `HttpRequest::Cancel()` — as a bitfield it shared a word with the redirect/proxy bits, so a cross-thread cancel raced `ParseUrl()`'s read-modify-write |
 | `libhv-openssl-static-link.patch` | OpenSSL/static build hook |
+| `libhv-streaming-upload.patch` | Streaming upload support |
+| `libhv-tcpclient-reconnect-resilience.patch` | `TcpClient` reconnect hardening: re-resolve the host on every retry (a hostname whose IP changed is no longer dialed at its stale address forever), guard the reconnect timer against a stopped event loop, defer old-channel destruction to the loop thread (the onclose closure was freed while still running), and reschedule instead of dropping the retry chain on transient `::socket()` failures |
+| `libhv-websocket-backoff-on-upgrade.patch` | Undo `open()`'s premature backoff reset when the upgrade handshake never reached WS_OPENED — a failing upgrade used to restart the reconnect delay from scratch on every attempt |
+| `libhv-websocket-open-install-once.patch` | Install the TcpClient-level channel callbacks exactly once in the constructor — `open()` reassigned those `std::function` members from the caller's thread, freeing the closure's heap storage under a concurrently running callback |
 
 ## Usage
 
@@ -109,10 +117,10 @@ git -C lib/lvgl diff src/path/to/file.c > patches/patch_name.patch
 
 ### Regenerating a patch whose file is shared
 
-That `git diff` recipe is only safe when exactly one patch touches the file. **Sixteen files
+That `git diff` recipe is only safe when exactly one patch touches the file. **A dozen-plus files
 are touched by more than one patch**, so for those it silently folds every other patch's hunks
-into the one being regenerated. `src/misc/lv_event.c` has seven patches; `lv_obj_event.c`,
-`lv_obj_tree.c` and `lv_linux_fbdev.c` have four each.
+into the one being regenerated. `src/misc/lv_event.c` has seven patches; `lv_obj_event.c` and
+`lv_obj_tree.c` have four each.
 
 Check before regenerating:
 

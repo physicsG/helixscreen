@@ -417,6 +417,12 @@ void register_xml_components() {
     // include/ui_progress_arc.h for the C++ companion (attach_progress_arc).
     register_xml("components/helix_progress_arc.xml");
     register_xml("components/perf_metric_row.xml");
+    // G-code preview stack (thumbnail / 2D / 3D) shared by print status and the
+    // file detail view, and the whole print-status preview card shared by the
+    // landscape and portrait status layouts. Registered here, ahead of both
+    // consumers, because a component must exist before the file that nests it.
+    register_xml("components/preview_stack.xml");
+    register_xml("components/print_status_preview_card.xml");
     register_xml("header_bar.xml");
     register_xml("overlay_backdrop.xml");
     register_xml("overlay_panel.xml");
@@ -518,6 +524,7 @@ void register_xml_components() {
     register_xml("components/panel_widget_humidity.xml");
     register_xml("components/panel_widget_width_sensor.xml");
     register_xml("components/panel_widget_filament.xml");
+    register_xml("components/panel_widget_bypass.xml");
     register_xml("components/panel_widget_thermistor.xml");
     register_xml("components/panel_widget_thermistor_carousel.xml");
     register_xml("components/panel_widget_temp_graph.xml");

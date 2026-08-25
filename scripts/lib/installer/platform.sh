@@ -22,6 +22,7 @@ _USER_INSTALL_DIR="${INSTALL_DIR}"
 INIT_SCRIPT_DEST=""
 PREVIOUS_UI_SCRIPT=""
 AD5M_FIRMWARE=""
+# shellcheck disable=SC2034  # consumed by main.sh and competing_uis.sh
 K1_FIRMWARE=""
 KLIPPER_USER=""
 KLIPPER_GROUP=""
@@ -877,6 +878,7 @@ set_install_paths() {
         # the app now caches on /mnt/UDISK, so reclaim the old location.
         # Also reclaim scratch dirs leaked by pre-EXIT-trap installers: one
         # unit held a 60MB archive at /usr/data/helixscreen-install for months.
+        # shellcheck disable=SC2034  # consumed by release.sh (stale cache reclaim)
         STALE_CACHE_DIRS="/usr/data/helixscreen/cache /usr/data/helixscreen-install /opt/.helixscreen-install"
         log_info "Platform: Creality K2 series"
         log_info "Install directory: ${INSTALL_DIR}"
@@ -896,6 +898,7 @@ set_install_paths() {
         KLIPPER_USER="root"
         KLIPPER_GROUP="root"
         KLIPPER_HOME="/root"
+        # shellcheck disable=SC2034  # consumed by common.sh klipper_config_dir()
         KLIPPER_CONFIG_DIR="/etc/klipper/config"
         INIT_SYSTEM="sysv"
         log_info "Platform: Elegoo Centauri Carbon (COSMOS)"
@@ -911,6 +914,7 @@ set_install_paths() {
         KLIPPER_USER="root"
         KLIPPER_GROUP="root"
         KLIPPER_HOME="/home/lava"
+        # shellcheck disable=SC2034  # consumed by service.sh, common.sh, competing_uis.sh, uninstall.sh
         INIT_SYSTEM="sysv"
         # U1 does NOT install /etc/init.d/S99helixscreen. install_service_snapmaker_u1
         # patches the stock /etc/init.d/S99screen to delegate to helixscreen.init for
@@ -921,7 +925,9 @@ set_install_paths() {
         log_info "Install directory: ${INSTALL_DIR}"
     else
         # Pi and other platforms — detect klipper user, then auto-detect install dir
+        # shellcheck disable=SC2034  # consumed by service.sh and common.sh
         INIT_SCRIPT_DEST="/etc/init.d/S90helixscreen"
+        # shellcheck disable=SC2034  # consumed by competing_uis.sh and the uninstaller bundle
         PREVIOUS_UI_SCRIPT=""
         detect_klipper_user
         detect_pi_install_dir

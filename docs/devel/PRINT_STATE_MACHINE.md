@@ -182,6 +182,43 @@ that must distinguish `Paused` still switches on `PrintState`.
 a filament operation on a paused print when the backend does **not** self-home,
 because then no firmware macro can hide a `G28`.
 
+## What just happened: `print_lifecycle_prev` and `should_notify_print_ended()`
+
+Consumers that need the *transition* - "what did we just leave?" - no longer keep
+a private previous-state variable. `PrinterPrintState` publishes
+`print_lifecycle_prev` (`include/printer_print_state.h:321`-333) from the same
+place that computes the transition, with three deliberate properties:
+
+- **Written only when the state actually changes** (`src/printer/printer_print_state.cpp:1432`-1437). Rewriting it unconditionally would collapse it onto the current state and every consumer would see a self-transition.
+- **Written *before* `print_lifecycle`**, so an observer firing on the new value already sees a consistent pair.
+- **Initialized to `Idle`**, so booting straight into a terminal state reads as `Idle -> Complete` and correctly does not notify.
+
+Eight private previous-state variables existed before this subject, and they
+disagreed at the edges.
+
+The edge consumer is `should_notify_print_ended(prev, current, outcome)`
+(`include/print_completion.h:61`, `src/print/print_completion.cpp:141`), which
+decides whether a lifecycle transition means *a print the user was watching
+ended*. `Printing`/`Paused` -> terminal notifies. `Preparing` -> terminal is the
+interesting arm, and it gates on `outcome` in both directions:
+
+- **A print that dies inside `PRINT_START` never passes through `Printing`.** A
+  live phase outranks the job state, so the lifecycle holds at `Preparing` while
+  `print_stats` already reads printing, then jumps straight to the terminal value
+  when the phase clears. The outcome was recorded for THIS attempt, so it is not
+  NONE and the death is reported - without this arm, a Klipper fault inside
+  `PRINT_START` or a cancel during a long bed mesh was reported by nothing (the
+  preparing-exit observer cannot cover it either: the job was retired as
+  `Confirmed` the moment the printer took it).
+- **An abandoned host-side pre-start block derives the same `Preparing` ->
+  terminal shape**, but from the PREVIOUS job's stale `print_stats`.
+  `begin_preparing()` clears `print_outcome`, so that case reads NONE and stays
+  silent - otherwise abandoning a start would announce the last print's
+  completion.
+
+The completion observer (`print_completion.cpp:312`) reads both halves of the
+transition from `PrinterPrintState`; it no longer owns a latch of its own.
+
 ---
 
 ## Guards
@@ -231,8 +268,10 @@ when `print_ended` is true.
 ### gcode_loaded
 
 `gcode_loaded` is preserved through terminal states so the 3D viewer stays visible
-showing where the print stopped. It is cleared only on transition to Idle
-(`clear_gcode_loaded=true`). The flag can be set externally via `set_gcode_loaded()`.
+showing where the print stopped. It is cleared only on transition to Idle: the
+transition computes a local `clear_gcode_loaded` from `print_ended` and applies it
+in the same pass (`src/printer/print_lifecycle_state.cpp:96`) - it is not a
+`StateChangeResult` field. The flag can be set externally via `set_gcode_loaded()`.
 
 ### 3D Viewer visibility
 

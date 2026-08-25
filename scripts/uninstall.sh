@@ -45,13 +45,16 @@ PREVIOUS_UIS="guppyscreen GuppyScreen featherscreen FeatherScreen klipperscreen 
 # Pi: /opt/helixscreen
 # CC1 (COSMOS): /user-resource/helixscreen (/ is RO squashfs)
 # Snapmaker U1: /userdata/helixscreen
+# shellcheck disable=SC2034  # consumed by uninstall.sh (sweep of all known install locations)
 HELIX_INSTALL_DIRS="/root/printer_software/helixscreen /opt/helixscreen /usr/data/helixscreen /srv/helixscreen /user-resource/helixscreen /userdata/helixscreen"
 
 # Init script locations vary by platform/firmware
 # AD5M Klipper Mod: S80, AD5M Forge-X: S90, K1: S99, CC1 (COSMOS): plain /etc/init.d/helixscreen
+# shellcheck disable=SC2034  # consumed by service.sh and uninstall.sh
 HELIX_INIT_SCRIPTS="/etc/init.d/S80helixscreen /etc/init.d/S90helixscreen /etc/init.d/S99helixscreen /etc/init.d/helixscreen"
 
 # HelixScreen process names (order matters: watchdog first to prevent crash dialog)
+# shellcheck disable=SC2034  # consumed by service.sh and uninstall.sh (kill_process_by_name)
 HELIX_PROCESSES="helix-watchdog helix-screen helix-splash"
 
 # Returns true when install.sh was spawned by helix-screen's in-app update.
@@ -167,9 +170,9 @@ klipper_config_dir() {
 
 # Track what we've done for cleanup
 CLEANUP_TMP=false
-CLEANUP_SERVICE=false
 BACKUP_CONFIG=""
 BACKUP_ENV=""
+# shellcheck disable=SC2034  # consumed by release.sh (set true at the swap, read at config restore)
 ORIGINAL_INSTALL_EXISTS=false
 
 # Colors (if terminal supports it)
@@ -186,6 +189,7 @@ setup_colors() {
         GREEN=''
         YELLOW=''
         CYAN=''
+        # shellcheck disable=SC2034  # consumed by main.sh (installer banner) and release.sh
         BOLD=''
         NC=''
     fi
@@ -324,6 +328,7 @@ _user_dir_name_ok() {
     [ -n "$base" ] || return 1
     local pat
     for pat in "$@"; do
+        # shellcheck disable=SC2254  # $pat is a caller-supplied glob ('*helixscreen-install*'), not a literal
         case "$base" in
             $pat) return 0 ;;
         esac
@@ -551,6 +556,7 @@ _USER_INSTALL_DIR="${INSTALL_DIR}"
 INIT_SCRIPT_DEST=""
 PREVIOUS_UI_SCRIPT=""
 AD5M_FIRMWARE=""
+# shellcheck disable=SC2034  # consumed by main.sh and competing_uis.sh
 K1_FIRMWARE=""
 KLIPPER_USER=""
 KLIPPER_GROUP=""
@@ -1406,6 +1412,7 @@ set_install_paths() {
         # the app now caches on /mnt/UDISK, so reclaim the old location.
         # Also reclaim scratch dirs leaked by pre-EXIT-trap installers: one
         # unit held a 60MB archive at /usr/data/helixscreen-install for months.
+        # shellcheck disable=SC2034  # consumed by release.sh (stale cache reclaim)
         STALE_CACHE_DIRS="/usr/data/helixscreen/cache /usr/data/helixscreen-install /opt/.helixscreen-install"
         log_info "Platform: Creality K2 series"
         log_info "Install directory: ${INSTALL_DIR}"
@@ -1425,6 +1432,7 @@ set_install_paths() {
         KLIPPER_USER="root"
         KLIPPER_GROUP="root"
         KLIPPER_HOME="/root"
+        # shellcheck disable=SC2034  # consumed by common.sh klipper_config_dir()
         KLIPPER_CONFIG_DIR="/etc/klipper/config"
         INIT_SYSTEM="sysv"
         log_info "Platform: Elegoo Centauri Carbon (COSMOS)"
@@ -1440,6 +1448,7 @@ set_install_paths() {
         KLIPPER_USER="root"
         KLIPPER_GROUP="root"
         KLIPPER_HOME="/home/lava"
+        # shellcheck disable=SC2034  # consumed by service.sh, common.sh, competing_uis.sh, uninstall.sh
         INIT_SYSTEM="sysv"
         # U1 does NOT install /etc/init.d/S99helixscreen. install_service_snapmaker_u1
         # patches the stock /etc/init.d/S99screen to delegate to helixscreen.init for
@@ -1450,7 +1459,9 @@ set_install_paths() {
         log_info "Install directory: ${INSTALL_DIR}"
     else
         # Pi and other platforms — detect klipper user, then auto-detect install dir
+        # shellcheck disable=SC2034  # consumed by service.sh and common.sh
         INIT_SCRIPT_DEST="/etc/init.d/S90helixscreen"
+        # shellcheck disable=SC2034  # consumed by competing_uis.sh and the uninstaller bundle
         PREVIOUS_UI_SCRIPT=""
         detect_klipper_user
         detect_pi_install_dir
@@ -2295,6 +2306,7 @@ detect_init_system() {
 
     # Check for SysV init (BusyBox or traditional)
     if [ -d /etc/init.d ]; then
+        # shellcheck disable=SC2034  # consumed by service.sh, common.sh, competing_uis.sh, uninstall.sh
         INIT_SYSTEM="sysv"
         log_info "Init system: SysV (BusyBox/traditional)"
         return
@@ -2902,6 +2914,7 @@ uninstall_forgex() {
     # Re-enable GuppyScreen and tslib init scripts
     if [ -f "/opt/config/mod/.root/S80guppyscreen" ]; then
         $SUDO chmod +x "/opt/config/mod/.root/S80guppyscreen" 2>/dev/null || true
+        # shellcheck disable=SC2034  # consumed by uninstall.sh (previous-UI restore chain) and the uninstaller bundle
         restored_ui="GuppyScreen (/opt/config/mod/.root/S80guppyscreen)"
     fi
     if [ -f "/opt/config/mod/.root/S35tslib" ]; then
@@ -3085,7 +3098,6 @@ install_service_systemd() {
     if _is_self_update; then
         log_info "Skipping main service file install (self-update; preserving customizations)"
         update_watcher_if_stale
-        CLEANUP_SERVICE=true
         return 0
     fi
 
@@ -3109,7 +3121,6 @@ install_service_systemd() {
     if _has_no_new_privs; then
         if [ -f "$service_dest" ]; then
             log_info "Skipping service reinstall (NoNewPrivileges; already installed)"
-            CLEANUP_SERVICE=true
             return 0
         fi
         log_error "Service not installed and NoNewPrivileges prevents installation"
@@ -3143,7 +3154,6 @@ install_service_systemd() {
     # Workaround for mainsail-crew/mainsail#2444: type: web lacks managed_services
     install_update_watcher_systemd
 
-    CLEANUP_SERVICE=true
     log_success "Installed systemd service"
 }
 
@@ -3260,7 +3270,6 @@ install_service_sysv() {
     if _is_self_update; then
         log_info "Skipping init script install (self-update; already installed)"
         _migrate_init_script_hooks_path
-        CLEANUP_SERVICE=true
         return 0
     fi
 
@@ -3284,7 +3293,6 @@ install_service_sysv() {
     # This is important for Klipper Mod which uses a different path
     _sed_inplace "s|DAEMON_DIR=.*|DAEMON_DIR=\"${INSTALL_DIR}\"|" "$INIT_SCRIPT_DEST"
 
-    CLEANUP_SERVICE=true
     log_success "Installed SysV init script at $INIT_SCRIPT_DEST"
 }
 
@@ -3346,8 +3354,8 @@ start_service_snapmaker_u1() {
     fi
 
     # Wait for service to start (may be slow on embedded hardware)
-    local i
-    for i in 1 2 3 4 5; do
+    local _
+    for _ in 1 2 3 4 5; do
         sleep 1
         if pidof helix-screen >/dev/null 2>&1; then
             log_success "HelixScreen is running!"
@@ -3391,8 +3399,8 @@ start_service_systemd() {
     fi
 
     # Wait for service to start (may be slow on embedded hardware)
-    local i
-    for i in 1 2 3 4 5; do
+    local _
+    for _ in 1 2 3 4 5; do
         sleep 1
         if systemctl is-active --quiet "$SERVICE_NAME"; then
             log_success "HelixScreen is running!"
@@ -3435,8 +3443,8 @@ start_service_sysv() {
     fi
 
     # Wait for service to start (may be slow on embedded hardware)
-    local i
-    for i in 1 2 3 4 5; do
+    local _
+    for _ in 1 2 3 4 5; do
         sleep 1
         if $SUDO "$INIT_SCRIPT_DEST" status >/dev/null 2>&1; then
             log_success "HelixScreen is running!"
@@ -4375,6 +4383,178 @@ _k2cam_marker_file() { echo "${INSTALL_DIR}/config/.k2cam_webcam_disabled"; }
 # block. Uninstall strips this exact prefix back off.
 K2CAM_DISABLE_PREFIX="#helix-k2cam-disabled# "
 
+# --- nginx /webcam/ proxy-block tuning --------------------------------------
+# We register the camera through the K2's stock nginx /webcam/ proxy (see the
+# URL-form choice in install_camera_k2 -- the relative form survives DHCP lease
+# changes). On Tina Linux /var/log is a symlink onto the /tmp tmpfs, the K2
+# ships no logrotate, and Creality's Moonraker fork puts the gcode upload temp
+# file on that SAME tmpfs via tempfile.gettempdir(). So anything of ours that
+# grows in /tmp eventually breaks uploads: the write fails with ENOSPC, the
+# exception escapes tornado's body reader, no HTTP response is ever sent, and
+# the uploading client just sees "connection reset by peer".
+#
+# Two directives are needed, and BOTH matter -- either one alone still fills the
+# tmpfs:
+#
+#   access_log off       Without it nginx logs every camera request. Under the
+#                        old mjpegstreamer-adaptive registration that was ~5
+#                        requests/sec, ~147 MB/day.
+#
+#   proxy_buffering off  Without it nginx buffers the upstream response to a
+#                        temp file under /tmp/lib/nginx/proxy. For a normal
+#                        finite response that is harmless, but an MJPEG stream
+#                        NEVER ENDS -- measured at ~950 KB/s, which fills a
+#                        244 MB tmpfs in about two minutes. This is the one that
+#                        bites once the webcam is registered as plain
+#                        'mjpegstreamer' (a single persistent
+#                        multipart/x-mixed-replace connection) rather than the
+#                        per-frame-polling adaptive type.
+#
+# We scope both to the /webcam/ block -- the traffic we caused -- and leave the
+# server-level access_log and everything else alone. Reversible on uninstall.
+
+# nginx config path. Env-overridable so the BATS suite can redirect it off the
+# host, same as _initd_dir/_rcd_dir. Resolved per-call, not at source time.
+_nginx_conf_path() { echo "${HELIX_NGINX_CONF:-/etc/nginx/nginx.conf}"; }
+
+# The stock K2 access log fed by that proxy.
+_nginx_access_log_path() { echo "${HELIX_NGINX_ACCESS_LOG:-/var/log/nginx/fluidd-access.log}"; }
+
+# Marker recording that we edited the block. Name kept as-is for compatibility
+# with installs made before proxy_buffering was added to the same edit.
+_nginx_accesslog_marker_file() { echo "${INSTALL_DIR}/config/.nginx_webcam_accesslog"; }
+
+# Tag embedded in every line we insert, making both the idempotency check and
+# the removal exact rather than pattern-guessed. Deliberately a PREFIX of the
+# older 'helix-managed-webcam-accesslog' tag, so a substring delete also cleans
+# up lines written by the previous version of this installer.
+NGINX_WEBCAM_TAG="helix-managed-webcam"
+
+# True when $2 (a directive name) already appears inside the /webcam/ block,
+# whether we put it there or the user did. Scoped to that block only.
+_webcam_block_has_directive() {
+    awk -v d="$2" '
+        /^[[:space:]]*location[[:space:]]+\/webcam\/[[:space:]]*\{/ { inblk = 1; next }
+        inblk && /^[[:space:]]*\}/ { inblk = 0 }
+        inblk && $1 == d { found = 1 }
+        END { exit(found ? 0 : 1) }
+    ' "$1"
+}
+
+# Validate the edited config and reload nginx. Returns non-zero if `nginx -t`
+# rejects it, so the caller can roll back -- we must never be the reason
+# someone's web UI stops serving.
+_nginx_validate_and_reload() {
+    if command -v nginx >/dev/null 2>&1; then
+        if ! $SUDO nginx -t >/dev/null 2>&1; then
+            return 1
+        fi
+    fi
+    local initd
+    initd="$(_initd_dir)"
+    if [ -x "${initd}/nginx" ]; then
+        $SUDO "${initd}/nginx" reload >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# Add the directives above to the stock /webcam/ proxy block. Idempotent, and
+# per-directive: a block that already has one keeps it and gains only the other.
+# Every unexpected shape is a clean skip, never an error: no nginx.conf, no
+# /webcam/ block (a replaced nginx is not ours to edit), or both already set.
+_tune_webcam_proxy_block() {
+    local conf need_log need_buf
+    conf="$(_nginx_conf_path)"
+    [ -f "$conf" ] || return 0
+
+    grep -q '^[[:space:]]*location[[:space:]]\+/webcam/[[:space:]]*{' "$conf" 2>/dev/null || return 0
+
+    need_log=1; need_buf=1
+    _webcam_block_has_directive "$conf" access_log && need_log=0
+    _webcam_block_has_directive "$conf" proxy_buffering && need_buf=0
+    [ "$need_log" -eq 0 ] && [ "$need_buf" -eq 0 ] && return 0
+
+    local backup tmp
+    backup="${conf}.helix-bak"
+    tmp="${conf}.helix-new"
+    $SUDO cp "$conf" "$backup" 2>/dev/null || return 0
+
+    if ! awk -v tag="$NGINX_WEBCAM_TAG" -v nlog="$need_log" -v nbuf="$need_buf" '
+        {
+            print
+            if (!ins && $0 ~ /^[[:space:]]*location[[:space:]]+\/webcam\/[[:space:]]*\{/) {
+                match($0, /^[[:space:]]*/)
+                indent = substr($0, 1, RLENGTH) "    "
+                if (nlog == 1)
+                    print indent "access_log off; # " tag ": camera frames would fill the tmpfs log"
+                if (nbuf == 1)
+                    print indent "proxy_buffering off; # " tag ": endless MJPEG stream would buffer into the tmpfs"
+                ins = 1
+            }
+        }
+    ' "$conf" > "$tmp" 2>/dev/null; then
+        $SUDO rm -f "$tmp"
+        return 0
+    fi
+
+    $SUDO cp "$tmp" "$conf"
+    $SUDO rm -f "$tmp"
+
+    if ! _nginx_validate_and_reload; then
+        log_warn "nginx rejected the config after tuning the /webcam/ block — reverting"
+        $SUDO cp "$backup" "$conf"
+        $SUDO rm -f "$backup"
+        return 1
+    fi
+
+    $SUDO rm -f "$backup"
+    $SUDO touch "$(_nginx_accesslog_marker_file)"
+    log_info "Tuned nginx /webcam/ block (no access log, no proxy buffering) so the camera cannot fill the K2's tmpfs"
+    return 0
+}
+
+# Reverse _tune_webcam_proxy_block. Strips only our tagged lines, and only when
+# the marker says we were the ones who added them.
+_restore_webcam_proxy_block() {
+    local marker conf
+    marker="$(_nginx_accesslog_marker_file)"
+    [ -f "$marker" ] || return 0
+
+    conf="$(_nginx_conf_path)"
+    if [ -f "$conf" ]; then
+        $SUDO sed -i "/${NGINX_WEBCAM_TAG}/d" "$conf" 2>/dev/null || true
+        _nginx_validate_and_reload || \
+            log_warn "nginx rejected the config after untuning the /webcam/ block"
+        log_info "Restored the stock nginx /webcam/ block"
+    fi
+    $SUDO rm -f "$marker"
+    return 0
+}
+
+# Empty an already-oversized fluidd-access.log. An affected K2 arrives here with
+# its tmpfs already full, so preventing further growth is not enough to unwedge
+# uploads. The file is on tmpfs and is cleared on every reboot anyway, and the
+# traffic in it is ours, so truncating is safe.
+_truncate_oversized_webcam_log() {
+    local log max size
+    log="$(_nginx_access_log_path)"
+    [ -f "$log" ] || return 0
+
+    max="${HELIX_WEBCAM_LOG_MAX_BYTES:-20971520}"
+    size="$(wc -c < "$log" 2>/dev/null | tr -d ' ')"
+    [ -n "$size" ] || return 0
+    [ "$size" -gt "$max" ] 2>/dev/null || return 0
+
+    log_warn "nginx access log is $((size / 1024 / 1024)) MB and filling the tmpfs — truncating"
+    log_warn "  (${log} is volatile; it is cleared on every reboot)"
+    if [ -n "$SUDO" ]; then
+        $SUDO sh -c ': > "$1"' _ "$log" 2>/dev/null || true
+    else
+        : > "$log" 2>/dev/null || true
+    fi
+    return 0
+}
+
 # Detect the community "K2-Camera-main" mod. It REPLACES Moonraker (backs up
 # /usr/share/moonraker -> /usr/share/moonraker_backup, drops in its own copy)
 # and ships an iframe camera viewer whose [webcam Default] entry conflicts with
@@ -4711,15 +4891,29 @@ except Exception:
     pass  # non-fatal; the POST below is what matters
 
 try:
-    # 'mjpegstreamer-adaptive' (not 'ustreamer'): fluidd/mainsail render MJPEG by
-    # service type and have no 'ustreamer' renderer — it shows "service not
-    # supported!" and never displays frames. ustreamer's /stream + /snapshot are
-    # the standard mjpegstreamer endpoints, so 'mjpegstreamer-adaptive' renders
-    # correctly in both web UIs and still matches HelixScreen's own is_mjpeg
-    # consumer check (which keys on the 'mjpeg' substring).
+    # Service type, and why it is neither of the two obvious alternatives:
+    #
+    #   NOT 'ustreamer': fluidd/mainsail render MJPEG by service type and ship no
+    #   'ustreamer' renderer -- it shows "service not supported!" and never
+    #   displays frames.
+    #
+    #   NOT 'mjpegstreamer-adaptive': that mode fetches ONE HTTP REQUEST PER
+    #   FRAME (each with a &cacheBust= param to defeat caching), up to target_fps.
+    #   On the K2 that meant ~5 request/response cycles a second through nginx
+    #   and ustreamer on a 488 MB SoC, and its access-log volume filled the /tmp
+    #   tmpfs -- which is also where Creality's Moonraker fork puts the upload
+    #   temp file, so gcode uploads then died mid-stream with ENOSPC and the
+    #   client saw "connection reset by peer".
+    #
+    # Plain 'mjpegstreamer' consumes ustreamer's /stream as a single persistent
+    # multipart/x-mixed-replace connection: one request instead of thousands per
+    # minute. It renders in fluidd (both renderers ship in 1.30.0) and mainsail,
+    # and still matches HelixScreen's own is_mjpeg consumer check (which keys on
+    # the 'mjpeg' substring). Frame rate stays governed server-side by
+    # ustreamer's own --desired-fps in helixscreen-ustreamer-k2.sh.
     req('POST', '/server/webcams/item', {
         'name': name,
-        'service': 'mjpegstreamer-adaptive',
+        'service': 'mjpegstreamer',
         'stream_url': stream,
         'snapshot_url': snap,
         'enabled': True,
@@ -4841,6 +5035,11 @@ install_camera_k2() {
         log_warn "ustreamer does not appear to be listening on :$port (check /dev/video0)"
     fi
 
+    # (d2) Keep our own camera traffic from filling the K2's tmpfs. Must run
+    # before the Moonraker section, which returns early when Moonraker is down.
+    _tune_webcam_proxy_block || true
+    _truncate_oversized_webcam_log
+
     # (e) Moonraker webcam migration (preserve/fix fluidd). Back up the current
     # list, then delete the stock iframe and add our ustreamer webcam. If
     # moonraker is unreachable, warn but leave ustreamer running (the camera
@@ -4925,6 +5124,9 @@ uninstall_camera_k2() {
     fi
     killall ustreamer 2>/dev/null || true
     $SUDO rm -f "${INSTALL_DIR}/bin/ustreamer" 2>/dev/null || true
+
+    # (a2) Put the nginx /webcam/ block back the way we found it.
+    _restore_webcam_proxy_block
 
     # (b) Restore moonraker webcams from the backup, if we migrated them.
     local marker backup
@@ -5175,145 +5377,19 @@ undo_seeded_settings() {
 
 # Uninstall HelixScreen
 # Args: platform (optional)
-uninstall() {
-    local platform=${1:-}
-
-    log_info "Uninstalling HelixScreen..."
-
-    # Drop sentinel BEFORE any destructive work.  helixscreen-update.service
-    # checks for it and refuses to fire while uninstall is running, closing
-    # the race where Moonraker's path unit could re-trigger a restart between
-    # stop_service and rm -rf.  Swept at the end by clean_helix_state_dirs;
-    # the trap covers the abort case so a stuck sentinel can't silently block
-    # future update.service firings.
-    # Chained with the scratch-dir cleanup main.sh arms: a trap REPLACES the
-    # previous handler for a signal, and install.sh bundles both modules, so
-    # setting only the sweep here would disarm cleanup on the --uninstall path.
-    trap '_sweep_uninstalling_sentinel; type cleanup_on_success >/dev/null 2>&1 && cleanup_on_success' EXIT INT TERM
-    _drop_uninstalling_sentinel
-
-    # Remove the [update_manager helixscreen] section FIRST, before any files
-    # disappear.  If Moonraker auto-refreshes (or someone clicks "Update" in
-    # Mainsail mid-uninstall), having the section gone before we start
-    # dismantling files prevents a re-extract from racing us.  Moonraker's
-    # in-memory updater object survives until Moonraker is reloaded, but
-    # type:web only extracts on explicit user trigger so the on-disk edit is
-    # the effective fix; no moonraker restart needed.
-    if type remove_update_manager_section >/dev/null 2>&1; then
-        remove_update_manager_section || true
-    fi
-
-    # Drop the service-allowlist entry the install added. Nothing else prunes
-    # moonraker.asvc, so skipping this leaves helixscreen listed forever.
-    if type remove_moonraker_asvc >/dev/null 2>&1; then
-        local _asvc_conf
-        _asvc_conf=$(find_moonraker_conf 2>/dev/null || true)
-        [ -n "$_asvc_conf" ] && remove_moonraker_asvc "$_asvc_conf" || true
-    fi
-
-    # Detect init system first
-    detect_init_system
-
-    if [ "$INIT_SYSTEM" = "systemd" ]; then
-        # Stop and disable systemd service
-        $SUDO systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-        $SUDO systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-        $SUDO rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
-        # Remove update watcher units (mainsail#2444 workaround)
-        $SUDO systemctl stop helixscreen-update.path 2>/dev/null || true
-        $SUDO systemctl disable helixscreen-update.path 2>/dev/null || true
-        $SUDO rm -f /etc/systemd/system/helixscreen-update.path
-        $SUDO rm -f /etc/systemd/system/helixscreen-update.service
-        # Remove permission rules (udev, polkit)
-        $SUDO rm -f /etc/udev/rules.d/99-helixscreen-backlight.rules
-        $SUDO rm -f /etc/polkit-1/localauthority/50-local.d/helixscreen-network.pkla
-        $SUDO rm -f /etc/polkit-1/rules.d/49-helixscreen-network.rules
-        $SUDO rm -f /etc/polkit-1/rules.d/50-helixscreen-network.rules
-        $SUDO systemctl daemon-reload
-    else
-        # Stop and remove SysV init scripts (check all possible locations)
-        local removed_procd_shim=false
-        for init_script in $HELIX_INIT_SCRIPTS; do
-            if [ -f "$init_script" ]; then
-                log_info "Stopping and removing $init_script..."
-                $SUDO "$init_script" stop 2>/dev/null || true
-                # K2 procd shim: only call disable if this is actually a
-                # rc.common-style script. CC1 installs a plain SysV script
-                # at the same /etc/init.d/helixscreen path, and CC1's BusyBox
-                # rejects `head -1` (only supports `head -n 1`), so we use
-                # awk for the shebang check (portable across all BusyBox
-                # variants we ship to). Also CC1 has no /etc/rc.common, so
-                # the first guard short-circuits anyway.
-                if [ "$init_script" = "/etc/init.d/helixscreen" ] && \
-                   [ -x /etc/rc.common ] && \
-                   awk 'NR==1 {exit !/\/etc\/rc\.common/}' "$init_script" 2>/dev/null; then
-                    $SUDO "$init_script" disable 2>/dev/null || true
-                    removed_procd_shim=true
-                fi
-                $SUDO rm -f "$init_script"
-            fi
-        done
-        # Belt-and-suspenders cleanup of rc.d symlinks, but only if we actually
-        # removed a procd shim (avoid touching /etc/rc.d on platforms that
-        # don't use the procd boot iterator).
-        if [ "$removed_procd_shim" = "true" ]; then
-            $SUDO rm -f /etc/rc.d/S99helixscreen /etc/rc.d/K01helixscreen 2>/dev/null || true
-        fi
-    fi
-
-    # Kill any remaining processes (watchdog first to prevent crash dialog flash)
-    # shellcheck disable=SC2086
-    kill_process_by_name $HELIX_PROCESSES || true
-
-    # Clean up PID files and log file
-    $SUDO rm -f /var/run/helixscreen.pid 2>/dev/null || true
-    $SUDO rm -f /var/run/helix-splash.pid 2>/dev/null || true
-    rm -f /tmp/helixscreen.log 2>/dev/null || true
-
-    # K2 ustreamer camera teardown (#camera): stop/disable/remove the ustreamer
-    # service + binary and restore Moonraker's stock webcam list. Must run BEFORE
-    # reenable_disabled_services (which chmod +x's the stock WebRTC init scripts
-    # back) and BEFORE $INSTALL_DIR is removed (the .webcams_backup.json and
-    # .camera_migrated marker live in $INSTALL_DIR/config). No-op off K2.
-    if type uninstall_camera_k2 >/dev/null 2>&1; then
-        uninstall_camera_k2 "$platform" || true
-    fi
-
-    # Re-enable services from state file (before removing install dir)
-    reenable_disabled_services
-
-    # Revert per-printer Klipper includes (#986) — strip the [include] line from
-    # printer.cfg and remove the copied snippet. Must run before $INSTALL_DIR
-    # (which holds the .klipper_includes state file) is removed.
-    undo_klipper_includes
-
-    # Acknowledge per-printer settings seeding (#986) — log which defaults were
-    # seeded (they remain in settings.json by design) and remove the marker.
-    # Must run before $INSTALL_DIR (which holds the .seeded_settings state file)
-    # is removed.
-    undo_seeded_settings
-
-    # Remove installation (check all possible locations)
-    local removed_dir=""
-    for install_dir in $HELIX_INSTALL_DIRS; do
-        if [ -d "$install_dir" ]; then
-            $SUDO rm -rf "$install_dir"
-            log_success "Removed ${install_dir}"
-            removed_dir="$install_dir"
-            # Also remove the updater repo clone if present
-            if [ -d "${install_dir}-repo" ]; then
-                $SUDO rm -rf "${install_dir}-repo"
-                log_success "Removed ${install_dir}-repo"
-            fi
-        fi
-    done
-
-    if [ -z "$removed_dir" ]; then
-        log_warn "No HelixScreen installation found"
-    fi
-
-    # Re-enable the previous UI based on firmware
-    log_info "Re-enabling previous screen UI..."
+# Restore whatever screen UI HelixScreen displaced at install time, for the
+# platform passed in $1. Split out of uninstall() so the STANDALONE uninstaller can
+# reach it too. `install.sh --uninstall` calls uninstall() and always could;
+# bundle-uninstaller.sh builds its own main() around reenable_previous_ui() instead,
+# so every platform branch below — COSMOS, Snapmaker U1, AD5M zmod, Creality app —
+# was unreachable from the uninstall.sh that ships into the install dir. On a U1 that
+# left /usr/bin/gui non-executable and /oem/.debug set: no bootable stock UI and the
+# firmware's overlay-wipe disabled for good.
+#
+# Communicates results through HELIX_RESTORED_UI / HELIX_RESTORED_XORG rather
+# than a return value, because callers need both.
+restore_previous_ui_platform() {
+    local platform="${1:-}"
     local restored_ui=""
     local restored_xorg=""
 
@@ -5457,6 +5533,153 @@ uninstall() {
             $SUDO rm -f /oem/.debug 2>/dev/null || true
         fi
     fi
+
+    HELIX_RESTORED_UI="$restored_ui"
+    HELIX_RESTORED_XORG="$restored_xorg"
+}
+
+uninstall() {
+    local platform=${1:-}
+
+    log_info "Uninstalling HelixScreen..."
+
+    # Drop sentinel BEFORE any destructive work.  helixscreen-update.service
+    # checks for it and refuses to fire while uninstall is running, closing
+    # the race where Moonraker's path unit could re-trigger a restart between
+    # stop_service and rm -rf.  Swept at the end by clean_helix_state_dirs;
+    # the trap covers the abort case so a stuck sentinel can't silently block
+    # future update.service firings.
+    # Chained with the scratch-dir cleanup main.sh arms: a trap REPLACES the
+    # previous handler for a signal, and install.sh bundles both modules, so
+    # setting only the sweep here would disarm cleanup on the --uninstall path.
+    trap '_sweep_uninstalling_sentinel; type cleanup_on_success >/dev/null 2>&1 && cleanup_on_success' EXIT INT TERM
+    _drop_uninstalling_sentinel
+
+    # Remove the [update_manager helixscreen] section FIRST, before any files
+    # disappear.  If Moonraker auto-refreshes (or someone clicks "Update" in
+    # Mainsail mid-uninstall), having the section gone before we start
+    # dismantling files prevents a re-extract from racing us.  Moonraker's
+    # in-memory updater object survives until Moonraker is reloaded, but
+    # type:web only extracts on explicit user trigger so the on-disk edit is
+    # the effective fix; no moonraker restart needed.
+    if type remove_update_manager_section >/dev/null 2>&1; then
+        remove_update_manager_section || true
+    fi
+
+    # Drop the service-allowlist entry the install added. Nothing else prunes
+    # moonraker.asvc, so skipping this leaves helixscreen listed forever.
+    if type remove_moonraker_asvc >/dev/null 2>&1; then
+        local _asvc_conf
+        _asvc_conf=$(find_moonraker_conf 2>/dev/null || true)
+        [ -n "$_asvc_conf" ] && remove_moonraker_asvc "$_asvc_conf" || true
+    fi
+
+    # Detect init system first
+    detect_init_system
+
+    if [ "$INIT_SYSTEM" = "systemd" ]; then
+        # Stop and disable systemd service
+        $SUDO systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+        $SUDO systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+        $SUDO rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        # Remove update watcher units (mainsail#2444 workaround)
+        $SUDO systemctl stop helixscreen-update.path 2>/dev/null || true
+        $SUDO systemctl disable helixscreen-update.path 2>/dev/null || true
+        $SUDO rm -f /etc/systemd/system/helixscreen-update.path
+        $SUDO rm -f /etc/systemd/system/helixscreen-update.service
+        # Remove permission rules (udev, polkit)
+        $SUDO rm -f /etc/udev/rules.d/99-helixscreen-backlight.rules
+        $SUDO rm -f /etc/polkit-1/localauthority/50-local.d/helixscreen-network.pkla
+        $SUDO rm -f /etc/polkit-1/rules.d/49-helixscreen-network.rules
+        $SUDO rm -f /etc/polkit-1/rules.d/50-helixscreen-network.rules
+        $SUDO systemctl daemon-reload
+    else
+        # Stop and remove SysV init scripts (check all possible locations)
+        local removed_procd_shim=false
+        for init_script in $HELIX_INIT_SCRIPTS; do
+            if [ -f "$init_script" ]; then
+                log_info "Stopping and removing $init_script..."
+                $SUDO "$init_script" stop 2>/dev/null || true
+                # K2 procd shim: only call disable if this is actually a
+                # rc.common-style script. CC1 installs a plain SysV script
+                # at the same /etc/init.d/helixscreen path, and CC1's BusyBox
+                # rejects `head -1` (only supports `head -n 1`), so we use
+                # awk for the shebang check (portable across all BusyBox
+                # variants we ship to). Also CC1 has no /etc/rc.common, so
+                # the first guard short-circuits anyway.
+                if [ "$init_script" = "/etc/init.d/helixscreen" ] && \
+                   [ -x /etc/rc.common ] && \
+                   awk 'NR==1 {exit !/\/etc\/rc\.common/}' "$init_script" 2>/dev/null; then
+                    $SUDO "$init_script" disable 2>/dev/null || true
+                    removed_procd_shim=true
+                fi
+                $SUDO rm -f "$init_script"
+            fi
+        done
+        # Belt-and-suspenders cleanup of rc.d symlinks, but only if we actually
+        # removed a procd shim (avoid touching /etc/rc.d on platforms that
+        # don't use the procd boot iterator).
+        if [ "$removed_procd_shim" = "true" ]; then
+            $SUDO rm -f /etc/rc.d/S99helixscreen /etc/rc.d/K01helixscreen 2>/dev/null || true
+        fi
+    fi
+
+    # Kill any remaining processes (watchdog first to prevent crash dialog flash)
+    # shellcheck disable=SC2086
+    kill_process_by_name $HELIX_PROCESSES || true
+
+    # Clean up PID files and log file
+    $SUDO rm -f /var/run/helixscreen.pid 2>/dev/null || true
+    $SUDO rm -f /var/run/helix-splash.pid 2>/dev/null || true
+    rm -f /tmp/helixscreen.log 2>/dev/null || true
+
+    # K2 ustreamer camera teardown (#camera): stop/disable/remove the ustreamer
+    # service + binary and restore Moonraker's stock webcam list. Must run BEFORE
+    # reenable_disabled_services (which chmod +x's the stock WebRTC init scripts
+    # back) and BEFORE $INSTALL_DIR is removed (the .webcams_backup.json and
+    # .camera_migrated marker live in $INSTALL_DIR/config). No-op off K2.
+    if type uninstall_camera_k2 >/dev/null 2>&1; then
+        uninstall_camera_k2 "$platform" || true
+    fi
+
+    # Re-enable services from state file (before removing install dir)
+    reenable_disabled_services
+
+    # Revert per-printer Klipper includes (#986) — strip the [include] line from
+    # printer.cfg and remove the copied snippet. Must run before $INSTALL_DIR
+    # (which holds the .klipper_includes state file) is removed.
+    undo_klipper_includes
+
+    # Acknowledge per-printer settings seeding (#986) — log which defaults were
+    # seeded (they remain in settings.json by design) and remove the marker.
+    # Must run before $INSTALL_DIR (which holds the .seeded_settings state file)
+    # is removed.
+    undo_seeded_settings
+
+    # Remove installation (check all possible locations)
+    local removed_dir=""
+    for install_dir in $HELIX_INSTALL_DIRS; do
+        if [ -d "$install_dir" ]; then
+            $SUDO rm -rf "$install_dir"
+            log_success "Removed ${install_dir}"
+            removed_dir="$install_dir"
+            # Also remove the updater repo clone if present
+            if [ -d "${install_dir}-repo" ]; then
+                $SUDO rm -rf "${install_dir}-repo"
+                log_success "Removed ${install_dir}-repo"
+            fi
+        fi
+    done
+
+    if [ -z "$removed_dir" ]; then
+        log_warn "No HelixScreen installation found"
+    fi
+
+    # Re-enable the previous UI based on firmware
+    log_info "Re-enabling previous screen UI..."
+    restore_previous_ui_platform "$platform"
+    local restored_ui="$HELIX_RESTORED_UI"
+    local restored_xorg="$HELIX_RESTORED_XORG"
 
     # Clean up helixscreen cache directories
     for cache_dir in /root/.cache/helix /tmp/helix_thumbs /.cache/helix /data/helixscreen/cache /usr/data/helixscreen/cache; do
@@ -5654,6 +5877,22 @@ reenable_previous_ui() {
 
     found_ui=false
     restored_xorg=false
+
+    # Platform-specific restores live in uninstall.sh's restore_previous_ui_platform()
+    # and cover what the generic scanning below cannot: COSMOS sibling UIs, the
+    # Snapmaker U1 stock binary + /oem/.debug, AD5M zmod, and the Creality `app`
+    # launcher. They were reachable only through uninstall(), which install.sh calls
+    # but THIS bundle does not — its main() calls this function instead. So the
+    # uninstaller users actually run silently restored nothing on those platforms.
+    # Run it FIRST; the scanning below is the fallback for platforms it does not know.
+    if type restore_previous_ui_platform >/dev/null 2>&1; then
+        restore_previous_ui_platform "$platform"
+        if [ -n "$HELIX_RESTORED_UI" ]; then
+            log_success "Re-enabled: $HELIX_RESTORED_UI"
+            found_ui=true
+        fi
+        [ -n "$HELIX_RESTORED_XORG" ] && restored_xorg=true
+    fi
 
     # For ForgeX firmware, do comprehensive cleanup and restore
     if [ "$AD5M_FIRMWARE" = "forge_x" ]; then

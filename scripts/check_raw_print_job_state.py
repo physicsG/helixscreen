@@ -12,7 +12,7 @@ queue tap deleted the job it then failed to start.
 The derived axis is `PrintState` (include/print_lifecycle_state.h), published as
 the `print_lifecycle` subject and reached through `get_print_lifecycle()`.
 
-**This gate does not forbid the wire.** Roughly sixty sites legitimately want it:
+**This gate does not forbid the wire.** Roughly eighty sites legitimately want it:
 the parse itself, terminal-outcome formatting, telemetry's phase tracker,
 navigation's activation edge, the PRINT_START collector's arming. What it forbids
 is reading the wire *silently*, because a reader cannot tell a deliberate wire

@@ -59,7 +59,6 @@ AmsDeviceOperationsOverlay::~AmsDeviceOperationsOverlay() {
         lv_subject_deinit(&status_subject_);
         lv_subject_deinit(&supports_bypass_subject_);
         lv_subject_deinit(&fw_supports_bypass_subject_);
-        lv_subject_deinit(&bypass_active_subject_);
         lv_subject_deinit(&hw_bypass_sensor_subject_);
         lv_subject_deinit(&supports_auto_heat_subject_);
         lv_subject_deinit(&has_backend_subject_);
@@ -102,9 +101,6 @@ void AmsDeviceOperationsOverlay::init_subjects() {
     lv_subject_init_int(&fw_supports_bypass_subject_, 0);
     lv_xml_register_subject(nullptr, "ams_device_ops_fw_supports_bypass",
                             &fw_supports_bypass_subject_);
-
-    lv_subject_init_int(&bypass_active_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_device_ops_bypass_active", &bypass_active_subject_);
 
     lv_subject_init_int(&hw_bypass_sensor_subject_, 0);
     lv_xml_register_subject(nullptr, "ams_device_ops_hw_bypass_sensor", &hw_bypass_sensor_subject_);
@@ -235,6 +231,10 @@ void AmsDeviceOperationsOverlay::show(lv_obj_t* parent_screen) {
     NavigationManager::instance().push_overlay(overlay_);
 }
 
+void AmsDeviceOperationsOverlay::on_ui_destroyed() {
+    bypass_toggle_.cancel_pending();
+}
+
 void AmsDeviceOperationsOverlay::refresh() {
     if (!overlay_) {
         return;
@@ -256,7 +256,6 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
         lv_subject_set_int(&has_backend_subject_, 0);
         lv_subject_set_int(&supports_bypass_subject_, 0);
         lv_subject_set_int(&fw_supports_bypass_subject_, 0);
-        lv_subject_set_int(&bypass_active_subject_, 0);
         lv_subject_set_int(&hw_bypass_sensor_subject_, 0);
         lv_subject_set_int(&supports_auto_heat_subject_, 0);
         lv_subject_set_int(&is_afc_subject_, 0);
@@ -295,7 +294,6 @@ void AmsDeviceOperationsOverlay::update_from_backend() {
     lv_subject_set_int(&supports_bypass_subject_,
                        helix::bypass_available_for(info.supports_bypass) ? 1 : 0);
     lv_subject_set_int(&fw_supports_bypass_subject_, info.supports_bypass ? 1 : 0);
-    lv_subject_set_int(&bypass_active_subject_, backend->is_bypass_active() ? 1 : 0);
     lv_subject_set_int(&hw_bypass_sensor_subject_, info.has_hardware_bypass_sensor ? 1 : 0);
 
     // Update hardware bypass status pill if applicable
@@ -574,49 +572,22 @@ void AmsDeviceOperationsOverlay::on_bypass_toggled(lv_event_t* e) {
     if (!toggle || !lv_obj_is_valid(toggle)) {
         spdlog::warn("[AmsDeviceOperationsOverlay] Stale callback - toggle no longer valid");
     } else {
-        // Guard: hardware sensor controls bypass — toggle should be hidden but check anyway
-        AmsBackend* backend_check = AmsState::instance().get_backend();
-        if (backend_check && backend_check->get_system_info().has_hardware_bypass_sensor) {
-            NOTIFY_WARNING("{}", lv_tr("Bypass controlled by hardware sensor"));
-            return;
-        }
+        // The switch flips its own CHECKED state before this runs, so the widget
+        // is not the authority on intent — the controller reads the backend, the
+        // same way the sidebar toggle and the home tile do. It owns the print
+        // guard, the hardware-sensor refusal and the #1229 unload-first chain,
+        // none of which this handler had while it called the backend directly.
+        get_ams_device_operations_overlay().bypass_toggle_.toggle();
 
-        bool is_checked = lv_obj_has_state(toggle, LV_STATE_CHECKED);
-
-        spdlog::info("[AmsDeviceOperationsOverlay] Bypass toggle: {}",
-                     is_checked ? "enabled" : "disabled");
-
-        AmsBackend* backend = AmsState::instance().get_backend();
-        if (backend) {
-            AmsError result;
-            if (is_checked) {
-                result = backend->enable_bypass();
-            } else {
-                result = backend->disable_bypass();
-            }
-
-            if (result.success()) {
-                spdlog::info("[AmsDeviceOperationsOverlay] Bypass mode {}",
-                             is_checked ? "enabled" : "disabled");
-                lv_subject_set_int(&get_ams_device_operations_overlay().bypass_active_subject_,
-                                   is_checked ? 1 : 0);
-            } else {
-                spdlog::error("[AmsDeviceOperationsOverlay] Failed to {} bypass: {}",
-                              is_checked ? "enable" : "disable", result.user_msg);
-                if (is_checked) {
-                    lv_obj_remove_state(toggle, LV_STATE_CHECKED);
-                } else {
-                    lv_obj_add_state(toggle, LV_STATE_CHECKED);
-                }
-            }
-        } else {
-            spdlog::error("[AmsDeviceOperationsOverlay] No backend available for bypass toggle");
-            if (is_checked) {
-                lv_obj_remove_state(toggle, LV_STATE_CHECKED);
-            } else {
-                lv_obj_add_state(toggle, LV_STATE_CHECKED);
-            }
-        }
+        // Put the switch back where the backend actually is. A refusal, or an
+        // armed unload->enable chain that has not settled yet, leaves the widget
+        // flipped ahead of reality; sync_from_backend() republishes
+        // ams_bypass_active from every backend, and the notify re-applies the
+        // binding for the case where that value did NOT change (lv_subject_set_int
+        // is a no-op notify-wise when the value is unchanged, which is exactly
+        // the refusal case).
+        AmsState::instance().sync_from_backend();
+        lv_subject_notify(AmsState::instance().get_bypass_active_subject());
     }
 
     LVGL_SAFE_EVENT_CB_END();

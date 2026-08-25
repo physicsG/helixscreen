@@ -4382,6 +4382,35 @@ TEST_CASE("PrinterDetector: print_start_default_phases empty for unknown printer
     REQUIRE(phases.empty());
 }
 
+TEST_CASE("PrinterDetector: print_start_default_phases returns K1C measured durations",
+          "[printer][preprint]") {
+    // Measured on hardware 2026-08-19: the generic defaults (30s homing, 20s
+    // cleaning) under-predicted the K1C prep chain by 100-800%. Heating phases
+    // stay absent — the thermal model owns those.
+    auto phases = PrinterDetector::get_print_start_default_phases("Creality K1C");
+    REQUIRE(phases.size() == 3);
+    REQUIRE(phases[static_cast<int>(helix::PrintStartPhase::HOMING)] == 60);
+    REQUIRE(phases[static_cast<int>(helix::PrintStartPhase::CLEANING)] == 85);
+    REQUIRE(phases[static_cast<int>(helix::PrintStartPhase::BED_MESH)] == 125);
+}
+
+TEST_CASE("PrinterDetector: print_start_default_phases returns K2 measured durations",
+          "[printer][preprint]") {
+    // Measured on a K2 Plus 2026-08-18 (three captured prints): three homing
+    // rail rounds ~15s; nozzle wipe plus both BOX_NOZZLE_CLEAN passes ~60s;
+    // the bed-mesh toggle is OPTIONAL (emit_when_disabled: false) and when on
+    // runs a check-passed validation of ~6s — a failed check re-meshes (67-pt
+    // adaptive) and the prediction history learns that longer duration after
+    // the first such print. Heating stays absent: thermal model owns it.
+    for (const char* name : {"Creality K2 Plus", "Creality K2 Pro"}) {
+        auto phases = PrinterDetector::get_print_start_default_phases(name);
+        REQUIRE(phases.size() == 3);
+        REQUIRE(phases[static_cast<int>(helix::PrintStartPhase::HOMING)] == 15);
+        REQUIRE(phases[static_cast<int>(helix::PrintStartPhase::CLEANING)] == 60);
+        REQUIRE(phases[static_cast<int>(helix::PrintStartPhase::BED_MESH)] == 10);
+    }
+}
+
 TEST_CASE("PrinterDetector: print_start_default_phases empty for printer without override",
           "[printer][preprint]") {
     // Voron 2.4 has no print_start_default_phases field — generic defaults apply.
@@ -4563,6 +4592,54 @@ TEST_CASE("should_warn_type_mismatch table", "[detector][mismatch]") {
         const std::string k1max = "Creality K1 Max (with CFS)";
         REQUIRE(PD::should_warn_type_mismatch(k1max, trident, 85, ad5m));
     }
+}
+
+// ============================================================================
+// Renamed Database Entries
+// ============================================================================
+
+TEST_CASE("canonical_type_name resolves former database names", "[detector][mismatch]") {
+    using PD = PrinterDetector;
+
+    SECTION("a name the database still publishes is returned untouched") {
+        REQUIRE(PD::canonical_type_name("Voron Trident") == "Voron Trident");
+        REQUIRE(PD::canonical_type_name("Voron 0.2") == "Voron 0.2");
+    }
+    SECTION("every recorded rename resolves to the current name") {
+        REQUIRE(PD::canonical_type_name("Voron 0.1") == "Voron 0.2");
+        REQUIRE(PD::canonical_type_name("FlashForge AD5M Pro") == "FlashForge Adventurer 5M Pro");
+        REQUIRE(PD::canonical_type_name("Zero G Nebula 255") == "Zero G Mercury One.1 Nebula");
+        REQUIRE(PD::canonical_type_name("Zero G Nebula 370") == "Zero G Mercury One.1 Plus Nebula");
+    }
+    SECTION("unknown and empty names pass through unchanged") {
+        REQUIRE(PD::canonical_type_name("") == "");
+        REQUIRE(PD::canonical_type_name("Custom/Other") == "Custom/Other");
+        REQUIRE(PD::canonical_type_name("Some Rig That Is Not In The Database") ==
+                "Some Rig That Is Not In The Database");
+    }
+}
+
+// The bug this closes: a config written before the entry was renamed detects
+// correctly and is still told it is set up as the wrong printer.
+TEST_CASE("a renamed entry does not warn once the saved name is canonicalised",
+          "[detector][mismatch]") {
+    using PD = PrinterDetector;
+    const std::string none;
+    const std::string legacy = "Voron 0.1";
+    const std::string current = "Voron 0.2";
+
+    // Raw comparison — what shipped before the alias lookup, and why the
+    // prompt fired at 100% confidence on a printer that was never mis-set.
+    REQUIRE(PD::should_warn_type_mismatch(legacy, current, 100, none));
+
+    // Through the resolver, the same pair is the same printer.
+    REQUIRE_FALSE(
+        PD::should_warn_type_mismatch(PD::canonical_type_name(legacy), current, 100, none));
+
+    // A genuine mismatch still warns after canonicalisation — the resolver
+    // must not swallow real disagreement.
+    REQUIRE(
+        PD::should_warn_type_mismatch(PD::canonical_type_name(legacy), "Voron Trident", 100, none));
 }
 
 // ============================================================================
@@ -4922,8 +4999,8 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: a build volume alone 
         // stayed silent before the volume reached detection; it must not start
         // crossing the 70-point bar that triggers a "this is not your printer"
         // warning just because it now reports a bed size.
-        for (float bed : {180.0f, 200.0f, 215.0f, 220.0f, 235.0f, 250.0f, 256.0f, 300.0f, 350.0f,
-                          400.0f}) {
+        for (float bed :
+             {180.0f, 200.0f, 215.0f, 220.0f, 235.0f, 250.0f, 256.0f, 300.0f, 350.0f, 400.0f}) {
             PrinterHardwareData hardware{.heaters = {"extruder", "heater_bed"},
                                          .hostname = "printer",
                                          .printer_objects = {"bed_mesh"},
@@ -4954,8 +5031,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: a build volume alone 
 // With the volume scored as identifying evidence at confidence 97, it cleared
 // the 85-point auto-save bar on its own and no hostname could outrank it, so a
 // Geralkom auto-saved under a Sovol nameplate.
-TEST_CASE_METHOD(PrinterDetectorFixture,
-                 "PrinterDetector: a 500mm Geralkom keeps its own identity",
+TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: a 500mm Geralkom keeps its own identity",
                  "[printer][build_volume][detector]") {
     PrinterHardwareData hardware{.heaters = {"extruder", "heater_bed"},
                                  .hostname = "geralkom-x500",

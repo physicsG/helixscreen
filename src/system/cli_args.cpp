@@ -134,6 +134,8 @@ static void print_help(const char* program_name) {
     printf("  --remote-http-bind <h>  HTTP bind host (default 127.0.0.1; implies http)\n");
     printf("  --remote-http-port <n>  HTTP port (default 7130; implies http)\n");
     printf("  --rotate <degrees>   Display rotation: 0, 90, 180, 270\n");
+    printf("  --render-2d          Force the G-code viewer to the 2D layer renderer\n");
+    printf("  --render-3d          Force the G-code viewer to the 3D GLES renderer\n");
     printf("  --layout <type>      Override auto-detected layout (auto, standard, ultrawide, "
            "portrait, micro, micro-portrait, tiny, tiny-portrait)\n");
     printf("  -h, --help           Show this help message\n");
@@ -159,8 +161,6 @@ static void print_help(const char* program_name) {
     printf("  --gcode-el <deg>     Set camera elevation angle (degrees)\n");
     printf("  --gcode-zoom <n>     Set camera zoom level (positive number)\n");
     printf("  --gcode-debug-colors Enable per-face debug coloring\n");
-    printf("  --render-2d          Force 2D layer renderer (fast, no 3D)\n");
-    printf("  --render-3d          Force 3D GLES renderer\n");
     printf("\nScreen sizes:\n");
     printf("  micro    = %dx%d\n", UI_SCREEN_MICRO_W, UI_SCREEN_MICRO_H);
     printf("  tiny     = %dx%d\n", UI_SCREEN_TINY_W, UI_SCREEN_TINY_H);

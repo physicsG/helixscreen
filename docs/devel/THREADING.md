@@ -660,8 +660,17 @@ Create observers with the factories in `include/observer_factory.h` rather than 
 | `observe_int_async<T>()` | int subject, explicitly async |
 | `observe_string()` | string subject, callback deferred |
 | `observe_string_async()` | string subject, explicitly async |
+| `observe_print_state<T>()` | typed `PrintJobState` over the raw `print_state_enum` subject, deferred |
+| `observe_print_state_immediate<T>()` | the same typing, firing synchronously like `observe_int_immediate` |
+| `observe_print_lifecycle<T>()` | typed `PrintState` over the derived `print_lifecycle` subject |
 
 All return an `ObserverGuard` (`include/ui_observer_guard.h`) for RAII removal.
+
+The print factories are not sugar: `PrintJobState` and `PrintState` do not share
+numbering past index 0, so pairing a factory with the wrong subject (or hand-casting the
+subject's int) compiles and silently answers a different question. That mistake shipped
+twice — see `architecture/05-printer-state.md` § "Reading print state: typed accessors,
+not hand-cast ints".
 
 ### Deferred by default
 
@@ -778,6 +787,52 @@ executor still run on a worker thread, so their callbacks still need `queue_upda
 Adding a raw detached spawn reintroduces the anti-pattern and will crash on the smallest
 device you ship to. See `docs/devel/MOONRAKER_ARCHITECTURE.md` § "HTTP Work Execution
 (HttpExecutor)".
+
+### Never hold a subsystem lock across a call into another subsystem
+
+Two managers that each take their own `recursive_mutex` and call each other form an ABBA
+cycle the moment one of them calls out while holding its lock. TSan reports it as
+`lock-order-inversion (potential deadlock)`. It has happened twice:
+`AmsState` <-> `SpoolmanManager`, and `AmsState` <-> `FilamentSensorManager`.
+
+**Established order: `AmsState` -> `FilamentSensorManager`.** AmsState may notify the sensor
+layer while holding `mutex_`; the sensor layer must **not** hold its own lock when it queries
+AmsState. The direction is forced by arithmetic, not taste: `AmsState` takes its lock at ~49
+sites and `FilamentSensorManager` at ~2, so "the AMS lock is not held" is not a property
+anyone can maintain, while "the sensor lock is not held" is.
+
+Two shapes that keep a lock off an outbound call, both in
+`src/print/filament_sensor_manager.cpp`:
+
+```cpp
+// 1. Hoist: read the other subsystem BEFORE taking your lock. Works when the
+//    value is whole-printer rather than per-item.
+const bool ams_active = AmsState::instance().is_filament_operation_active();
+{
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    ...use ams_active...
+}
+
+// 2. Snapshot: take the lock only long enough to copy what you need, then
+//    decide outside it. Works when the query is per-item (has_real_runout()).
+std::vector<Candidate> candidates;
+{
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    ...fill candidates from members...
+}
+for (const auto& c : candidates) { ...ask AmsState... }
+```
+
+**A `recursive_mutex` defeats the obvious fix.** Deferring the outbound call to the end of the
+locking function does *not* release the lock when a caller above you already holds it:
+`AmsState::sync_backend()` locks `mutex_` and then calls `sync_from_backend()`, so releasing
+the inner acquisition leaves the outer one held and the cycle intact. Any fix anchored to one
+scope inside a recursive lock has this hole. Fix the side that can actually guarantee the
+invariant.
+
+`make test-tsan` is the gate; a targeted run is `make test-tsan-one TEST="[ams]"`. Note that
+both halves of a cycle must execute in the *same process* for TSan to see it, so a filter
+narrow enough to exclude one of the two tests reports nothing.
 
 ---
 
@@ -932,6 +987,7 @@ Relevant tags: `[state]` (subjects/observers), `[connection]` (WebSocket lifecyc
 | `lv_obj_delete_async()` double-free | Parent's `lv_obj_clean()` ran before the async fired | Only async-delete when no parent cleanup follows (§9) |
 | `[UpdateQueue] DROPPED (shutdown): <tag>` in a device log | Background thread enqueueing after `update_queue_shutdown()` | Real bug — find the thread that outlived shutdown (§4) |
 | Two panel widget instances, only one updates | Per-instance subject registered globally, or XML scope mismatch | Pick one: shared subject in component scope, or filter a shared subject by ID |
+| TSan `lock-order-inversion (potential deadlock)` between two managers | One holds its own `recursive_mutex` across a call into the other | Hoist the read above the lock, or snapshot under it and decide outside (§8) |
 
 ---
 
@@ -942,7 +998,7 @@ Relevant tags: `[state]` (subjects/observers), `[connection]` (WebSocket lifecyc
 | `include/ui_update_queue.h` | `UpdateQueue`, `queue_update()`, `scoped_freeze()` |
 | `include/async_lifetime_guard.h` | `AsyncLifetimeGuard`, `LifetimeToken`, `bg_cb()` |
 | `include/ui_observer_guard.h` | `ObserverGuard`, `SubjectLifetime` |
-| `include/observer_factory.h` | `observe_int_sync/async`, `observe_string/async` |
+| `include/observer_factory.h` | `observe_int_sync/async`, `observe_string/async`, `observe_print_state[_immediate]`, `observe_print_lifecycle` |
 | `include/ui_utils.h` | `safe_delete_deferred`, `safe_clean_children`, `safe_delete_subtree` |
 | `include/static_subject_registry.h` | Shutdown cleanup registry |
 | `include/http_executor.h` | `HttpExecutor::fast()` / `slow()` pools |

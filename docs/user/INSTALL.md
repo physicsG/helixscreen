@@ -133,6 +133,7 @@ Ignore the `.aab` file on the release page. That one is only for publishing to G
 - **Updating means downloading the new APK** and installing over the old one. There is no in-app updater on Android yet, and the app will not update itself.
 - **Foldables and unusual screen shapes** can show layout quirks when the device folds or resizes. Reports with a screenshot are welcome.
 - **It cannot do the printer-side things.** Anything that requires running *on* the printer, like taking over the printer's own panel or configuring the printer's WiFi during the wizard, does not apply here. Printing, monitoring, and control all work normally.
+- **Power controls are hidden.** An Android app can't power off or reboot the device it runs on, so the shutdown widget never appears on the Home panel (it shows as "Not available on Android" in the widget catalog) and the **POWER** section of the Advanced panel is hidden too. Moonraker power *devices* (smart plugs and the like) are unaffected.
 
 **Coming to Google Play.** Play Store distribution is in progress. When it lands, installs from Play will be signed differently from these APKs, which means moving from a sideloaded install to the Play version will require uninstalling first and setting the app up again. Sideloading will keep working either way.
 

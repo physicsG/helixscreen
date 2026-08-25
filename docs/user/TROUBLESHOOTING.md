@@ -1189,7 +1189,7 @@ This is common on devices where the touch controller is mounted at a different o
 
 HelixScreen automatically detects swapped touch axes during calibration and corrects them. Just recalibrate:
 ```bash
-# Settings > System > Recalibrate Touch
+# Settings > System > Touch & Input > Touch Calibration
 ```
 
 **2. Manual axis swap (fallback):**
@@ -1268,6 +1268,31 @@ sudo systemctl restart klipper
 
 ---
 
+### Preparing takes long or seems stuck
+
+**Symptoms:**
+- The screen shows "Preparing Print" for many minutes after tapping Start Print
+- The pre-print progress bar sits on one step
+- Other interfaces (Mainsail, Fluidd) report the printer as idle or "complete" while HelixScreen shows preparing
+
+**What's going on:**
+The window between tapping Start Print and the first layer is doing real work — homing, heating the bed to soak temperature, bed mesh — and on some printers it regularly runs five to ten minutes (a K2 Plus with Auto Bed Mesh enabled takes seven to ten). Two things make it *look* stuck when it isn't:
+
+- Part of this work can run on the printer's host before the job is formally handed over, so other interfaces may show the printer as idle or still "complete" for the whole block. HelixScreen tracks it as preparing regardless.
+- A slow step is not a stuck step. As long as the printer is still moving and narrating what it's doing, HelixScreen keeps waiting — a long bed mesh is given the time it needs rather than cut off mid-sequence.
+
+During this window the Print Status panel and the home panel's print card show the preparing job: the current step, a progress bar, and an estimate for the whole pre-print period.
+
+**Solutions:**
+
+**Check the printer is actually working.** Look at the machine — is the toolhead moving, the bed heating? Or open a web interface's console and watch for ongoing output. Motion and messages mean it's working, not stuck.
+
+**Not willing to wait? Cancel — it's clean.** Cancel is always available during preparation, and cancelling there is a clean cancel, not a failed print: the print never starts, and if the printer is mid-way through a motion it finishes that move first. Then start again with the slow step switched off — see [Pre-Print Options](guide/printing.md#pre-print-options).
+
+**If the printer has gone quiet** — no motion, no console output, for a good while — it may genuinely be stuck. Collect a [debug bundle](#collecting-logs) and check the Klipper log for the macro that was running.
+
+---
+
 ### Can't pause or cancel print
 
 **Symptoms:**
@@ -1288,6 +1313,27 @@ sudo systemctl restart klipper
 ```bash
 curl -X POST http://localhost:7125/printer/print/cancel
 ```
+
+---
+
+### Power cut out during a print
+
+**Symptoms:**
+- After power comes back and HelixScreen reconnects, a dialog asks: **Resume interrupted print?**
+- The body names the file when the printer reported it ("The printer lost power while printing <name>.") or describes it generically
+
+**What's going on:**
+On printers whose firmware saves recovery data when power drops mid-print — the Creality models with recovery support (K1 family, K2, Ender 3 V3 and siblings) and the Snapmaker U1 — that data survives the reboot. When HelixScreen connects and finds it, it asks what you want to do rather than deciding for you. Creality printers get an extra-honest wording ("The resumed layer may not line up exactly.") because their recovery re-homes without re-probing the bed — that is a real property of the resume, not a malfunction.
+
+**Your choices:**
+
+| Choice | What happens |
+|--------|--------------|
+| **Resume** | The printer continues the interrupted print from where its firmware saved its progress. On Creality, check the first resumed layer before walking away — it can sit a millimetre or two off. |
+| **Discard** | The recovery data is cleared and nothing is printed. The printer is back to a clean slate; start whatever you like. |
+| Dismiss the dialog (tap outside it) | Nothing is decided: the recovery data is kept, and you are asked again the next time HelixScreen connects. |
+
+The offer never appears on top of a print you have already started — if you tap Start Print before answering, the question waits until that job is done. On printers without firmware-side recovery data there is nothing to find, so the dialog never appears there; a power cut simply means starting the print again.
 
 ---
 
@@ -1547,7 +1593,7 @@ ps aux | grep helix-screen
 | Cause | Fix |
 |-------|-----|
 | Debug mode in production | Remove `-vv`/`-vvv` from service, don't use `--test` |
-| Animations on slow hardware | Settings → Display → disable Animations |
+| Animations on slow hardware | Settings → Display & Sound → disable Animations |
 | Too many G-code files | Large directories with thumbnails use more RAM |
 | Other processes hogging CPU | Check `top` for culprits |
 | Swapping to SD card | Reduce memory usage or add swap to USB |
@@ -1604,20 +1650,22 @@ max_job_count: 100
 **What's going on:**
 - The **printer type** (the model picked during setup) drives the name, image, bed size, probe type, and preset options. The image picker in Printer Manager is cosmetic only — it never changes the type.
 - **Device-specific install packages** (Creality K1, FlashForge Adventurer 5M, and similar) run a preset-mode setup that *skips printer identification entirely*: the type comes from the install package itself, not from detection. No setting can override it.
-- On **generic installs**, auto-detection picked the wrong model from the database.
+- On **generic installs**, auto-detection either picked a wrong near-relative from the database, or — when it wasn't confident enough — deliberately left the type empty for you to choose rather than guess.
 
 **Solutions:**
 
-**First, figure out which situation you're in.** What did you install, and what is HelixScreen running on? If a device-specific preset package doesn't match the machine (or its screen), that's the cause — detection never ran. Install the HelixScreen package built for your hardware, or use the [remote screen setup](../INSTALL.md#remote-screen-setup-run-on-a-separate-device) on a Pi/PC/tablet pointed at your printer's Moonraker — generic installs run full auto-detection.
+**First, figure out which situation you're in.** What did you install, and what is HelixScreen running on? If a device-specific preset package doesn't match the machine (or its screen), that's the cause — detection never ran. Install the HelixScreen package built for your hardware, or use the [remote screen setup](INSTALL.md#remote-screen-setup-run-on-a-separate-device) on a Pi/PC/tablet pointed at your printer's Moonraker — generic installs run full auto-detection.
 
-**If auto-detection guessed wrong (generic install), re-identify without wiping anything:**
+**If the saved model is wrong (generic install), correct it in Printer Manager — nothing gets wiped:**
 
-1. Enable the printer switcher: **Settings > Printers > Show printer icon in navigation bar**
-2. Open **Printer Manager > Manage Printers** and tap **+ Add Printer**
-3. The setup wizard runs for the new printer entry — at the **Printer Setup: Identity** step, pick your model by hand (Voron 2.4, Voron 0.2, Voron Trident, and Voron Switchwire are all in the database)
-4. Switch to the new entry, then delete the misidentified one from Manage Printers
+1. Tap the **printer image** on the Home Panel to open the Printer Manager
+2. Tap the **printer model** row — the model name directly below the printer name, marked with a pencil icon ("Printer model (click to correct)")
+3. Pick your model from the list (Voron 2.4, Voron 0.2, Voron Trident, and Voron Switchwire are all in the database)
+4. The new type applies immediately — name, image, and all the type-driven features follow it
 
-**Settings > System > Factory Reset** also re-runs the wizard, but it wipes all HelixScreen settings — use it only if you want a clean start anyway. Prefer the add-printer path above.
+**Let HelixScreen catch it for you.** If you'd rather not hunt through the list, just connect the printer and wait: when detection is confident the saved type is wrong, a **Printer type mismatch** dialog names both models and offers **Re-identify** (re-runs just the identification step of the setup wizard) or **Keep current** — the right answer for a heavily modified printer that legitimately differs from its stock sibling. Picking **Keep current** is remembered for that type; the prompt won't nag on every boot.
+
+Re-adding the printer through **Printer Manager > Manage Printers > + Add Printer** (then deleting the old entry) and **Settings > System > Factory Reset** remain as last resorts — the factory reset re-runs the full wizard but wipes all HelixScreen settings, so use it only if you want a clean start anyway.
 
 If your model isn't in the database, leave it on the detected/generic profile — everything still works; you can rename the printer and set any image from Printer Manager.
 
@@ -1703,17 +1751,17 @@ sudo systemctl start helixscreen
 
 **Symptoms:**
 - Wizard shows wrong printer model
+- Wizard asks you to pick a model instead of choosing one automatically
 - Features missing or wrong
+
+**What's going on:**
+Auto-detection only commits to a model when it is confident enough. Below that bar it deliberately leaves the type empty and asks you to pick — that's detection declining to guess, not a failure. When it *is* confident it can still land on a near-relative of your actual machine.
 
 **Solutions:**
 
-**Re-run wizard:**
-1. Delete config: `rm ~/helixscreen/config/settings.json`
-2. Restart: `sudo systemctl restart helixscreen`
-3. Manually select correct printer in wizard
+**In the wizard:** pick your model by hand at the **Printer Setup: Identity** step. The full database is there.
 
-**Manual configuration:**
-Edit `~/helixscreen/config/settings.json` to set correct printer type and features.
+**After setup:** if the wrong model got saved, correct it from Printer Manager — tap the printer image on the Home Panel, then the **printer model** row underneath the printer name, and pick the right model. It applies immediately, with nothing wiped. On the next connect, HelixScreen may also flag the mismatch itself and offer **Re-identify** — see [Wrong printer model identified](#wrong-printer-model-identified) above for that flow.
 
 ---
 

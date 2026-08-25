@@ -1,6 +1,6 @@
 # Print Monitoring & Failure Detection
 
-HelixScreen watches over a print in two ways: it checks your filament *before* a multi-color job starts (two separate dialogs — **Check filament** for an empty slot, **Color Mismatch** for an unassigned tool), and — on printers that support it — it reacts when the printer's own camera spots a print going wrong. This page covers both.
+HelixScreen watches over a print in two ways: it runs a series of filament checks *before* a job starts (an empty required slot stops with **Check filament**; unassigned tools, a grade or material change, stray filament in the toolhead, and a too-light spool each raise their own warning below), and — on printers that support it — it reacts when the printer's own camera spots a print going wrong. This page covers both.
 
 ---
 
@@ -90,6 +90,38 @@ The wording depends on which way round it is, because the risk isn't symmetric:
 **Buttons:** **Start Anyway** prints as-is; **Cancel** backs out so you can load the right spool.
 
 Your tool mapping is unaffected either way. HelixScreen still routes the tool to that lane, exactly as it did before — the grade difference changes what you're told, not where the filament comes from.
+
+### The Filament In The Toolhead dialog
+
+The dialogs above compare what the *file* needs against what your slots hold. This one looks at the toolhead itself: filament is sitting in it, but no lane in your filament system reports having loaded it. That usually means leftovers — filament that was on its way in or out when an earlier job was cancelled or aborted, and never got seated in a lane. Rather than silently print on top of unknown material, HelixScreen asks first:
+
+> *The toolhead has filament but no AMS lane reports it loaded. Pull it out manually before printing. Start anyway?*
+
+**Buttons:**
+
+| Button | Action |
+|--------|--------|
+| **Start Anyway** | Starts the print with the stray filament left in the toolhead. Reasonable when you know what it is and it matches the file — the tail of the spool you just printed with, for example. |
+| **Cancel** | Backs out. Pull the filament out by hand (or load it properly from a lane), then start the print again. |
+
+![The Filament In The Toolhead dialog](../../images/screenshot-unaccounted-dialog.png)
+
+Only filament systems that can actually tell raise this dialog — AFC (Box Turtle), Happy Hare, Creality CFS, and FlashForge AD5X IFS. On a system that can't determine it, the dialog never appears, and printing from bypass skips it too: bypass means the toolhead filament is the external spool's, which is exactly what you intended.
+
+### The Not Enough Filament dialog
+
+This one is about quantity, not identity: when you print from the **external spool** and HelixScreen knows how much filament is left on it — a spool tracked through Spoolman with its remaining weight recorded — it compares that against what the file is expected to use before starting:
+
+> *This print needs about 108g but the spool has about 62g remaining. Start anyway?*
+
+**Buttons:**
+
+| Button | Action |
+|--------|--------|
+| **Start Anyway** | Starts the print. Often reasonable: the estimate comes from the slicer's numbers, and spools frequently hold a little more than their label says — a small shortfall may still fit. |
+| **Cancel** | Backs out. Swap in a fuller spool (or a fresh one) and start again. |
+
+The estimate uses the file's own filament weight when the slicer recorded it; when it only recorded a length, HelixScreen converts it using the material set on the spool. Two honest silences: spools whose remaining weight is unknown are never compared (there is nothing to compare against), and spools sitting in AMS slots are not covered by this dialog — slot-level tracking belongs to your filament system.
 
 ---
 

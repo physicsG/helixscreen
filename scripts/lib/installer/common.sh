@@ -21,13 +21,16 @@ _HELIX_COMMON_SOURCED=1
 # Pi: /opt/helixscreen
 # CC1 (COSMOS): /user-resource/helixscreen (/ is RO squashfs)
 # Snapmaker U1: /userdata/helixscreen
+# shellcheck disable=SC2034  # consumed by uninstall.sh (sweep of all known install locations)
 HELIX_INSTALL_DIRS="/root/printer_software/helixscreen /opt/helixscreen /usr/data/helixscreen /srv/helixscreen /user-resource/helixscreen /userdata/helixscreen"
 
 # Init script locations vary by platform/firmware
 # AD5M Klipper Mod: S80, AD5M Forge-X: S90, K1: S99, CC1 (COSMOS): plain /etc/init.d/helixscreen
+# shellcheck disable=SC2034  # consumed by service.sh and uninstall.sh
 HELIX_INIT_SCRIPTS="/etc/init.d/S80helixscreen /etc/init.d/S90helixscreen /etc/init.d/S99helixscreen /etc/init.d/helixscreen"
 
 # HelixScreen process names (order matters: watchdog first to prevent crash dialog)
+# shellcheck disable=SC2034  # consumed by service.sh and uninstall.sh (kill_process_by_name)
 HELIX_PROCESSES="helix-watchdog helix-screen helix-splash"
 
 # Returns true when install.sh was spawned by helix-screen's in-app update.
@@ -143,9 +146,9 @@ klipper_config_dir() {
 
 # Track what we've done for cleanup
 CLEANUP_TMP=false
-CLEANUP_SERVICE=false
 BACKUP_CONFIG=""
 BACKUP_ENV=""
+# shellcheck disable=SC2034  # consumed by release.sh (set true at the swap, read at config restore)
 ORIGINAL_INSTALL_EXISTS=false
 
 # Colors (if terminal supports it)
@@ -162,6 +165,7 @@ setup_colors() {
         GREEN=''
         YELLOW=''
         CYAN=''
+        # shellcheck disable=SC2034  # consumed by main.sh (installer banner) and release.sh
         BOLD=''
         NC=''
     fi
@@ -300,6 +304,7 @@ _user_dir_name_ok() {
     [ -n "$base" ] || return 1
     local pat
     for pat in "$@"; do
+        # shellcheck disable=SC2254  # $pat is a caller-supplied glob ('*helixscreen-install*'), not a literal
         case "$base" in
             $pat) return 0 ;;
         esac

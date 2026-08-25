@@ -95,8 +95,6 @@ translations:
   ABS: ABS
   ACCELEROMETERS: ACCELEROMETERS
   ACE Moonraker bridge not found. Install ace_status.py for full support.: ACE Moonraker bridge not found. Install ace_status.py for full support.
-  ACE Moonraker bridge not found. Install ace_status.py from ValgACE for full support.: ACE
-    Moonraker bridge not found. Install ace_status.py from ValgACE for full support.
   ACTIONS: ACTIONS
   ADXL: ADXL
   AFC: AFC
@@ -192,7 +190,6 @@ translations:
   An unexpected printer error occurred.: An unexpected printer error occurred.
   An update is available: An update is available
   Analyzing data...: Analyzing data...
-  Analyzing data... {}%: Analyzing data... {}%
   Analyzing data... {}s: Analyzing data... {}s
   Android logcat: Android logcat
   Animations: Animations
@@ -233,6 +230,7 @@ translations:
   Auto-poll for weight updates: Auto-poll for weight updates
   Auto-probe or manually check screw heights: Auto-probe or manually check screw heights
   Auto-render video: Auto-render video
+  'Auto-tuning Shapers...': 'Auto-tuning Shapers...'
   Auto-uninstall only works on local Moonraker: Auto-uninstall only works on local
     Moonraker
   Automatic: Automatic
@@ -265,8 +263,10 @@ translations:
   Bed Level: Bed Level
   Bed Leveling: Bed Leveling
   Bed Mesh: Bed Mesh
+  'Bed Mesh Complete': 'Bed Mesh Complete'
   Bed Mesh Render: Bed Mesh Render
   Bed Mesh...: Bed Mesh...
+  Bed Meshing...: Bed Meshing...
   Bed Moves: Bed Moves
   Bed Screw Adjustment: Bed Screw Adjustment
   Bed Screw Results: Bed Screw Results
@@ -276,6 +276,7 @@ translations:
   Bed Temperature: Bed Temperature
   Bed is Level!: Bed is Level!
   Bed mesh operation timed out: Bed mesh operation timed out
+  'Bed mesh...': 'Bed mesh...'
   Bed target set to {}°C: Bed target set to {}°C
   Bed temp must be 0-200°C: Bed temp must be 0-200°C
   Bed warming timed out: Bed warming timed out
@@ -332,7 +333,6 @@ translations:
   Bypass: Bypass
   Bypass Is Active: Bypass Is Active
   Bypass Mode: Bypass Mode
-  Bypass active — this print runs on the external spool, not on the lanes below.: Bypass active — this print runs on the external spool, not on the lanes below.
   Bypass active — this print runs on the external spool.: Bypass active — this print runs on the external spool.
   Bypass cannot be changed while printing: Bypass cannot be changed while printing
   Bypass controlled by hardware sensor: Bypass controlled by hardware sensor
@@ -372,6 +372,8 @@ translations:
     input
   Calibrate, tune jitter and scroll feel: Calibrate, tune jitter and scroll feel
   Calibrated: Calibrated
+  'Calibrating Probe...': 'Calibrating Probe...'
+  'Calibrating bed mesh...': 'Calibrating bed mesh...'
   Calibrating {} axis...: Calibrating {} axis...
   Calibrating...: Calibrating...
   Calibration & Tools: Calibration & Tools
@@ -473,6 +475,7 @@ translations:
   Checking: Checking
   Checking Spoolman server...: Checking Spoolman server...
   Checking accelerometer...: Checking accelerometer...
+  'Checking extruders...': 'Checking extruders...'
   Checking filament...: Checking filament...
   Checking for plugin...: Checking for plugin...
   Checking for webcam...: Checking for webcam...
@@ -499,6 +502,7 @@ translations:
   Clean Brush: Clean Brush
   Clean Nozzle: Clean Nozzle
   Cleaning Nozzle...: Cleaning Nozzle...
+  'Cleaning nozzle...': 'Cleaning nozzle...'
   Clear: Clear
   Clear All: Clear All
   Clear All Events: Clear All Events
@@ -512,6 +516,8 @@ translations:
   Clog Detection: Clog Detection
   Clog detection: Clog detection
   Close: Close
+  Close feeder: Close feeder
+  Close feeder macro: Close feeder macro
   Closer: Closer
   Closer = more squish | Farther = less squish: Closer = more squish | Farther = less
     squish
@@ -616,6 +622,7 @@ translations:
   Cooling: Cooling
   Cooling Tube Length: Cooling Tube Length
   Cooling Tube Retraction: Cooling Tube Retraction
+  'Cooling for probing...': 'Cooling for probing...'
   Copied to clipboard!: Copied to clipboard!
   Copy Command: Copy Command
   Copy failed - use SSH manually: Copy failed - use SSH manually
@@ -650,6 +657,7 @@ translations:
   Create a 4-6 digit security PIN: Create a 4-6 digit security PIN
   Create backup of %s before applying: Create backup of %s before applying
   Create video when print completes: Create video when print completes
+  'Creating bed mesh...': 'Creating bed mesh...'
   Creating spool...: Creating spool...
   'Critical hardware missing: {}': 'Critical hardware missing: {}'
   Current / Target: Current / Target
@@ -711,6 +719,7 @@ translations:
   Deploy: Deploy
   Describe the issue (optional): Describe the issue (optional)
   Detailed: Detailed
+  'Detecting plate...': 'Detecting plate...'
   Detecting printer type...: Detecting printer type...
   Detecting...: Detecting...
   Detection Length: Detection Length
@@ -906,6 +915,7 @@ translations:
   Extruder heats automatically based on material: Extruder heats automatically based
     on material
   Extruder to Nozzle: Extruder to Nozzle
+  'Extruding prime line...': 'Extruding prime line...'
   FAILED: FAILED
   FILAMENTS: FILAMENTS
   FILTERS: FILTERS
@@ -1021,11 +1031,13 @@ translations:
   Farther: Farther
   'Features: ': 'Features: '
   Feed Assist: Feed Assist
+  Feed assist and debug tools: Feed assist and debug tools
   Feed filament: Feed filament
   Feed filament directly to extruder: Feed filament directly to extruder
   Feed filament from current slot: Feed filament from current slot
   Feeding filament forward: Feeding filament forward
   Filament: Filament
+  Filament Control: Filament Control
   Filament Detected: Filament Detected
   Filament Environment: Filament Environment
   Filament Grade Mismatch: Filament Grade Mismatch
@@ -1041,6 +1053,7 @@ translations:
   Filament deleted: Filament deleted
   Filament diameter sensors for flow compensation: Filament diameter sensors for flow
     compensation
+  Filament feeder: Filament feeder
   Filament is clear of the toolhead. Pull it out the rest of the way.: Filament is clear of the toolhead. Pull it out the rest of the way.
   Filament is loose: Filament is loose
   Filament is pulling tight: Filament is pulling tight
@@ -1075,6 +1088,7 @@ translations:
   Fine: Fine
   Fine-Tune: Fine-Tune
   Finish: Finish
+  'Finishing clean...': 'Finishing clean...'
   Finishing up...: Finishing up...
   Firmware Restart: Firmware Restart
   Firmware reports no bypass. Enable if you feed filament straight to the extruder: Firmware reports no bypass. Enable if you feed filament straight to the extruder
@@ -1089,6 +1103,7 @@ translations:
   Flow Rate: Flow Rate
   'Flow change failed: {}': 'Flow change failed: {}'
   Flowguard: Flowguard
+  'Flushing Filament...': 'Flushing Filament...'
   Flying Toasters: Flying Toasters
   Follow active tool: Follow active tool
   Follows unit %d: Follows unit %d
@@ -1126,6 +1141,7 @@ translations:
   Good Accuracy: Good Accuracy
   Got it: Got it
   Gray: Gray
+  Grip the filament: Grip the filament
   Guides and reference: Guides and reference
   H: H
   HOST: HOST
@@ -1168,7 +1184,13 @@ translations:
   Heating: Heating
   Heating (%d°C below minimum): Heating (%d°C below minimum)
   Heating Bed...: Heating Bed...
+  'Heating Chamber...': 'Heating Chamber...'
   Heating Nozzle...: Heating Nozzle...
+  'Heating bed to $1°C...': 'Heating bed to $1°C...'
+  'Heating bed...': 'Heating bed...'
+  'Heating chamber...': 'Heating chamber...'
+  'Heating nozzle to $1°C...': 'Heating nozzle to $1°C...'
+  'Heating nozzle...': 'Heating nozzle...'
   Heating to %d°C... %.0f°C: Heating to %d°C... %.0f°C
   Heating to {}°C before {}...: Heating to {}°C before {}...
   Heating to {}°C for {}...: Heating to {}°C for {}...
@@ -1201,6 +1223,7 @@ translations:
   Homing Y...: Homing Y...
   Homing Z...: Homing Z...
   Homing all axes...: Homing all axes...
+  'Homing axes...': 'Homing axes...'
   'Homing failed: ': 'Homing failed: '
   'Homing failed: {}': 'Homing failed: {}'
   Homing first...: Homing first...
@@ -1255,6 +1278,7 @@ translations:
   Info: Info
   Initial speed for filament unloading: Initial speed for filament unloading
   Initialized: Initialized
+  'Initializing print...': 'Initializing print...'
   Initializing...: Initializing...
   Initiate blade change procedure: Initiate blade change procedure
   Input: Input
@@ -1262,6 +1286,7 @@ translations:
   Input Shaper Help: Input Shaper Help
   Input Shaping: Input Shaping
   Input shaper calibration sensors: Input shaper calibration sensors
+  'Input shaper calibration...': 'Input shaper calibration...'
   Input shaper settings applied!: Input shaper settings applied!
   Input shaping reduces ringing and ghosting artifacts caused by printer vibrations during fast movements.: Input
     shaping reduces ringing and ghosting artifacts caused by printer vibrations during
@@ -1271,6 +1296,7 @@ translations:
   'Input: ': 'Input: '
   InputShaper: InputShaper
   Insert filament before resuming: Insert filament before resuming
+  'Inspecting bed...': 'Inspecting bed...'
   Install: Install
   Install HelixPrint Plugin: Install HelixPrint Plugin
   Install Older Version?: Install Older Version?
@@ -1495,6 +1521,7 @@ translations:
   Manual Bed Leveling: Manual Bed Leveling
   Manual Feed: Manual Feed
   Manual Retract: Manual Retract
+  Manual feed and retract operations: Manual feed and retract operations
   Map to closest colors with matching material: Map to closest colors with matching
     material
   Marginal: Marginal
@@ -1516,7 +1543,6 @@ translations:
   Maximum toolhead speed (mm/s): Maximum toolhead speed (mm/s)
   Measure and compare belt path frequencies: Measure and compare belt path frequencies
   Measure belt path frequencies: Measure belt path frequencies
-  Measured: Measured
   Measured (shaper off): Measured (shaper off)
   Measurement Failed: Measurement Failed
   Measuring Path A... %d%%: Measuring Path A... %d%%
@@ -1728,6 +1754,7 @@ translations:
   Nozzle Temperature: Nozzle Temperature
   Nozzle Temperatures: Nozzle Temperatures
   Nozzle Temps: Nozzle Temps
+  'Nozzle clean complete': 'Nozzle clean complete'
   Nozzle did not reach {}°C — {} cancelled: Nozzle did not reach {}°C — {} cancelled
   Nozzle min cannot exceed max: Nozzle min cannot exceed max
   Nozzle target set to {}°C: Nozzle target set to {}°C
@@ -1757,6 +1784,8 @@ translations:
   Open G-code command console: Open G-code command console
   Open LED color and brightness controls: Open LED color and brightness controls
   Open Source Licenses: Open Source Licenses
+  Open feeder macro: Open feeder macro
+  Open feeder: Open feeder
   Open in ACE: Open in ACE
   Operation already in progress: Operation already in progress
   Operations: Operations
@@ -1885,15 +1914,19 @@ translations:
   Power Devices: Power Devices
   Power off the printer or screen: Power off the printer or screen
   'Pre-print command failed: {}': 'Pre-print command failed: {}'
+  'Pre-print homing...': 'Pre-print homing...'
   Preheat: Preheat
   Preheat Macro: Preheat Macro
   Preheat PLA: Preheat PLA
   Preheat cancelled: Preheat cancelled
   'Preheat: T{} + bed set': 'Preheat: T{} + bed set'
   'Preheat: all {} tools + bed set': 'Preheat: all {} tools + bed set'
+  'Prepared': 'Prepared'
   Preparing: Preparing
   Preparing Print: Preparing Print
   Preparing Print...: Preparing Print...
+  'Preparing to Print...': 'Preparing to Print...'
+  'Preparing to clean...': 'Preparing to clean...'
   Preparing...: Preparing...
   Preset: Preset
   'Preset ID: {}': 'Preset ID: {}'
@@ -1905,6 +1938,7 @@ translations:
   Previous: Previous
   Price: Price
   Primary: Primary
+  'Priming nozzle...': 'Priming nozzle...'
   Priming...: Priming...
   Print: Print
   Print Anyway: Print Anyway
@@ -1930,9 +1964,11 @@ translations:
   Print Tuning: Print Tuning
   Print Was Terminated: Print Was Terminated
   Print cancelled: Print cancelled
+  'Print complete': 'Print complete'
   Print did not start: Print did not start
   Print didn't start — printer may be busy or offline (B3 polls={}, status=0x{:02X}, error=0x{:02X}): Print
     didn't start — printer may be busy or offline (B3 polls={}, status=0x{:02X}, error=0x{:02X})
+  'Print ending...': 'Print ending...'
   Print error: Print error
   Print failed: Print failed
   Print history statistics: Print history statistics
@@ -2002,9 +2038,12 @@ translations:
   Probe controls, accuracy test, and settings: Probe controls, accuracy test, and
     settings
   Probing Bed Mesh: Probing Bed Mesh
+  'Probing Bed Mesh...': 'Probing Bed Mesh...'
   Probing Bed Screws...: Probing Bed Screws...
   Probing Bed...: Probing Bed...
   Probing Failed: Probing Failed
+  'Probing Z...': 'Probing Z...'
+  'Checking Bed Mesh...': 'Checking Bed Mesh...'
   Probing point {} of {}: Probing point {} of {}
   Probing... ({} points): Probing... ({} points)
   Proceed: Proceed
@@ -2068,7 +2107,6 @@ translations:
   Ready: Ready
   Ready for filament operations: Ready for filament operations
   Ready to Apply: Ready to Apply
-  Ready to load: Ready to load
   Reason: Reason
   ? "Reason: {}\n\nThe printer cannot resume this print. Restart from the beginning?"
   : "Reason: {}\n\nThe printer cannot resume this print. Restart from the beginning?"
@@ -2101,8 +2139,11 @@ translations:
   Refresh Interval: Refresh Interval
   Refresh RFID: Refresh RFID
   Relative vibration: Relative vibration
+  'Reheating...': 'Reheating...'
   Release all stepper motors. Position will be lost.: Release all stepper motors.
     Position will be lost.
+  Release or grip the filament by hand: Release or grip the filament by hand
+  Release the filament: Release the filament
   Remaining (g): Remaining (g)
   Remaining Weight (g): Remaining Weight (g)
   Remap Tool: Remap Tool
@@ -2113,6 +2154,7 @@ translations:
   Remove PIN: Remove PIN
   Remove Spoolman?: Remove Spoolman?
   Remove plugin from printer: Remove plugin from printer
+  Remove the bypass spool from the toolhead first: Remove the bypass spool from the toolhead first
   Rename: Rename
   Rename Fan: Rename Fan
   Rename Mesh Profile: Rename Mesh Profile
@@ -2122,6 +2164,7 @@ translations:
   Render Now: Render Now
   Rendering timelapse...: Rendering timelapse...
   Replay Welcome Tour: Replay Welcome Tour
+  'Replenishing filament...': 'Replenishing filament...'
   Report saved to crash_report.txt: Report saved to crash_report.txt
   Reprint: Reprint
   Reprint Last: Reprint Last
@@ -2178,6 +2221,7 @@ translations:
   Resume interrupted print?: Resume interrupted print?
   Resume macro not configured: Resume macro not configured
   Resume preparation failed: Resume preparation failed
+  'Resuming print...': 'Resuming print...'
   Resuming...: Resuming...
   Retract: Retract
   Retract Distance: Retract Distance
@@ -2425,6 +2469,8 @@ translations:
   Slot: Slot
   Slot %d: Slot %d
   Slot %d Filament: Slot %d Filament
+  Slot %d has about %.0fg but tool %d needs about %.0fg. Start anyway?: Slot %d has about %.0fg but tool %d needs about %.0fg. Start anyway?
+  'Slot %d: %.0fg of %.0fg needed': 'Slot %d: %.0fg of %.0fg needed'
   Slot 1: Slot 1
   Slot {}: Slot {}
   Slot {} matches.: Slot {} matches.
@@ -2438,6 +2484,7 @@ translations:
   Software Updates: Software Updates
   Some filaments don't match the slicer's intent.: Some filaments don't match the
     slicer's intent.
+  'Some mapped slots are short on filament:': 'Some mapped slots are short on filament:'
   Some settings will take effect after restart.: Some settings will take effect after
     restart.
   Sound Theme: Sound Theme
@@ -2457,7 +2504,6 @@ translations:
   Speed used to push filament out of the box (mm/s): Speed used to push filament out
     of the box (mm/s)
   Spool: Spool
-  'Spool ': 'Spool '
   'Spool #': 'Spool #'
   'Spool #{}': 'Spool #{}'
   Spool Info: Spool Info
@@ -2491,6 +2537,7 @@ translations:
   Start Drying: Start Drying
   Start Print: Start Print
   Start Probing: Start Probing
+  Start anyway?: Start anyway?
   Start at: Start at
   Start failed: Start failed
   Start print anyway?: Start print anyway?
@@ -2498,6 +2545,8 @@ translations:
   Starting Print...: Starting Print...
   Starting download...: Starting download...
   Starting measurement...: Starting measurement...
+  'Starting nozzle clean...': 'Starting nozzle clean...'
+  'Starting print...': 'Starting print...'
   Starting...: Starting...
   Startup Brightness: Startup Brightness
   Startup, auto-control, and macro devices: Startup, auto-control, and macro devices
@@ -2855,7 +2904,6 @@ translations:
   Update installed!: Update installed!
   Update your security PIN: Update your security PIN
   Updating Configuration...: Updating Configuration...
-  Upgrade to AFC 1.2.0 or newer for filament names and multi-color spools.: Upgrade to AFC 1.2.0 or newer for filament names and multi-color spools.
   Upgrade to AFC 1.2.0 or newer for multi-color spools. It also adds filament names, which otherwise need Spoolman.: Upgrade to AFC 1.2.0 or newer for multi-color spools. It also adds filament names, which otherwise need Spoolman.
   Upload: Upload
   Upload Debug Bundle: Upload Debug Bundle
@@ -2868,6 +2916,7 @@ translations:
   Use printer type to select image: Use printer type to select image
   VM Peak: VM Peak
   VM Size: VM Size
+  'Validating bed mesh...': 'Validating bed mesh...'
   Value must be between {:.0f} and {:.0f}: Value must be between {:.0f} and {:.0f}
   Values must not be negative: Values must not be negative
   Velocity and acceleration limits: Velocity and acceleration limits
@@ -2878,6 +2927,7 @@ translations:
   Verify: Verify
   Verifying SHA256 checksum...: Verifying SHA256 checksum...
   Verifying download...: Verifying download...
+  'Verifying file...': 'Verifying file...'
   Verifying timelapse plugin...: Verifying timelapse plugin...
   Verifying...: Verifying...
   Version: Version
@@ -2938,6 +2988,8 @@ translations:
     time when you've already done it recently or want more control over your print
     preparation.
   Where UI sounds play: Where UI sounds play
+  Which macro the Close feeder button sends: Which macro the Close feeder button sends
+  Which macro the Open feeder button sends: Which macro the Open feeder button sends
   White: White
   Wi-Fi and ethernet connection status: Wi-Fi and ethernet connection status
   WiFi: WiFi

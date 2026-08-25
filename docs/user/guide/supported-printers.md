@@ -10,9 +10,15 @@ This page is the detailed breakdown of what actually works on those specially-su
 
 **1. You don't have to run it on the printer.** Some printers can run HelixScreen directly on their own built-in touchscreen (see the list below). But HelixScreen is a Moonraker client, so for *any* printer you can also run it on a separate Raspberry Pi, mini PC, or tablet with a touchscreen and control the printer over the network. See [Can I run HelixScreen on a separate device?](../FAQ.md#can-i-run-helixscreen-on-a-separate-device-instead-of-on-my-printer) and [Remote Screen Setup](../INSTALL.md#remote-screen-setup-run-on-a-separate-device).
 
-**2. Your printer is auto-detected.** The first-run setup wizard identifies your printer from a database of 90+ models — filling in the right name, image, bed size, probe type, and preset options automatically. The **printer type** this sets drives features and calibration dialogs; the image picker in Printer Manager is cosmetic only. If the wizard guesses wrong, its **Printer Setup: Identity** step lets you pick your model by hand. To change the type later, see [Wrong printer model identified](../TROUBLESHOOTING.md#wrong-printer-model-identified) — the short version: re-add the printer and pick the right model, or re-run the wizard via Factory Reset (which wipes settings). Two caveats:
+**2. Your printer is auto-detected.** The first-run setup wizard identifies your printer from a database of 90+ models — filling in the right name, image, bed size, probe type, and preset options automatically. The **printer type** this sets drives features and calibration dialogs; the image picker in Printer Manager is cosmetic only. When detection isn't confident enough to commit (best guess under 85%), no type is saved and the wizard's **Printer Setup: Identity** step has you pick your model by hand instead.
 
-- The model pick exists **only in the setup wizard** — there is no "change printer model" option in Printer Manager or Settings.
+**Wrong model picked? It's a one-tap fix in Printer Manager.** The model row on the printer's Printer Manager card (tap the printer image on the Home panel) opens the same model picker the wizard's identity step uses — pick your model and it applies on the spot, no re-setup needed. HelixScreen also watches for this itself: if the saved type stops matching what detection finds on the printer, you're asked once whether to **Re-identify** (re-run the identity step) or **Keep current**. Re-adding the printer or re-running the wizard via Factory Reset (which wipes settings) is only needed for edge cases — see [Wrong printer model identified](../TROUBLESHOOTING.md#wrong-printer-model-identified).
+
+![Printer Manager identity card — the printer model row with its pencil](../../images/screenshot-model-row.png)
+![The model picker the row opens](../../images/screenshot-type-picker.png)
+
+One caveat:
+
 - Device-specific install packages (Creality K1, FlashForge Adventurer 5M, and similar) run the wizard in **preset mode**, which *skips* printer identification entirely — the printer type on those installs comes from the install package itself, not from detection. If such an install is showing the wrong printer (for example, an AD5M package running against a different machine), the fix is to install the HelixScreen package built for your hardware (or the generic remote-screen setup) — no settings change can override the preset.
 
 If your printer isn't in the database at all, it still works fully via generic detection (see [Every Other Klipper Printer](#every-other-klipper-printer) below).
@@ -182,6 +188,7 @@ Some filament systems aren't tied to a specific printer model — HelixScreen de
 - **Happy Hare** (ERCF, Tradrack, 3MS, EMU, and other MMUs)
 - **AFC-Klipper** (Box Turtle, OpenAMS, ViViD)
 - **klipper-toolchanger** (multi-toolhead setups)
+- **MedusaHC** (hotend changer, commonly on a Duender) - detected on top of klipper-toolchanger
 
 Full details on each are in [Filament Management](filament.md#ams--multi-material-systems).
 

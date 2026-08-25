@@ -494,6 +494,51 @@ These widgets come pre-themed. Adding redundant style attributes clutters the XM
 | `divider_*` | `style_bg_color`, width/height |
 | `ui_markdown` | All styling |
 
+### Shared styles (`ui_xml/styles.xml`)
+
+A `<styles>` block is file-local. When two files want the same style, it lives in
+`ui_xml/styles.xml` instead -- the shared style library. Any XML file borrows from it
+by dotted name, where the prefix is that file's basename:
+
+```xml
+<!-- The definition, ui_xml/styles.xml -->
+<style name="press_wash" bg_color="#primary" bg_opa="30%" radius="#border_radius"/>
+
+<!-- Any other file, borrowing it -->
+<style name="styles.press_wash" selector="pressed"/>
+```
+
+`press_wash` is the pressed-state feedback for clickable rows (a primary-color wash
+while the finger is down); it backs the filament catalog rows
+(`components/filament_catalog_row.xml`, `components/filament_catalog_add_row.xml`) and
+the external spool row in `filament_panel.xml`. `metadata_strip` is the other one --
+the translucent strip at the bottom of a g-code preview card, shared by
+`components/print_status_preview_card.xml` and `print_file_detail.xml`, which keep
+their own (genuinely different) placement inline.
+
+![Filament catalog rows at rest -- the wash appears only while a row is held](../images/screenshot-press-wash-row.png)
+
+Check `styles.xml` before writing a local `<style>` that is really a look another
+screen already has -- and when a second file copies one of your local styles, promote
+it into the library rather than forking it.
+
+**A borrowed style is a raw pointer into another file's scope.** `lv_obj_add_style()`
+stores `&style`, and that storage belongs to `styles.xml`'s component scope, not to
+yours. Nothing instantiates `styles.xml`, so its instance count is permanently zero,
+and the engine used to free the whole scope the moment the file was re-registered --
+which every hot-reload save does -- leaving every borrower holding a dangling style.
+It detonated far away, in the next `lv_obj_report_style_change(NULL)` at theme init.
+Fixed in helix-xml `3177f3f7`: a lookup that crosses a scope boundary marks the
+lender, and a marked scope is held instead of freed. The mark is one-way, so a file
+that lends styles is held until `lv_xml_component_deinit()` -- one retained scope per
+hot-reload save of `styles.xml`, which is why the library is worth keeping small.
+
+**Registration order matters.** `styles.xml` is registered from
+`register_xml_components()` (`src/xml_registration.cpp`), which runs *after*
+`theme_manager_init()` has injected the theme constants. Style `#token` values resolve
+at registration time, so a theme-token style placed in `globals.xml` (parsed before
+theme init) registers empty -- theme-aware styles must live in `styles.xml`.
+
 ---
 
 ## 6. XML Layout Essentials
@@ -689,12 +734,12 @@ ui_xml/
   globals.xml              <-- Shared by ALL layouts (never override this)
   home_panel.xml           <-- Standard home panel
   controls_panel.xml       <-- Standard controls panel
-  ...                      <-- 226 XML files total
+  ...                      <-- ~230 top-level XML files (components/ holds ~100 more)
   micro/                   <-- Micro (480x272) overrides (4 files)
     controls_panel.xml
     header_bar.xml
     ...
-  portrait/                <-- Portrait overrides (app_layout.xml, navigation_bar.xml)
+  portrait/                <-- Portrait overrides (4 files)
   micro_portrait/          <-- Micro-portrait overrides (dir present, empty)
   ultrawide/               <-- Does NOT exist yet (no overrides created)
   tiny/, tiny_portrait/    <-- Do NOT exist yet
@@ -864,7 +909,8 @@ These panels work well and can serve as reference for how to do things right:
 
 ### Portrait / Micro Status
 
-- `ui_xml/portrait/` exists with two overrides (`app_layout.xml`, `navigation_bar.xml`).
+- `ui_xml/portrait/` exists with four overrides (`app_layout.xml`,
+  `navigation_bar.xml`, `print_status_panel.xml`, `print_tune_panel.xml`).
 - `ui_xml/micro/` exists with four overrides (`controls_panel.xml`, `header_bar.xml`,
   `theme_editor_overlay.xml`, `theme_preview_overlay.xml`).
 - `ui_xml/micro_portrait/` exists as a directory but has no overrides yet.

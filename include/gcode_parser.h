@@ -16,6 +16,7 @@
 
 #include <array>
 #include <climits>
+#include <cmath>
 #include <glm/glm.hpp>
 #include <limits>
 #include <map>
@@ -24,6 +25,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace helix {
@@ -71,6 +73,45 @@ struct AABB {
         return min.x > max.x || min.y > max.y || min.z > max.z;
     }
 
+    /**
+     * @brief Copy with every axis pair ordered so min <= max.
+     *
+     * A box assembled field-by-field from independently tracked sources (the
+     * streaming index's stats, slicer metadata) can arrive with one axis
+     * inverted while the others hold good data. Every consumer gates on
+     * is_empty(), which is a single OR across all three axes, so one bad axis
+     * silently discards the two that were fine — the 2D auto-fit falls back to
+     * scale 1.0 about the world origin and the 3D camera declines to move.
+     *
+     * Axes that were never written keep their sentinel (±inf from this struct,
+     * or the float max/lowest pair the index stats use) and stay inverted:
+     * they carry no extent to order, and fabricating a span from the sentinels
+     * would turn "no geometry" into a plausible-looking box.
+     */
+    AABB normalized() const {
+        AABB out = *this;
+        order_axis(out.min.x, out.max.x);
+        order_axis(out.min.y, out.max.y);
+        order_axis(out.min.z, out.max.z);
+        return out;
+    }
+
+  private:
+    /// Swap one axis pair into order, unless either side is still a sentinel.
+    static void order_axis(float& lo, float& hi) {
+        if (lo <= hi) {
+            return;
+        }
+        if (!std::isfinite(lo) || !std::isfinite(hi)) {
+            return;
+        }
+        if (lo >= std::numeric_limits<float>::max() || hi <= std::numeric_limits<float>::lowest()) {
+            return;
+        }
+        std::swap(lo, hi);
+    }
+
+  public:
     /// 8 corners of the box. Order: bits 0/1/2 of the index select max for x/y/z.
     std::array<glm::vec3, 8> corners() const {
         return {{

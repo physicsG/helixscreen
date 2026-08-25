@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include "ui_bypass_toggle_controller.h"
+
 #include "ams_types.h"
 #include "overlay_base.h"
 
@@ -111,6 +113,12 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
      */
     void refresh();
 
+  protected:
+    /// Abort a pending unload->enable bypass chain when this surface goes away,
+    /// matching BypassWidget::detach() and AmsOperationSidebar::cleanup(): the
+    /// controller's self-observer must not fire an enable nobody is waiting on.
+    void on_ui_destroyed() override;
+
   private:
     //
     // === Internal Methods ===
@@ -192,9 +200,6 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
     /// user turns the override on so they can turn it back off.
     lv_subject_t fw_supports_bypass_subject_;
 
-    /// Subject for bypass active state (0=inactive, 1=active)
-    lv_subject_t bypass_active_subject_;
-
     /// Subject for hardware bypass sensor (0=virtual toggle, 1=hardware sensor)
     lv_subject_t hw_bypass_sensor_subject_;
 
@@ -242,6 +247,11 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
 
     /// Cached section metadata for row click dispatch
     std::vector<helix::printer::DeviceSection> cached_sections_;
+
+    /// Shared bypass policy — print guard, hardware-sensor refusal and the
+    /// unload-first chain. One instance per surface, as in AmsOperationSidebar
+    /// and BypassWidget; the switch handler owns nothing beyond forwarding to it.
+    BypassToggleController bypass_toggle_;
 };
 
 /**

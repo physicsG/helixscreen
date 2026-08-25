@@ -4,7 +4,6 @@
 # Service installation and management (systemd and SysV)
 #
 # Reads: INIT_SYSTEM, INSTALL_DIR, INIT_SCRIPT_DEST, SERVICE_NAME, SUDO
-# Writes: CLEANUP_SERVICE
 
 # Source guard
 [ -n "${_HELIX_SERVICE_SOURCED:-}" ] && return 0
@@ -174,7 +173,6 @@ install_service_systemd() {
     if _is_self_update; then
         log_info "Skipping main service file install (self-update; preserving customizations)"
         update_watcher_if_stale
-        CLEANUP_SERVICE=true
         return 0
     fi
 
@@ -198,7 +196,6 @@ install_service_systemd() {
     if _has_no_new_privs; then
         if [ -f "$service_dest" ]; then
             log_info "Skipping service reinstall (NoNewPrivileges; already installed)"
-            CLEANUP_SERVICE=true
             return 0
         fi
         log_error "Service not installed and NoNewPrivileges prevents installation"
@@ -232,7 +229,6 @@ install_service_systemd() {
     # Workaround for mainsail-crew/mainsail#2444: type: web lacks managed_services
     install_update_watcher_systemd
 
-    CLEANUP_SERVICE=true
     log_success "Installed systemd service"
 }
 
@@ -349,7 +345,6 @@ install_service_sysv() {
     if _is_self_update; then
         log_info "Skipping init script install (self-update; already installed)"
         _migrate_init_script_hooks_path
-        CLEANUP_SERVICE=true
         return 0
     fi
 
@@ -373,7 +368,6 @@ install_service_sysv() {
     # This is important for Klipper Mod which uses a different path
     _sed_inplace "s|DAEMON_DIR=.*|DAEMON_DIR=\"${INSTALL_DIR}\"|" "$INIT_SCRIPT_DEST"
 
-    CLEANUP_SERVICE=true
     log_success "Installed SysV init script at $INIT_SCRIPT_DEST"
 }
 
@@ -435,8 +429,8 @@ start_service_snapmaker_u1() {
     fi
 
     # Wait for service to start (may be slow on embedded hardware)
-    local i
-    for i in 1 2 3 4 5; do
+    local _
+    for _ in 1 2 3 4 5; do
         sleep 1
         if pidof helix-screen >/dev/null 2>&1; then
             log_success "HelixScreen is running!"
@@ -480,8 +474,8 @@ start_service_systemd() {
     fi
 
     # Wait for service to start (may be slow on embedded hardware)
-    local i
-    for i in 1 2 3 4 5; do
+    local _
+    for _ in 1 2 3 4 5; do
         sleep 1
         if systemctl is-active --quiet "$SERVICE_NAME"; then
             log_success "HelixScreen is running!"
@@ -524,8 +518,8 @@ start_service_sysv() {
     fi
 
     # Wait for service to start (may be slow on embedded hardware)
-    local i
-    for i in 1 2 3 4 5; do
+    local _
+    for _ in 1 2 3 4 5; do
         sleep 1
         if $SUDO "$INIT_SCRIPT_DEST" status >/dev/null 2>&1; then
             log_success "HelixScreen is running!"

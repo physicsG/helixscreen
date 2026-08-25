@@ -33,12 +33,12 @@ graph TB
         subgraph UI["UI Layer"]
             NAV["NavigationManager<br/>panel/overlay stack"]
             PANELS["6 root panels"]
-            OVERLAYS["58 overlay classes"]
+            OVERLAYS["~60 overlay classes"]
             MODALS["41 modal XMLs"]
-            XMLW["ui_xml/*.xml<br/>230 top-level + 95 components"]
+            XMLW["ui_xml/*.xml<br/>232 top-level + 96 components"]
         end
         subgraph State["State Layer"]
-            PS["PrinterState<br/>get_printer_state()<br/>13 domains, 122 subjects"]
+            PS["PrinterState<br/>get_printer_state()<br/>13 domains, ~120 subjects"]
             AS["AmsState<br/>per-filament-system backends"]
             TS["ToolState<br/>multi-tool tracking"]
             SM["SettingsManager"]
@@ -105,6 +105,23 @@ graph TB
     PLG --> MA
 ```
 
+## Design Philosophy
+
+HelixScreen is a **local touchscreen** UI — users are physically present at the printer. This fundamentally differs from web UIs (Mainsail/Fluidd) designed for remote monitoring.
+
+**We prioritize:**
+- Tactile controls optimized for touch
+- At-a-glance information for the user standing at the machine
+- Calibration workflows (PID, Z-offset, screws tilt, input shaper)
+- Real-time tuning (speed, flow, firmware retraction)
+
+**Lower priority for this form factor:**
+- Job queue (requires manual print removal between jobs)
+- System stats (CPU/memory) — not diagnosing remote issues
+- Remote access/monitoring features
+
+Don't copy features from web UIs just because "competitors have it" — evaluate whether it makes sense for a local touchscreen.
+
 ## Pick your subsystem
 
 | I want to... | Read |
@@ -124,6 +141,7 @@ graph TB
 | add a peripheral or remote-control the UI | [ch. 13 — Peripherals & remote](architecture/13-peripherals.md) |
 | make HelixScreen run on a new board | [ch. 14 — Build & platforms](architecture/14-build-platforms.md) |
 | pay down tech debt | [ch. 15 — Known debt](architecture/15-known-debt.md) |
+| work on the G-code viewer, preview download/parse, or object picking | [ch. 16 — G-code pipeline](architecture/16-gcode-pipeline.md) |
 
 ## The rules with teeth
 
@@ -132,7 +150,7 @@ New UI code is declarative, class-based, and token-styled: no
 show/hide or `lv_label_set_text()` (subject bindings instead), no C++ styling
 with hex literals (design tokens instead), and vendor knowledge stays behind
 one capability module instead of leaking into generic code. The full rule
-table with the sanctioned exceptions lives in the root `CLAUDE.md`; chapter 01
+table with the sanctioned exceptions lives in the root [`CLAUDE.md`](../../CLAUDE.md); chapter 01
 explains why the engine makes these rules cheap to follow, and chapter 15 maps
 the remaining imperative-UI debt and the ratchet gate that keeps it shrinking.
 

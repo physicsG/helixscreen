@@ -31,7 +31,7 @@ Manual filament control:
 | **Extrude** | Push filament through nozzle |
 | **Retract** | Pull filament back |
 
-**Amount selector**: 5mm, 10mm, 25mm, 50mm
+**Amount selector**: 5mm, 10mm, 25mm
 **Speed selector**: Slow, Normal, Fast
 
 > **Safety:** Extrusion requires the hotend to be at minimum temperature (usually 180°C for PLA, higher for other materials). If HelixScreen knows what filament is loaded — either from an [external spool](filament.md#external-spool-configuration) or an active AMS slot — it skips the cold-nozzle safety warning and auto-preheats to the correct temperature instead.
@@ -59,7 +59,7 @@ This works whether or not you have an AMS system. If a slot is left empty (no ma
 
 ### Manual extrude/retract
 
-For manual control without macros, use the **Extrude** and **Retract** buttons on the extrusion widget with selectable amounts (5mm, 10mm, 25mm, 50mm) and speeds.
+For manual control without macros, use the **Extrude** and **Retract** buttons on the extrusion widget with selectable amounts (5mm, 10mm, 25mm) and speeds.
 
 ### What happens to the nozzle afterward
 
@@ -137,7 +137,7 @@ Some steps only apply to how your machine is set up. A step your system never re
 
 | Button | Action |
 |--------|--------|
-| **Bypass** (toggle) | Feed filament directly to the extruder, bypassing the AMS. Shown when your hardware supports bypass, or when you turn on **Enable Bypass Controls** - see [When Bypass Doesn't Appear](#when-bypass-doesnt-appear). |
+| **Bypass** (toggle) | Feed filament directly to the extruder, bypassing the AMS. Shown when your hardware supports bypass, or when you turn on **Enable Bypass Controls** - see [When Bypass Doesn't Appear](#when-bypass-doesnt-appear). The toggle is guarded: it can't be changed while a job holds the machine (a "Bypass cannot be changed while printing" warning appears), if a lane's filament is loaded it is unloaded first before bypass engages, and where a hardware sensor owns the bypass the toggle only reports that the sensor is in control. |
 | **Unload** | Retract the currently loaded filament back to its slot |
 | **Reset** | Reset the AMS system state (useful after jams or errors) |
 | **Settings** | Open the AMS Management overlay for advanced controls |
@@ -268,7 +268,7 @@ Tap **Settings** in the sidebar to open the AMS Management overlay with advanced
 - **Home** — Return the AMS to its home position
 - **Recover** — Attempt to recover from an error state
 - **Abort** — Cancel the current operation immediately
-- **Bypass Mode** — Toggle direct-feed mode (if supported by hardware). If your machine has no bypass according to its firmware, an **Enable Bypass Controls** toggle appears here instead - see [When Bypass Doesn't Appear](#when-bypass-doesnt-appear)
+- **Bypass Mode** — Toggle direct-feed mode (if supported by hardware). The toggle refuses while a filament operation is running, and on systems that require it, while filament is still loaded - unload first. When a hardware sensor owns the bypass, this row becomes a read-only "Controlled by hardware sensor" indicator instead of a toggle. If your machine has no bypass according to its firmware, an **Enable Bypass Controls** toggle appears here instead - see [When Bypass Doesn't Appear](#when-bypass-doesnt-appear)
 - **Always Show Bypass Spool** — Keep the external spool visible on the filament path even while bypass is disengaged (AFC systems only)
 - **Keep Spool Info on Eject** — When a lane is emptied, keep its spool details so reloading the same spool after maintenance needs no re-selection (on by default). Turn it off to start fresh when a lane empties. This applies only to spools you selected in HelixScreen: a spool assigned elsewhere (such as Mainsail) clears with the lane. To have every assigned spool remembered no matter where it was picked, use the firmware's own retention instead (AFC: `remember_spool` in AFC.cfg) - HelixScreen follows the spool the firmware reports. Note that when the firmware's own retention is switched on for every lane, it takes precedence: this toggle then has no effect and shows as disabled with a note explaining why. Shown on systems whose firmware tracks spool ids per lane (such as AFC and Happy Hare); systems that detect spool swaps by tag always refresh on a swap regardless of this setting.
 - **Reset Endless Spool** — Wipe every slot's backup assignment at once, so a runout stops the print until you set up failover again. Only appears on systems whose failover you can edit here (AFC, single-unit Happy Hare); hidden on CFS and AD5X, which manage it in firmware. Asks you to confirm before clearing. See [Endless Spool / Backup Slot](#slot-context-menu) above.
@@ -404,6 +404,74 @@ You can still edit spool info manually from the slot context menu for spools wit
 The U1 tracks filament with a motion sensor per tool. When a runout fires mid-print, HelixScreen prepares the printer before resuming — disabling the runout sensor, heating the tool, priming a short length of filament past the encoder, and re-enabling the sensor — so a plain Resume actually continues the print. If the motion sensor reports a runout but filament is still physically present (a stale sensor reading), HelixScreen recovers silently without prompting you.
 
 > **Note:** Because each toolhead is independent, the Snapmaker backend has no Home, Recover, Reset, Bypass, or Endless Spool controls — those apply to shared-path AMS hardware only.
+
+---
+
+## MedusaHC (Hotend Changer)
+
+MedusaHC swaps only the **hot end** — heater, thermistor and fan — rather than a whole
+toolhead. It runs on top of klipper-toolchanger, so HelixScreen shows it as a tool changer
+with **parallel** topology: each tool is its own independent path, with no hub or selector.
+
+You don't need to configure anything. HelixScreen recognises a MedusaHC automatically when
+your Klipper config has both a tool changer and MedusaHC's own dock sensors.
+
+### Which tool is mounted
+
+MedusaHC has a sensor at each dock, and HelixScreen trusts those sensors over what the
+toolchanger *thinks* it picked up. That matters after a failed or partial pickup: the
+toolchanger will still report the tool it was told to fetch, while the docks know it never
+arrived.
+
+If the sensors can't agree on what's on the head, HelixScreen shows an error rather than
+guessing. That state is deliberately not shown as "no tool" — starting a tool change from
+an unknown position risks driving the carriage into a dock. Clear it by running a tool
+change or your printer's error-recovery macro from the console.
+
+### The filament feeder
+
+Because only the hot end travels, the filament is held by a servo gripper on the frame
+instead of by the moving toolhead. You'll find **Open feeder** and **Close feeder** under
+the AMS panel's **Settings** button, in Device Operations.
+
+Use **Open feeder** to release the filament when you're clearing a jam or loading a fresh
+spool by hand, then **Close feeder** to grip it again.
+
+> **Note:** These are refused while a print is running. The gripper is the only thing
+> holding your filament — releasing it mid-print drops the strand and ruins the job.
+
+HelixScreen picks the right macro for your setup automatically, whether you're on the
+original MedusaHC config or the newer Python controller.
+
+If your setup uses different macro names — you've renamed them, or you're part-way through
+migrating to the Python controller — you can choose them yourself. In the same Device
+Operations screen, **Open feeder macro** and **Close feeder macro** list the macros found
+on your printer. Leave them on **auto** to keep HelixScreen's automatic choice, which also
+means you'll pick up the newer commands for free if you migrate later.
+
+### Tool mapping
+
+Tool mapping works the same as on any klipper-toolchanger machine — see
+[Tool Mapping](#tool-mapping) above. You can point a G-code tool number at a different
+physical tool, which is useful when a slicer project expects a different tool order than
+your machine is loaded with.
+
+### What HelixScreen remembers per tool
+
+Your printer reports nothing about the filament in each hot end — no material, no colour,
+no brand. So whatever you set in HelixScreen *is* the record, and it's kept for you:
+material, colour, brand, spool name, and remaining weight, per tool.
+
+That survives restarts and reconnects. It's stored on your printer via Moonraker rather
+than only on the screen, and it uses the same records Mainsail writes, so spools you've
+assigned there should show up here and vice versa.
+
+One consequence worth knowing: nothing on a tool changer can detect that you physically
+swapped a spool, so HelixScreen keeps showing what you last told it until you change it.
+Edit the slot when you switch filament.
+
+> **Note:** Like other tool changers, MedusaHC has no Unload, Bypass, Endless Spool or
+> dryer controls — each tool is its own path, and those apply to shared-path AMS hardware.
 
 ---
 

@@ -305,6 +305,13 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                         {"pid_ki", 1.132},
                         {"pid_kd", 1194.093}}}}},
                     {"config", config_section}};
+
+                // [bed_mesh] probe_count — the print-start collector's
+                // entry-time query reads this to size the mesh denominator.
+                if (const auto* probe_count = self->config_bed_mesh_probe_count()) {
+                    status_obj["configfile"]["settings"]["bed_mesh"] = {
+                        {"probe_count", json::array({probe_count->first, probe_count->second})}};
+                }
             }
 
             // toolhead (for get_machine_limits)

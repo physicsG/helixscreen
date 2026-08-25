@@ -31,7 +31,8 @@ SCRIPT_START=$(date +%s)
 # Timing helper - prints elapsed time for a section (seconds)
 section_time() {
   local start=$1
-  local end=$(date +%s)
+  local end
+  end=$(date +%s)
   local elapsed=$((end - start))
   if [ $elapsed -gt 0 ]; then
     printf " (%ds)" "$elapsed"
@@ -96,7 +97,7 @@ if [ -n "$FILES" ]; then
   if [ -n "$MISSING_HEADERS" ]; then
     section_time $SECTION_START
     echo ""
-    echo "See docs/COPYRIGHT_HEADERS.md for the required header format"
+    echo "See docs/devel/COPYRIGHT_HEADERS.md for the required header format"
   else
     section_time $SECTION_START
     echo ""
@@ -163,7 +164,7 @@ if [ -n "$FILES" ]; then
   if [ -n "$TRAILING_WS" ]; then
     echo "⚠️  Found trailing whitespace:"
     echo "$TRAILING_WS" | head -10 | sed 's/^/   /'
-    if [ $(echo "$TRAILING_WS" | wc -l) -gt 10 ]; then
+    if [ "$(echo "$TRAILING_WS" | wc -l)" -gt 10 ]; then
       echo "   ... and $(($(echo "$TRAILING_WS" | wc -l) - 10)) more"
     fi
     echo "ℹ️  Fix with: sed -i 's/[[:space:]]*$//' <file>"
@@ -1109,13 +1110,57 @@ if [ -n "$XML_FILES" ]; then
     # clean", is how three LVGL state-selector layouts drifted unnoticed.
     if $VENV_PYTHON scripts/format-xml.py --check $XML_FILES; then
       echo "✅ All XML files properly formatted"
+    elif [ "$AUTO_FIX" = true ]; then
+      # Close the loop the way qc_phase2 does for C++. Staying purely advisory
+      # here left a real hole: tests/shell/test_format_xml_gate.bats checks the
+      # WHOLE ui_xml tree and fails hard, so an unformatted file that sails past
+      # this warning turns the shell suite red on main until someone notices.
+      # panel_widget_bypass.xml sat that way through 58ea1eea2.
+      # Which files already had unstaged work — recorded BEFORE formatting,
+      # because the reformat itself makes every file differ from the index.
+      XML_PRE_DIRTY=""
+      if [ "$STAGED_ONLY" = true ]; then
+        for f in $XML_FILES; do
+          git diff --quiet -- "$f" || XML_PRE_DIRTY="$XML_PRE_DIRTY $f "
+        done
+      fi
+      XML_FIXED=$($VENV_PYTHON scripts/format-xml.py $XML_FILES 2>&1 \
+                  | sed -n 's/^Formatted: //p')
+      if [ -n "$XML_FIXED" ]; then
+        for f in $XML_FIXED; do echo "   ✓ Auto-formatted: $f"; done
+        if [ "$STAGED_ONLY" = true ]; then
+          # Re-stage only files with NOTHING unstaged. `git add` takes the whole
+          # working-tree file, so on a partially staged file it would sweep in
+          # hunks deliberately held back — the commit would carry work its author
+          # never staged. Those get formatted on disk and named instead.
+          XML_RESTAGE=""; XML_HELD=""
+          for f in $XML_FIXED; do
+            case "$XML_PRE_DIRTY" in
+              *" $f "*) XML_HELD="$XML_HELD $f" ;;
+              *)        XML_RESTAGE="$XML_RESTAGE $f" ;;
+            esac
+          done
+          # shellcheck disable=SC2086  # word splitting is the point: a path list
+          [ -n "$XML_RESTAGE" ] && git add $XML_RESTAGE && \
+            echo "✅ Re-staged:$XML_RESTAGE"
+          if [ -n "$XML_HELD" ]; then
+            echo "⚠️  Formatted but NOT re-staged (partially staged):$XML_HELD"
+            echo "ℹ️  This commit still carries unformatted XML. Stage it with: git add$XML_HELD"
+          fi
+        fi
+      else
+        # --check disagreed with a real run: the file is unparseable, not unformatted.
+        echo "⚠️  XML could not be parsed — see above"
+        echo "ℹ️  Fix with: .venv/bin/python scripts/format-xml.py <files>"
+      fi
     else
       echo "⚠️  XML files need formatting (or could not be parsed — see above)"
       echo "ℹ️  Fix with: .venv/bin/python scripts/format-xml.py <files>"
       echo "ℹ️  Or run: make format"
-      # Don't fail CI for XML formatting - it's a style preference.
-      # Genuine malformed XML is still a hard failure via the xmllint validation pass
-      # earlier in this script, so staying advisory here does not let broken XML through.
+      # Don't fail CI for XML formatting - it's a style preference, and --auto-fix
+      # (the pre-commit path) now repairs it rather than nagging. Genuine malformed
+      # XML is still a hard failure via the xmllint validation pass earlier in this
+      # script, so staying advisory here does not let broken XML through.
       # EXIT_CODE=1
     fi
   elif command -v xmllint >/dev/null 2>&1; then
@@ -1521,6 +1566,38 @@ else
   section_time $SECTION_START
   echo ""
   echo "⚠️  check_imperative_ui.py not found — skipping"
+fi
+
+echo ""
+
+SECTION_START=$(date +%s)
+echo -n "🔌 Checking orphan subjects (registered, never read)..."
+
+if [ -f "scripts/check_orphan_subjects.py" ]; then
+  # The ratchet has reached zero, so this is a hard gate, not a baseline. The XML
+  # linter already rejects a bind_* naming a subject nobody registers; this is the
+  # other direction — a subject registered and kept current but read by neither an
+  # XML binding nor a C++ consumer. It renders nothing and costs every update that
+  # writes it. Usually what a binding leaves behind when its widget is deleted or
+  # renamed. Genuinely-unreadable-by-static-analysis cases (a subject handed to a
+  # helper by pointer, or observed only from a test accessor) take
+  # `// SUBJECT_OK: <reason>` on the registration.
+  if python3 scripts/check_orphan_subjects.py --max-allowed 0 --summary >/tmp/orphan_subjects.out 2>&1; then
+    section_time $SECTION_START
+    echo ""
+    tail -1 /tmp/orphan_subjects.out
+  else
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/orphan_subjects.out
+    echo "   Run: python3 scripts/check_orphan_subjects.py --list"
+    echo "   Bind it in XML, read it from C++, or delete it."
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  check_orphan_subjects.py not found — skipping"
 fi
 
 echo ""
@@ -1959,6 +2036,50 @@ echo ""
 }
 
 # ====================================================================
+# Architecture-guide file links are generated, not hand-written
+# ====================================================================
+qc_doc_links() {
+  local EXIT_CODE=0
+# The guide links every backticked citation to the file (and line) it names.
+# Those links are DERIVED from the citation text by scripts/gen_doc_links.py, so
+# a hand-edited URL, a citation added without regenerating, or a renamed target
+# all show up here as "stale" rather than rotting silently in the rendered doc.
+# Same contract as regen-tokens / regen-xml-schema: the artifact is committed,
+# and the gate proves it matches its source.
+SECTION_START=$(date +%s)
+echo -n "🔗 Checking architecture-guide file links..."
+
+if [ -f "scripts/gen_doc_links.py" ]; then
+  if python3 scripts/gen_doc_links.py --diff >/tmp/doc_links.out 2>&1; then
+    :
+  else
+    EXIT_CODE=1
+    # --auto-fix (what the pre-commit hook passes) repairs the guide in place so
+    # the committer only has to stage it. It still FAILS: the fix lands in the
+    # working tree, not the index, and passing here would commit the stale doc
+    # while leaving a green run behind it. Deliberately not `git add`-ed — a
+    # hook that stages for you sweeps up whatever else sits in those files.
+    if [ "$AUTO_FIX" = true ]; then
+      python3 scripts/gen_doc_links.py >>/tmp/doc_links.out 2>&1
+      echo "   Regenerated in place — 'git add' the guide and commit again." >>/tmp/doc_links.out
+    fi
+  fi
+  section_time $SECTION_START
+  echo ""
+  cat /tmp/doc_links.out
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  gen_doc_links.py not found — skipping"
+fi
+
+echo ""
+
+# ====================================================================
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Translation format-specifier parity (crash #1073)
 # ====================================================================
 qc_translation_fmt() {
@@ -2058,10 +2179,16 @@ echo -n "🐚 Checking shell scripts (shellcheck)..."
 #   config/  - platform hooks and the init script. Clean at shellcheck's
 #              default severity; kept there.
 #   scripts/ - installer modules, launcher, release tooling. These ship to
-#              devices but were outside this gate entirely until now, so 19
-#              files carry pre-existing findings. Those are listed in
-#              SHELLCHECK_BASELINE: still reported, but not fatal. Every other
-#              file must be clean. The list may shrink, never grow.
+#              devices and are held to the same bar as config/: clean at
+#              warning severity (minus the two excluded codes below). The 19
+#              files that carried pre-existing findings when this gate landed
+#              have since been fixed and SHELLCHECK_BASELINE is empty. A file
+#              enters the baseline only by explicit decision after a fix is
+#              judged riskier than the finding; the list may shrink, never
+#              grow. Variables shared across `source` boundaries carry a
+#              per-line disable directive naming their consumer at the
+#              assignment site - SC1091 is excluded, so shellcheck cannot see
+#              those reads itself.
 #
 # install.sh / uninstall.sh are skipped: they are bundled artifacts of
 # install-dev.sh + lib/installer/, which are themselves checked here.
@@ -2072,25 +2199,7 @@ echo -n "🐚 Checking shell scripts (shellcheck)..."
 #   SC1091 - "not following sourced file". The installer sources its modules
 #            by a path that only exists once unpacked on the device.
 SHELLCHECK_SCRIPTS_EXCLUDE="SC3043,SC1091"
-SHELLCHECK_BASELINE="scripts/audit_codebase.sh
-scripts/benchmark_hosts.sh
-scripts/benchmark_neon.sh
-scripts/check_cjk_font_staleness.sh
-scripts/git-stats.sh
-scripts/install-dev.sh
-scripts/lib/installer/common.sh
-scripts/lib/installer/forgex.sh
-scripts/lib/installer/main.sh
-scripts/lib/installer/platform.sh
-scripts/lib/installer/release.sh
-scripts/lib/installer/requirements.sh
-scripts/lib/installer/service.sh
-scripts/lib/lvgl_image_lib.sh
-scripts/quality-checks.sh
-scripts/regen_images.sh
-scripts/regen_printer_images.sh
-scripts/resolve-backtrace.sh
-scripts/screenshot.sh"
+SHELLCHECK_BASELINE=""
 
 SHELL_FILES=""
 if [ "$STAGED_ONLY" = true ]; then
@@ -2233,7 +2342,7 @@ qc_run_buffered() {
 # when asked to fix them.
 QC_SERIAL="qc_xml_linter"
 if [ "$AUTO_FIX" = true ]; then QC_SERIAL="$QC_SERIAL qc_phase2"; fi
-QC_ALL="qc_phase1 qc_xml_const qc_xml_attr qc_dup_names qc_xml_linter qc_xml_subtests qc_hidden_tests qc_overlay_width qc_design_pixels qc_phase2 qc_icon_font qc_mdi_codepoints qc_code_style qc_mem_safety qc_null_safety qc_l081 qc_net_pii qc_decl_ui qc_spdlog_only qc_design_tokens qc_doc_refs qc_translation_fmt qc_base_locale qc_shellcheck"
+QC_ALL="qc_phase1 qc_xml_const qc_xml_attr qc_dup_names qc_xml_linter qc_xml_subtests qc_hidden_tests qc_overlay_width qc_design_pixels qc_phase2 qc_icon_font qc_mdi_codepoints qc_code_style qc_mem_safety qc_null_safety qc_l081 qc_net_pii qc_decl_ui qc_spdlog_only qc_design_tokens qc_doc_refs qc_doc_links qc_translation_fmt qc_base_locale qc_shellcheck"
 
 QC_PARALLEL=""
 for fn in $QC_ALL; do
@@ -2262,6 +2371,7 @@ qc_trigger_re() {
                         echo '\.(cpp|c|h|mm)$' ;;
     qc_design_tokens)   echo '\.(cpp|h|xml)$' ;;
     qc_doc_refs)        echo '\.md$|^scripts/check_doc_refs\.py$' ;;
+    qc_doc_links)       echo '^docs/devel/ARCHITECTURE\.md$|^docs/devel/architecture/|^scripts/gen_doc_links\.py$' ;;
     qc_translation_fmt) echo '^translations/|^ui_xml/|\.py$' ;;
     qc_base_locale)     echo '^translations/' ;;
     qc_shellcheck)      echo '\.(sh|bats)$' ;;
