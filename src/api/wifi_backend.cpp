@@ -18,6 +18,9 @@
 #elif defined(ESP_PLATFORM)
 // esp_wifi backend lives in the firmware tree; only the declaration in
 // wifi_backend.h is needed here.
+#elif defined(__EMSCRIPTEN__)
+// Browser preview: no WiFi stack to manage, and the wpa_supplicant backend
+// derives from hv::EventLoopThread, which the WASM build does not link.
 #elif !defined(__ANDROID__)
 #include "wifi_backend_networkmanager.h"
 #include "wifi_backend_wpa_supplicant.h"
@@ -120,6 +123,11 @@ std::unique_ptr<WifiBackend> WifiBackend::create(bool silent) {
 #elif defined(__ANDROID__)
     // Android: WiFi managed by the OS, not by us
     spdlog::info("[WifiBackend] Android platform - WiFi not managed natively");
+    return nullptr;
+#elif defined(__EMSCRIPTEN__)
+    // Browser preview: the page has no radio. Reaching here at all means mocks
+    // were disabled, which the browser build never does.
+    spdlog::info("[WifiBackend] Browser preview - no native WiFi backend");
     return nullptr;
 #else
     // Linux: pick between NetworkManager and wpa_supplicant using CHEAP

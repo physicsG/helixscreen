@@ -103,6 +103,20 @@ class RemoteControlServer {
      */
     void register_handler(const std::string& method, CommandHandler handler);
 
+    /**
+     * @brief Serve one JSON-RPC request in-process, with no transport.
+     *
+     * For embedders that already own the UI thread and have no socket to listen
+     * on -- the WebAssembly browser preview calls this from a JS bridge. Gives
+     * the same command surface as `helix-screen ctl`, so the same locators and
+     * the same scripts work against a page.
+     *
+     * Registers the builtin handlers on first use and marks the server running
+     * so execute_on_ui_thread() does not bail; there is no transport to start.
+     * Must be called on the UI thread.
+     */
+    std::string serve_inproc(const std::string& request_line);
+
   private:
     RemoteControlServer() = default;
     ~RemoteControlServer();
