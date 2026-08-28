@@ -577,6 +577,43 @@ TEST_CASE("FilamentMapper use_current_assignments", "[filament_mapper][current_a
         CHECK(mappings[2].reason == ToolMapping::MatchReason::AUTO);
     }
 
+    SECTION("a sparse tool set pairs each tool with its own head, not the list index") {
+        // The U1 case (calicat_PLA_37m55s.gcode): the file uses T0 and T2 only.
+        // Pairing the i-th used tool with slots[i] walks the slot list densely,
+        // so T2 — the second USED tool — lands on lane 1 instead of lane 2. That
+        // is a remap the user never asked for, and because it is not the
+        // firmware default identity_filtered_remap() emits it, sending the
+        // print to a lane holding the wrong filament.
+        //
+        // Positional means "each tool keeps its own head". Only a dense tool
+        // set makes index-pairing and head-pairing agree, and every other case
+        // here is dense, which is why this went unnoticed.
+        std::vector<GcodeToolInfo> tools = {
+            {0, 0xFF0000, "PLA"}, // red   — the file's body
+            {2, 0x000000, "PLA"}, // black — the file's tail
+        };
+        std::vector<AvailableSlot> slots = {
+            {0, 0, 0x080A0D, "PLA", false, -1}, // lane 0 — black
+            {1, 0, 0xE2DEDB, "PLA", false, -1}, // lane 1 — off-white
+            {2, 0, 0xE72F1D, "PLA", false, -1}, // lane 2 — red
+            {3, 0, 0xF4C032, "PLA", false, -1}, // lane 3 — yellow
+        };
+
+        auto mappings = FilamentMapper::use_current_assignments(tools, slots);
+
+        REQUIRE(mappings.size() == 2);
+
+        CHECK(mappings[0].tool_index == 0);
+        CHECK(mappings[0].mapped_slot == 0);
+
+        CHECK(mappings[1].tool_index == 2);
+        CHECK(mappings[1].mapped_slot == 2); // NOT 1
+
+        // And the whole point: a positional map is the firmware default, so
+        // nothing goes out on the wire.
+        CHECK(FilamentMapper::identity_filtered_remap(mappings).empty());
+    }
+
     SECTION("detects material mismatches") {
         std::vector<GcodeToolInfo> tools = {
             {0, 0xFF0000, "PLA"},
@@ -1296,4 +1333,222 @@ TEST_CASE("effective_tool_colors scatters a sparse used-set to tool-number indic
 TEST_CASE("effective_tool_colors returns empty for no tools", "[filament_mapper][effective]") {
     std::vector<AvailableSlot> slots = {{0, 0, 0xAA0000, "PLA", false, -1}};
     CHECK(FilamentMapper::effective_tool_colors({}, slots, /*auto_color_map=*/true).empty());
+}
+
+// =============================================================================
+// compute_defaults — a tool whose color is unknown
+// =============================================================================
+//
+// GcodeToolInfo::color_known is false when NO source could say what color a
+// tool prints in — Moonraker omitted filament_colors, and neither the G-code
+// footer nor a viewer parse has backfilled it yet. color_rgb then holds a
+// neutral stand-in, and running the nearest-color search against it picks a
+// lane on the strength of a value the file never stated.
+//
+// Positional fallback is the honest answer there: it is what the mapper already
+// does when no lane is within COLOR_MATCH_TOLERANCE, and it does not pretend the
+// file expressed a preference. Firmware mappings still win — those are the
+// printer's own statement of fact and owe nothing to the palette.
+
+TEST_CASE("compute_defaults: an unknown color never takes a color match",
+          "[filament_mapper][compute][color_known]") {
+    // NOTE ON THE ASSERTION: reason cannot discriminate here — the positional
+    // fallback below stamps MatchReason::COLOR_MATCH too (it has since before
+    // this change), so both outcomes report COLOR_MATCH. The slot actually
+    // chosen is the only honest observable, so the fixture is built to make the
+    // two paths pick DIFFERENT slots:
+    //
+    //   tool 0, stand-in colour 0x808080  ->  color match wants slot 1 (exact)
+    //                                     ->  positional wants slot 0 (index 0)
+    //
+    // Both lanes are ASA, so the material gate lets the colour search reach
+    // either one — which is the point: with several lanes of the same material
+    // loaded, matching against a stand-in is pure coin-toss.
+    std::vector<GcodeToolInfo> tools = {{0, 0x808080, "ASA", /*color_known=*/false}};
+    std::vector<AvailableSlot> slots = {
+        {0, 0, 0x111111, "ASA", false, -1},
+        {1, 0, 0x808080, "ASA", false, -1},
+    };
+
+    auto result = FilamentMapper::compute_defaults(tools, slots);
+    REQUIRE(result.size() == 1);
+    CHECK(result[0].mapped_slot == 0); // positional, NOT the exact grey match
+}
+
+TEST_CASE("compute_defaults: a known color still takes the color match",
+          "[filament_mapper][compute][color_known]") {
+    // Identical fixture with color_known defaulted true — the pre-existing
+    // behavior must be untouched, or every file that DOES declare its colors
+    // regresses to positional assignment.
+    std::vector<GcodeToolInfo> tools = {{0, 0x808080, "ASA"}};
+    std::vector<AvailableSlot> slots = {
+        {0, 0, 0x111111, "ASA", false, -1},
+        {1, 0, 0x808080, "ASA", false, -1},
+    };
+
+    auto result = FilamentMapper::compute_defaults(tools, slots);
+    REQUIRE(result.size() == 1);
+    CHECK(result[0].mapped_slot == 1); // exact colour match wins
+    CHECK(result[0].reason == ToolMapping::MatchReason::COLOR_MATCH);
+}
+
+TEST_CASE("compute_defaults: a firmware mapping still wins for an unknown color",
+          "[filament_mapper][compute][color_known]") {
+    // The firmware's own tool assignment is not a guess about the palette, so
+    // an unknown color must not suppress it.
+    std::vector<GcodeToolInfo> tools = {{0, 0x808080, "ASA", /*color_known=*/false}};
+    std::vector<AvailableSlot> slots = {
+        {0, 0, 0x111111, "ASA", false, -1},
+        {1, 0, 0x222222, "ASA", false, /*current_tool_mapping=*/0},
+    };
+
+    auto result = FilamentMapper::compute_defaults(tools, slots);
+    REQUIRE(result.size() == 1);
+    CHECK(result[0].reason == ToolMapping::MatchReason::FIRMWARE_MAPPING);
+    CHECK(result[0].mapped_slot == 1);
+}
+
+// =============================================================================
+// mapped_lane_display_number
+// =============================================================================
+//
+// The mapping chip draws the gcode colour and the mapped lane's colour. When
+// two bays hold the same filament those swatches are identical, so the chip
+// says which colour will print without saying which spool it comes from —
+// precisely the case where the user needs to know. These pin the number that
+// disambiguates them, and the rules about when there is no number to show.
+
+TEST_CASE("mapped_lane_display_number: a mapped lane reports its 1-based position",
+          "[filament_mapper][lane_number]") {
+    // Slot indices are 0-based internally and 1-based everywhere they are shown
+    // (format_slot_label, the AMS slot badges). The chip must agree with them.
+    std::vector<AvailableSlot> slots = {
+        {0, 0, 0xFF0000, "PLA", false, -1},
+        {1, 0, 0x00FF00, "PLA", false, -1},
+        {2, 0, 0x0000FF, "PLA", false, -1},
+    };
+    slots[0].local_slot_index = 0;
+    slots[1].local_slot_index = 1;
+    slots[2].local_slot_index = 2;
+
+    ToolMapping m;
+    m.tool_index = 0;
+    m.mapped_slot = 1;
+    m.mapped_backend = 0;
+
+    CHECK(FilamentMapper::mapped_lane_display_number(m, slots) == 2);
+}
+
+TEST_CASE("mapped_lane_display_number: two lanes of the same colour stay distinguishable",
+          "[filament_mapper][lane_number]") {
+    // The reason this function exists. Both lanes are the same red; only the
+    // number tells the user which spool the print will pull from.
+    std::vector<AvailableSlot> slots = {
+        {0, 0, 0xFF0000, "PLA", false, -1},
+        {1, 0, 0xFF0000, "PLA", false, -1},
+    };
+    slots[0].local_slot_index = 0;
+    slots[1].local_slot_index = 1;
+
+    ToolMapping first;
+    first.mapped_slot = 0;
+    first.mapped_backend = 0;
+    ToolMapping second;
+    second.mapped_slot = 1;
+    second.mapped_backend = 0;
+
+    CHECK(FilamentMapper::mapped_lane_display_number(first, slots) == 1);
+    CHECK(FilamentMapper::mapped_lane_display_number(second, slots) == 2);
+}
+
+TEST_CASE("mapped_lane_display_number: a multi-unit lane is numbered within its own unit",
+          "[filament_mapper][lane_number]") {
+    // Second unit's first bay is "Slot 1" on the hardware, not "Slot 5".
+    // Reporting the global index would name a lane the printer does not have,
+    // and would disagree with format_slot_label() on the same slot.
+    std::vector<AvailableSlot> slots = {
+        {4, 0, 0xFF0000, "PLA", false, -1},
+    };
+    slots[0].unit_index = 1;
+    slots[0].local_slot_index = 0;
+    slots[0].unit_display_name = "Turtle 2";
+
+    ToolMapping m;
+    m.mapped_slot = 4;
+    m.mapped_backend = 0;
+
+    CHECK(FilamentMapper::mapped_lane_display_number(m, slots) == 1);
+}
+
+TEST_CASE("mapped_lane_display_number: the backend must match, not just the slot index",
+          "[filament_mapper][lane_number]") {
+    // Slot indices are unique within a backend, not across them. Matching on
+    // the index alone would return the first backend's lane for a tool mapped
+    // to the second one's.
+    std::vector<AvailableSlot> slots = {
+        {0, 0, 0xFF0000, "PLA", false, -1},
+        {0, 1, 0x00FF00, "PLA", false, -1},
+    };
+    slots[0].local_slot_index = 0;
+    slots[1].local_slot_index = 3;
+
+    ToolMapping m;
+    m.mapped_slot = 0;
+    m.mapped_backend = 1;
+
+    CHECK(FilamentMapper::mapped_lane_display_number(m, slots) == 4);
+}
+
+TEST_CASE("mapped_lane_display_number: an auto or unmapped tool has no lane to name",
+          "[filament_mapper][lane_number]") {
+    // "Auto" is a deliberate absence — the firmware chooses at print time.
+    // Printing a number here would claim a decision nothing has made.
+    std::vector<AvailableSlot> slots = {
+        {0, 0, 0xFF0000, "PLA", false, -1},
+    };
+
+    ToolMapping automatic;
+    automatic.is_auto = true;
+    automatic.mapped_slot = 0;
+    automatic.mapped_backend = 0;
+    CHECK(FilamentMapper::mapped_lane_display_number(automatic, slots) == -1);
+
+    ToolMapping unmapped;
+    unmapped.mapped_slot = -1;
+    unmapped.mapped_backend = -1;
+    CHECK(FilamentMapper::mapped_lane_display_number(unmapped, slots) == -1);
+}
+
+TEST_CASE("mapped_lane_display_number: a mapping that outlived its lane shows nothing",
+          "[filament_mapper][lane_number]") {
+    // Unit unplugged between the mapping being computed and the chip rendering.
+    // A stale number is worse than none: it names a lane that is not there.
+    std::vector<AvailableSlot> slots = {
+        {0, 0, 0xFF0000, "PLA", false, -1},
+    };
+
+    ToolMapping m;
+    m.mapped_slot = 7;
+    m.mapped_backend = 0;
+
+    CHECK(FilamentMapper::mapped_lane_display_number(m, slots) == -1);
+
+    std::vector<AvailableSlot> none;
+    CHECK(FilamentMapper::mapped_lane_display_number(m, none) == -1);
+}
+
+TEST_CASE("mapped_lane_display_number: an empty lane still reports its number",
+          "[filament_mapper][lane_number]") {
+    // The chip already flags an empty mapped lane with a warning border. The
+    // number is what tells the user which bay to go load.
+    std::vector<AvailableSlot> slots = {
+        {0, 0, 0x000000, "", true, -1},
+    };
+    slots[0].local_slot_index = 2;
+
+    ToolMapping m;
+    m.mapped_slot = 0;
+    m.mapped_backend = 0;
+
+    CHECK(FilamentMapper::mapped_lane_display_number(m, slots) == 3);
 }

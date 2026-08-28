@@ -8,7 +8,9 @@
 #include "ui_test_utils.h"
 #include "ui_update_queue.h"
 
+#include "ams_state.h"
 #include "app_constants.h"
+#include "app_globals.h"
 #include "async_lifetime_guard.h"
 #include "audio_settings_manager.h"
 #include "config.h"
@@ -24,6 +26,7 @@
 #include "test_helpers/config_test_access.h"
 #include "test_helpers/emergency_stop_test_access.h"
 #include "test_helpers/print_control_buttons_test_access.h"
+#include "test_helpers/printer_state_test_access.h"
 #include "tool_state.h"
 
 #include <cstdlib>
@@ -201,6 +204,31 @@ void HelixTestFixture::reset_all() {
     // Drain any callbacks queued by a prior test before we touch state they read.
     helix::ui::UpdateQueue::instance().drain();
 
+    // Clear every plain (non-subject) data member on the GLOBAL PrinterState.
+    //
+    // PrinterState is a Meyers singleton (get_printer_state()) that lives for the
+    // whole process, and its thirteen domain components pair init_subjects() with
+    // deinit_subjects() — which manage the SUBJECTS only. The plain members
+    // sitting next to them have no lifetime hook at all: the excluded/defined
+    // object sets, the discovery result, the capability-override map, the cached
+    // status JSON, the klippy freshness watermark. Nothing ever clears them, so a
+    // test that writes one poisons every later test in the same binary.
+    //
+    // It leaks silently, which is why this belongs here and not in the tests:
+    // the next test reads a plausible value it never set, and the assertion that
+    // actually trips is usually in some third test that looks unrelated. A test
+    // author cannot be expected to know which of thirteen components they just
+    // dirtied, so the fixture that every test already inherits does it for them.
+    // (test_exclude_object_long_press_gate.cpp had grown a hand-rolled version of
+    // exactly this in its harness destructor; that is the pattern this replaces.)
+    //
+    // Deliberately clear_data() and not PrinterStateTestAccess::reset(): reset()
+    // also tears the subjects down, which from a ctor/dtor that runs for EVERY
+    // fixture would walk straight into the observer-lifetime traps documented
+    // below (the PrintStatusWidget formatter, PrintControlButtons). clear_data()
+    // touches no observer lists and is safe whether or not subjects exist.
+    helix::PrinterStateTestAccess::clear_data(get_printer_state());
+
     // SystemSettingsManager language back to "en" (matches config default).
     // init_subjects() is idempotent — first call creates the subjects, later
     // calls are no-ops. Required because set_language() writes to an LVGL subject.
@@ -290,6 +318,19 @@ void HelixTestFixture::reset_all() {
     if (lv_subject_t* ams = lv_xml_get_subject(nullptr, "ams_slot_count")) {
         lv_subject_set_int(ams, 0);
     }
+
+    // AmsState::active_step_operation_ is a plain std::atomic<StepOperationType>
+    // (LOAD_SWAP by default) with no subject behind it, so resetting it is safe
+    // even for the many tests that never touch LVGL. A test that leaves it on
+    // something else (test_toolchange_narration_e2e.cpp sets UNLOAD partway
+    // through one case and does not restore it) silently changes the sequence
+    // length any LATER test's tc_step_sequence()-based index resolves against -
+    // a bare TEST_CASE reading operation_phase off a freshly constructed
+    // backend has no fixture of its own to catch this, so without this reset it
+    // inherits whatever the previous test left behind. set_active_step_operation()
+    // only exchanges the atomic and clears a plain int high-water mark - no
+    // subject writes - so it is safe to call unconditionally here.
+    AmsState::instance().set_active_step_operation(StepOperationType::LOAD_SWAP);
 
     // DisplaySettingsManager's animations_enabled is a process-global subject
     // that defaults to the platform value (true on desktop). A fixture-less

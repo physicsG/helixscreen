@@ -24,6 +24,8 @@
 //    on screen rather than the panel's belief about it. The two diverge — the
 //    panel clears its markers on a filename change without touching the widget,
 //    so only the widget says what a user would see.
+//    per-tool colors come from — shared with PrintSelectDetailView, so it needs
+//    a test on THIS side too or the two can drift apart unnoticed.
 //
 // Follows the tests/test_helpers/ TestAccess pattern ([L088]) rather than
 // adding _for_testing() accessors to the production API.

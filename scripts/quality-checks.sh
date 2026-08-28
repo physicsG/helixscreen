@@ -741,7 +741,7 @@ if [ -f "scripts/check_hardcoded_pixels.py" ]; then
     PIXELS_ARGS=""
   fi
   # shellcheck disable=SC2086
-  if python3 scripts/check_hardcoded_pixels.py --max-allowed 162 --summary $PIXELS_ARGS \
+  if python3 scripts/check_hardcoded_pixels.py --max-allowed 155 --summary $PIXELS_ARGS \
       >/tmp/hardcoded_pixels.out 2>&1; then
     tail -1 /tmp/hardcoded_pixels.out
   else
@@ -1024,6 +1024,17 @@ if [ -n "$FILES" ]; then
       # Leading space is load-bearing: a message below prints "git add$FORMAT_ISSUES".
       FORMAT_ISSUES="$(sed 's|^| |' "$CF_DIRTY" | tr -d '
 ')"
+      # Which of the dirty files already carried unstaged work, captured BEFORE
+      # clang-format -i runs: afterwards every reformatted file differs from the
+      # index, so the question can no longer be asked. Mirrors XML_PRE_DIRTY in
+      # the XML formatter below.
+      CF_PRE_DIRTY=""
+      if [ "$STAGED_ONLY" = true ] && [ -s "$CF_DIRTY" ]; then
+        while IFS= read -r cf_f; do
+          [ -n "$cf_f" ] || continue
+          git diff --quiet -- "$cf_f" || CF_PRE_DIRTY="$CF_PRE_DIRTY $cf_f "
+        done < "$CF_DIRTY"
+      fi
       if [ -n "$FORMAT_ISSUES" ] && [ "$AUTO_FIX" = true ]; then
         case "$CF_VER" in
           18.*)
@@ -1046,9 +1057,28 @@ if [ -n "$FILES" ]; then
         if [ "$AUTO_FIX" = true ]; then
           # Auto-stage formatted files when in pre-commit mode (--staged-only)
           if [ "$STAGED_ONLY" = true ]; then
-            git add $FORMAT_ISSUES
-            echo "✅ Auto-formatted and re-staged files:"
-            echo "$FORMAT_ISSUES" | tr ' ' '\n' | grep -v '^$' | sed 's/^/   /'
+            # Re-stage only files with NOTHING unstaged. `git add` takes the whole
+            # working-tree file, so on a partially staged file it would sweep in
+            # hunks deliberately held back - the commit would carry work its author
+            # never staged. Those get formatted on disk and named instead. Same
+            # rule the XML formatter below applies.
+            CF_RESTAGE=""; CF_HELD=""
+            for cf_f in $FORMAT_ISSUES; do
+              case "$CF_PRE_DIRTY" in
+                *" $cf_f "*) CF_HELD="$CF_HELD $cf_f" ;;
+                *)           CF_RESTAGE="$CF_RESTAGE $cf_f" ;;
+              esac
+            done
+            if [ -n "$CF_RESTAGE" ]; then
+              # shellcheck disable=SC2086  # word splitting is the point: a path list
+              git add $CF_RESTAGE
+              echo "✅ Auto-formatted and re-staged files:"
+              echo "$CF_RESTAGE" | tr ' ' '\n' | grep -v '^$' | sed 's/^/   /'
+            fi
+            if [ -n "$CF_HELD" ]; then
+              echo "⚠️  Formatted but NOT re-staged (partially staged):$CF_HELD"
+              echo "ℹ️  This commit still carries unformatted C++. Stage it with: git add$CF_HELD"
+            fi
           else
             echo "✅ Auto-formatted files - re-stage them before committing:"
             echo "$FORMAT_ISSUES" | tr ' ' '\n' | grep -v '^$' | sed 's/^/   /'
@@ -1550,7 +1580,7 @@ if [ -f "scripts/check_imperative_ui.py" ]; then
   # as deliberate pragmatism (the XML engine couldn't express it at the time), some
   # are plain mistakes — both are debt. The number may go DOWN (port a site, then
   # lower this baseline) but must never go up.
-  if python3 scripts/check_imperative_ui.py --max-allowed 380 --summary >/tmp/imperative_ui.out 2>&1; then
+  if python3 scripts/check_imperative_ui.py --max-allowed 379 --summary >/tmp/imperative_ui.out 2>&1; then
     section_time $SECTION_START
     echo ""
     tail -1 /tmp/imperative_ui.out
@@ -1966,7 +1996,7 @@ fi
 # procedural canvas renderers, and helix-splash (a separate binary that does not
 # link ThemeManager). Ratcheting baseline — port these to theme_manager_get_color().
 HEX_ALLOW='theme_manager|src/rendering/|canvas|confetti|glyph|src/helix_splash.cpp'
-HEX_BASELINE=34
+HEX_BASELINE=33
 HEX_COUNT=$(grep -rn 'lv_color_hex(0x' src include 2>/dev/null | grep -vcE "$HEX_ALLOW" || true)
 if [ "$HEX_COUNT" -gt "$HEX_BASELINE" ]; then
   echo ""
@@ -2000,6 +2030,78 @@ echo ""
 }
 
 # ====================================================================
+# Tests must exercise shipped code, not a copy of it
+# ====================================================================
+qc_test_mirrors() {
+  local EXIT_CODE=0
+SECTION_START=$(date +%s)
+echo -n "🪞 Checking for mirror tests..."
+
+if [ -f "scripts/check_test_mirrors.py" ]; then
+  if python3 scripts/check_test_mirrors.py --max-allowed 0 >/tmp/test_mirrors.out 2>&1; then
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/test_mirrors.out
+  else
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/test_mirrors.out
+    echo "   Run: python3 scripts/check_test_mirrors.py --list"
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  check_test_mirrors.py not found — skipping"
+fi
+
+echo ""
+
+# ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
+# No production XML widget name may be served by test code
+# ====================================================================
+qc_test_widget_registry() {
+  local EXIT_CODE=0
+SECTION_START=$(date +%s)
+echo -n "🧩 Checking test widget registry..."
+
+if [ -f "scripts/check_test_widget_registry.py" ]; then
+  if python3 scripts/check_test_widget_registry.py >/tmp/test_widget_registry.out 2>&1; then
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/test_widget_registry.out
+  else
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/test_widget_registry.out
+    echo "   Run: python3 scripts/check_test_widget_registry.py"
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  check_test_widget_registry.py not found — skipping"
+fi
+
+echo ""
+
+# ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Agent-facing docs: references resolve, doc index is complete
 # ====================================================================
 qc_doc_refs() {
@@ -2013,6 +2115,21 @@ if [ -f "scripts/check_doc_refs.py" ]; then
     echo ""
     cat /tmp/doc_refs.out
   else
+    # A stale / unanchored / orphaned citation anchor is mechanically
+    # repairable: the line number is DERIVED from a committed content hash, so
+    # --auto-fix (what the pre-commit hook passes) re-pins it in place and the
+    # committer only has to stage the result. It still FAILS, for the same
+    # reason qc_doc_links does — the repair lands in the working tree, not the
+    # index, and passing here would commit the stale doc behind a green run.
+    # Deliberately not auto-fixed: a "gone" or "blank" anchor, which
+    # check_doc_refs.py reports without the regen hint. There the cited line's
+    # own text changed, and no generator can decide whether the sentence around
+    # it is still true.
+    if [ "$AUTO_FIX" = true ] && grep -q "Run: make regen-doc-links" /tmp/doc_refs.out; then
+      python3 scripts/doc_cite_anchors.py >>/tmp/doc_refs.out 2>&1
+      python3 scripts/gen_doc_links.py >>/tmp/doc_refs.out 2>&1
+      echo "   Re-pinned in place — 'git add' the docs plus scripts/doc_cite_anchors.tsv, then commit again." >>/tmp/doc_refs.out
+    fi
     section_time $SECTION_START
     echo ""
     cat /tmp/doc_refs.out
@@ -2071,6 +2188,47 @@ else
   section_time $SECTION_START
   echo ""
   echo "⚠️  gen_doc_links.py not found — skipping"
+fi
+
+echo ""
+
+# ====================================================================
+  return $EXIT_CODE
+}
+
+# ====================================================================
+# Crash-worker LVGL event-code table is generated, not hand-typed
+# ====================================================================
+qc_lvgl_event_codes() {
+  local EXIT_CODE=0
+# The worker labels every auto-filed crash issue with "code=N (NAME)", and that
+# name is often the entire diagnosis. The table was maintained by hand until
+# LVGL 9.5 inserted four codes mid-enum; 58 of 63 entries went stale and a
+# DELETE crash was filed as SCREEN_UNLOAD_START, pointing triage away from the
+# teardown bug. lv_event_code_t is the source of truth now, the table is derived
+# from it, and this proves the committed artifact still matches.
+SECTION_START=$(date +%s)
+echo -n "🩺 Checking crash-worker LVGL event codes..."
+
+if [ -f "scripts/gen_lvgl_event_codes.py" ]; then
+  if python3 scripts/gen_lvgl_event_codes.py --diff >/tmp/lvgl_event_codes.out 2>&1; then
+    :
+  else
+    EXIT_CODE=1
+    # Same contract as qc_doc_links: --auto-fix repairs the working tree but
+    # still fails, because passing here would commit the stale table.
+    if [ "$AUTO_FIX" = true ]; then
+      python3 scripts/gen_lvgl_event_codes.py >>/tmp/lvgl_event_codes.out 2>&1
+      echo "   Regenerated in place — 'git add' the worker and commit again." >>/tmp/lvgl_event_codes.out
+    fi
+  fi
+  section_time $SECTION_START
+  echo ""
+  cat /tmp/lvgl_event_codes.out
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  gen_lvgl_event_codes.py not found — skipping"
 fi
 
 echo ""
@@ -2154,6 +2312,58 @@ else
   section_time $SECTION_START
   echo ""
   echo "⚠️  check_translation_identity.py not found — skipping"
+fi
+
+echo ""
+
+# ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
+# Translation catalog coverage (user-facing strings with no key)
+# ====================================================================
+qc_translation_coverage() {
+  local EXIT_CODE=0
+# A user-facing string that never reached translations/*.yml fails silently at
+# runtime: lv_translation_get() falls back to the tag, so the string renders in
+# English in all nine languages and only a debug-level line says so. One bundle
+# carried 1445 of those lines. v0.99.116 was tagged with five such strings on
+# main because this gate lived only in tests/shell/test_code_lint.bats, which a
+# release runs after quality-checks and which nothing runs pre-commit.
+#
+# --dry-run is load-bearing: a bare `sync` REWRITES all nine catalogs, and a
+# check that edits the tree it is inspecting would stage catalog churn behind
+# the committer's back.
+SECTION_START=$(date +%s)
+echo -n "🌐 Checking translation catalog coverage..."
+
+if [ -x "$VENV_PYTHON" ] && [ -f "scripts/translation_sync.py" ]; then
+  if "$VENV_PYTHON" scripts/translation_sync.py sync --dry-run >/tmp/trans_cov.out 2>&1 \
+     && grep -q "All XML strings already in YAML files" /tmp/trans_cov.out; then
+    section_time $SECTION_START
+    echo ""
+    echo "✅ Every user-facing string has a translation key"
+  else
+    section_time $SECTION_START
+    echo ""
+    grep -vE "^[[:space:]]*$" /tmp/trans_cov.out | tail -12
+    echo "   Fix: make translation-sync && make translations"
+    echo "   Then translate the new keys - consult translations/GLOSSARY.md and"
+    echo "   reuse the canonical term rather than coining a new one - and stage"
+    echo "   translations/*.yml alongside ui_xml/translations/*.xml."
+    echo "   A string that genuinely should not be translated gets"
+    echo "   '// i18n: do not translate' on its line or the line above."
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  .venv not set up — skipping (run 'make venv-setup')"
 fi
 
 echo ""
@@ -2281,6 +2491,92 @@ echo ""
 }
 
 # ====================================================================
+# Installer Step Reachability
+# ====================================================================
+# The installer is a set of modules wired together by exactly one orchestrator,
+# main(). A step that is written, tested, and never wired in is silent: the
+# shell defines the function, never calls it, and exits 0. That is #1343 --
+# install_permission_rules() shipped with 34 passing tests and no call site, so
+# the backlight udev rule was never written and dimming/sleep failed on every
+# non-root install. The bats suites call these functions directly, which is why
+# a green suite proved nothing about whether they run.
+qc_installer_reachability() {
+  local EXIT_CODE=0
+SECTION_START=$(date +%s)
+echo -n "🔌 Checking installer step reachability..."
+
+if [ -f "scripts/check_installer_step_reachability.py" ]; then
+  if python3 scripts/check_installer_step_reachability.py >/tmp/installer_reachability.out 2>&1; then
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/installer_reachability.out
+  else
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/installer_reachability.out
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  check_installer_step_reachability.py not found — skipping"
+fi
+
+echo ""
+
+# ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
+# Patch Drift
+# ====================================================================
+# mk/patches.mk guards every apply with "is this file already dirty?", never
+# with "is it dirty with the CURRENT revision of this patch". So the first
+# revision to reach a checkout is the one that stays: editing a patch afterwards
+# does nothing for anyone who already carries the old hunks. 86560d156 added
+# lv_evdev_get_last_raw() to patches/lvgl-evdev-protocol-a.patch, main's
+# lib/lvgl kept the previous revision, and every device cross-build failed while
+# the desktop suite stayed green - `make test` skips patch application and
+# lv_evdev.c is compiled out of desktop builds, so nothing here could see it.
+# Which is exactly why this one runs on desktop.
+qc_patch_drift() {
+  local EXIT_CODE=0
+SECTION_START=$(date +%s)
+echo -n "🩹 Checking patch drift..."
+
+if [ -f "scripts/check_patch_drift.py" ]; then
+  if python3 scripts/check_patch_drift.py >/tmp/patch_drift.out 2>&1; then
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/patch_drift.out
+  else
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/patch_drift.out
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  check_patch_drift.py not found - skipping"
+fi
+
+echo ""
+
+# ====================================================================
+# (terminator: tests/shell/*.bats extract a section's body by awk-ing from
+#  its first line to the next '# ====' banner. Wrapping the sections in
+#  functions moved the banners above them, so without this the extraction
+#  ran on past the body and swallowed the return/closing brace.)
+  return $EXIT_CODE
+}
+
+# ====================================================================
 # Parallel driver
 # ====================================================================
 # The checks are independent greps and linters and the script ran strictly
@@ -2342,7 +2638,33 @@ qc_run_buffered() {
 # when asked to fix them.
 QC_SERIAL="qc_xml_linter"
 if [ "$AUTO_FIX" = true ]; then QC_SERIAL="$QC_SERIAL qc_phase2"; fi
-QC_ALL="qc_phase1 qc_xml_const qc_xml_attr qc_dup_names qc_xml_linter qc_xml_subtests qc_hidden_tests qc_overlay_width qc_design_pixels qc_phase2 qc_icon_font qc_mdi_codepoints qc_code_style qc_mem_safety qc_null_safety qc_l081 qc_net_pii qc_decl_ui qc_spdlog_only qc_design_tokens qc_doc_refs qc_doc_links qc_translation_fmt qc_base_locale qc_shellcheck"
+qc_workflow_submodules() {
+  local EXIT_CODE=0
+SECTION_START=$(date +%s)
+echo -n "🧱 Checking workflow submodule gates..."
+
+if [ -f "scripts/check_workflow_submodules.py" ]; then
+  if python3 scripts/check_workflow_submodules.py >/tmp/workflow_submodules.out 2>&1; then
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/workflow_submodules.out
+  else
+    section_time $SECTION_START
+    echo ""
+    cat /tmp/workflow_submodules.out
+    EXIT_CODE=1
+  fi
+else
+  section_time $SECTION_START
+  echo ""
+  echo "⚠️  check_workflow_submodules.py not found - skipping"
+fi
+
+echo ""
+  return $EXIT_CODE
+}
+
+QC_ALL="qc_phase1 qc_xml_const qc_xml_attr qc_dup_names qc_xml_linter qc_xml_subtests qc_hidden_tests qc_overlay_width qc_design_pixels qc_phase2 qc_icon_font qc_mdi_codepoints qc_code_style qc_mem_safety qc_null_safety qc_l081 qc_net_pii qc_decl_ui qc_spdlog_only qc_design_tokens qc_test_mirrors qc_test_widget_registry qc_doc_refs qc_doc_links qc_lvgl_event_codes qc_translation_fmt qc_base_locale qc_translation_coverage qc_shellcheck qc_installer_reachability qc_patch_drift qc_workflow_submodules"
 
 QC_PARALLEL=""
 for fn in $QC_ALL; do
@@ -2370,11 +2692,25 @@ qc_trigger_re() {
     qc_mem_safety|qc_null_safety|qc_l081|qc_net_pii|qc_decl_ui|qc_spdlog_only)
                         echo '\.(cpp|c|h|mm)$' ;;
     qc_design_tokens)   echo '\.(cpp|h|xml)$' ;;
-    qc_doc_refs)        echo '\.md$|^scripts/check_doc_refs\.py$' ;;
+    qc_test_mirrors)    echo '^tests/|^scripts/check_test_mirrors\.py$' ;;
+    qc_test_widget_registry)
+                        echo '^tests/|^src/|^scripts/check_test_widget_registry\.py$' ;;
+    qc_doc_refs)        echo '\.md$|^scripts/(check_doc_refs|doc_cite_anchors)\.py$|^scripts/doc_cite_anchors\.tsv$|^scripts/doc_cite_anchor_baseline\.txt$' ;;
     qc_doc_links)       echo '^docs/devel/ARCHITECTURE\.md$|^docs/devel/architecture/|^scripts/gen_doc_links\.py$' ;;
+    qc_lvgl_event_codes)
+                        echo '^server/crash-worker/|^scripts/gen_lvgl_event_codes\.py$|^lib/lvgl$|^lv_conf\.h$' ;;
     qc_translation_fmt) echo '^translations/|^ui_xml/|\.py$' ;;
     qc_base_locale)     echo '^translations/' ;;
+    # Any src/ or ui_xml/ file can introduce a user-facing string, so this
+    # wakes on both trees rather than only on the catalogs they land in.
+    qc_translation_coverage)
+                        echo '^ui_xml/|^src/|^translations/|^scripts/translation_sync\.py$|^scripts/translations/' ;;
     qc_shellcheck)      echo '\.(sh|bats)$' ;;
+    qc_installer_reachability)
+                        echo '^scripts/lib/installer/|^scripts/install-dev\.sh$|^scripts/bundle-(un)?installer\.sh$|^scripts/check_installer_step_reachability\.py$' ;;
+    qc_patch_drift)     echo '^patches/|mk/patches\.mk|check_patch_drift\.py' ;;
+    qc_workflow_submodules)
+                        echo '^\.github/workflows/|^\.github/actions/|check_workflow_submodules\.py$' ;;
     *)                  echo '' ;;
   esac
 }
@@ -2388,6 +2724,18 @@ qc_wanted() {
   # A deletion can invalidate a doc citation, so doc_refs also wakes on any D.
   if [ "$1" = "qc_doc_refs" ] && git diff --cached --name-only --diff-filter=D 2>/dev/null | grep -q .; then
     return 0
+  fi
+  # A citation rots when the file it points AT moves, not when the doc changes,
+  # so a code-only commit has to wake this check or the whole content-anchor
+  # scheme never gets a chance to re-pin. The sidecar's resolved-path column is
+  # exactly the set of files a citation names — a few hundred out of ~19k — so
+  # this stays far tighter than "any .cpp" and a commit touching nothing cited
+  # still skips the check.
+  if [ "$1" = "qc_doc_refs" ] && [ -f scripts/doc_cite_anchors.tsv ]; then
+    grep -v '^#' scripts/doc_cite_anchors.tsv | cut -f4 | sort -u > "$QC_TMP/cited_paths.txt"
+    if printf '%s\n' "$QC_STAGED_ALL" | grep -qxF -f "$QC_TMP/cited_paths.txt"; then
+      return 0
+    fi
   fi
   if printf '%s\n' "$QC_STAGED_ALL" | grep -qE "$re"; then
     return 0

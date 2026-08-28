@@ -25,10 +25,14 @@ namespace helix::ui {
 
 // Static member initialization
 bool AmsContextMenu::callbacks_registered_ = false;
-lv_subject_t AmsContextMenu::s_slot_is_loaded_subject_;
-lv_subject_t AmsContextMenu::s_slot_can_load_subject_;
-lv_subject_t AmsContextMenu::s_slot_source_external_subject_;
-bool AmsContextMenu::s_subjects_initialized_ = false;
+bool AmsContextMenu::subjects_initialized_ = false;
+lv_subject_t AmsContextMenu::slot_is_loaded_subject_;
+lv_subject_t AmsContextMenu::slot_can_load_subject_;
+lv_subject_t AmsContextMenu::slot_mounts_tool_subject_;
+lv_subject_t AmsContextMenu::slot_unload_hint_subject_;
+lv_subject_t AmsContextMenu::slot_unload_hint_visible_subject_;
+char AmsContextMenu::slot_unload_hint_buf_[128];
+lv_subject_t AmsContextMenu::slot_source_external_subject_;
 
 // ============================================================================
 // Construction / Destruction
@@ -41,34 +45,48 @@ AmsContextMenu::AmsContextMenu() {
 }
 
 void AmsContextMenu::init_subjects() {
-    if (s_subjects_initialized_ || !lv_is_initialized()) {
+    if (subjects_initialized_ || !lv_is_initialized()) {
         return;
     }
     // Subjects for button enabled states -- one set for every instance; see the
     // header for why.
-    lv_subject_init_int(&s_slot_is_loaded_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_slot_is_loaded", &s_slot_is_loaded_subject_);
+    lv_subject_init_int(&slot_is_loaded_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_slot_is_loaded", &slot_is_loaded_subject_);
 
-    lv_subject_init_int(&s_slot_can_load_subject_, 1);
-    lv_xml_register_subject(nullptr, "ams_slot_can_load", &s_slot_can_load_subject_);
+    lv_subject_init_int(&slot_can_load_subject_, 1);
+    lv_xml_register_subject(nullptr, "ams_slot_can_load", &slot_can_load_subject_);
 
-    lv_subject_init_int(&s_slot_source_external_subject_, 0);
-    lv_xml_register_subject(nullptr, "ams_slot_source_external", &s_slot_source_external_subject_);
+    lv_subject_init_int(&slot_source_external_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_slot_source_external", &slot_source_external_subject_);
 
-    s_subjects_initialized_ = true;
+    lv_subject_init_int(&slot_mounts_tool_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_slot_mounts_tool", &slot_mounts_tool_subject_);
+
+    lv_subject_init_int(&slot_unload_hint_visible_subject_, 0);
+    lv_xml_register_subject(nullptr, "ams_slot_unload_hint_visible",
+                            &slot_unload_hint_visible_subject_);
+
+    lv_subject_init_string(&slot_unload_hint_subject_, slot_unload_hint_buf_, nullptr,
+                           sizeof(slot_unload_hint_buf_), "");
+    lv_xml_register_subject(nullptr, "ams_slot_unload_hint", &slot_unload_hint_subject_);
+
+    subjects_initialized_ = true;
     // Torn down with every other static subject: after the panels (and so every
     // card bound to these) are gone, before lv_deinit().
     StaticSubjectRegistry::instance().register_deinit("AmsContextMenu", deinit_subjects);
 }
 
 void AmsContextMenu::deinit_subjects() {
-    if (!s_subjects_initialized_) {
+    if (!subjects_initialized_) {
         return;
     }
-    lv_subject_deinit(&s_slot_is_loaded_subject_);
-    lv_subject_deinit(&s_slot_can_load_subject_);
-    lv_subject_deinit(&s_slot_source_external_subject_);
-    s_subjects_initialized_ = false;
+    lv_subject_deinit(&slot_is_loaded_subject_);
+    lv_subject_deinit(&slot_can_load_subject_);
+    lv_subject_deinit(&slot_source_external_subject_);
+    lv_subject_deinit(&slot_mounts_tool_subject_);
+    lv_subject_deinit(&slot_unload_hint_subject_);
+    lv_subject_deinit(&slot_unload_hint_visible_subject_);
+    subjects_initialized_ = false;
 }
 
 AmsContextMenu::~AmsContextMenu() {
@@ -162,7 +180,7 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
             source_owner_unit_ = *owner;
         }
     }
-    lv_subject_set_int(&s_slot_source_external_subject_, source_owner_unit_ >= 0 ? 1 : 0);
+    lv_subject_set_int(&slot_source_external_subject_, source_owner_unit_ >= 0 ? 1 : 0);
     spdlog::debug("[AmsContextMenu] slot {} identity owner unit = {} (backend={})", slot_index,
                   source_owner_unit_, backend_ ? "yes" : "null");
 
@@ -177,8 +195,8 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
             lv_obj_add_flag(btn_unload, LV_OBJ_FLAG_HIDDEN);
 
         // Disable subject-driven states so hidden buttons stay hidden
-        lv_subject_set_int(&s_slot_is_loaded_subject_, 0);
-        lv_subject_set_int(&s_slot_can_load_subject_, 0);
+        lv_subject_set_int(&slot_is_loaded_subject_, 0);
+        lv_subject_set_int(&slot_can_load_subject_, 0);
 
         // Set header to "External Spool"
         lv_obj_t* slot_header = lv_obj_find_by_name(menu_obj, "slot_header");
@@ -293,7 +311,7 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     const bool unload_enabled =
         decide_unload_enabled(system_busy, unload_mode_, print_blocks_op,
                               backend_ && backend_->cold_lane_ops_refused_during_print());
-    lv_subject_set_int(&s_slot_is_loaded_subject_, unload_enabled ? 1 : 0);
+    lv_subject_set_int(&slot_is_loaded_subject_, unload_enabled ? 1 : 0);
 
     lv_obj_t* btn_unload = lv_obj_find_by_name(menu_obj, "btn_unload");
     if (btn_unload) {
@@ -309,9 +327,35 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
             break;
         case UnloadMode::Unload:
         case UnloadMode::Unavailable:
-            break; // XML defaults: "Unload"
+            // XML defaults: "Unload" - unless this backend's unload is an
+            // unmount, in which case say so.
+            if (backend_ && backend_->load_mounts_tool()) {
+                ui_button_set_text(btn_unload, lv_tr("Unmount"));
+            }
+            break;
         }
     }
+
+    // A changer's load/unload mount and unmount a tool: no filament is fed and
+    // nothing is heated or purged, so the filament wording actively misleads.
+    // Asked as a capability, not a type - the Snapmaker U1 is a tool changer
+    // whose load DOES feed filament and keeps the default labels.
+    const bool mounts_tool = backend_ && backend_->load_mounts_tool();
+    lv_subject_set_int(&slot_mounts_tool_subject_, mounts_tool ? 1 : 0);
+    if (mounts_tool) {
+        if (lv_obj_t* btn_load = lv_obj_find_by_name(menu_obj, "btn_load")) {
+            ui_button_set_text(btn_load, lv_tr("Mount"));
+        }
+    }
+
+    // A disabled button with no stated reason reads as a bug. Only populated
+    // when the backend has something actionable to say - "nothing is loaded" is
+    // not worth a line, because there is visibly nothing to unload.
+    const std::string unload_hint =
+        (!unload_enabled && backend_) ? backend_->unload_blocked_reason(slot_index) : std::string();
+    // Already translated by the backend, which had the literal to extract.
+    lv_subject_copy_string(&slot_unload_hint_subject_, unload_hint.c_str());
+    lv_subject_set_int(&slot_unload_hint_visible_subject_, unload_hint.empty() ? 0 : 1);
 
     // QIDI Box: a lane with ejectable filament but [force_move] enable_force_move
     // off means eject is unavailable (supports_lane_eject() is false). Surface a
@@ -337,7 +381,7 @@ void AmsContextMenu::on_created(lv_obj_t* menu_obj) {
     // Disable Load if: system busy, slot empty, OR filament is already at the head.
     bool can_load = decide_can_load(system_busy, toolhead_unload, slot_has_filament,
                                     print_blocks_op, source_owner_unit_ >= 0);
-    lv_subject_set_int(&s_slot_can_load_subject_, can_load ? 1 : 0);
+    lv_subject_set_int(&slot_can_load_subject_, can_load ? 1 : 0);
     if (!can_load) {
         spdlog::debug("[AmsContextMenu] Load disabled for slot {}: busy={}, loaded={} "
                       "(live={}), has_filament={}, print_blocks_op={}",

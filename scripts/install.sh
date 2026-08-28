@@ -484,6 +484,42 @@ kill_process_by_name() {
 #        HELIX_STATE_VAR_LIB (default /var/lib/helixscreen),
 #        HELIX_STATE_ROOT_HOME (default /root/.helixscreen)
 # Writes: (none)
+# Retire the pre-settings.json rolling backup.
+#
+# Each backup tier (/var/lib/helixscreen via systemd StateDirectory, and
+# $HOME/.helixscreen where there is none) holds three files. Two are current --
+# settings.json.backup and helixscreen.env.backup -- and helixconfig.json.backup
+# is the superseded one, kept only as the lowest-priority entry in Config::init's
+# restore chain (legacy_config_backup_primary/fallback, include/app_constants.h).
+#
+# ONLY removed when settings.json.backup exists beside it. That is what makes the
+# migration provably complete: the current backup is present, so the legacy file
+# can no longer be the only thing standing between a user and their settings. On
+# a machine old enough to have just the legacy file, it is left alone and the
+# restore chain still finds it.
+#
+# Uninstall already takes these with the whole state dir (clean_helix_state_dirs
+# below); this is the install/update path, where nothing swept them and the file
+# sat on the smallest partition on the box indefinitely.
+#
+# Reads: KLIPPER_HOME, SUDO, HELIX_STATE_VAR_LIB, HELIX_STATE_ROOT_HOME
+retire_legacy_config_backups() {
+    local state_var_lib="${HELIX_STATE_VAR_LIB:-/var/lib/helixscreen}"
+    local state_root_home="${HELIX_STATE_ROOT_HOME:-/root/.helixscreen}"
+
+    local tier
+    for tier in "$state_var_lib" "$state_root_home" "${KLIPPER_HOME:+${KLIPPER_HOME}/.helixscreen}"; do
+        [ -n "$tier" ] || continue
+        [ -f "${tier}/helixconfig.json.backup" ] || continue
+        # The gate: no current backup means the legacy file is still load-bearing.
+        [ -f "${tier}/settings.json.backup" ] || continue
+
+        if $SUDO rm -f "${tier}/helixconfig.json.backup" 2>/dev/null; then
+            log_info "Removed superseded config backup: ${tier}/helixconfig.json.backup"
+        fi
+    done
+}
+
 clean_helix_state_dirs() {
     local install_parent
     # The two hardcoded paths are env-overrideable so the BATS suite can
@@ -2270,8 +2306,10 @@ install_runtime_deps() {
 }
 
 # Check available disk space
-# Requires at least 50MB free on the install directory's filesystem
-# Note: INSTALL_DIR must be set before calling this function
+# Requires at least 50MB free on the install directory's filesystem, then hands
+# off to check_service_dest_space for the filesystem that receives the service
+# definition -- on the K1 those are two different partitions.
+# Note: INSTALL_DIR and INIT_SCRIPT_DEST must be set before calling this function
 check_disk_space() {
     local platform=$1
     local required_mb=50
@@ -2307,6 +2345,109 @@ check_disk_space() {
     fi
 
     log_info "Disk space check: ${available_mb}MB available on $check_dir"
+
+    # INSTALL_DIR is not the only filesystem this install writes to.
+    check_service_dest_space
+}
+
+# Free space the service definition needs, in KB. The init script is ~15KB; the
+# probe is sized well above it so a filesystem with only a few free blocks left
+# fails here rather than at the real write.
+SERVICE_DEST_PROBE_KB=64
+
+# Echo the overlayfs upperdir backing `/`, if `/` is an overlay.
+#
+# On an overlay root the bytes live in the upperdir, so that is the only tree
+# worth pointing a user's `du` at: `du /` descends into every larger partition
+# mounted underneath (on the K1, the multi-gigabyte /usr/data) and reports a
+# number with no relationship to the full filesystem.
+# Reads /proc/mounts by default; the path is an argument so the parse can be
+# driven against a fixture instead of the running system.
+# shellcheck disable=SC2120  # the argument is a test seam; production passes none
+_overlay_upperdir() {
+    awk '$2 == "/" && $3 == "overlay" {
+             n = split($4, opts, ",")
+             for (i = 1; i <= n; i++)
+                 if (opts[i] ~ /^upperdir=/) {
+                     sub(/^upperdir=/, "", opts[i])
+                     print opts[i]
+                     exit
+                 }
+         }' "${1:-/proc/mounts}" 2>/dev/null
+}
+
+# Check the filesystem that will receive the init script or systemd unit.
+#
+# It is frequently NOT the filesystem holding INSTALL_DIR. On the K1 they are
+# different partitions entirely: /usr/data is a multi-gigabyte ext4
+# (mmcblk0p10) while /etc/init.d sits on the ~97MB root overlay (mmcblk0p9,
+# upperdir for the overlayfs `/`). A K1 whose overlay is full sails through the
+# INSTALL_DIR check with gigabytes reported free and then dies in
+# install_service_sysv with
+#     cp: write error: No space left on device
+# -- by which point stop_competing_uis has already disabled the stock UI, so
+# the printer is left with no screen at all, and the "3768MB available" line
+# above sends the user off to delete print files on the partition that was
+# never the problem.
+#
+# Probing with a real write rather than a free-space threshold: the operation
+# under test is a 15KB copy, and a filesystem with 800KB free performs it just
+# fine. Any MB-granularity floor either false-positives on a legitimately tight
+# rootfs or fails to catch a genuinely full one. The probe also catches a
+# read-only or unwritable destination, which is the same class of failure.
+#
+# Runs at pre-flight -- before any UI is stopped and before the ~58MB download
+# -- so a refusal here leaves the printer exactly as it was found.
+check_service_dest_space() {
+    # set_install_paths() has already run, so INIT_SCRIPT_DEST is known. It is
+    # empty on systemd platforms, where install_service_systemd writes the unit
+    # to /etc/systemd/system instead.
+    local dest_dir=""
+    if [ -n "${INIT_SCRIPT_DEST:-}" ]; then
+        dest_dir=$(dirname "$INIT_SCRIPT_DEST")
+    elif [ -d /etc/systemd/system ]; then
+        dest_dir="/etc/systemd/system"
+    fi
+    [ -n "$dest_dir" ] && [ -d "$dest_dir" ] || return 0
+
+    # Resolve the same directory check_disk_space measured, so a destination on
+    # that filesystem can be skipped -- it is already covered, and a second
+    # line quoting the same number reads like a second measurement.
+    local install_probe
+    install_probe=$(dirname "${INSTALL_DIR:-/opt/helixscreen}")
+    while [ ! -d "$install_probe" ] && [ "$install_probe" != "/" ]; do
+        install_probe=$(dirname "$install_probe")
+    done
+    [ "$(_fs_id "$dest_dir")" != "$(_fs_id "$install_probe")" ] || return 0
+
+    local probe="${dest_dir}/.helixscreen-space-probe.$$"
+    if $SUDO dd if=/dev/zero of="$probe" bs=1024 count="$SERVICE_DEST_PROBE_KB" \
+            >/dev/null 2>&1; then
+        $SUDO rm -f "$probe" 2>/dev/null || true
+        log_info "Service directory check: $(_fs_free_mb "$dest_dir")MB available on $dest_dir"
+        return 0
+    fi
+    $SUDO rm -f "$probe" 2>/dev/null || true
+
+    local upper
+    upper=$(_overlay_upperdir)
+
+    log_error "Cannot write the service definition to ${dest_dir}."
+    log_error "Filesystem: $(_fs_id "$dest_dir") ($(_fs_free_mb "$dest_dir")MB free) -- full or read-only."
+    log_error ""
+    log_error "This is a DIFFERENT filesystem from ${install_probe}, which has room."
+    log_error "Deleting print files or gcode will NOT help: they are on the other partition."
+    log_error ""
+    log_error "Find what is filling it:"
+    log_error "  df -h ${dest_dir}"
+    if [ -n "$upper" ] && [ -d "$upper" ]; then
+        log_error "  du -k ${upper}/* 2>/dev/null | sort -n | tail -20"
+    else
+        log_error "  du -k ${dest_dir}/* 2>/dev/null | sort -n | tail -20"
+    fi
+    log_error ""
+    log_error "Free a few MB there, then re-run this installer."
+    exit 1
 }
 
 # Detect init system (systemd vs SysV)
@@ -4107,9 +4248,14 @@ _has_real_curl() {
     [ "$_REAL_CURL" = "yes" ]
 }
 
-# User-Agent for python downloads. Our CDN/origin returns HTTP 403 to requests
-# with an empty UA or the default Python-urllib/x.y UA; any other UA passes.
-_PY_UA="helixscreen-installer/1.0"
+# User-Agent for every request the installer makes. Our CDN front returns HTTP
+# 403 to the default Python-urllib/x.y UA, so anything backed by urllib must
+# override it -- including a system `wget` that is secretly a python shim, which
+# is what some K2 firmware ships in place of the removed BusyBox applet.
+# The fetch helpers pass it to curl and wget as well; the download helpers do
+# not, because a shim that rejects -U would turn a working 60MB transfer into a
+# retry, and their callers already fall through to the next candidate URL.
+_INSTALLER_UA="helixscreen-installer/1.0"
 
 # Core python urllib GET (fallback when curl/wget unavailable). Writes the
 # response to DEST, or to stdout when DEST is "-". Sends a non-default
@@ -4119,7 +4265,7 @@ _PY_UA="helixscreen-installer/1.0"
 # total transfer deadline, and min_speed CDN fail-fast is not honored here.
 _py_get() {
     _has_python || return 1
-    HELIX_PY_URL="$1" HELIX_PY_DEST="$2" HELIX_PY_UA="$_PY_UA" \
+    HELIX_PY_URL="$1" HELIX_PY_DEST="$2" HELIX_PY_UA="$_INSTALLER_UA" \
         HELIX_PY_TIMEOUT="${3:-300}" "$_PY_BIN" - <<'PYEOF'
 import os, sys, urllib.request, shutil
 url = os.environ["HELIX_PY_URL"]
@@ -4202,34 +4348,57 @@ except Exception:
 PYEOF
 }
 
-# Fetch a URL to stdout using curl or wget
-# Returns non-zero if neither is available or fetch fails
+# One wget-to-stdout attempt, preferring our own User-Agent. BusyBox wget
+# (v1.31+) and GNU wget both take -U; a shim that does not is retried bare so a
+# rejected flag never looks like an unreachable host. Prints nothing on failure.
+_wget_fetch() {
+    local url=$1 out=""
+    out=$(wget -qO- --timeout=10 -U "$_INSTALLER_UA" "$url" 2>/dev/null) || out=""
+    [ -n "$out" ] || out=$(wget -qO- --timeout=10 "$url" 2>/dev/null) || out=""
+    printf '%s' "$out"
+}
+
+# Fetch a URL to stdout with curl, wget, or python, in that order.
+#
+# Unlike the download helpers -- whose callers retry the next candidate URL --
+# these have no caller-side retry, so an empty result here reads as "the CDN is
+# down" and silently costs the manifest, and with it SHA256 verification. So
+# each transport falls through to the next when it produces nothing rather than
+# committing to whichever binary happens to exist. That is what rescues a device
+# whose `wget` is a python urllib shim (some K2 firmware): however such a
+# stand-in fails -- our CDN 403s the default Python-urllib UA, and a shim need
+# not honor -U -- _py_fetch still gets through with the right UA.
+# Returns non-zero when every transport failed.
 fetch_url() {
-    local url=$1
+    local url=$1 out=""
     if _has_real_curl; then
-        curl -sSL --connect-timeout 10 "$url" 2>/dev/null
-    elif command -v wget >/dev/null 2>&1; then
-        wget -qO- --timeout=10 "$url" 2>/dev/null
-    elif _has_python; then
-        _py_fetch "$url"
-    else
-        return 1
+        out=$(curl -sSL --connect-timeout 10 -A "$_INSTALLER_UA" "$url" 2>/dev/null) || out=""
     fi
+    if [ -z "$out" ] && command -v wget >/dev/null 2>&1; then
+        out=$(_wget_fetch "$url")
+    fi
+    if [ -z "$out" ] && _has_python; then
+        out=$(_py_fetch "$url") || out=""
+    fi
+    [ -n "$out" ] || return 1
+    printf '%s\n' "$out"
 }
 
 # Fetch a URL via plain HTTP (for systems without SSL support)
 # Prefers wget (BusyBox wget handles HTTP fine but not HTTPS)
 fetch_url_http() {
-    local url=$1
+    local url=$1 out=""
     if command -v wget >/dev/null 2>&1; then
-        wget -qO- --timeout=10 "$url" 2>/dev/null
-    elif _has_real_curl; then
-        curl -sSL --connect-timeout 10 "$url" 2>/dev/null
-    elif _has_python; then
-        _py_fetch "$url"
-    else
-        return 1
+        out=$(_wget_fetch "$url")
     fi
+    if [ -z "$out" ] && _has_real_curl; then
+        out=$(curl -sSL --connect-timeout 10 -A "$_INSTALLER_UA" "$url" 2>/dev/null) || out=""
+    fi
+    if [ -z "$out" ] && _has_python; then
+        out=$(_py_fetch "$url") || out=""
+    fi
+    [ -n "$out" ] || return 1
+    printf '%s\n' "$out"
 }
 
 # Download a file via plain HTTP (for systems without SSL support)
@@ -4313,34 +4482,44 @@ download_file() {
     fi
 }
 
-# Extract "version" value from manifest JSON on stdin
-# Uses POSIX basic regex only (BusyBox compatible)
-parse_manifest_version() {
-    sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
-}
-
-# Extract platform asset URL from manifest JSON on stdin
-# Greps for the platform-specific filename pattern then extracts the URL
-# Uses POSIX basic regex only (BusyBox compatible)
-parse_manifest_platform_url() {
-    local platform=$1
-    grep "helixscreen-${platform}-" | \
-        sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
-}
-
-# Extract a platform's SHA256 from manifest JSON on stdin.
-# Args: platform [zip]   — "zip" reads zip_sha256, anything else reads sha256.
-# Prints the hex digest, or nothing when the manifest has no hash for it.
+# Extract the value of a JSON string field from stdin. Args: key
 #
-# Splitting each line on '"' and comparing whole fields (rather than regex) is
-# what keeps "sha256" from also matching "zip_sha256", and "pi" from matching
-# "pi32". Works on both the pretty-printed manifest jq emits and a compact
-# one-line variant. awk is present on every target (BusyBox included).
-parse_manifest_platform_sha256() {
-    local platform=$1 kind=${2:-tar}
-    local key="sha256"
-    [ "$kind" = "zip" ] && key="zip_sha256"
-    awk -v plat="$platform" -v key="$key" '
+# Splitting on '"' and comparing whole fields is what keeps this correct on
+# single-line JSON. A greedy `.*"key"[^"]*"\(...\)"` regex resolves to the LAST
+# occurrence on a line, so on a one-line release payload it returns a fragment
+# of the release notes instead of the field. The GitHub API serves exactly that
+# to any client sending no Accept header, which is every python urllib caller
+# (our own _py_fetch, and the python wget shim Creality ships on the K2).
+# Escaped quotes inside a string value cannot produce a false hit either, since
+# \"key\" splits to the field `key\`, which is not equal to `key`. First match
+# wins. awk is present on every target (BusyBox included).
+parse_json_string_field() {
+    awk -v key="$1" '
+        {
+            n = split($0, p, "\"")
+            for (i = 1; i <= n - 2; i++) {
+                if (p[i] == key && p[i+1] ~ /^[ \t]*:[ \t]*$/) {
+                    print p[i+2]
+                    exit
+                }
+            }
+        }
+    '
+}
+
+# Extract "version" value from manifest JSON on stdin
+parse_manifest_version() {
+    parse_json_string_field version
+}
+
+# Extract one string field from a platform's block of the manifest's assets
+# object on stdin. Args: platform key
+#
+# Whole-field comparison (rather than regex) is what keeps "sha256" from also
+# matching "zip_sha256", and "pi" from matching "pi32". Works on both the
+# pretty-printed manifest jq emits and a compact one-line variant.
+parse_manifest_platform_field() {
+    awk -v plat="$1" -v key="$2" '
         {
             n = split($0, p, "\"")
             hit = 0
@@ -4352,6 +4531,21 @@ parse_manifest_platform_sha256() {
             if (inblk && !hit && index($0, "}")) inblk = 0
         }
     '
+}
+
+# Extract platform asset URL from manifest JSON on stdin. Args: platform
+parse_manifest_platform_url() {
+    parse_manifest_platform_field "$1" url
+}
+
+# Extract a platform's SHA256 from manifest JSON on stdin.
+# Args: platform [zip]   - "zip" reads zip_sha256, anything else reads sha256.
+# Prints the hex digest, or nothing when the manifest has no hash for it.
+parse_manifest_platform_sha256() {
+    local platform=$1 kind=${2:-tar}
+    local key="sha256"
+    [ "$kind" = "zip" ] && key="zip_sha256"
+    parse_manifest_platform_field "$platform" "$key"
 }
 
 # Print the lowercase SHA256 of a file, or nothing when this system has no way
@@ -4566,6 +4760,9 @@ validate_archive() {
 }
 
 # Backwards-compatible wrapper — new code should call validate_archive.
+# UNCALLED_OK: deliberate compatibility alias. Every in-tree caller was moved
+# to validate_archive(); the name is kept so an out-of-tree script that sourced
+# the modules under the old API keeps working. Covered by test_download_validation.bats.
 validate_tarball() {
     validate_archive "$1" "${2:-}"
 }
@@ -4688,8 +4885,7 @@ get_latest_version() {
         local url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
         log_info "Fetching latest version from GitHub..."
 
-        # Use basic sed regex (no -E flag) for BusyBox compatibility
-        version=$(fetch_url "$url" | grep '"tag_name"' | sed 's/.*"\([^"][^"]*\)".*/\1/')
+        version=$(fetch_url "$url" | parse_json_string_field tag_name)
 
         if [ -n "$version" ]; then
             echo "$version"
@@ -8576,6 +8772,10 @@ install_recovery_script() {
 }
 
 # Remove the local recovery script on uninstall. No-op when absent.
+# UNCALLED_OK: the uninstall path deletes the whole install tree
+# (remove_installation does `rm -rf "$INSTALL_DIR"`), which takes
+# bin/helix-recover.sh with it. Kept as the targeted removal for a caller that
+# wants to drop only the recovery script; covered by test_recovery_script.bats.
 remove_recovery_script() {
     local install_dir="$1"
     local fs="${2:-}"
@@ -8642,6 +8842,8 @@ configure_local_recovery() {
 # Backward-compat shim — main.sh historically called this name. Keep it
 # until the next bundle so callers that pulled an older install.sh keep
 # working through the upgrade.
+# UNCALLED_OK: deliberate compatibility alias for configure_local_recovery(),
+# which is what main.sh calls now.
 configure_moonraker_recovery() {
     configure_local_recovery "$@"
 }
@@ -9807,6 +10009,20 @@ main() {
     install_service "$platform"
     install_platform_hooks
 
+    # System permission rules for a non-root service user: the backlight udev
+    # rule (makes /sys/class/backlight/*/brightness group-writable by video, so
+    # dimming and sleep work) and the NetworkManager polkit rule.
+    #
+    # Placement is load-bearing on both sides. It must come after
+    # extract_release, because the udev rule ships inside the release package at
+    # $INSTALL_DIR/config/, and before start_service, so udevadm has already
+    # re-applied the ownership by the time the UI first writes brightness.
+    #
+    # Runs on fresh install and --update alike (both reach this line), and
+    # self-skips on the root-only platforms (ad5m/ad5x/k1/k2), when KLIPPER_USER
+    # is root, and under NoNewPrivileges where sudo is unavailable.
+    install_permission_rules "$platform"
+
     # Install KIAUH extension if KIAUH is detected
     install_kiauh_extension "$skip_kiauh_registration" || true
 
@@ -9874,6 +10090,7 @@ main() {
     start_service "$platform"
     cleanup_old_install
     cleanup_stale_cache_dirs
+    retire_legacy_config_backups
 
     # Cleanup on success
     cleanup_on_success

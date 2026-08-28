@@ -2391,10 +2391,10 @@ TEST_CASE("CFS: box-only update does not clobber sensor-derived filament_loaded"
     REQUIRE(backend.get_system_info().filament_loaded == true);
 }
 
-// Fix 3: trust the user's assignment. An untagged spool always reads RFID -1,
-// so firmware reports the bay EMPTY. When the user has assigned filament to
-// that bay (override carries real data), the bay is PRESENT (AVAILABLE).
-TEST_CASE("CFS: user override promotes an RFID-empty bay to AVAILABLE", "[ams][cfs]") {
+// An override says what the user ASSIGNED to a bay, never whether a spool is
+// physically in it. A bay firmware reports empty stays EMPTY, keeping its
+// identity so ui_ams_slot.cpp can render the "assigned, not present" ghost.
+TEST_CASE("CFS: user override does not fake presence on an empty bay", "[ams][cfs]") {
     CfsTmpCacheDir tmp("presence_override_trust");
     MoonrakerClientMock client(MoonrakerClientMock::PrinterType::VORON_24);
     helix::PrinterState state;
@@ -2419,8 +2419,11 @@ TEST_CASE("CFS: user override promotes an RFID-empty bay to AVAILABLE", "[ams][c
     box["T1"]["remain_len"] = json::array({"-1", "-1", "-1", "-1"});
     CfsTestAccess::handle_status(backend, make_cfs_notification(box));
 
-    SECTION("assigned bay is promoted to AVAILABLE") {
-        REQUIRE(backend.get_slot_info(0).status == SlotStatus::AVAILABLE);
+    SECTION("assigned bay reads EMPTY — firmware owns presence") {
+        REQUIRE(backend.get_slot_info(0).status == SlotStatus::EMPTY);
+    }
+    SECTION("the assignment survives, so the lane ghosts instead of vanishing") {
+        REQUIRE(backend.get_slot_info(0).material == "PLA");
     }
     SECTION("control: unassigned empty bay stays EMPTY") {
         REQUIRE(backend.get_slot_info(1).status == SlotStatus::EMPTY);
@@ -2766,6 +2769,11 @@ TEST_CASE("CFS removal keeps a user-locked assignment for an unloaded slot",
         rig.poll(box_removed);
     }
 
+    // Ghost precondition: presence follows firmware, identity follows the user.
+    // ui_ams_slot.cpp renders EMPTY + retained identity as a 20%-opacity spool;
+    // promoting the bay back to AVAILABLE here is what made that unreachable.
+    CHECK(rig.backend->get_slot_info(3).status == SlotStatus::EMPTY);
+
     auto ovr = CfsTestAccess::get_override(*rig.backend, 3);
     REQUIRE(ovr.has_value());
     CHECK(ovr->material == "ASA-CF");
@@ -2775,6 +2783,147 @@ TEST_CASE("CFS removal keeps a user-locked assignment for an unloaded slot",
     auto stored = rig.api->mock_get_db_value("lane_data", "lane4");
     REQUIRE(!stored.is_null());
     CHECK(stored["material"] == "ASA-CF");
+}
+
+TEST_CASE("CFS: a labeled untagged spool stays AVAILABLE while it is seated",
+          "[ams][cfs][presence][filament_slot_override]") {
+    // The other half of the ghost rule. A user-labeled spool must render solid
+    // while it is physically in the bay and ghost only once pulled, so presence
+    // has to come from a live signal rather than from the assignment.
+    //
+    // `vender` is that signal: on CFS 1.1.3 it reports occupancy for ANY seated
+    // spool, tagged or not. Verified on a K2 Plus carrying only third-party
+    // filament — both occupied bays read vender "unknown" with no Creality RFID
+    // in the machine, while both empty bays read "none".
+    //
+    // material_type here is the code our own identity push wrote (#968), not one
+    // read off a tag. That suppresses the untagged remain_len fallback, which is
+    // exactly the case the removed override->AVAILABLE promotion used to cover.
+    CfsOverrideRig rig("cfs_labeled_untagged_seated");
+
+    json box_seated =
+        make_unit_box_explicit({"101001", "-1", "-1", "-1"}, {"0FFFFFF", "-1", "-1", "-1"},
+                               {"unknown", "none", "none", "none"}, {"100", "-1", "-1", "-1"});
+    rig.poll(box_seated);
+
+    SlotInfo edit;
+    edit.material = "ASA-GF";
+    edit.brand = "Ambrosia";
+    edit.spool_name = "Black ASA-GF";
+    edit.color_rgb = 0x000000;
+    REQUIRE(rig.backend->set_slot_info(0, edit, /*persist=*/true).success());
+    rig.poll(box_seated);
+
+    SECTION("seated + labeled renders solid, not ghosted") {
+        CHECK(rig.backend->get_slot_info(0).status == SlotStatus::AVAILABLE);
+        CHECK(rig.backend->get_slot_info(0).material == "ASA-GF");
+    }
+
+    SECTION("pulling it ghosts the lane: EMPTY status, identity intact") {
+        json box_pulled =
+            make_unit_box_explicit({"101001", "-1", "-1", "-1"}, {"0FFFFFF", "-1", "-1", "-1"},
+                                   {"none", "none", "none", "none"}, {"100", "-1", "-1", "-1"});
+        rig.poll(box_pulled);
+        CHECK(rig.backend->get_slot_info(0).status == SlotStatus::EMPTY);
+        auto ovr = CfsTestAccess::get_override(*rig.backend, 0);
+        REQUIRE(ovr.has_value());
+        CHECK(ovr->material == "ASA-GF");
+    }
+}
+
+TEST_CASE("CFS probes RFID on a bay insert, without feeding filament",
+          "[ams][cfs][presence][probe_on_insert]") {
+    // Firmware reports occupancy the instant a spool goes in but does not read
+    // its tag. Verified on a K2 Plus: a genuine Creality RFID spool inserted
+    // into an empty bay sat at vender "unknown" / material_type "unknown" /
+    // remain_len -1 indefinitely, so a stale override kept painting the lane
+    // until BOX_GET_RFID was sent by hand.
+    CfsRemapHelper backend;
+    auto poll = [&backend](const json& box) {
+        CfsTestAccess::handle_status(backend, make_cfs_notification(box));
+    };
+
+    // Bay A seated, B/C/D empty.
+    const json empty_bcd =
+        make_unit_box_explicit({"101001", "-1", "-1", "-1"}, {"0FFFFFF", "-1", "-1", "-1"},
+                               {"unknown", "none", "none", "none"}, {"100", "-1", "-1", "-1"});
+
+    SECTION("first sighting seeds occupancy without probing") {
+        poll(empty_bcd);
+        CHECK(backend.captured.empty());
+    }
+
+    SECTION("steady state does not probe") {
+        poll(empty_bcd);
+        poll(empty_bcd);
+        CHECK(backend.captured.empty());
+    }
+
+    SECTION("empty -> occupied with no tag probes that bay only") {
+        poll(empty_bcd);
+        backend.captured.clear();
+        // Spool into bay B: occupancy appears, tag does not.
+        const json b_in = make_unit_box_explicit(
+            {"101001", "unknown", "-1", "-1"}, {"0FFFFFF", "0000000", "-1", "-1"},
+            {"unknown", "unknown", "none", "none"}, {"100", "-1", "-1", "-1"});
+        poll(b_in);
+        REQUIRE(backend.captured.size() == 1);
+        CHECK(backend.captured[0] == "BOX_INFO_REFRESH ADDR=1 NUM=2");
+    }
+
+    SECTION("sends the full refresh — every step of it is load bearing") {
+        poll(empty_bcd);
+        backend.captured.clear();
+        const json b_in = make_unit_box_explicit(
+            {"101001", "unknown", "-1", "-1"}, {"0FFFFFF", "0000000", "-1", "-1"},
+            {"unknown", "unknown", "none", "none"}, {"100", "-1", "-1", "-1"});
+        poll(b_in);
+        REQUIRE(backend.captured.size() == 1);
+        // BOX_GET_RFID on its own is inert: measured on a K2 Plus, the tag only
+        // resolves once BOX_SET_PRE_LOADING has run, and remain_len reports the
+        // "never measured" default of 100 until the same motion happens.
+        CHECK(backend.captured[0].find("BOX_INFO_REFRESH") != std::string::npos);
+    }
+
+    SECTION("a latched material_type does NOT suppress the probe") {
+        // Regression: bay C on the K2 rig reported material_type 101001 latched
+        // from a spool pulled days earlier. Treating a non-sentinel code as
+        // "firmware already knows this bay" skipped the probe on exactly the
+        // bays carrying stale identity — the case this feature exists for.
+        poll(empty_bcd);
+        backend.captured.clear();
+        const json c_in_latched = make_unit_box_explicit(
+            {"101001", "-1", "101001", "-1"}, {"0FFFFFF", "-1", "0000000", "-1"},
+            {"unknown", "none", "unknown", "none"}, {"100", "-1", "-1", "-1"});
+        poll(c_in_latched);
+        REQUIRE(backend.captured.size() == 1);
+        CHECK(backend.captured[0] == "BOX_INFO_REFRESH ADDR=1 NUM=4");
+    }
+
+    SECTION("two bays inserted together share one command pair") {
+        poll(empty_bcd);
+        backend.captured.clear();
+        const json bc_in = make_unit_box_explicit(
+            {"101001", "unknown", "unknown", "-1"}, {"0FFFFFF", "0000000", "0000000", "-1"},
+            {"unknown", "unknown", "unknown", "none"}, {"100", "-1", "-1", "-1"});
+        poll(bc_in);
+        REQUIRE(backend.captured.size() == 1);
+        // B = 0b0010, C = 0b0100 -> NUM=6
+        CHECK(backend.captured[0] == "BOX_INFO_REFRESH ADDR=1 NUM=6");
+    }
+
+    SECTION("removal re-arms the probe for the next insert") {
+        poll(empty_bcd);
+        const json b_in = make_unit_box_explicit(
+            {"101001", "unknown", "-1", "-1"}, {"0FFFFFF", "0000000", "-1", "-1"},
+            {"unknown", "unknown", "none", "none"}, {"100", "-1", "-1", "-1"});
+        poll(b_in);
+        poll(empty_bcd); // pulled back out
+        backend.captured.clear();
+        poll(b_in); // and back in
+        REQUIRE(backend.captured.size() == 1);
+        CHECK(backend.captured[0] == "BOX_INFO_REFRESH ADDR=1 NUM=2");
+    }
 }
 
 TEST_CASE("FillUnsetOnly mirror does not overwrite user-locked fields",

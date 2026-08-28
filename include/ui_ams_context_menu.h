@@ -171,17 +171,27 @@ class AmsContextMenu : public ContextMenu {
     // an owner was destroyed, the registry pointing at reclaimed storage (that
     // last one caught by nightly ASan, 2026-08-16). One menu is on screen at a
     // time, so one set is exactly what the XML needs.
+    // Sharing them is correct rather than merely tolerable: the values are set
+    // in on_created() immediately before the menu is shown.
     //
     // Torn down through StaticSubjectRegistry at shutdown, never in the
     // destructor -- a per-instance deinit is what left the registry resolving
     // "ams_slot_can_load" to dead storage the moment any one owner went away.
-    static lv_subject_t s_slot_is_loaded_subject_; ///< 1 = loaded (Unload enabled), 0 = not loaded
-    static lv_subject_t s_slot_can_load_subject_;  ///< 1 = has filament (Load enabled), 0 = empty
+    static lv_subject_t slot_is_loaded_subject_; ///< 1 = loaded (Unload enabled), 0 = not loaded
+    static lv_subject_t slot_can_load_subject_;  ///< 1 = has filament (Load enabled), 0 = empty
+    /// 1 = this backend's load/unload mount and unmount a tool, so the menu
+    /// shows the tool wording instead of the filament wording.
+    static lv_subject_t slot_mounts_tool_subject_;
+    /// One-line reason the unload is unavailable, and whether to show it.
+    /// Text and visibility are separate because bind_flag needs an int.
+    static lv_subject_t slot_unload_hint_subject_;
+    static lv_subject_t slot_unload_hint_visible_subject_;
+    static char slot_unload_hint_buf_[128];
     /// 1 = another unit owns this slot's filament identity (multiACE: an
     /// ACE-fed U1 head). Bound in XML so the edit actions hide and the
     /// "open the owner" action appears, without adding imperative visibility.
-    static lv_subject_t s_slot_source_external_subject_;
-    static bool s_subjects_initialized_;
+    static lv_subject_t slot_source_external_subject_;
+    static bool subjects_initialized_;
     static void deinit_subjects();
     /// Unit that owns this slot's identity, or -1. Held so OPEN_SOURCE_UNIT can
     /// name it without re-querying a backend that may have changed.

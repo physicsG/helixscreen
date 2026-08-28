@@ -71,6 +71,31 @@ class AmsBackendMock : public AmsBackend {
     [[nodiscard]] int get_current_slot() const override;
     [[nodiscard]] bool is_filament_loaded() const override;
 
+    /**
+     * @brief Only the carriage tool is an unmount target, matching the real backend.
+     *
+     * Mirrors AmsBackendToolChanger::can_unload_from_toolhead(). Without this the
+     * mock inherits AmsBackend's PARALLEL rule (slot.is_present()), which holds for
+     * every toolhead forever — so the context menu offered Unload on tools parked in
+     * their docks and, through decide_can_load()'s inverted `!toolhead_unload`
+     * factor, disabled Load on all of them. That is prestonbrown/helixscreen#1199,
+     * fixed in the real backend but never reproduced here, which left the fix
+     * unguarded against regression in every mock-driven check.
+     *
+     * Scoped to tool-changer mode: the mock also stands in for lane-based systems,
+     * where the inherited LOADED-status rule is the correct one.
+     *
+     * Snapmaker/multiACE answer separately, and are not tool_changer_mode_: only
+     * a HEAD can be unloaded from the toolhead, exactly as AmsBackendSnapmaker
+     * answers (false for every index >= NUM_TOOLS). Multiace mode is PARALLEL, so
+     * under the base rule every filled ACE bay read "already at the toolhead" —
+     * the slot menu greyed Load on all four bays of an ACE and offered Unload on
+     * all four. Real hardware does neither, so the one scenario the mock exists
+     * to exercise — swapping bays on an ACE-fed head — could not be reached in
+     * `--test` at all.
+     */
+    [[nodiscard]] bool can_unload_from_toolhead(int slot_index) const override;
+
     // Capability flag (overridable in tests; production mock returns default false)
     [[nodiscard]] bool tracks_consumption_natively() const override {
         return tracks_consumption_natively_;
@@ -193,9 +218,22 @@ class AmsBackendMock : public AmsBackend {
     [[nodiscard]] std::vector<int> get_tool_mapping() const override;
     [[nodiscard]] RemapStrategy get_remap_strategy() const override;
     // Mirrors get_remap_strategy(): when emulating Snapmaker U1 the controller
-    // must run the pre-print send path (a no-op here since the mock does not
-    // override build_preprint_gcode, matching the old strategy-gated behavior).
+    // must run the pre-print send path.
     [[nodiscard]] bool requires_preprint_send() const override;
+
+    /// Emulates the U1's firmware-native pre-print config in Snapmaker mode, ""
+    /// otherwise.
+    ///
+    /// Load-bearing, not cosmetic. requires_preprint_send() above tells the
+    /// controller there is work to do; while this was left to the base's ""
+    /// return, every --test run of the U1 remap ended at "U1 pre-print config
+    /// empty - starting print directly" and the user's pick reached nothing.
+    /// Picking a head in the modal still logged a stored mapping, so the feature
+    /// LOOKED like it worked while the one step that carries it to the printer
+    /// was skipped. Delegates to AmsBackendSnapmaker::preprint_gcode so the
+    /// bytes are the real ones.
+    [[nodiscard]] std::string build_preprint_gcode(const std::set<int>& tools_used,
+                                                   const std::map<int, int>& remap) const override;
 
     // Device actions
     [[nodiscard]] std::vector<helix::printer::DeviceSection> get_device_sections() const override;
@@ -503,17 +541,6 @@ class AmsBackendMock : public AmsBackend {
     /// the base behaviour.
     [[nodiscard]] std::optional<int> slot_identity_owner_unit(int slot_index) const override;
     [[nodiscard]] std::optional<int> slot_identity_owner_slot(int slot_index) const override;
-
-    /// Only a HEAD can be unloaded from the toolhead; an ACE bay cannot, exactly
-    /// as AmsBackendSnapmaker answers (false for every index >= NUM_TOOLS).
-    ///
-    /// The base rule is `slot.is_present()` on a PARALLEL backend, and multiace
-    /// mode is PARALLEL, so every filled ACE bay read "already at the toolhead":
-    /// the slot menu greyed Load on all four bays of an ACE and offered Unload on
-    /// all four. Real hardware does neither, so the one scenario the mock exists
-    /// to exercise — swapping bays on an ACE-fed head — could not be reached in
-    /// `--test` at all.
-    [[nodiscard]] bool can_unload_from_toolhead(int slot_index) const override;
 
     /// Mounting the head an ACE bay feeds moves the carriage and feeds nothing,
     /// so `T{n}` is not that bay's load — exactly as AmsBackendMultiAce answers.

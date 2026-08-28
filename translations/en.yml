@@ -20,6 +20,7 @@ translations:
   '%zu changes': '%zu changes'
   '%zu events queued': '%zu events queued'
   '%zu plugins failed to load': '%zu plugins failed to load'
+  "'{}' already exists. Replace the stored mesh?": "'{}' already exists. Replace the stored mesh?"
   (different grade): (different grade)
   (incompatible): (incompatible)
   (multi-tool): (multi-tool)
@@ -337,7 +338,6 @@ translations:
   Bypass Mode: Bypass Mode
   Bypass active — this print runs on the external spool.: Bypass active — this print runs on the external spool.
   Bypass cannot be changed while printing: Bypass cannot be changed while printing
-  Bypass controlled by hardware sensor: Bypass controlled by hardware sensor
   Bypass controlled by sensor: Bypass controlled by sensor
   Bypass disabled: Bypass disabled
   Bypass enabled: Bypass enabled
@@ -368,11 +368,11 @@ translations:
   Calibrate Gear: Calibrate Gear
   Calibrate X: Calibrate X
   Calibrate Y: Calibrate Y
+  Calibrate and tune scroll feel: Calibrate and tune scroll feel
   Calibrate input shaping to reduce ringing artifacts in prints: Calibrate input shaping
     to reduce ringing artifacts in prints
   Calibrate your touchscreen for accurate input: Calibrate your touchscreen for accurate
     input
-  Calibrate, tune jitter and scroll feel: Calibrate, tune jitter and scroll feel
   Calibrated: Calibrated
   'Calibrating Probe...': 'Calibrating Probe...'
   'Calibrating bed mesh...': 'Calibrating bed mesh...'
@@ -458,6 +458,7 @@ translations:
   Change Filament: Change Filament
   Change Tool: Change Tool
   Change Tool While Paused: Change Tool While Paused
+  Change tool: Change tool
   Changes apply immediately. Adjust during print for tuning.: Changes apply immediately.
     Adjust during print for tuning.
   Changes are temporary and reset on printer reboot: Changes are temporary and reset
@@ -705,8 +706,6 @@ translations:
   Date (newest): Date (newest)
   Date (oldest): Date (oldest)
   Day: Day
-  Dead zone in pixels (raise if taps register as swipes; 0 disables): Dead zone in
-    pixels (raise if taps register as swipes; 0 disables)
   Debug: Debug
   Default border thickness: Default border thickness
   'Default: %d-%d°C nozzle, %d°C bed': 'Default: %d-%d°C nozzle, %d°C bed'
@@ -765,6 +764,8 @@ translations:
   Do not power off your printer.: Do not power off your printer.
   Do not touch the printer during calibration: Do not touch the printer during calibration
   Dock: Dock
+  Dock sensors cannot tell which tool is mounted: Dock sensors cannot tell which tool is mounted
+  Dock tool: Dock tool
   Docking tool: Docking tool
   Documentation: Documentation
   Don't Save: Don't Save
@@ -851,6 +852,7 @@ translations:
   Enter New PIN: Enter New PIN
   Enter PIN: Enter PIN
   Enter WiFi Password: Enter WiFi Password
+  Enter a name for this profile: Enter a name for this profile
   'Enter a name for your custom theme:': 'Enter a name for your custom theme:'
   Enter a name to save this profile: Enter a name to save this profile
   Enter network name: Enter network name
@@ -875,6 +877,8 @@ translations:
   'Error: Invalid download': 'Error: Invalid download'
   'Error: No update available': 'Error: No update available'
   'Error: Not enough disk space': 'Error: Not enough disk space'
+  'Error: Previous download still finishing': 'Error: Previous download still finishing'
+  "Error: This install can't update itself": "Error: This install can't update itself"
   'Error: Verification failed': 'Error: Verification failed'
   'Error: Wrong architecture': 'Error: Wrong architecture'
   'Error: `unzip` not installed': 'Error: `unzip` not installed'
@@ -1066,7 +1070,6 @@ translations:
   ? Filament is still at the nozzle after unloading. The cut or retract may not have completed. Clear the toolhead before loading another spool.
   : Filament is still at the nozzle after unloading. The cut or retract may not have completed. Clear the toolhead before loading another spool.
   'Filament load failed: {}': 'Filament load failed: {}'
-  Filament loaded: Filament loaded
   Filament operation failed: Filament operation failed
   Filament operation timed out: Filament operation timed out
   Filament ran out - nothing at the toolhead and the print is paused.: Filament ran out - nothing at the toolhead and the print is paused.
@@ -1147,6 +1150,7 @@ translations:
   Good Accuracy: Good Accuracy
   Got it: Got it
   Gray: Gray
+  Grip filament: Grip filament
   Grip the filament: Grip the filament
   Guides and reference: Guides and reference
   H: H
@@ -1588,6 +1592,7 @@ translations:
   Motors Off: Motors Off
   'Motors disable failed: {}': 'Motors disable failed: {}'
   Motors disabled: Motors disabled
+  Mount: Mount
   Move: Move
   Move paper back and forth while adjusting. Stop when paper catches slightly but still slides.: Move
     paper back and forth while adjusting. Stop when paper catches slightly but still
@@ -1618,8 +1623,7 @@ translations:
   Name: Name
   Name (optional): Name (optional)
   'Name:': 'Name:'
-  Named actions in the LED control panel (long-press).: Named actions in the LED control
-    panel (long-press).
+  Named actions in the LED Controls widget. Not shown under LED selection.: Named actions in the LED Controls widget. Not shown under LED selection.
   Needs adjustment: Needs adjustment
   Needs the {} package to switch spools: Needs the {} package to switch spools
   Net Weight (g): Net Weight (g)
@@ -1648,9 +1652,9 @@ translations:
   No Camera: No Camera
   No Filament Detected: No Filament Detected
   No History: No History
-  No LED macros detected on your printer.: No LED macros detected on your printer.
   No LED macros detected on your printer. Add Klipper macros for LED control first.: No
     LED macros detected on your printer. Add Klipper macros for LED control first.
+  No LED macros detected. Type a macro name below.: No LED macros detected. Type a macro name below.
   No LED strips detected: No LED strips detected
   No Macros Found: No Macros Found
   No Multi-Filament System connected: No Multi-Filament System connected
@@ -1785,6 +1789,7 @@ translations:
   On/Off: On/Off
   On/Off (state-aware): On/Off (state-aware)
   'On:': 'On:'
+  One tap runs this macro with no parameters. Dangerous macros still ask.: One tap runs this macro with no parameters. Dangerous macros still ask.
   Ooze Reduction: Ooze Reduction
   Open: Open
   Open G-code command console: Open G-code command console
@@ -1802,6 +1807,7 @@ translations:
     - select your main lighting source, or skip if your printer doesn't have one
   Options: Options
   Or Enter Manually: Or Enter Manually
+  Or instead of turning the others: Or instead of turning the others
   Oscillating... cycle %d/%d: Oscillating... cycle %d/%d
   Out of range: Out of range
   Outcome: Outcome
@@ -1876,6 +1882,7 @@ translations:
   Phomemo M110: Phomemo M110
   Pick: Pick
   Pick Color: Pick Color
+  Pick up tool: Pick up tool
   Picking up tool: Picking up tool
   Pill: Pill
   Pixels before a press becomes a scroll (lower = scrolls engage sooner): Pixels before
@@ -2059,12 +2066,12 @@ translations:
   Profile name (e.g., default): Profile name (e.g., default)
   Profile renamed: Profile renamed
   Profiles: Profiles
+  Prompt before running this macro: Prompt before running this macro
   Pulling filament back: Pulling filament back
   Purge: Purge
   Purge & Wipe: Purge & Wipe
   Purge Length: Purge Length
   'Purge failed: {}': 'Purge failed: {}'
-  Purge macro not configured: Purge macro not configured
   Purge may still be running — response timed out: Purge may still be running — response
     timed out
   Purge to bucket: Purge to bucket
@@ -2148,6 +2155,7 @@ translations:
   'Reheating...': 'Reheating...'
   Release all stepper motors. Position will be lost.: Release all stepper motors.
     Position will be lost.
+  Release filament: Release filament
   Release or grip the filament by hand: Release or grip the filament by hand
   Release the filament: Release the filament
   Remaining (g): Remaining (g)
@@ -2169,12 +2177,15 @@ translations:
   Rename failed at save step: Rename failed at save step
   Render Now: Render Now
   Rendering timelapse...: Rendering timelapse...
+  Replace: Replace
+  Replace Profile?: Replace Profile?
   Replay Welcome Tour: Replay Welcome Tour
   'Replenishing filament...': 'Replenishing filament...'
   Report saved to crash_report.txt: Report saved to crash_report.txt
   Reprint: Reprint
   Reprint Last: Reprint Last
   Request Failed: Request Failed
+  Require Confirmation?: Require Confirmation?
   Require confirmation before emergency stop: Require confirmation before emergency
     stop
   Requires Moonraker power device: Requires Moonraker power device
@@ -2270,7 +2281,6 @@ translations:
     themselves)
   Run test sequence on all lanes: Run test sequence on all lanes
   Run the HelixScreen installer with --update from a terminal on this printer. Scan for the command for your platform.: Run the HelixScreen installer with --update from a terminal on this printer. Scan for the command for your platform.
-  Run without parameter prompt: Run without parameter prompt
   Run {}?: Run {}?
   Running {}...: Running {}...
   Runout: Runout
@@ -2702,6 +2712,8 @@ translations:
   The runout sensor indicates no filament is loaded. Start print anyway?: The runout
     sensor indicates no filament is loaded. Start print anyway?
   The toolhead has filament but no AMS lane reports it loaded. Pull it out manually before printing. Start anyway?: The toolhead has filament but no AMS lane reports it loaded. Pull it out manually before printing. Start anyway?
+  ? The toolhead has filament but no AMS lane reports it loaded. The printer may refuse to load a lane until it is cleared. Start anyway?
+  : The toolhead has filament but no AMS lane reports it loaded. The printer may refuse to load a lane until it is cleared. Start anyway?
   The toolhead sensor indicates filament is already loaded. Proceed with load anyway?: The
     toolhead sensor indicates filament is already loaded. Proceed with load anyway?
   The toolhead sensor indicates no filament is present. Proceed with unload anyway?: The
@@ -2830,7 +2842,6 @@ translations:
   Touch & Input: Touch & Input
   Touch Cal: Touch Cal
   Touch Calibration: Touch Calibration
-  Touch Jitter Filter: Touch Jitter Filter
   Touch anywhere to test calibration: Touch anywhere to test calibration
   Touch anywhere to verify accuracy: Touch anywhere to verify accuracy
   Touch input did not track the new calibration. Your previous settings were kept.: Touch input did not track the new calibration. Your previous settings were kept.
@@ -2896,6 +2907,7 @@ translations:
   Unloads After Print: Unloads After Print
   Unlock: Unlock
   Unmapped: Unmapped
+  Unmount: Unmount
   Unretract Extra: Unretract Extra
   Unretract Speed: Unretract Speed
   Unsupported tape width: Unsupported tape width
@@ -3112,6 +3124,7 @@ translations:
   Monitor for print abnormalities (K2 Plus camera-based): Monitor for print abnormalities (K2 Plus camera-based)
   AFC's remember_spool is retaining spool info in firmware; that takes precedence over this toggle: AFC's remember_spool is retaining spool info in firmware; that takes precedence over this toggle
   AI detection: AI detection
+  or type a macro name: or type a macro name
   prints: prints
   remaining: remaining
   remaining before clog detection triggers: remaining before clog detection triggers

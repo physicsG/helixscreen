@@ -638,6 +638,19 @@ void AmsOperationSidebar::recreate_step_progress_for_operation(StepOperationType
     // and observes the backend-supplied index subject. No backend-type checks here.
     if (backend) {
         current_step_model_ = backend->get_operation_step_model(op_type);
+        // A backend that reports no phases AND says the legacy bar would lie
+        // gets no bar. Distinct from an empty model, which still means "fall
+        // back". A tool changer has no Heat/Feed/Purge to show: it mounts a
+        // toolhead, and the status line above already names what it is doing.
+        if (current_step_model_.suppressed) {
+            current_step_count_ = 0;
+            if (step_progress_container_) {
+                lv_obj_add_flag(step_progress_container_, LV_OBJ_FLAG_HIDDEN);
+            }
+            spdlog::debug("[AmsSidebar] Backend suppressed the step bar for op_type={}",
+                          static_cast<int>(op_type));
+            return;
+        }
         if (!current_step_model_.steps.empty()) {
             std::vector<ui_step_t> steps;
             steps.reserve(current_step_model_.steps.size());
@@ -967,28 +980,29 @@ void AmsOperationSidebar::update_step_progress(AmsAction action) {
         return;
     }
 
-    // One notion of "this operation is visibly running", used for BOTH the
-    // ownership latch and the container visibility below — they were separate
-    // expressions of the same idea, and only one of them updated ownership.
-    const bool action_is_progress =
-        (action == AmsAction::HEATING || action == AmsAction::LOADING ||
-         action == AmsAction::PURGING || action == AmsAction::CUTTING ||
-         action == AmsAction::FORMING_TIP || action == AmsAction::UNLOADING);
-    ownership_.on_action(action_is_progress);
+    AmsBackend* backend = AmsState::instance().get_backend();
+
+    // The one question both halves of this function ask: is this action an
+    // operation the bar should be following? The backend owns the answer,
+    // because the action vocabulary differs by backend family - a filament
+    // system heats and feeds, a tool changer selects.
+    const bool is_active_action = backend ? backend->action_tracks_step_operation(action)
+                                          : ams_action_is_filament_operation(action);
+
+    // The same answer also drives the ownership latch, which used to carry its
+    // own third copy of the list.
+    ownership_.on_action(is_active_action);
 
     // Heuristic detection for externally-started operations
     const bool is_external = ownership_.is_external();
     bool filament_loaded = false;
-    if (is_external) {
-        AmsBackend* backend = AmsState::instance().get_backend();
-        if (backend) {
-            AmsSystemInfo info = backend->get_system_info();
-            filament_loaded = (info.current_slot >= 0);
-        }
+    if (is_external && backend) {
+        AmsSystemInfo info = backend->get_system_info();
+        filament_loaded = (info.current_slot >= 0);
     }
 
     auto detection = detect_step_operation(action, prev_ams_action_, current_operation_type_,
-                                           is_external, filament_loaded);
+                                           is_external, filament_loaded, is_active_action);
     if (detection.should_recreate) {
         StepOperationType new_op = detection.op_type;
         if (new_op == StepOperationType::LOAD_SWAP &&
@@ -1008,10 +1022,14 @@ void AmsOperationSidebar::update_step_progress(AmsAction action) {
         return;
     }
 
-    // Show/hide container based on action. Ownership is NOT cleared here any
-    // more: on_action() above already released it, but only once the operation
-    // had actually been seen running.
-    if (action_is_progress) {
+    // Same question as the detection above, same answer. These were two separate
+    // hardcoded lists that disagreed about both SELECTING and PURGING, so a tool
+    // changer's bar appeared for the dock half of a swap and vanished for the
+    // pick half.
+    //
+    // Ownership is NOT cleared here any more: on_action() above already released
+    // it, but only once the operation had actually been seen running.
+    if (is_active_action) {
         lv_obj_remove_flag(step_progress_container_, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(step_progress_container_, LV_OBJ_FLAG_HIDDEN);
@@ -1084,36 +1102,25 @@ void AmsOperationSidebar::refresh_heat_step_display() {
 // ============================================================================
 
 helix::ui::OpButtonState AmsOperationSidebar::read_unload_gating_state() const {
-    helix::ui::OpButtonState state;
-
+    // The reads live here; the field mapping they feed is
+    // build_unload_gating_state(), so the sidebar's shape — aggregate loaded
+    // flag, always the heated unload — is stated once and stays testable without
+    // an AmsState singleton. The sidebar had no print term at all before, so it
+    // went straight from "always tappable" to "correct" only if it asks the same
+    // question the backend does.
     AmsBackend* backend = AmsState::instance().get_backend();
-
-    // print_blocks_filament_op(), not the raw print_active subject: PRINTING
-    // always refuses, but a PAUSED print now ALLOWS the unload on every backend
-    // whose filament macro does not home itself (only AD5X IFS does). Gating on
-    // print_active would keep this button greyed through the pause that is the
-    // entire recovery workflow — and the sidebar had no print term at all
-    // before, so it went straight from "always tappable" to "correct" only if
-    // this asks the same question the backend does.
-    const auto lifecycle = printer_state_.get_print_lifecycle();
-    state.print_blocks_op = helix::ui::print_blocks_filament_op(
-        lifecycle, backend && backend->filament_ops_self_home());
-
-    if (backend) {
-        // AmsSystemInfo::is_busy() — the same predicate check_preconditions()
-        // refuses on, instead of a fourth open-coded `action != IDLE && != ERROR`.
-        state.system_busy = backend->get_system_info().is_busy();
-    }
 
     // This button means "unload whatever is active", so the aggregate loaded flag
     // is its availability — the same signal the XML used to bind directly.
     lv_subject_t* loaded = AmsState::instance().get_filament_loaded_subject();
-    state.unload_available = loaded && lv_subject_get_int(loaded) == 1;
 
-    // Always the heated toolhead unload. The cold lane ops (Eject / Recover),
-    // which stay reachable mid-print, live on the AMS context menu.
-    state.unload_is_cold_lane_op = false;
-    return state;
+    return helix::ui::build_unload_gating_state(
+        /*filament_loaded=*/loaded && lv_subject_get_int(loaded) == 1,
+        // AmsSystemInfo::is_busy() — the same predicate check_preconditions()
+        // refuses on, instead of a fourth open-coded `action != IDLE && != ERROR`.
+        /*system_busy=*/backend && backend->get_system_info().is_busy(),
+        printer_state_.get_print_lifecycle(),
+        /*backend_self_homes=*/backend && backend->filament_ops_self_home());
 }
 
 void AmsOperationSidebar::refresh_unload_gating() {

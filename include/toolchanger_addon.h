@@ -66,11 +66,58 @@ struct ToolReading {
     /// current_tool == -2. A distinct state from "no tool": the machine does not
     /// KNOW, and acting on a guess would drive the carriage into a dock.
     bool sensor_error = false;
-    /// "idle" / "picking" / "dropping", or empty when the frame did not say.
-    /// Finer than klipper-toolchanger's single "changing".
+    /// The machine's phase word, or empty when the frame did not say.
+    ///
+    /// The two controllers do NOT share a vocabulary, and this is deliberately
+    /// the raw word rather than a normalised enum, because callers need to tell
+    /// them apart:
+    ///   Irbis3D MedusaHC-Python-Controller  `operation`: idle/picking/dropping
+    ///   topi314/MedusaHC                    `state`:     uninitialized/ready/
+    ///                                                    changing/error
+    /// Verified against both sources, not inferred: `state` is a COARSER
+    /// vocabulary than `operation`, not another spelling of it.
     std::string operation;
+    /// True when `operation` came from the key that names the swap DIRECTION.
+    /// False for a machine whose phase word is only ever "changing", which
+    /// cannot say whether it is docking or picking. Available from the first
+    /// status frame, unlike the phase words themselves, which only appear once a
+    /// swap is already running - so this is what a caller keys on to decide what
+    /// it can render BEFORE anything moves.
+    bool phase_names_direction = false;
     /// 0 when this frame carried no tool count.
     int tool_count = 0;
+    /// Per-dock occupancy, indexed by tool number: true seated, false empty,
+    /// nullopt not reported in this frame. EMPTY when the frame carried no dock
+    /// state at all - which is not the same answer as "every dock is vacant",
+    /// and callers must not conflate them: Moonraker republishes only the fields
+    /// that CHANGED.
+    ///
+    /// Upstream spells it `sensors` ({"e":1,"t0":1,...}), the fork spells it
+    /// flat `tool<N>_docked` booleans. Same physical answer.
+    std::vector<std::optional<bool>> docks;
+    /// Whether anything is on the head at all (`sensors.e` / `head_loaded`).
+    /// nullopt when the frame did not say.
+    std::optional<bool> head_loaded;
+    /// Frame-side gripper released. nullopt when this machine does not report it
+    /// at all. BOTH MedusaHC controllers publish `feeder_open`, so in practice
+    /// every machine carrying [medusahc] fills this in; the nullopt case is a
+    /// changer with no such extra. The difference between "closed" and "never
+    /// said" is what decides whether the step bar can name the release/grip
+    /// phases (see AmsBackendToolChanger::get_operation_step_model).
+    std::optional<bool> feeder_open;
+};
+
+/// How a swap is commanded on a machine where klipper-toolchanger is not the
+/// one doing it. Default-constructed - `present` false - means the printer has
+/// [toolchanger] and its SELECT_TOOL/UNSELECT_TOOL own the swap.
+struct ToolCommands {
+    bool present = false;
+    std::string provider_name; ///< Machine it came from, for logs
+    /// Prefixed to the tool number: "T" sends T0, T1, ... Empty when absent.
+    std::string select_prefix;
+    /// Unmounts whatever is on the head. Empty when the machine has no such
+    /// command and the tool can only be swapped for another.
+    std::string unselect;
 };
 
 /// Presence of an add-on dock sensor. When set, read_tool() is worth calling on
@@ -85,6 +132,10 @@ bool present(const PrinterDiscovery& hw);
 
 /// The dock sensor this printer exposes, or an absent capability.
 ToolSensor resolve_tool_sensor(const PrinterDiscovery& hw);
+
+/// The swap commands this printer needs, or an absent capability meaning
+/// klipper-toolchanger is there and owns them.
+ToolCommands resolve_tool_commands(const PrinterDiscovery& hw);
 
 /// Machine name for logs and the AMS unit label ("MedusaHC"), or empty.
 std::string machine_name(const PrinterDiscovery& hw);
