@@ -334,6 +334,30 @@ else
   echo "⚠️  check_duplicate_xml_names.py not found — skipping"
 fi
 
+# One widget state, one binding. Two <bind_state_if_*> on the same state do not
+# compose into an OR — each asserts both polarities when its own subject moves,
+# so the last one to fire wins and a false condition clears what another set.
+echo "🎚️  Checking for conflicting XML state bindings..."
+
+if [ -f "scripts/check_state_binding_conflicts.py" ]; then
+  if [ "$STAGED_ONLY" = true ]; then
+    STATE_BIND_ARGS="--staged-only"
+  else
+    STATE_BIND_ARGS=""
+  fi
+  # shellcheck disable=SC2086
+  if python3 scripts/check_state_binding_conflicts.py $STATE_BIND_ARGS --summary \
+      >/tmp/state_binding_conflicts.out 2>&1; then
+    cat /tmp/state_binding_conflicts.out
+  else
+    cat /tmp/state_binding_conflicts.out
+    echo "   Run: python3 scripts/check_state_binding_conflicts.py --list"
+    EXIT_CODE=1
+  fi
+else
+  echo "⚠️  check_state_binding_conflicts.py not found — skipping"
+fi
+
 echo ""
 
 # ====================================================================

@@ -326,8 +326,7 @@
                          width="100%" height="100%" variant="ghost" flex_flow="column" style_flex_main_place="center"
                          style_flex_cross_place="center" style_flex_track_place="center" style_bg_opa="0"
                          style_border_width="0" focusable="false">
-                <bind_state_if_not_eq subject="printer_connection_state" state="disabled" ref_value="2"/>
-                <bind_state_if_eq subject="led_command_in_flight" state="disabled" ref_value="1"/>
+                <bind_state_if cond="printer_connection_state ne 2 or led_command_in_flight eq 1" state="disabled"/>
                 <icon name="light_icon" src="lightbulb_outline" size="sm" variant="muted"/>
                 <text_small text="Light" translation_tag="Light"/>
               </ui_button>
@@ -412,8 +411,7 @@
                        width="0" height="#button_height_sm" flex_grow="1" text="Quad Gantry Level"
                        translation_tag="Quad Gantry Level" variant="secondary" hidden="true">
               <bind_flag_if_eq subject="printer_has_qgl" flag="hidden" ref_value="0"/>
-              <bind_state_if_eq subject="job_holds_machine" state="disabled" ref_value="1"/>
-              <bind_state_if_eq subject="controls_operation_in_progress" state="disabled" ref_value="1"/>
+              <bind_state_if cond="job_holds_machine eq 1 or controls_operation_in_progress eq 1" state="disabled"/>
               <event_cb trigger="clicked" callback="on_controls_qgl"/>
             </ui_button>
             <!-- Z-Tilt button - visible only if printer has z_tilt_adjust -->
@@ -421,8 +419,7 @@
                        width="0" height="#button_height_sm" flex_grow="1" text="Z-Tilt Adjust"
                        translation_tag="Z-Tilt Adjust" variant="secondary" hidden="true">
               <bind_flag_if_eq subject="printer_has_z_tilt" flag="hidden" ref_value="0"/>
-              <bind_state_if_eq subject="job_holds_machine" state="disabled" ref_value="1"/>
-              <bind_state_if_eq subject="controls_operation_in_progress" state="disabled" ref_value="1"/>
+              <bind_state_if cond="job_holds_machine eq 1 or controls_operation_in_progress eq 1" state="disabled"/>
               <event_cb trigger="clicked" callback="on_controls_z_tilt"/>
             </ui_button>
             <ui_button name="btn_macro_1"
