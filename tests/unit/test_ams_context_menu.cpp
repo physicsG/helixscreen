@@ -804,10 +804,7 @@ TEST_CASE("The option list is built from the live backend virtual, not a local r
     backend.stop();
 }
 
-// ======================================================================
-    }
-}
-
+// =============================================================================
 // The backup list labels slots with the number their badge shows
 //
 // slot+1 is only right when every slot owns its identity. On multiACE an
@@ -838,7 +835,9 @@ TEST_CASE("Backup options use the badge's spool number, not slot + 1",
         const auto opts = Access::build_backup_options_for(4, 0, allow_all);
         CHECK(opts.find("Slot 4") != std::string::npos);
         CHECK(opts.find("Slot 5") == std::string::npos);
-=======
+    }
+}
+
 // ============================================================================
 // A backend that withdraws its unmount offer has to be able to make it stick.
 //
