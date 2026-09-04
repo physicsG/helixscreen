@@ -137,7 +137,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // One resize, to put the widget in a mode that shows the list at all
     // (mode 1). Every assertion after this point is about the subject driving
     // a rebuild — resize is never called again.
-    h.resize(1, 1, W_NORMAL, H_TALL);
+    h.resize(1, 1, w_normal(), h_tall());
     process_lvgl(50);
     REQUIRE(container_children(container) == 0);
 

@@ -126,4 +126,12 @@ bool dispatch_filament_macro(const std::string& macro_name, ParamPolicy policy,
  */
 [[nodiscard]] std::string filament_unload_fallback_gcode();
 
+/**
+ * @brief Purge fallback: extrude a fixed 50mm at 10mm/s. M83 = relative
+ *        extrusion. Purge has no plan_purge()/AmsBackend tier, so this is the
+ *        whole tier-2 ladder alongside the configured macro, not "tier 3" of
+ *        three.
+ */
+[[nodiscard]] std::string filament_purge_fallback_gcode();
+
 } // namespace helix::ui

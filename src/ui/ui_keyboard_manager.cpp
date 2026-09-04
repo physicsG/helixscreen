@@ -6,12 +6,15 @@
 #include "ui_breakpoint.h"
 #include "ui_event_safety.h"
 #include "ui_fonts.h"
+#include "ui_keycap_style.h"
 #include "ui_text_input.h"
 #include "ui_utils.h"
 
 #include "config.h"
 #include "display_settings_manager.h"
 #include "keyboard_layout_provider.h"
+#include "observer_factory.h"
+#include "platform_capabilities.h"
 #include "theme_manager.h"
 
 // For lv_buttonmatrix_t::button_areas — the real per-button rects LVGL laid out.
@@ -20,6 +23,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <cstdlib>
 #include <cstring>
 
 #ifdef __ANDROID__
@@ -1026,7 +1030,132 @@ bool keyboard_animations_enabled() {
     return DisplaySettingsManager::instance().get_animations_enabled();
 #endif
 }
+
+// Which depth treatment the keys get, resolved once: neither the hardware tier
+// nor the build config changes at runtime. Constrained hardware drops the
+// per-key box shadow for a border rather than going flat, and ESP32 keeps the
+// no-shadow-at-all tuning the rest of this file is built around.
+// HELIX_KEY_DEPTH forces a branch, for a device that renders slower than its
+// tier suggests and for checking every branch on one development machine.
+helix::ui::KeycapDepth resolve_keycap_depth() {
+    static const helix::ui::KeycapDepth depth = [] {
+        const char* requested = getenv("HELIX_KEY_DEPTH");
+        if (auto forced = helix::ui::parse_keycap_depth_override(requested)) {
+            spdlog::info("[KeyboardManager] Key depth forced to {} by HELIX_KEY_DEPTH", requested);
+            return *forced;
+        }
+#if defined(ESP_PLATFORM)
+        constexpr bool platform_has_shadows = false;
+#else
+        constexpr bool platform_has_shadows = true;
+#endif
+        const auto caps = helix::PlatformCapabilities::detect();
+        const auto resolved = helix::ui::decide_keycap_depth(caps.tier, platform_has_shadows);
+        spdlog::debug("[KeyboardManager] Key depth = {} ({} tier)",
+                      resolved == helix::ui::KeycapDepth::SKIRT    ? "skirt"
+                      : resolved == helix::ui::KeycapDepth::EMBOSS ? "emboss"
+                                                                   : "flat",
+                      helix::platform_tier_to_string(caps.tier));
+        return resolved;
+    }();
+    return depth;
+}
 } // namespace
+
+void KeyboardManager::apply_key_styles() {
+    if (keyboard_ == nullptr) {
+        return;
+    }
+
+    lv_color_t keyboard_bg = theme_manager_get_color("screen_bg");
+    lv_color_t key_bg = theme_manager_get_color("elevated_bg");
+    // Special (shift-lock, mode-toggle) keys derive from the regular key color
+    // by lightening in dark mode / darkening in light mode so they read as
+    // distinct without a dedicated theme token.
+    lv_color_t key_special_bg = theme_manager_is_dark_mode() ? lv_color_lighten(key_bg, LV_OPA_20)
+                                                             : lv_color_darken(key_bg, LV_OPA_20);
+    // Auto-pick text color for contrast against each key background so key
+    // glyphs stay legible across themes and light/dark modes.
+    lv_color_t key_text = theme_manager_get_contrast_color(key_bg);
+    lv_color_t key_special_text = theme_manager_get_contrast_color(key_special_bg);
+
+    lv_obj_set_style_bg_color(keyboard_, keyboard_bg, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(keyboard_, LV_OPA_COVER, LV_PART_MAIN);
+
+    lv_obj_set_style_bg_color(keyboard_, key_bg, LV_PART_ITEMS);
+    lv_obj_set_style_bg_opa(keyboard_, LV_OPA_COVER, LV_PART_ITEMS);
+    lv_obj_set_style_radius(keyboard_, 8, LV_PART_ITEMS);
+
+    // Depth. Both treatments are written every time, so switching themes (or
+    // re-applying after one) clears whichever one is not in use rather than
+    // leaving a stale rim behind.
+    const helix::ui::KeycapStyle cap =
+        helix::ui::make_keycap_style(resolve_keycap_depth(), key_bg, theme_manager_is_dark_mode(),
+                                     theme_manager_get_active_theme().properties.shadow_intensity);
+    const bool has_skirt = cap.skirt_opa > LV_OPA_TRANSP;
+
+    // Skirt: the key's side wall, not a shadow it throws — hence a blur width of
+    // 1 (lv_draw_rect.c skips the shadow only at width 0, so 1 renders a hard
+    // edge) in a colour derived from the key itself. The offset stays inside the
+    // matrix's row gap, which is also what invalidate_button_area() pads the
+    // repaint by.
+    lv_obj_set_style_shadow_width(keyboard_, has_skirt ? 1 : 0, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_opa(keyboard_, cap.skirt_opa, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_offset_x(keyboard_, 0, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_offset_y(keyboard_, cap.skirt_offset_y, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_spread(keyboard_, 0, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_color(keyboard_, cap.skirt_color, LV_PART_ITEMS);
+
+    // The key's own edge: the whole treatment on EMBOSS, and on a dark theme the
+    // part of the skirt treatment that the background cannot swallow.
+    lv_obj_set_style_border_width(keyboard_, cap.edge_width, LV_PART_ITEMS);
+    lv_obj_set_style_border_color(keyboard_, cap.edge_color, LV_PART_ITEMS);
+    lv_obj_set_style_border_opa(keyboard_, cap.edge_width > 0 ? LV_OPA_COVER : LV_OPA_TRANSP,
+                                LV_PART_ITEMS);
+    lv_obj_set_style_border_side(keyboard_, cap.edge_side, LV_PART_ITEMS);
+
+#if !defined(ESP_PLATFORM)
+    // Press feedback. The key cannot actually travel: lv_buttonmatrix lays out
+    // its own button rects and hands them to lv_draw_rect, so translate_y on
+    // LV_PART_ITEMS moves nothing. It sinks instead — the rim collapses, the
+    // edge flips to the opposite corner so the light moves, and the face shades.
+    // ESP32 has no pressed-state styles at all (they are removed in init() for
+    // the full-matrix invalidation they cause), so this whole block is skipped.
+    lv_obj_set_style_bg_color(keyboard_, cap.pressed_bg, LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_offset_y(keyboard_, 0, LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_opa(keyboard_, LV_OPA_TRANSP, LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_border_side(keyboard_, cap.edge_side_pressed,
+                                 LV_PART_ITEMS | LV_STATE_PRESSED);
+#endif
+
+    lv_obj_set_style_bg_color(keyboard_, key_special_bg, LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(keyboard_, key_special_text, LV_PART_ITEMS | LV_STATE_CHECKED);
+
+    // Special keys carry their own face colour, so their edge has to derive from
+    // that face. Derived from the regular key instead, it lands on roughly the
+    // value of the special face itself and the key reads flat next to its
+    // neighbours.
+    const helix::ui::KeycapStyle special_cap =
+        helix::ui::make_keycap_style(cap.depth, key_special_bg, theme_manager_is_dark_mode(),
+                                     theme_manager_get_active_theme().properties.shadow_intensity);
+    lv_obj_set_style_shadow_color(keyboard_, special_cap.skirt_color,
+                                  LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_border_color(keyboard_, special_cap.edge_color,
+                                  LV_PART_ITEMS | LV_STATE_CHECKED);
+#if !defined(ESP_PLATFORM)
+    lv_obj_set_style_bg_color(keyboard_, special_cap.pressed_bg,
+                              LV_PART_ITEMS | LV_STATE_CHECKED | LV_STATE_PRESSED);
+#endif
+
+    lv_obj_set_style_text_font(keyboard_, &keyboard_font_, LV_PART_ITEMS);
+    lv_obj_set_style_text_color(keyboard_, key_text, LV_PART_ITEMS);
+    lv_obj_set_style_text_opa(keyboard_, LV_OPA_COVER, LV_PART_ITEMS);
+
+    lv_obj_set_style_bg_opa(keyboard_, LV_OPA_TRANSP, LV_PART_ITEMS | LV_STATE_DISABLED);
+    lv_obj_set_style_border_opa(keyboard_, LV_OPA_TRANSP, LV_PART_ITEMS | LV_STATE_DISABLED);
+    lv_obj_set_style_shadow_opa(keyboard_, LV_OPA_TRANSP, LV_PART_ITEMS | LV_STATE_DISABLED);
+    lv_obj_set_style_text_opa(keyboard_, LV_OPA_TRANSP, LV_PART_ITEMS | LV_STATE_DISABLED);
+}
 
 void KeyboardManager::init(lv_obj_t* parent) {
     if (keyboard_ != nullptr) {
@@ -1124,48 +1253,16 @@ void KeyboardManager::init(lv_obj_t* parent) {
     mode_ = MODE_ALPHA_LC;
     apply_keyboard_mode();
 
-    lv_color_t keyboard_bg = theme_manager_get_color("screen_bg");
-    lv_color_t key_bg = theme_manager_get_color("elevated_bg");
-    // Special (shift-lock, mode-toggle) keys derive from the regular key color
-    // by lightening in dark mode / darkening in light mode so they read as
-    // distinct without a dedicated theme token.
-    lv_color_t key_special_bg = theme_manager_is_dark_mode() ? lv_color_lighten(key_bg, LV_OPA_20)
-                                                             : lv_color_darken(key_bg, LV_OPA_20);
-    // Auto-pick text color for contrast against each key background so key
-    // glyphs stay legible across themes and light/dark modes.
-    lv_color_t key_text = theme_manager_get_contrast_color(key_bg);
-    lv_color_t key_special_text = theme_manager_get_contrast_color(key_special_bg);
+    apply_key_styles();
 
-    lv_obj_set_style_bg_color(keyboard_, keyboard_bg, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(keyboard_, LV_OPA_COVER, LV_PART_MAIN);
-
-    lv_obj_set_style_bg_color(keyboard_, key_bg, LV_PART_ITEMS);
-    lv_obj_set_style_bg_opa(keyboard_, LV_OPA_COVER, LV_PART_ITEMS);
-    lv_obj_set_style_radius(keyboard_, 8, LV_PART_ITEMS);
-
-#if defined(ESP_PLATFORM)
-    // No per-key shadows: software shadow blur is LVGL's most expensive
-    // primitive, and 30+ keys pay it on every matrix repaint — measured ~10x
-    // per-pixel render cost vs normal content on the ESP32-S3 pipeline.
-    lv_obj_set_style_shadow_width(keyboard_, 0, LV_PART_ITEMS);
-#else
-    lv_obj_set_style_shadow_width(keyboard_, 2, LV_PART_ITEMS);
-    lv_obj_set_style_shadow_opa(keyboard_, LV_OPA_30, LV_PART_ITEMS);
-    lv_obj_set_style_shadow_offset_y(keyboard_, 1, LV_PART_ITEMS);
-    lv_obj_set_style_shadow_color(keyboard_, lv_color_black(), LV_PART_ITEMS);
-#endif
-
-    lv_obj_set_style_bg_color(keyboard_, key_special_bg, LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_text_color(keyboard_, key_special_text, LV_PART_ITEMS | LV_STATE_CHECKED);
-
-    lv_obj_set_style_text_font(keyboard_, &keyboard_font_, LV_PART_ITEMS);
-    lv_obj_set_style_text_color(keyboard_, key_text, LV_PART_ITEMS);
-    lv_obj_set_style_text_opa(keyboard_, LV_OPA_COVER, LV_PART_ITEMS);
-
-    lv_obj_set_style_bg_opa(keyboard_, LV_OPA_TRANSP, LV_PART_ITEMS | LV_STATE_DISABLED);
-    lv_obj_set_style_border_opa(keyboard_, LV_OPA_TRANSP, LV_PART_ITEMS | LV_STATE_DISABLED);
-    lv_obj_set_style_shadow_opa(keyboard_, LV_OPA_TRANSP, LV_PART_ITEMS | LV_STATE_DISABLED);
-    lv_obj_set_style_text_opa(keyboard_, LV_OPA_TRANSP, LV_PART_ITEMS | LV_STATE_DISABLED);
+    // The keyboard is created once at startup and never rebuilt, so without this
+    // its keys keep the palette that was active when the app started. The bg
+    // colour swap in theme_manager_apply_theme() reaches the key background but
+    // not the derived skirt or press colours. Static singleton subject, so a
+    // plain member guard with no SubjectLifetime is correct.
+    theme_observer_ = helix::ui::observe_int_sync<KeyboardManager>(
+        theme_manager_get_changed_subject(), this,
+        [](KeyboardManager* self, int) { self->apply_key_styles(); });
 
     lv_obj_align(keyboard_, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_add_flag(keyboard_, LV_OBJ_FLAG_HIDDEN);
@@ -1491,6 +1588,10 @@ void KeyboardManager::reset() {
         helix::ui::safe_delete_deferred(keyboard_);
     }
     keyboard_ = nullptr;
+
+    // Drop the theme observer with the widget it restyles: its handler
+    // dereferences keyboard_, and init() installs a fresh one on rebuild.
+    theme_observer_.reset();
 
     context_textarea_ = nullptr; // Child of app_layout — deleted by lv_obj_del(m_app_layout)
 

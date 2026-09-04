@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -113,7 +114,7 @@ TEST_CASE_METHOD(ToolSwitcherFixture,
 
     // --- Compact: both axes below floor. Contradicting span: 2x2 (old rule:
     // colspan==1 && rowspan==1 is false -> pills).
-    h.resize(2, 2, W_NORMAL - 1, H_TALL - 1);
+    h.resize(2, 2, w_normal() - 1, h_tall() - 1);
     process_lvgl(30);
 
     CHECK(lv_obj_get_child_count(container) == 2); // icon + label
@@ -126,7 +127,7 @@ TEST_CASE_METHOD(ToolSwitcherFixture,
     // the colspan/rowspan migration this test targets — keeps a single flex
     // row instead of switching to its 2-row grid. Contradicting span: 1x1
     // (old rule -> compact).
-    h.resize(1, 1, W_NORMAL, 60);
+    h.resize(1, 1, w_normal(), 60);
     process_lvgl(30);
 
     REQUIRE(lv_obj_get_child_count(container) == 3); // one ui_button per tool
@@ -135,7 +136,7 @@ TEST_CASE_METHOD(ToolSwitcherFixture,
     // --- Pill column: narrow but tall — the legacy 1x2 vertical-stack shape
     // (tool_switcher_widget.cpp's rebuild_pills(), the current_rowspan_>=2
     // branch). Contradicting span: 1x1 (old rule -> compact, not even pills).
-    h.resize(1, 2, W_NORMAL - 1, H_TALL);
+    h.resize(1, 2, w_normal() - 1, h_tall());
     process_lvgl(30);
 
     REQUIRE(lv_obj_get_child_count(container) == 3);
@@ -162,7 +163,7 @@ TEST_CASE_METHOD(ToolSwitcherFixture,
     // is a separate real-geometry heuristic this test doesn't target).
     // on_active_tool_changed() never receives a size — it only ever sees
     // whatever this resize cached.
-    h.resize(1, 1, W_WIDE, H_TALL - 1);
+    h.resize(1, 1, w_wide(), h_tall() - 1);
     process_lvgl(30);
     REQUIRE(lv_obj_get_child_count(container) == 3);
 
@@ -201,7 +202,7 @@ TEST_CASE_METHOD(ToolSwitcherFixture,
     process_lvgl(30);
 
     // Grant pill-row pixels with a single tool present.
-    h.resize(1, 1, W_WIDE, H_TALL - 1);
+    h.resize(1, 1, w_wide(), h_tall() - 1);
     process_lvgl(30);
     REQUIRE(lv_obj_get_child_count(container) == 1);
 
@@ -244,7 +245,7 @@ TEST_CASE_METHOD(ToolSwitcherFixture,
     // exactly) — the real cell that only fits a single row, per the bug
     // report's "590px measured, 66px real" repro.
     int real_h = pill_min_h;
-    int real_w = W_WIDE;
+    int real_w = w_wide();
 
     PanelWidgetHarness<ToolSwitcherWidget> h(test_screen(), state());
     lv_obj_t* container = h.child("tool_switcher_container");

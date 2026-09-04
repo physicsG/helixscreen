@@ -38,7 +38,7 @@ HelixScreen works with any Klipper-based printer running Moonraker. Tested and s
 | FlashForge AD5X | **Tested** | IFS filament system integrated |
 | SOVOL SV06 / SV08 | **Tested** | Community reports welcome |
 | Elegoo Centauri Carbon 1 | **Tested** | Requires [OpenCentauri COSMOS](https://docs.opencentauri.cc/klipper-conversion/cosmos/cosmos/) firmware; ships with factory white-balance calibration |
-| Snapmaker U1 (SnapSwap toolchanger) | **Tested** | Native four-head support with RFID spool recognition. Needs SSH — stock firmware (1.2+) via its **Root access** option, or PAXX Extended Firmware (SSH on by default). Tested on PAXX 1.2.x–1.4.x; stock-firmware support is newly added. Reinstall after a firmware update. On PAXX firmware you can also view/control the screen remotely in Mainsail/Fluidd (the "gui" webcam) via the firmware's `web remote_screen` toggle; physical cameras work normally. |
+| Snapmaker U1 (SnapSwap toolchanger) | **Tested** | Native four-head support with RFID spool recognition. Needs SSH — stock firmware (1.2+) via its **Root access** option, or PAXX Extended Firmware (SSH on by default). Tested on PAXX 1.2.x–1.4.x; the stock-firmware path is unverified on a real stock device. Reinstall after a firmware update. On PAXX firmware you can also view/control the screen remotely in Mainsail/Fluidd (the "gui" webcam) via the firmware's `web remote_screen` toggle; physical cameras work normally. |
 | Artillery M1 Pro | **Tested** | |
 | Zero G Mercury / Nebula / Hydra | **Tested** | Multiple variants supported |
 | Other Klipper printers | **Should work** | Any printer with Moonraker API access |
@@ -69,9 +69,9 @@ Point it at Moonraker (port `7125`), not the Mainsail/Fluidd web interface — y
 
 **Display sizes:** HelixScreen auto-detects the best layout for your display. 800x480 and 1024x600 are fully supported. 480x320 displays will run but may have layout overlap issues — improved small-screen support is ongoing.
 
-**Ultrawide and portrait screens both work.** The layout engine detects an ultrawide screen (wider than about 2.5:1, e.g. 1920x480) or a portrait screen (narrower than about 0.8:1, e.g. 480x800) and adapts the navigation bar and grid sizing to it. Portrait additionally has dedicated layouts for the app shell, navigation bar, print status and print tune. Panels without a dedicated layout use the adaptive fallback, so landscape remains the most polished of the three.
+**Ultrawide and portrait screens both work.** The layout engine detects an ultrawide screen (wider than about 2.5:1, e.g. 1920x440) or a portrait screen (narrower than about 0.8:1, e.g. 480x800) and adapts the navigation bar and grid sizing to it. Portrait additionally has dedicated layouts for the app shell, navigation bar, Print Status, Print Tune, Motion, Bed Mesh and the temperature graph; ultrawide has the home dashboard and nothing else. Panels without a dedicated layout use the adaptive fallback, so landscape remains the most polished of the three.
 
-The part that adapts furthest is the **home dashboard**. Its widget grid is sized from the actual screen rather than a fixed table, so a 480x800 portrait panel gets a 3x6 grid and a 320x1480 one gets 2x12 — more usable cells than before. Portrait also has its own set of default widgets (Tips is left out, since it is too wide to be worth a row on a narrow grid), and buttons, inputs, and headers are sized from the screen's height, so a tall panel gets taller controls instead of cramped ones. Nothing outside the home dashboard changes.
+The part that adapts furthest is the **home dashboard**. Its grid is sized from the actual screen with square cells, so a 480x800 portrait panel gets 4 columns by 6 rows, a tall 320x1480 one gets 4x17, and a 1920x440 ultrawide gets 23x5. Portrait and ultrawide each have their own default layout rather than a stretched landscape one, and on a portrait panel buttons, inputs, and headers are sized from the screen's height, so you get taller controls instead of cramped ones.
 
 Both keep gaining per-panel work. If you want to help, they need only XML, not C++ — see the [UI Contributor Guide](../devel/UI_CONTRIBUTOR_GUIDE.md).
 
@@ -109,7 +109,7 @@ For an exact layer count and a reliable time-remaining estimate, HelixScreen nee
 | **Reactive Binding** | Built-in | Manual | Manual |
 | **3D G-code preview** | Yes | 2D layers | No |
 | **3D bed mesh** | Yes | 2D heatmap | 2D heatmap |
-| **Status** | 1.0 (active) | Mature (maintenance) | Unmaintained |
+| **Status** | Pre-1.0, actively developed | Mature (maintenance) | Unmaintained |
 
 **HelixScreen advantages:**
 - Low memory footprint (~15MB on embedded targets vs ~50MB for KlipperScreen on the same hardware)
@@ -274,14 +274,16 @@ Features include visual slot configuration with tool badges, endless spool arrow
 
 ### Can I customize the home screen widgets?
 
-**Yes!** The Home Panel displays configurable widgets — quick-access buttons for features like temperature, LED control, network status, AMS, and more.
+**Yes!** The Home Panel is a grid of widgets you arrange yourself — temperatures, LED control, network status, AMS, camera, macro buttons, and more, spread across up to 8 pages.
 
 To customize:
-1. Long-press the Home panel to enter Edit Mode
-2. Tap the **+** button on the navigation bar to open the Widget Catalog and add widgets
-3. Drag widgets to rearrange or resize them, then tap **Done**
+1. **Long-press the widget grid** to enter Edit Mode
+2. **Drag** a widget to move it, or drag its edges to resize it
+3. **Long-press an empty area** — or tap **+** on the navigation bar — to open the Widget Catalog and add something
+4. Select a widget and tap the **trash icon** to remove it, or the **gear icon** to configure it
+5. Tap **Done** when you are finished
 
-Some widgets (like AMS, humidity sensor, or probe) only appear if the relevant hardware is detected. See the [Home Panel guide](guide/home-panel.md#available-widgets) for the full widget list.
+How many widgets fit depends on your screen - the grid is sized from it, so a bigger screen gives you more cells rather than bigger ones. Widgets that need hardware you don't have still show up in the Widget Catalog, but they are dimmed, can't be tapped, and carry the reason in parentheses - for example "Humidity (No humidity sensor detected)" or "Chamber Temperature (No chamber temperature sensor detected)". They become available on their own once the hardware is detected. See the [Home Panel guide](guide/home-panel.md#available-widgets) for the full widget list.
 
 ### Is there a quicker way to shut down the printer?
 

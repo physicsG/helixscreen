@@ -40,6 +40,7 @@ src/api/drm_rotation_strategy.cpp  # not in the v1 Core+AMS cut
 src/api/ethernet_backend.cpp  # not in the v1 Core+AMS cut
 src/api/ethernet_backend_linux.cpp  # not in the v1 Core+AMS cut
 src/api/ethernet_backend_mock.cpp  # not in the v1 Core+AMS cut
+src/api/ethernet_backend_netd.cpp  # not in the v1 Core+AMS cut
 src/api/ethernet_manager.cpp  # not in the v1 Core+AMS cut
 src/api/fbdev_size_helper.cpp  # not in the v1 Core+AMS cut
 src/api/input_device_scanner.cpp  # not in the v1 Core+AMS cut
@@ -60,6 +61,7 @@ src/api/moonraker_request_tracker.cpp  # not in the v1 Core+AMS cut
 src/api/moonraker_rest_api.cpp  # not in the v1 Core+AMS cut
 src/api/moonraker_spoolman_api.cpp  # scope decision 2026-08-12: unreachable while ESP discovery omits server.info#2; re-adding requires restoring these TUs + verifying flash budget; until then the UI entry points fail with an error toast
 src/api/moonraker_timelapse_api.cpp  # not in the v1 Core+AMS cut
+src/api/netd_protocol.cpp  # not in the v1 Core+AMS cut
 src/api/touch_calibration_wrapper.cpp  # not in the v1 Core+AMS cut
 src/api/usb_backend.cpp  # not in the v1 Core+AMS cut
 src/api/usb_backend_linux.cpp  # not in the v1 Core+AMS cut
@@ -67,6 +69,7 @@ src/api/usb_backend_mock.cpp  # not in the v1 Core+AMS cut
 src/api/usb_manager.cpp  # not in the v1 Core+AMS cut
 src/api/webcam_service_health.cpp  # camera service health; only consumer is the excluded discovery sequence
 src/api/wifi_backend_mock.cpp  # not in the v1 Core+AMS cut
+src/api/wifi_backend_netd.cpp  # not in the v1 Core+AMS cut
 src/api/wifi_backend_networkmanager.cpp  # not in the v1 Core+AMS cut
 src/api/wifi_backend_wpa_supplicant.cpp  # not in the v1 Core+AMS cut
 src/api/wifi_saved_config.cpp  # not in the v1 Core+AMS cut
@@ -126,7 +129,10 @@ src/rendering/gcode_layer_index.cpp  # not in the v1 Core+AMS cut
 src/rendering/gcode_layer_renderer.cpp  # not in the v1 Core+AMS cut
 src/rendering/gcode_object_thumbnail_renderer.cpp  # not in the v1 Core+AMS cut
 src/rendering/gcode_projection.cpp  # not in the v1 Core+AMS cut
+src/rendering/gcode_raster.cpp  # not in the v1 Core+AMS cut
 src/rendering/gcode_renderer.cpp  # not in the v1 Core+AMS cut
+src/rendering/gcode_selection_state.cpp  # not in the v1 Core+AMS cut
+src/rendering/gcode_selection_style.cpp  # not in the v1 Core+AMS cut
 src/rendering/gcode_streaming_config.cpp  # not in the v1 Core+AMS cut
 src/rendering/gcode_streaming_controller.cpp  # not in the v1 Core+AMS cut
 src/rendering/geometry_budget_manager.cpp  # not in the v1 Core+AMS cut
@@ -152,10 +158,10 @@ src/system/helix_cache_dir.cpp  # firmware provides its own get_helix_cache_dir 
 src/system/helix_display_telemetry.cpp  # not in the v1 Core+AMS cut
 src/system/helix_lvgl_anomaly.cpp  # not in the v1 Core+AMS cut
 src/system/helix_version.cpp  # not in the v1 Core+AMS cut
-src/system/host_identity.cpp  # not in the v1 Core+AMS cut
 src/system/http_android.cpp  # not in the v1 Core+AMS cut
 src/system/ipp_printer.cpp  # not in the v1 Core+AMS cut
 src/system/ipp_protocol.cpp  # not in the v1 Core+AMS cut
+src/system/klippy_frame_decoder.cpp  # decodes klippy's UDS accel stream for the belt tuner, which requires co-location with klippy
 src/system/label_bitmap.cpp  # not in the v1 Core+AMS cut
 src/system/label_printer.cpp  # not in the v1 Core+AMS cut
 src/system/label_printer_settings.cpp  # not in the v1 Core+AMS cut
@@ -180,6 +186,7 @@ src/system/platform_info.cpp  # not in the v1 Core+AMS cut
 src/system/pwg_raster.cpp  # not in the v1 Core+AMS cut
 src/system/pwm_sound_backend.cpp  # not in the v1 Core+AMS cut
 src/system/qr_decoder.cpp  # not in the v1 Core+AMS cut
+src/system/screen_locality.cpp  # not in the v1 Core+AMS cut
 src/system/screenshot.cpp  # not in the v1 Core+AMS cut
 src/system/sdl_sound_backend.cpp  # not in the v1 Core+AMS cut
 src/system/sha256_util.cpp  # not in the v1 Core+AMS cut
@@ -206,7 +213,7 @@ src/ui/screensaver_pipes.cpp  # not in the v1 Core+AMS cut
 src/ui/screensaver_starfield.cpp  # not in the v1 Core+AMS cut
 src/ui/splash_screen.cpp  # not in the v1 Core+AMS cut
 src/ui/ui_ams_tool_text.cpp  # not in the v1 Core+AMS cut
-src/ui/ui_coalesced_timer.cpp  # not in the v1 Core+AMS cut
+src/ui/ui_belt_trace.cpp  # not in the v1 Core+AMS cut
 src/ui/ui_crash_report_modal.cpp  # not in the v1 Core+AMS cut
 src/ui/ui_fatal_error.cpp  # not in the v1 Core+AMS cut
 src/ui/ui_frequency_response_chart.cpp  # not in the v1 Core+AMS cut
@@ -230,6 +237,7 @@ src/ui/ui_panel_screws_tilt.cpp  # not in the v1 Core+AMS cut
 src/ui/ui_panel_spoolman.cpp  # scope decision 2026-08-12: unreachable while ESP discovery omits server.info#2; re-adding requires restoring these TUs + verifying flash budget; until then the UI entry points fail with an error toast
 src/ui/ui_panel_step_test.cpp  # not in the v1 Core+AMS cut
 src/ui/ui_panel_test.cpp  # not in the v1 Core+AMS cut
+src/ui/ui_pluck_animation.cpp  # not in the v1 Core+AMS cut
 src/ui/ui_print_cancel_modal.cpp  # not in the v1 Core+AMS cut
 src/ui/ui_save_z_offset_modal.cpp  # not in the v1 Core+AMS cut
 src/ui/ui_screensaver.cpp  # not in the v1 Core+AMS cut
@@ -260,3 +268,4 @@ src/ui/upgrade_banner.cpp  # not in the v1 Core+AMS cut
 src/ui/wizard_validation.cpp  # not in the v1 Core+AMS cut
 src/util/version.cpp  # not in the v1 Core+AMS cut
 
+src/system/jz_pwm_sound_backend.cpp  # AD5X-only: exec's the Linux fx-pwm child; no process model on ESP32

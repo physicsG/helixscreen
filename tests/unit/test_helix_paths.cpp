@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -44,8 +45,12 @@ class EnvVarGuard {
             ::unsetenv(name_.c_str());
         }
     }
-    void set(const std::string& value) { ::setenv(name_.c_str(), value.c_str(), 1); }
-    void unset() { ::unsetenv(name_.c_str()); }
+    void set(const std::string& value) {
+        ::setenv(name_.c_str(), value.c_str(), 1);
+    }
+    void unset() {
+        ::unsetenv(name_.c_str());
+    }
 
   private:
     std::string name_;
@@ -217,7 +222,8 @@ TEST_CASE("home rejects control characters", "[helix_paths]") {
     EnvVarGuard home_guard("HOME");
 
     // Absolute path with an embedded control char (0x01) is rejected.
-    home_guard.set("/home/\x01" "bad");
+    home_guard.set("/home/\x01"
+                   "bad");
     CHECK(home() == "");
 
     // A clean absolute path is still accepted (guards against over-rejection).

@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../include/plr_offer.h"
 #include "moonraker_client.h" // ConnectionState

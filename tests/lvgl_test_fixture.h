@@ -22,9 +22,19 @@ constexpr int TEST_DISPLAY_HEIGHT = 480;
  *
  * A resize is the only production path that reaches
  * theme_manager_refresh_layout_constants(), and the rest of the suite assumes
- * the fixture's TEST_DISPLAY_WIDTH x TEST_DISPLAY_HEIGHT. Restoring the
- * resolution does NOT restore the XML constants the refresh rewrote — call the
- * refresh once more after the scope ends if the test moved them.
+ * the fixture's TEST_DISPLAY_WIDTH x TEST_DISPLAY_HEIGHT.
+ *
+ * Restoring the resolution does NOT restore the XML constants the refresh
+ * rewrote — call the refresh once more after the scope ends if the test moved
+ * them.
+ *
+ * Refreshing from this guard's own constructor and destructor was tried and
+ * reverted: the content-fit sweep (test_widget_content_fits) measures widgets
+ * across eight geometries inside these scopes and depends on the token set NOT
+ * moving under it, so the extra refreshes broke its measurements and crashed
+ * the suite. A caller that needs the constants to follow must say so itself.
+ * For the breakpoint subject specifically, use
+ * tests/test_helpers/scoped_breakpoint.h, which restores what it sets.
  */
 class ScopedResolution {
   public:

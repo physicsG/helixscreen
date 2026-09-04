@@ -7,9 +7,12 @@
         style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="#space_xs" scrollable="false">
     <!-- Visibility gate (klippy not READY) checked in C++ populate_widgets() -->
     <!-- Circular button: warning color to indicate recovery action needed -->
+    <!-- style_pad_all="0": the badge IS the icon's box, so ui_button's default
+         padding would leave the glyph less room than icon_badge_size promises.
+         Every other icon_badge_size badge in the tree zeroes it the same way. -->
     <ui_button name="firmware_restart_button_home"
                width="#icon_badge_size" height="#icon_badge_size" style_radius="#icon_badge_radius"
-               style_border_width="0" focusable="false" style_bg_color="#warning" style_bg_opa="255">
+               style_border_width="0" style_pad_all="0" focusable="false" style_bg_color="#warning" style_bg_opa="255">
       <icon src="refresh" size="sm" variant="text" align="center"/>
       <event_cb trigger="clicked" callback="firmware_restart_clicked"/>
     </ui_button>

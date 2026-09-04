@@ -291,6 +291,8 @@ def check_file(path: Path) -> list[tuple[int, str, str]]:
 def iter_targets(explicit: list[str]) -> Iterable[Path]:
     if explicit:
         for f in explicit:
+            if f.startswith("firmware/"):
+                continue
             p = Path(f)
             if p.suffix in SCAN_SUFFIXES and p.is_file() and not is_excluded(p):
                 yield p

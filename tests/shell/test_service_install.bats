@@ -10,8 +10,9 @@ setup() {
     load helpers
 
     # Source modules (reset source guards so each test gets a fresh load)
-    unset _HELIX_COMMON_SOURCED _HELIX_SERVICE_SOURCED
+    unset _HELIX_COMMON_SOURCED _HELIX_HOST_PROFILE_SOURCED _HELIX_SERVICE_SOURCED
     . "$WORKTREE_ROOT/scripts/lib/installer/common.sh" 2>/dev/null || true
+    . "$WORKTREE_ROOT/scripts/lib/installer/host_profile.sh" 2>/dev/null || true
     . "$WORKTREE_ROOT/scripts/lib/installer/service.sh"
 
     # Set required globals
@@ -304,6 +305,74 @@ OKEOF
 }
 
 # =============================================================================
+# install_service: mod-managed host
+#
+# The mod does not start the payload, so the installer installs its own
+# service. set_install_paths points INIT_SCRIPT_DEST at the mod chroot's
+# /etc/init.d; install_service must take the ordinary SysV path and land the
+# script there, creating the directory, which a stock rig does not have.
+# =============================================================================
+
+@test "install_service: mod-managed host installs into the chroot init.d" {
+    HOST_SERVICE_MECHANISM="mod-managed"
+    INIT_SYSTEM="sysv"
+    create_init_template
+    HOST_MOD_CHROOT="$BATS_TEST_TMPDIR/usr/data/.mod/.forge-x"
+    # Deliberately NOT pre-created: the installer owns creating it.
+    INIT_SCRIPT_DEST="$HOST_MOD_CHROOT/etc/init.d/S80helixscreen"
+
+    run install_service "ad5x"
+    [ "$status" -eq 0 ]
+    [ -f "$INIT_SCRIPT_DEST" ]
+    [ -x "$INIT_SCRIPT_DEST" ]
+}
+
+@test "install_service: mod-managed host creates the absent chroot init.d dir" {
+    # The directory being absent is what leaves the mod's start.sh loop with
+    # nothing to run, so creating it is the load-bearing half of the install.
+    HOST_SERVICE_MECHANISM="mod-managed"
+    INIT_SYSTEM="sysv"
+    create_init_template
+    HOST_MOD_CHROOT="$BATS_TEST_TMPDIR/usr/data/.mod/.forge-x"
+    mkdir -p "$HOST_MOD_CHROOT/etc"
+    [ ! -d "$HOST_MOD_CHROOT/etc/init.d" ]
+    INIT_SCRIPT_DEST="$HOST_MOD_CHROOT/etc/init.d/S80helixscreen"
+
+    install_service "ad5x"
+
+    [ -d "$HOST_MOD_CHROOT/etc/init.d" ]
+    [ -f "$INIT_SCRIPT_DEST" ]
+}
+
+@test "install_service: mod-managed host writes no systemd unit" {
+    # Mod hosts are SysV; a unit file would be dead weight in the mod's tree.
+    HOST_SERVICE_MECHANISM="mod-managed"
+    INIT_SYSTEM="sysv"
+    create_init_template
+    create_service_template
+    setup_sudo_redirect
+    HOST_MOD_CHROOT="$BATS_TEST_TMPDIR/usr/data/.mod/.forge-x"
+    INIT_SCRIPT_DEST="$HOST_MOD_CHROOT/etc/init.d/S80helixscreen"
+
+    install_service "ad5x"
+
+    [ ! -f "$FAKE_SYSTEMD_DIR/helixscreen.service" ]
+}
+
+@test "install_service: a plain host still installs the init script (control)" {
+    # host_profile.sh initializes the mechanism to "systemd" at source time;
+    # only a probed mod host flips it to mod-managed. The dispatcher must
+    # still reach the sysv path for everyone else.
+    HOST_SERVICE_MECHANISM="systemd"
+    INIT_SYSTEM="sysv"
+    create_init_template
+
+    install_service "ad5m"
+
+    [ -f "$INIT_SCRIPT_DEST" ]
+}
+
+# =============================================================================
 # stop_service
 # =============================================================================
 
@@ -470,11 +539,9 @@ EOF
     grep -q "$INSTALL_DIR" "$chown_log"
 }
 
-# Root-run platforms (ad5m/ad5x/k1/k2/cc1/u1) used to be skipped entirely, so
-# nothing ever normalised the numeric uid/gid that root's --same-owner extract
-# restored out of the release tarball.  A K2 install measured 890 of 915 files
-# owned by uid 1001, which has no /etc/passwd entry on that box.  The root case
-# must now chown to root:root so existing bad installs heal on the next update.
+# Root's --same-owner extract restores the numeric uid/gid baked into the
+# release tarball, which need not exist in the device's /etc/passwd. The root
+# case must normalise the tree to root:root.
 @test "fix_install_ownership: root user normalises the tree to root:root" {
     KLIPPER_USER="root"
     mkdir -p "$INSTALL_DIR/config"

@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -155,7 +156,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: out-of-range fill subject value c
     // -1 "no data" skip are covered by "fill renders from subject without panel
     // push".
     ui_ams_slot_register();
-    AmsState::instance().init_subjects(false);
+    AmsState::instance().init_subjects(true);
 
     lv_subject_t* fill = AmsState::instance().get_slot_fill_subject(0);
     REQUIRE(fill != nullptr);
@@ -177,9 +178,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: out-of-range fill subject value c
 TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: fill renders from subject without panel push",
                  "[ui][ams_slot][fill]") {
     ui_ams_slot_register();
-    // init_subjects is idempotent on the shared singleton; register_xml=false is
-    // fine because the widget observes via the C++ accessor, not an XML name.
-    AmsState::instance().init_subjects(false);
+    // Always register_xml=true on this shared singleton, even though the widget
+    // observes via the C++ accessor: the initialized_ guard makes the FIRST init
+    // in the process decide, so a false here leaves the XML names unpublished
+    // for every later case in the same shard.
+    AmsState::instance().init_subjects(true);
 
     // Write the per-slot fill subject exactly as sync_from_backend would (50%).
     lv_subject_t* fill = AmsState::instance().get_slot_fill_subject(0);
@@ -217,9 +220,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: fill renders from subject without
 TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: material renders from subject without panel push",
                  "[ui][ams_slot][material][1065]") {
     ui_ams_slot_register();
-    // The widget observes via the C++ accessor, not an XML name, so
-    // register_xml=false is fine (mirrors the fill test).
-    AmsState::instance().init_subjects(false);
+    // register_xml=true for the shared-singleton reason in the fill test above.
+    AmsState::instance().init_subjects(true);
 
     // Seed the per-slot material subject exactly as sync_from_backend would.
     lv_subject_t* mat = AmsState::instance().get_slot_material_subject(0);
@@ -307,8 +309,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_slot: material label binds to subject",
     // LVGLUITestFixture does not init AmsState subjects. Without this the
     // per-slot material subject is raw memory, sync_from_backend()'s
     // lv_subject_copy_string lands nowhere, and the label stays at "--".
-    // register_xml=false is enough — the widget observes via the C++ accessor.
-    AmsState::instance().init_subjects(false);
+    AmsState::instance().init_subjects(true);
 
     // Set up mock backend with known data
     auto mock = AmsBackend::create_mock(4);
@@ -717,24 +718,15 @@ struct SpoolVisualState {
 ///   [2] empty_placeholder (unnamed, transparent)
 ///   [3] tool_badge (XML, named, moved to end via move_to_index)
 ///   [4] error_indicator (unnamed, moved to end)
-/// The XML-named badges are always named; the dynamically-created visuals are
-/// unnamed. We key off the first unnamed child for the spool visual.
+/// The spool visual (spool_canvas in the 3d branch, or the filament_ring in
+/// the flat branch) is named "spool_graphic" by create_spool_visual(), so we
+/// look it up by name rather than by position.
 SpoolVisualState inspect_spool_state(lv_obj_t* spool_container) {
     SpoolVisualState st;
     uint32_t n = lv_obj_get_child_count(spool_container);
     st.child_count = static_cast<int>(n);
 
-    lv_obj_t* spool_visual = nullptr;
-    for (uint32_t i = 0; i < n; ++i) {
-        lv_obj_t* child = lv_obj_get_child(spool_container, i);
-        if (!child)
-            continue;
-        const char* name = lv_obj_get_name(child);
-        if (name)
-            continue; // skip named XML children (status_badge, tool_badge)
-        spool_visual = child;
-        break;
-    }
+    lv_obj_t* spool_visual = lv_obj_find_by_name(spool_container, "spool_graphic");
     if (!spool_visual)
         return st;
 
@@ -855,7 +847,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "AMS slot hides empty slot with no metadata 
 }
 
 TEST_CASE("SlotInfo::display_fill_level renders ghost lanes empty, present lanes by weight",
-          "[ams][slot][1071]") {
+          "[ams][slot][1071][1367]") {
     // Ghost lane: EMPTY status, but a Spoolman link + material were RETAINED
     // across an eject (#1071), so has_filament_info() is true. The fill bar must
     // read empty (0), NOT the metadata fallback — otherwise an ejected lane
@@ -892,4 +884,39 @@ TEST_CASE("SlotInfo::display_fill_level renders ghost lanes empty, present lanes
     SlotInfo bare;
     bare.status = SlotStatus::AVAILABLE;
     CHECK_FALSE(bare.display_fill_level().has_value());
+
+    // UNKNOWN lane, both weights known: UNKNOWN itself carries no presence
+    // signal (a backend that publishes none, or the startup skeleton before
+    // the first status parse lands), so the weights decide as for a present
+    // lane.
+    SlotInfo unknown_weighed;
+    unknown_weighed.status = SlotStatus::UNKNOWN;
+    unknown_weighed.total_weight_g = 1000.0f;
+    unknown_weighed.remaining_weight_g = 250.0f;
+    auto uwfill = unknown_weighed.display_fill_level();
+    REQUIRE(uwfill.has_value());
+    CHECK(*uwfill == Catch::Approx(0.25f));
+
+    // UNKNOWN lane, metadata but no weights: full, same metadata fallback as
+    // a present lane.
+    SlotInfo unknown_meta;
+    unknown_meta.status = SlotStatus::UNKNOWN;
+    unknown_meta.material = "PLA";
+    auto umfill = unknown_meta.display_fill_level();
+    REQUIRE(umfill.has_value());
+    CHECK(*umfill == Catch::Approx(1.0f));
+
+    // UNKNOWN lane, nothing known at all: leave the bar unchanged (nullopt).
+    SlotInfo unknown_bare;
+    unknown_bare.status = SlotStatus::UNKNOWN;
+    CHECK_FALSE(unknown_bare.display_fill_level().has_value());
+
+    // UNKNOWN lane, colour only: has_filament_info() counts a non-default
+    // color_rgb, so the metadata fallback applies here too.
+    SlotInfo unknown_color;
+    unknown_color.status = SlotStatus::UNKNOWN;
+    unknown_color.color_rgb = 0x00FF00;
+    auto ucfill = unknown_color.display_fill_level();
+    REQUIRE(ucfill.has_value());
+    CHECK(*ucfill == Catch::Approx(1.0f));
 }

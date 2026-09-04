@@ -25,17 +25,33 @@
                     style_text_color="#text_muted" clickable="false" event_bubble="true"/>
         <text_small bind_text="print_status_idle_meta"
                     style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-        <!-- Flex spacer pushes the Reprint Last button to the bottom if room permits -->
-        <lv_obj width="100%"
-                flex_grow="1" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false"
-                clickable="false" event_bubble="true"/>
-        <ui_button name="idle_reprint_btn"
-                   width="content" height="#button_height_sm" variant="outline" text="Reprint Last"
-                   translation_tag="Reprint Last">
-          <bind_state_if_eq subject="print_status_idle_has_last" state="disabled" ref_value="0"/>
-          <event_cb trigger="clicked" callback="library_last_cb"/>
-        </ui_button>
       </lv_obj>
+    </lv_obj>
+    <!-- Actions span the whole card, not the data column beside the thumbnail.
+         The data column is a little over half of a portrait card; two buttons
+         squeezed into it are 77px at 320x480 and their captions overrun the
+         button border. Full width gives both room at every tier.
+         Job Queue lives here because Detailed is the portrait default and the
+         Library row is otherwise the only route to the queue modal from the home
+         screen. Same visibility rule as Library: the widget publishes
+         print_status_queue_hidden from "config allows AND queue non-empty".
+         row_wrap + flex_grow keeps the two the same width, side by side while
+         they fit and stacked when they do not. -->
+    <lv_obj name="idle_action_row"
+            width="100%" height="content" style_pad_all="0" flex_flow="row_wrap" style_pad_column="#space_xs"
+            style_pad_row="#space_xs" scrollable="false" clickable="false" event_bubble="true">
+      <ui_button name="idle_reprint_btn"
+                 width="content" height="#button_height_sm" flex_grow="1" variant="outline" text="Reprint Last"
+                 translation_tag="Reprint Last">
+        <bind_state_if_eq subject="print_status_idle_has_last" state="disabled" ref_value="0"/>
+        <event_cb trigger="clicked" callback="library_last_cb"/>
+      </ui_button>
+      <ui_button name="idle_queue_btn"
+                 width="content" height="#button_height_sm" flex_grow="1" variant="outline" text="Job Queue"
+                 translation_tag="Job Queue">
+        <bind_flag_if_eq subject="print_status_queue_hidden" flag="hidden" ref_value="1"/>
+        <event_cb trigger="clicked" callback="library_queue_cb"/>
+      </ui_button>
     </lv_obj>
     <text_small name="detailed_idle_display_message"
                 width="100%" bind_text="display_message" style_text_align="center" long_mode="dots" hidden="true"

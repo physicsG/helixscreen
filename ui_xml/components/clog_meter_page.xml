@@ -5,7 +5,13 @@
   <!--
     Clog meter page content for carousel embedding.
     Contains the named objects that UiClogMeter expects to find:
-    clog_meter, clog_arc_container, clog_arc, clog_value_text, clog_mode_text.
+    clog_meter, clog_arc_container, clog_arc, clog_value_text, clog_mode_text,
+    clog_safe_icon.
+
+    clog_safe_icon stands in for the arc when the reading is "nothing to
+    report" (clog_meter_is_safe()). UiClogMeter swaps the two — the predicate
+    needs both subjects, and clog_bar_page.xml renders the same state, so the
+    decision lives in C++ where both presentations can share it.
   -->
   <view name="clog_meter_page"
         extends="lv_obj" width="100%" height="100%" style_pad_all="0" style_pad_row="0" style_pad_column="0"
@@ -23,8 +29,11 @@
              and diameter-driven stroke tier. UiClogMeter syncs the
              danger/peak overlay arcs (created in C++) to match. -->
         <helix_progress_arc name="clog_arc" align="center" event_bubble="true"/>
+        <lv_label name="clog_safe_icon"
+                  hidden="true" align="center" text="#icon_check_circle" style_text_font="mdi_icons_24"
+                  style_text_color="#primary" clickable="false" event_bubble="true"/>
         <text_tiny name="clog_value_text"
-                   align="center" bind_text="clog_meter_value_text" style_text_align="center" clickable="false"
+                   align="center" bind_text="clog_meter_center_text" style_text_align="center" clickable="false"
                    event_bubble="true"/>
       </lv_obj>
       <text_tiny name="clog_mode_text"

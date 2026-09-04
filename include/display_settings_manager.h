@@ -177,6 +177,21 @@ class DisplaySettingsManager {
     /** @brief Set keep-navbar-visible preference (updates subject + persists + JNI push) */
     void set_keep_navbar_visible(bool enabled);
 
+    /**
+     * @brief Get the UI scale setting as a percentage.
+     *
+     * DisplayMetrics::kScaleSettingAutomatic (0) means "follow the panel's
+     * DPI"; anything else is an explicit percentage. Deliberately has no
+     * subject: the scale is read once during display init and screens do not
+     * re-tier at runtime, so a subject would advertise live reactivity that
+     * does not exist. Application reads the same Config key directly, because
+     * it needs the value before this manager is constructed.
+     */
+    int get_ui_scale_percent() const;
+
+    /** @brief Set the UI scale setting (persists; takes effect on next start) */
+    void set_ui_scale_percent(int percent);
+
     /** @brief Get bed mesh render mode (0=Auto, 1=3D, 2=2D) */
     int get_bed_mesh_render_mode() const;
 

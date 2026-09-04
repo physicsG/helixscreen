@@ -21,6 +21,31 @@ HelixScreen has a dedicated cross-compilation target for the FlashForge Adventur
 | Multi-Material | IFS (Intelligent Filament System), 4 spools, auto-switching |
 | SSH | `root@<ip>` (via ZMOD) |
 
+### Buzzer
+
+There is no host audio hardware and no sysfs PWM: the X2600's PWM2 IP is driven
+by the out-of-tree `soc_pwm.ko`, which registers the misc char device
+`/dev/jz_pwm` and never a `pwmchip`, so the PWM sysfs backend cannot probe (or
+steal backend selection) on this platform. The buzzer (pc12) is a host GPIO,
+unreachable from Klipper as configured — both MCUs are serial controller boards
+with no linux MCU — and the stock config set has no `[output_pin]` or beep
+section at all, so no output_pin object ever appears in objects/list.
+
+The working path is gcode to a macro that reaches the host GPIO from Klipper:
+ZMOD's AD5X config defines `[gcode_macro M300]` → `RUN_SHELL_COMMAND
+CMD=audio_freq`; Forge-X's macros/base.cfg ships `[gcode_macro M300]` wrapping
+the fork's native TONE command (whose tone_player backend is being ported to
+the cmd_pwm-compatible `fx-pwm` helper for this platform). HelixScreen's
+speaker detection therefore keys on the M300 macro (`parse_objects`,
+printer_discovery.h), and sound goes out as `M300 S<Hz> P<ms>` via the M300
+backend — S0 is the backend's silence form and is a no-op on both firmwares.
+Note for rigs: Forge-X's TONE wrapper drops every tone when the printer's
+`mod_params` `sound` variable is off — that mutes HelixScreen too, and looks
+identical to a broken sound path. A printer whose firmware handles M300
+without a macro and without an output_pin can be brought in by forcing the
+`speaker` capability override to `enable` in settings.json — that override
+installs the M300 backend too.
+
 ## Filesystem Layout
 
 The AD5X uses a FlashForge-specific layout, distinct from the Creality K1:
@@ -101,6 +126,37 @@ The ZMOD init script sets up touch input via tslib environment variables, but He
 - Framebuffer: `/dev/fb0` (800x480, 32bpp)
 - Backlight: `FBIOBLANK` ioctl (standard Linux fbdev)
 
+## Sound (2026-09-01 rig sessions)
+
+**Decision: UI sounds only.** The piezo is driven natively by
+`JzPwmSoundBackend` (behind `HELIX_HAS_JZ_PWM`, ad5x builds): theme steps
+render in-process with the full NoteEvent synthesis - chords, ADSR,
+sweeps - duty-encoded at the tuner-calibrated 385 MHz DMA rate and played
+by the long-lived `fx-pwm serve` daemon over `/tmp/fx-pwm.sock` (the
+backend spawns it on first sound; it idle-exits after 30 s so klippy's
+per-tone fx-pwm one-shots keep working between UI sounds). Audibility
+floor measured at 10 ms; buffers capped at 2.5 s.
+
+Why no music, with numbers: the driver's dma_update copies buffer words
+at ~30 µs each (measured 2026-09-01: 3,504 words = 106 ms, 14,024 =
+429 ms, linear). Upload time therefore equals playback time at the
+32 kHz ultrasonic carrier - a hard 50% duty ceiling for continuous
+audio; ~80% is reachable only by dropping the carrier into the audible
+band, which whines. The tracker phrase path
+(`jz_pwm_render_phrase`) stays in the tree, tested but unused: mods do
+not ship on ad5x. The M300 path remains for remote-UI installs. PCM
+streaming on this engine is impossible with numbers: buffer swaps are
+refused while a loop is armed and the legal chunk cycle costs a fixed
+~500 ms of silence per chunk.
+
+Daemon hardening (all learned from rig incidents, see SOUND_SYSTEM.md for
+the protocol): SIGPIPE ignored (a client close must not kill the daemon);
+per-frame release/re-request claim dance (second dma_init otherwise
+EPERMs) - and that dance can itself D-wedge pwm2_release, so never loop
+it hot; hold loops use absolute deadlines (poll timeout restarts on a
+readable socket = infinite phrase loop otherwise); the app's sender
+worker is the only socket writer (250 KB bodies block for seconds).
+
 ## Firmware Quirks and Operating Rules (verified 2026-08)
 
 Recorded during the 2026-08 research pass that accompanied commissioning our own AD5X
@@ -177,7 +233,7 @@ All [rig-verified]:
 - **`/opt` is empty on AD5X ZMOD installs.** "No /opt/zmod" is not evidence of a
   failed install.
 - **Port signature:** stock = 22 + 8899; ZMOD = 22 + 80 + 7125 with 8899 closed.
-  Fluidd is served on 80; nginx does **not** proxy Moonraker — talk to `:7125`
+  Fluidd is served on 80; nginx does **not** proxy Moonraker — talk to port 7125
   directly.
 - **First boot takes ~140 s to reach port 80**, then runs calibration and input
   shaping autonomously. Do not poll the printer during that window (see TTC above).
@@ -328,7 +384,7 @@ multicolor by code.
 
 > **Stock zMod has its own switchover.** Before any plugin is installed, `ANALOG_PRUTOK`
 > (`zmod_ifs.py:cmd_ANALOG_PRUTOK`) is wired to `head_switch_sensor`'s `runout_gcode`
-> (`ad5x_display_off.cfg:39-44`). zmod's user-facing name for this is **"Infinite Spool
+> (`ad5x_display_off.cfg`). zmod's user-facing name for this is **"Infinite Spool
 > Mode"**. Same type+colour+present match rule as the plugins. Always on, no toggle.
 > Confirmed from zmod 1.7.1 source and on-device by raza616.
 
@@ -346,7 +402,7 @@ Mostly unused by HelixScreen; `variable_backup` is the exception.
 | `variable_e_feedrates` | Per-tool extrusion feedrates |
 | `variable_kamp` | KAMP (adaptive bed mesh) enabled |
 | `variable_line_purge` | Purge line at print start |
-| `PAUSE REASON=` values | `jam`, `broken`, `runout`, `empty`, `backup`, `nobackup`, `loading` (the `nobackup` reason is bambufy-only, emitted on a backup-enabled runout with no same-type+colour match — `bambufy.cfg:149`) |
+| `PAUSE REASON=` values | `jam`, `broken`, `runout`, `empty`, `backup`, `nobackup`, `loading` (the `nobackup` reason is bambufy-only, emitted on a backup-enabled runout with no same-type+colour match — `bambufy.cfg`) |
 
 ### Known Issue: Zmod Slot Renumbering
 

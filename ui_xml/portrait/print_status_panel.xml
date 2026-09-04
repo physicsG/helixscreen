@@ -223,6 +223,18 @@
               <event_cb trigger="clicked" callback="on_print_status_tune"/>
               <bind_state_if_eq subject="print_controls_enabled" state="disabled" ref_value="0"/>
             </ui_button>
+            <!-- Camera button: live view of the print. Only when a webcam is
+                 configured AND this screen runs remotely from the printer
+                 (moonraker_is_remote — on the printer's own screen the print is
+                 in front of you) AND the build has camera support compiled in
+                 (platform_extras_available gates the ESP32 v1 cut). -->
+            <ui_button name="btn_camera"
+                       height="#button_height" flex_grow="1" icon="webcam" bind_text="camera_button_label"
+                       icon_position="top">
+              <bind_flag_if cond="printer_has_webcam and moonraker_is_remote and platform_extras_available"
+                            flag="hidden" invert="true"/>
+              <event_cb trigger="clicked" callback="on_print_status_camera"/>
+            </ui_button>
             <ui_button name="btn_cancel"
                        height="#button_height" flex_grow="1" variant="danger" icon="stop" text="Cancel"
                        translation_tag="Cancel" icon_position="top">

@@ -588,7 +588,7 @@ sudo systemctl restart helixscreen
    ```bash
    ls /sys/class/drm/
    ```
-   You should see something like `card0-HDMI-A-1`. If you still see only `card0` and `dmesg | grep -i drm` mentions `simpledrm`, the vc4 overlay did not load — double-check `/boot/firmware/config.txt` for typos and any conflicting `dtoverlay` lines.
+   You should see something like `card0-HDMI-A-1`. If you still see only `card0` and `dmesg | grep -i drm` mentions `simpledrm`, the vc4 overlay did not load — double-check /boot/firmware/config.txt for typos and any conflicting `dtoverlay` lines.
 
 **Check what modes the kernel knows about:**
 ```bash
@@ -638,9 +638,9 @@ Adjust in steps (e.g. 110, 100, 90 or 160, 200, 240) until the interface looks r
 
 **This is expected — ultrawide and portrait layouts are alpha at best.**
 
-HelixScreen detects both orientations and adjusts the navigation bar and grid sizing, but the per-panel layouts do not exist yet: there are no ultrawide panel layouts at all, and portrait has only the app shell and navigation bar. Every other panel falls back to the standard landscape layout, which is what you are seeing. Neither orientation has been tested on real hardware.
+HelixScreen detects both orientations and adjusts the navigation bar and grid sizing. Portrait is the better covered of the two: besides the app shell and navigation bar, the home dashboard, Print Status, Print Tune, Motion, Bed Mesh, the temperature graph and the Advanced panel's E-stop bar all rearrange themselves for a tall screen. Ultrawide has a home dashboard layout and nothing else. Any panel not in that list falls back to the standard landscape layout, which is what you are seeing on it. Neither orientation has been tested much on real hardware.
 
-**The home dashboard is the exception.** Its widget grid is sized from the actual screen — a 480x800 portrait panel gets a 3x6 grid, a 320x1480 one gets 2x12 — and portrait has its own default widget set (Tips is left out; it is too wide to earn a row on a narrow grid). Buttons, inputs, and headers on a portrait panel are sized from the screen's height, so they come out taller rather than cramped. Every other panel is still the landscape fallback.
+**The home dashboard is the exception, in both orientations.** Its grid is sized from the actual screen so the cells come out square — a 480x800 portrait panel gets 4 columns by 6 rows, a 320x1480 one gets 4x17, a 1920x440 ultrawide gets 23x5 — and portrait and ultrawide each have their own default layout rather than a stretched landscape one. Buttons, inputs, and headers on a portrait panel are sized from the screen's height, so they come out taller rather than cramped.
 
 **What you can do:**
 
@@ -667,7 +667,7 @@ Contributions are very welcome here and only need XML, not C++ — see the [UI C
 
 If your dashboard is full and you want a specific widget back, make room for it: remove a widget you care less about, or move it to a second page (see [Multiple Pages](guide/home-panel.md#multiple-pages)).
 
-Note that **Tips is now deliberately off by default on portrait screens** — it is a wide widget and takes a third to a half of a row on a narrow grid. If Tips is the only thing missing, that may simply be the new default rather than the old bug.
+**Tips** is the one that hits this most, because it is a wide widget and a portrait grid is narrow. On the shortest portrait screens Tips is also left out of the default layout on purpose, so if Tips is the only thing missing, that may be the default rather than a widget that got dropped.
 
 **Fix — put back a single widget:**
 
@@ -702,7 +702,7 @@ The detected rotation is saved to the config file and applied on all subsequent 
 
 **Setting panel orientation in the kernel (Raspberry Pi):**
 
-Edit `/boot/firmware/cmdline.txt` and add a `video=` parameter for your display connector:
+Edit /boot/firmware/cmdline.txt and add a `video=` parameter for your display connector:
 
 ```
 video=DSI-1:panel_orientation=upside_down
@@ -1361,7 +1361,7 @@ Re-slice your file after adding these — the commands are baked into the G-code
 
 > **Cura users:** Cura doesn't expose these layer placeholders directly and needs a post-processing script to inject `SET_PRINT_STATS_INFO`. See the Klipper community docs and forums for a Cura post-processing plugin that adds it.
 
-> **Note:** Some noise in the layer count during the print-start phase (bed mesh, purge/prime line, Z-hop) is normal. HelixScreen holds the layer at 0 until real printing begins, so it no longer jumps ahead before the first layer. The estimate only matters mid-print when the slicer macros above are missing.
+> **Note:** Some noise in the layer count during the print-start phase (bed mesh, purge/prime line, Z-hop) is normal. HelixScreen holds the layer at 0 until real printing begins, so it will not jump ahead before the first layer. The estimate only matters mid-print when the slicer macros above are missing.
 
 ### Time remaining is inaccurate or slow to settle
 
@@ -1660,7 +1660,7 @@ max_job_count: 100
 3. Pick your model from the list (Voron 2.4, Voron 0.2, Voron Trident, and Voron Switchwire are all in the database)
 4. The new type applies immediately — name, image, and all the type-driven features follow it
 
-**Let HelixScreen catch it for you.** If you'd rather not hunt through the list, just connect the printer and wait: when detection is confident the saved type is wrong, a **Printer type mismatch** dialog names both models and offers **Re-identify** (re-runs just the identification step of the setup wizard) or **Keep current** — the right answer for a heavily modified printer that legitimately differs from its stock sibling. Picking **Keep current** is remembered for that type; the prompt won't nag on every boot.
+**Let HelixScreen catch it for you.** If you'd rather not hunt through the list, just connect the printer and wait: when detection is confident the saved type is wrong, a **Printer type mismatch** dialog names both models and offers **Choose Model** (opens the model picker from the setup wizard's identity step) or **Keep current** — the right answer for a heavily modified printer that legitimately differs from its stock sibling. Picking **Keep current** is remembered for that type; the prompt won't nag on every boot.
 
 Re-adding the printer through **Printer Manager > Manage Printers > + Add Printer** (then deleting the old entry) and **Settings > System > Factory Reset** remain as last resorts — the factory reset re-runs the full wizard but wipes all HelixScreen settings, so use it only if you want a clean start anyway.
 
@@ -1758,7 +1758,7 @@ Auto-detection only commits to a model when it is confident enough. Below that b
 
 **In the wizard:** pick your model by hand at the **Printer Setup: Identity** step. The full database is there.
 
-**After setup:** if the wrong model got saved, correct it from Printer Manager — tap the printer image on the Home Panel, then the **printer model** row underneath the printer name, and pick the right model. It applies immediately, with nothing wiped. On the next connect, HelixScreen may also flag the mismatch itself and offer **Re-identify** — see [Wrong printer model identified](#wrong-printer-model-identified) above for that flow.
+**After setup:** if the wrong model got saved, correct it from Printer Manager — tap the printer image on the Home Panel, then the **printer model** row underneath the printer name, and pick the right model. It applies immediately, with nothing wiped. On the next connect, HelixScreen may also flag the mismatch itself and offer **Choose Model** — see [Wrong printer model identified](#wrong-printer-model-identified) above for that flow.
 
 ---
 
@@ -1776,7 +1776,7 @@ The Flashforge Adventurer 5M (AD5M) has unique characteristics due to its embedd
 ForgeX's `headless.cfg` has a `reset_screen` delayed_gcode that sets backlight to eco mode.
 
 **Solution:**
-The HelixScreen installer automatically patches `/opt/config/mod/.shell/screen.sh` to skip backlight commands when HelixScreen is running. If you installed manually or the patch didn't apply:
+The HelixScreen installer automatically patches /opt/config/mod/.shell/screen.sh to skip backlight commands when HelixScreen is running. If you installed manually or the patch didn't apply:
 
 ```bash
 # Check if patch is present
@@ -2119,7 +2119,7 @@ If you can't find a solution, open a GitHub issue with:
 
 ```markdown
 ## Environment
-- HelixScreen version: 1.0.0
+- HelixScreen version: 0.99.111
 - Hardware: Raspberry Pi 4 4GB
 - Display: Official 7" touchscreen
 - OS: MainsailOS 1.2.0

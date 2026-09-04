@@ -5,6 +5,28 @@
 
 #include <string>
 
+/**
+ * @brief Mark a string literal for translation extraction without translating
+ *        it here.
+ *
+ * `lv_tr()` both marks a string for the extractor and looks it up, which only
+ * works when those happen in the same place. Static tables break that: the copy
+ * is authored in a table initializer, but the lookup has to happen later, at
+ * render time, once a language is actually loaded. Wrapping the literal in
+ * `lv_tr()` at the table would resolve it once, at static-init time, against
+ * whatever pack happened to be loaded — usually none.
+ *
+ * So the two halves are split, the same way gettext splits `N_()` from `_()`:
+ * this macro expands to the literal unchanged and exists purely so
+ * `scripts/translations/extractor.py` can see it, and the call site keeps
+ * calling `lv_tr()` on the stored pointer.
+ *
+ * Without it a table's strings are extracted only by coincidence — when the
+ * same English text happens to appear in some XML file — which is how 18 of the
+ * 37 panel-widget names ended up untranslated in every locale.
+ */
+#define TR_NOOP(s) (s)
+
 namespace helix::ui {
 
 /**

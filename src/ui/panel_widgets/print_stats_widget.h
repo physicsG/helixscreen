@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "ui_breakpoint.h"
 #include "ui_observer_guard.h"
 
 #include "async_lifetime_guard.h"
@@ -26,6 +27,16 @@ class PrintStatsWidget : public PanelWidget {
     }
 
     static void print_stats_clicked_cb(lv_event_t* e);
+
+    /// Layout mode for a physical size, judged against the bands of the tier
+    /// now on screen. 0 = narrow compact, 1 = 2x2 grid, 2 = 3x2 full,
+    /// 3 = wide compact.
+    static int mode_for_size(int width_px, int height_px);
+
+    /// Same mapping against an explicit tier's bands. The bands scale with the
+    /// type ladder, so an extent measured on one panel only means something
+    /// next to that panel's own bands.
+    static int mode_for_size(int width_px, int height_px, UiBreakpoint bp);
 
   private:
     void update_stats();

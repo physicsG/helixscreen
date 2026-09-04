@@ -106,6 +106,20 @@ class TemperatureController {
     /// name is empty or chamber == 0.
     void apply_material(double nozzle, double bed, double chamber, SendOptions opts = {});
 
+    /// Backend-provided chamber action surface (issue #1290). Wired by
+    /// PrinterState when the resolved chamber heater is the discovery pick;
+    /// empty strings / 0 disable each capability.
+    void set_chamber_actions(std::string reset_gcode, std::string filter_fan_pin,
+                             double conservative_max);
+
+    /// Clear a latched chamber-heater fault (backend gcode). No-op when the
+    /// backend has no reset gcode or the api is gone.
+    void reset_chamber_fault();
+
+    /// Switch the chamber filtration fan (binary output_pin). No-op when the
+    /// backend has no filter pin or the api is gone.
+    void set_chamber_filter_fan(bool on);
+
   private:
     friend struct TemperatureControllerTestAccess;
     void set_configured_max(HeaterType type, int deg);
@@ -125,6 +139,10 @@ class TemperatureController {
 
     PrinterState& state_;
     IMoonrakerAPI* api_;
+
+    std::string chamber_reset_gcode_;
+    std::string chamber_filter_fan_pin_;
+    double conservative_chamber_max_ = 0;
 };
 
 } // namespace helix

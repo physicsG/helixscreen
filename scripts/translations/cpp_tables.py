@@ -4,20 +4,21 @@ Extract translatable strings from static C++ tables.
 
 The call-site patterns in ``extractor.py`` find a literal only where it is
 written into the call: ``lv_tr("Purge")``. A large part of the UI does not work
-that way. Widget definitions, device sections/actions and toolchange step models
-are static tables of ``const char*`` / ``std::string``, and the UI translates
-them at render time through a variable::
+that way. Device sections/actions and toolchange step models are static tables
+of ``const char*`` / ``std::string``, and the UI translates them at render time
+through a variable::
 
-    lv_tr(def.display_name)               ui_widget_catalog_overlay.cpp
     lv_tr(section.description.c_str())    ui_ams_device_operations_overlay.cpp
     lv_tr(s.label.c_str())                ui_ams_sidebar.cpp
 
-A regex over the call site sees ``def.display_name``, not the 40 strings the
+A regex over the call site sees ``section.description``, not the strings the
 table holds, so none of them were ever offered for translation. The whole
-home-screen widget catalog and the AFC/Happy Hare/ACE device-settings surface
-rendered in English in all nine languages, and every render logged a
-``lv_translation_get: tag is not found`` line -- 1445 of them, 294 KB, inside a
-single debug bundle's ring buffer.
+AFC/Happy Hare/ACE device-settings surface rendered in English in all nine
+languages, and every render logged a ``lv_translation_get: tag is not found``
+line -- 1445 of them, 294 KB, inside a single debug bundle's ring buffer.
+
+``PanelWidgetDef`` is not one of these shapes: the widget table marks its own
+literals with ``TR_NOOP()``, which ``extractor.py`` picks up directly.
 
 The previous answer to this was a hand-written ``*_translation_hints_()``
 function naming each literal a second time (see ``ams_state.cpp``). That works
@@ -188,13 +189,6 @@ def _block_after(content: str, marker_re) -> Optional[tuple]:
 # Table shapes
 # ---------------------------------------------------------------------------
 
-# PanelWidgetDef: id, display_name, icon, description,
-#                 hardware_gate_subject, hardware_gate_hint, ...
-# display_name and description render in the widget catalog; hardware_gate_hint
-# is the "Requires ..." / "No ... detected" line under an unavailable widget.
-_WIDGET_DEFS_RE = re.compile(r"s_widget_defs\s*=\s*")
-_WIDGET_FIELDS = (1, 3, 5)
-
 # DeviceSection: id, label, display_order, description
 # The element type is namespace-qualified at every definition site
 # (`std::vector<helix::printer::DeviceSection>`), so an unqualified match here
@@ -222,19 +216,6 @@ _PHASE_FIELDS = (1,)
 # Designated-initializer records (afc_defaults.cpp style) name their fields, so
 # position does not apply. Only these two are user-visible.
 _DESIGNATED_FIELDS = {"label", "description"}
-
-
-def _is_widget_row(fields: List[str]) -> bool:
-    """
-    PanelWidgetDef row: id, display_name, icon, description, gate_subject,
-    gate_hint, then default_enabled and the layout numbers. The first four cells
-    are literals (never nullptr); the two gate cells are a literal or nullptr.
-    """
-    if len(fields) < 7:
-        return False
-    if any(_literal_at(fields[i]) is None for i in (0, 1, 2, 3)):
-        return False
-    return _is_bool(fields[6])
 
 
 def _is_section_row(fields: List[str]) -> bool:
@@ -266,13 +247,6 @@ def _collect(content: str, span, shape, indices) -> Set[str]:
         if shape(fields):
             found |= _positional(record, indices)
     return found
-
-
-def _extract_widget_defs(content: str) -> Set[str]:
-    span = _block_after(content, _WIDGET_DEFS_RE)
-    if not span:
-        return set()
-    return _collect(content, span, _is_widget_row, _WIDGET_FIELDS)
 
 
 def _extract_device_sections(content: str) -> Set[str]:
@@ -381,7 +355,6 @@ def _extract_phase_templates(content: str) -> Set[str]:
 
 
 _TABLE_EXTRACTORS = (
-    _extract_widget_defs,
     _extract_helper_calls,
     _extract_device_sections,
     _extract_device_actions,

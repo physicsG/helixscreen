@@ -16,8 +16,10 @@
 #include "ui_update_queue.h"
 
 #include "accel_sensor_manager.h"
+#include "app_globals.h"
 #include "async_helpers.h"
 #include "capability_overrides.h"
+#include "chamber_heater_backend.h"
 #include "color_sensor_manager.h"
 #include "connection_state.h" // For ConnectionState enum
 #include "device_display_name.h"
@@ -36,10 +38,12 @@
 #include "settings_manager.h"
 #include "static_subject_registry.h"
 #include "system/crash_handler.h"
+#include "temperature_controller.h"
 #include "temperature_sensor_manager.h"
 #include "timelapse_state.h"
 #include "unit_conversions.h"
 #include "width_sensor_manager.h"
+#include "z_offset_persistence.h"
 
 #include <algorithm>
 #include <cctype>
@@ -405,6 +409,21 @@ void PrinterState::update_from_status(const json& state, double eventtime,
     // Delegate motion updates to motion state component
     motion_state_.update_from_status(state);
 
+    // Discovery latches external z-offset persistence the moment a provider
+    // matches, because the mistake that damages hardware is the other one
+    // (#1401). One provider is keyed on the SET_GCODE_OFFSET wrapper, which
+    // proves a wrapper exists but not that it stores anything, so a frame that
+    // positively proves the store is absent is what relaxes the latch back to
+    // the type-derived strategy. Gated on the flag, so this fires at most once
+    // per latch instead of thrashing on every later frame.
+    if (z_offset_external_persistence_ &&
+        helix::zoffset::status_refutes_persistence(discovery_, state)) {
+        spdlog::info("[PrinterState] Status refutes the detected z-offset persistence provider "
+                     "({}): the wrapper stores no offset",
+                     helix::zoffset::persistence_provider_name(discovery_));
+        clear_z_offset_external_persistence_internal();
+    }
+
     // Delegate print updates to print state component
     print_domain_.update_from_status(state);
 
@@ -661,6 +680,18 @@ void PrinterState::set_printer_connection_state_internal(int state, const char* 
     network_state_.set_printer_connection_state_internal(state, message);
 }
 
+void PrinterState::set_moonraker_is_remote(bool remote) {
+    // Thread-safe wrapper: defer LVGL subject updates to main thread
+    async_lifetime_.defer("PrinterState::set_moonraker_is_remote", [this, remote]() {
+        network_state_.set_moonraker_is_remote_internal(remote);
+    });
+}
+
+bool PrinterState::is_moonraker_remote() {
+    // Main-thread convenience read; UI decision points only.
+    return lv_subject_get_int(network_state_.get_moonraker_is_remote_subject()) != 0;
+}
+
 void PrinterState::set_network_status(int status) {
     // Delegate to network_state_ component
     network_state_.set_network_status(status);
@@ -814,10 +845,45 @@ void PrinterState::set_hardware(helix::PrinterDiscovery hardware) {
     // than a deliberate "Maintaining" set.
     temperature_state_.set_chamber_fan_resting(discovery_.chamber_fan_resting_deci());
 
+    // Chamber-heater diagnostics backend (issue #1290). The backend matched the
+    // DISCOVERED chamber heater during parse_objects; its diagnostics surfaces
+    // only apply while the RESOLVED heater is that same discovery pick — a
+    // manual override to another heater (or "none") detaches them and clears
+    // the capabilities. See include/chamber_heater_backend.h.
+    const bool chamber_diagnostics_apply =
+        !chamber_heater.empty() && chamber_heater == discovery_.chamber_heater_name();
+    if (chamber_diagnostics_apply) {
+        temperature_state_.set_chamber_diagnostics_source(discovery_.chamber_heater_backend_id(),
+                                                          discovery_.chamber_diagnostics_object(),
+                                                          discovery_.chamber_filter_fan_pin());
+    } else {
+        temperature_state_.set_chamber_diagnostics_source("", "", "");
+    }
+
+    // Backend action surface (issue #1290): fault-reset gcode, filter-fan pin
+    // and the conservative ceiling come from the matched backend — same gate
+    // as the diagnostics source above, so a manual override to another heater
+    // (or "none") clears them and the actions revert to no-ops.
+    if (auto* tc = get_temperature_controller()) {
+        if (chamber_diagnostics_apply) {
+            const auto* backend = chamber::backend_by_id(discovery_.chamber_heater_backend_id());
+            tc->set_chamber_actions(backend ? std::string(backend->fault_reset_gcode())
+                                            : std::string(),
+                                    discovery_.chamber_filter_fan_pin(),
+                                    backend ? backend->conservative_max_temp() : 0.0);
+        } else {
+            tc->set_chamber_actions(std::string(), std::string(), 0.0);
+        }
+    }
+
     // Update capability flags based on resolved chamber assignments
     // (set_hardware above used discovery flags which miss manual overrides)
     capabilities_state_.set_has_chamber_sensor(!chamber_sensor.empty());
     capabilities_state_.set_has_chamber_heater(!chamber_heater.empty());
+    capabilities_state_.set_has_chamber_heater_diagnostics(
+        chamber_diagnostics_apply && !discovery_.chamber_diagnostics_object().empty());
+    capabilities_state_.set_has_chamber_filter_fan(chamber_diagnostics_apply &&
+                                                   !discovery_.chamber_filter_fan_pin().empty());
 
     // Promote the resolved chamber sensor to CHAMBER role in the sensor
     // manager. Required for vendors whose chamber sensor name doesn't match
@@ -1118,6 +1184,46 @@ void PrinterState::set_printer_type_sync(const std::string& type) {
     set_printer_type_internal(type);
 }
 
+void PrinterState::set_z_offset_external_persistence(const std::string& provider_name) {
+    // Discovery calls this from the WebSocket thread; the body touches
+    // subjects, so it runs on the main thread like every other setter here.
+    helix::async::call_method_ref(this, &PrinterState::set_z_offset_external_persistence_internal,
+                                  provider_name);
+}
+
+void PrinterState::clear_z_offset_external_persistence() {
+    helix::async::call_method(this, &PrinterState::clear_z_offset_external_persistence_internal);
+}
+
+void PrinterState::clear_z_offset_external_persistence_internal() {
+    if (!z_offset_external_persistence_) {
+        return;
+    }
+    z_offset_external_persistence_ = false;
+    // Two callers with different reasons - rediscovery finding no provider, and
+    // a status frame refuting one - so each logs its own reason and this stays
+    // neutral about which happened.
+    spdlog::info("[PrinterState] No external z-offset persistence provider - Save Z Offset "
+                 "returns to the type-derived strategy");
+    if (!printer_type_.empty()) {
+        set_printer_type_internal(printer_type_);
+    }
+}
+
+void PrinterState::set_z_offset_external_persistence_internal(const std::string& provider_name) {
+    if (z_offset_external_persistence_) {
+        return;
+    }
+    z_offset_external_persistence_ = true;
+    spdlog::info("[PrinterState] {} persists the z-offset externally - Save Z Offset stands down",
+                 provider_name.empty() ? std::string("An installed module") : provider_name);
+    // Re-resolve now; set_printer_type_internal also honors the flag on every
+    // later type change.
+    if (!printer_type_.empty()) {
+        set_printer_type_internal(printer_type_);
+    }
+}
+
 void PrinterState::set_printer_type_internal(const std::string& type) {
     // Determine what the z-cal strategy would be for this type so we can
     // skip redundant updates (auto-detect often confirms the saved type).
@@ -1133,6 +1239,14 @@ void PrinterState::set_printer_type_internal(const std::string& type) {
     } else {
         new_strategy = capabilities_state_.has_probe() ? ZOffsetCalibrationStrategy::PROBE_CALIBRATE
                                                        : ZOffsetCalibrationStrategy::ENDSTOP;
+    }
+
+    // An installed SET_GCODE_OFFSET wrapper persists the offset itself; the
+    // type-derived strategy would fold the gcode offset into the probe and the
+    // wrapper's boot gcode would re-apply it - runaway stacking
+    // (prestonbrown/helixscreen#1401).
+    if (z_offset_external_persistence_) {
+        new_strategy = ZOffsetCalibrationStrategy::FIRMWARE_MANAGED;
     }
 
     if (type == printer_type_ && new_strategy == z_offset_calibration_strategy_) {

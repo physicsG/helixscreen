@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -48,14 +49,14 @@ TEST_CASE_METHOD(LVGLUITestFixture, "tips text font follows width, not colspan",
 
     // Wide colspan (would be non-compact under the old span predicate),
     // narrow pixels: compact must win on pixels alone.
-    h.resize(4, 4, W_WIDE - 1, 100);
+    h.resize(4, 4, w_wide() - 1, 100);
     REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_body"));
     REQUIRE(lv_obj_get_style_text_font(prefix, LV_PART_MAIN) ==
             theme_manager_get_font("font_body"));
 
     // Narrow colspan (would be compact under the old span predicate), wide
     // pixels: non-compact must win on pixels alone.
-    h.resize(1, 1, W_WIDE, 100);
+    h.resize(1, 1, w_wide(), 100);
     REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) ==
             theme_manager_get_font("font_heading"));
     REQUIRE(lv_obj_get_style_text_font(prefix, LV_PART_MAIN) ==

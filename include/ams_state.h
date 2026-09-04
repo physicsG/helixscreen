@@ -57,8 +57,8 @@ class PrinterDiscovery;
  *        Verified on a real U1; see VERDICT below before reopening this.
  *
  * The Snapmaker U1 carries a user's tool->lane pick only through its
- * firmware-native pre-print send, so AmsBackend::honors_user_tool_mapping()
- * correctly reports that it CAN honor one. Letting that decide the seed as well
+ * firmware-native pre-print send, so helix::printer::can_remap() correctly
+ * reports that it CAN honor one. Letting that decide the seed as well
  * changes what the U1 does with a file the user never remapped: today it always
  * color-matches, and following the setting seeds positionally instead, because
  * the persisted default is false. Positional means every tool keeps the head the
@@ -211,10 +211,20 @@ class AmsState {
      * @brief Initialize all LVGL subjects
      *
      * MUST be called BEFORE creating XML components that bind to these subjects.
-     * Can be called multiple times safely - subsequent calls are ignored.
+     * Can be called multiple times safely - re-entry rebinds the print-state
+     * observer and, when register_xml is true, re-publishes the XML names.
      *
      * @param register_xml If true, registers subjects with LVGL XML system (default).
-     *                     Set to false in tests to avoid XML observer creation.
+     *
+     * Pass true. A call with register_xml=false brings this process-wide
+     * singleton up WITHOUT publishing the `ams_*` XML names, and they stay
+     * absent until a later init_subjects(true) re-enters and publishes them -
+     * a test that never re-enters sees lv_xml_get_subject() answer null and
+     * every XML binding on an `ams_*` name resolves to nothing instead of
+     * failing. A test that binds only through the C++ accessors still costs
+     * nothing by publishing - XML subjects live in one global scope in the
+     * test build either way. Enforced by "no test initializes AmsState
+     * without its XML names" in tests/shell/test_code_lint.bats.
      */
     void init_subjects(bool register_xml = true);
 
@@ -314,6 +324,11 @@ class AmsState {
      */
     [[nodiscard]] std::vector<helix::AvailableSlot> collect_available_slots() const;
 
+    /// The primary backend's firmware DEFAULT tool -> head map, for the mapper.
+    /// Identity when no backend is present, which is also the majority shape.
+    /// NOT the live map - see AmsBackend::firmware_default_routing().
+    [[nodiscard]] helix::FirmwareRouting collect_firmware_routing() const;
+
     /**
      * @brief Whether ANY backend is currently feeding from its bypass / external
      *        spool instead of a slot.
@@ -360,8 +375,8 @@ class AmsState {
      * then colors from a different one.
      *
      * A backend that can carry out an explicit user tool->lane choice — by
-     * EITHER route, an editable mapping card or a firmware-native pre-print send
-     * (AmsBackend::honors_user_tool_mapping) — has a picker the user reaches,
+     * EITHER route, a table it writes itself or a firmware-native pre-print send
+     * (helix::printer::can_remap) — has a picker the user reaches,
      * and that picker carries the auto-color toggle. Its setting wins both ways.
      * A backend that can honor the choice by NEITHER route (ACE) has no picker,
      * so nothing can have flipped the persisted preference and the default
@@ -377,6 +392,31 @@ class AmsState {
      * Asks the PRIMARY backend: the picker the user reaches reflects backend 0.
      */
     [[nodiscard]] bool effective_auto_match() const;
+
+    /**
+     * @brief Seed the tool -> slot mapping. THE one place this rule lives.
+     *
+     * Composes the three things this class already owns - the effective
+     * auto-match predicate, the backend's firmware default routing, and the
+     * caller's slot list - into FilamentMapper::effective_mappings(). Every
+     * surface that shows or commits a mapping must come through here, or they
+     * drift: before this existed the card, the modal and the print-select detail
+     * view each re-assembled it, and two of them cleared firmware mappings
+     * before colour matching while a third did not.
+     *
+     * @param slots pass the SAME list you display, so the seed and the picker
+     *              cannot disagree about what is loaded.
+     */
+    [[nodiscard]] std::vector<helix::ToolMapping>
+    seed_tool_mappings(const std::vector<helix::GcodeToolInfo>& tools,
+                       const std::vector<helix::AvailableSlot>& slots) const;
+
+    /// As above, but with the auto-colour answer supplied by the caller. Only
+    /// for the mapping modal, which lets the user flip it live before
+    /// committing; everything else must use the effective predicate.
+    [[nodiscard]] std::vector<helix::ToolMapping>
+    seed_tool_mappings(const std::vector<helix::GcodeToolInfo>& tools,
+                       const std::vector<helix::AvailableSlot>& slots, bool auto_color_map) const;
 
     /**
      * @brief Per-tool render colors for the print that is actually running:
@@ -984,6 +1024,9 @@ class AmsState {
         return &clog_meter_warning_;
     }
 
+    lv_subject_t* get_clog_meter_status_subject() {
+        return &clog_meter_status_;
+    }
     lv_subject_t* get_clog_meter_danger_pct_subject() {
         return &clog_meter_danger_pct_;
     }
@@ -1121,6 +1164,18 @@ class AmsState {
      * @return Subject pointer or nullptr if out of range
      */
     [[nodiscard]] lv_subject_t* get_slot_status_subject(int slot_index);
+
+    /**
+     * @brief Get per-lane LaneState subject for a specific slot
+     *
+     * Holds helix::ui::LaneState (classify_lane) as int. THE presentation
+     * input for every surface that draws a lane. XML name:
+     * ams_slot_<n>_lane_state.
+     *
+     * @param slot_index Slot index (0 to MAX_SLOTS-1)
+     * @return Subject pointer or nullptr if out of range
+     */
+    [[nodiscard]] lv_subject_t* get_slot_lane_state_subject(int slot_index);
 
     /**
      * @brief Get slot color subject for a specific backend and slot
@@ -1803,6 +1858,15 @@ class AmsState {
     /// Wire (or rewire) the print_state_observer_. Idempotent.
     void install_print_state_observer();
 
+    /// Publish the already-initialized subjects under their XML names. Used by
+    /// the init_subjects() re-entry path so register_xml=true still publishes
+    /// after a first init that ran with register_xml=false. Registration only:
+    /// subjects must already be initialized — no lv_subject_init_* here, init
+    /// memzeros the subject and would wipe the observers bound since the first
+    /// init. MUST mirror the registration list in init_subjects(): a name
+    /// registered there must be registered here too. Caller must hold mutex_.
+    void register_xml_subject_names();
+
     /// In-memory override for external spool info. Set by set_external_spool_info_in_memory()
     /// to allow live tracker updates without touching settings.json. When set, takes priority
     /// over SettingsManager in get_external_spool_info(). Cleared by clear_external_spool_info().
@@ -1878,8 +1942,7 @@ class AmsState {
     lv_subject_t clog_meter_mode_;    // 0=none, 1=encoder, 2=flowguard, 3=afc_buffer
     lv_subject_t clog_meter_value_;   // 0-100 (encoder/afc) or -100..+100 (flowguard)
     lv_subject_t clog_meter_warning_; // 0=ok, 1=warning
-    lv_subject_t clog_meter_value_text_;
-    char clog_meter_value_text_buf_[16]{};
+    lv_subject_t clog_meter_status_;  // ClogMeterStatus: 0=ok, 1=warning, 2=fault
     lv_subject_t clog_meter_mode_text_;
     char clog_meter_mode_text_buf_[24]{};
     lv_subject_t clog_meter_danger_pct_;  // 0-100, where danger zone starts
@@ -1921,6 +1984,7 @@ class AmsState {
     lv_subject_t slot_segments_[MAX_SLOTS];         // int: PathSegment enum value
     lv_subject_t slot_toolhead_present_[MAX_SLOTS]; // int: 0/1 per-slot toolhead sensor
     lv_subject_t slot_active_loaded_[MAX_SLOTS];    // int: 0/1 firmware seated & loaded
+    lv_subject_t slot_lane_states_[MAX_SLOTS];      // int: helix::ui::LaneState (classify_lane)
 
     // Per-unit environment subjects (CFS temp/humidity)
     lv_subject_t unit_temp_[MAX_UNITS];     // int: tenths of C (270 = 27.0C), 0 = no data

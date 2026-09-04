@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -8,7 +9,7 @@
  * starts/stops an MJPEG stream on the compact<->non-compact boundary
  * (camera_widget.cpp on_size_changed(), :257-294).
  *
- * `compact_ = (width_px < W_NORMAL)` — width alone decides. The live view is
+ * `compact_ = (width_px < w_normal())` — width alone decides. The live view is
  * scaled with LV_IMAGE_ALIGN_COVER, so it fills whatever cell it is given
  * either way; extra height never buys the widget new content the way a
  * resolved name or a second column would, so gating on height too would only
@@ -124,7 +125,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     lv_image_set_src(camera_image, "A:assets/images/ams/spoolman_64.png");
     REQUIRE(lv_image_get_src(camera_image) != nullptr);
 
-    h.resize(4, 4, W_NORMAL - 1, H_TALL - 1);
+    h.resize(4, 4, w_normal() - 1, h_tall() - 1);
     process_lvgl(30);
 
     CHECK(lv_image_get_src(camera_image) == nullptr);
@@ -141,7 +142,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // implementation must NOT re-enter the "compact && !was_compact" branch,
     // so the sentinel must survive AND stop_stream_calls must not advance.
     lv_image_set_src(camera_image, "A:assets/images/ams/spoolman_24.png");
-    h.resize(3, 3, W_NORMAL - 1, H_TALL - 1); // spans vary, width identical
+    h.resize(3, 3, w_normal() - 1, h_tall() - 1); // spans vary, width identical
     process_lvgl(30);
 
     CHECK(lv_image_get_src(camera_image) != nullptr);                  // NOT re-cleared
@@ -172,7 +173,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     CHECK(CameraWidgetTestAccess::stop_stream_calls(h.widget()) == 1);
 
     // --- Micro-tier 1x2 (70x131): genuinely tall (rowspan==2) but still
-    // only one column wide. Width never clears W_NORMAL, so this stays
+    // only one column wide. Width never clears w_normal(), so this stays
     // compact too — a stream scaled to LV_IMAGE_ALIGN_COVER doesn't need
     // width *content* the way a resolved label would, but the rule tracks
     // width alone regardless of why a widget happens to be tall.
@@ -220,7 +221,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     // --- Leaving compact: width at/over its floor. Contradicting span: 1x1
     // (old shipping predicate -> compact stays true).
-    h.resize(1, 1, W_WIDE, H_TALLER);
+    h.resize(1, 1, w_wide(), h_taller());
     process_lvgl(30);
 
     CHECK_FALSE(lv_obj_has_flag(camera_status, LV_OBJ_FLAG_HIDDEN)); // status text shown again
@@ -236,7 +237,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // branch, so the manually-set hidden flag must survive AND
     // start_stream_calls must not advance.
     lv_obj_add_flag(camera_status, LV_OBJ_FLAG_HIDDEN);
-    h.resize(2, 2, W_WIDE, H_TALLER); // spans vary, width identical
+    h.resize(2, 2, w_wide(), h_taller()); // spans vary, width identical
     process_lvgl(30);
 
     CHECK(lv_obj_has_flag(camera_status, LV_OBJ_FLAG_HIDDEN));          // NOT re-shown

@@ -22,6 +22,8 @@
 #include "ui_temp_display.h"
 #include "ui_text_input.h"
 
+#include "setting_group.h"
+
 // XML registration
 #include "xml_registration.h"
 
@@ -135,6 +137,8 @@ void LVGLUITestFixture::register_widgets() {
     ui_bed_mesh_register();
     ui_gcode_viewer_register();
     ui_gradient_canvas_register();
+    // Grouped-list card used by every settings-style overlay
+    setting_group_register();
 
     // Initialize text input widget
     ui_text_input_init();

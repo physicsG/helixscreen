@@ -318,8 +318,6 @@ class ControlsPanel : public PanelBase {
     /// CFS writes CFS Tn_data via CXSAVE_CONFIG ~50s later).
     static constexpr uint32_t SAVE_Z_OFFSET_TIMEOUT_MS = 90000;
 
-    size_t pending_macro_run_index_ = 0; ///< Slot index awaiting run confirmation
-
     //
     // === Dynamic UI Containers ===
     //
@@ -403,11 +401,8 @@ class ControlsPanel : public PanelBase {
     //
 
     lv_subject_t speed_override_subject_{};
-    lv_subject_t flow_override_subject_{};
     char speed_override_buf_[16] = {};
-    char flow_override_buf_[16] = {};
     ObserverGuard speed_factor_observer_;
-    // Note: Flow factor observer uses extrude_factor from helix::PrinterState
 
     //
     // === Macro Slots 3 & 4 ===
@@ -527,12 +522,7 @@ class ControlsPanel : public PanelBase {
     // === Speed/Flow Override Handlers ===
     //
 
-    void handle_speed_up();
-    void handle_speed_down();
-    void handle_flow_up();
-    void handle_flow_down();
     void update_speed_display();
-    void update_flow_display();
 
     //
     // === Z-Offset Control Handlers ===
@@ -578,11 +568,6 @@ class ControlsPanel : public PanelBase {
     static void on_nozzle_target_edit(lv_event_t* e);
     static void on_bed_target_edit(lv_event_t* e);
     static void on_chamber_target_edit(lv_event_t* e);
-    static void on_motors_confirm(lv_event_t* e);
-    static void on_motors_cancel(lv_event_t* e);
-    static void on_save_z_offset_confirm(lv_event_t* e);
-    static void on_save_z_offset_cancel(lv_event_t* e);
-
     //
     // === Calibration Button Trampolines (XML event_cb - global accessor) ===
     //
@@ -606,10 +591,6 @@ class ControlsPanel : public PanelBase {
     static void on_macro(lv_event_t* e);
     static void on_fan_slider_changed(lv_event_t* e);
     static void on_save_z_offset(lv_event_t* e);
-    static void on_speed_up(lv_event_t* e);
-    static void on_speed_down(lv_event_t* e);
-    static void on_flow_up(lv_event_t* e);
-    static void on_flow_down(lv_event_t* e);
 
     //
     // === Z-Offset Trampolines (XML event_cb - global accessor) ===

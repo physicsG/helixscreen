@@ -921,6 +921,49 @@ field naming OrcaSlicer, its repo URL, the pinned tag, and its license, e.g.:
 
 ---
 
+## How a lane presents itself
+
+Every surface that draws an AMS lane answers the same question first: does this
+lane have filament, did it keep an identity after being ejected, or is it simply
+unused. That question has one implementation — `classify_lane()` in
+`include/ams_lane_state.h` — and three answers:
+
+| `LaneState` | Meaning | Spool rendering | Bar rendering |
+|-------------|---------|-----------------|---------------|
+| `Present` | has filament | spool at fill level | bar at fill level |
+| `Ghosted` | ejected, identity retained (#1071) | whole cell dimmed, last known fill | same |
+| `Empty` | no filament, no identity | placeholder + "Empty" | nothing — the gap is the signal |
+
+Two things about this are deliberate and easy to undo by accident:
+
+**Ghosting dims the whole cell, never one element.** The spool, the material
+label and the percent fade together, applied with `lv_obj_set_style_opa()` on the
+widget root using the `ghost_opacity` token. A per-element opacity produces a
+ghost too faint to read — a bar's fill is only a pixel or two tall at the sizes
+bar mode actually runs at, so the dimming has to be what carries the signal.
+
+**A ghosted lane shows its last known fill.** That reverses `a106413f6`, where an
+emptied lane rendered a full-strength 75% bar and read as loaded. It is safe only
+because the whole cell is dimmed: the dimming is the disclaimer. Do not reuse
+`lane_fill_level()`'s ghosted value on a surface that does not dim.
+
+`UNKNOWN` is classified exactly as `EMPTY`, so it inherits the identity split. It
+is not a steady state on any backend — every `SlotStatus::UNKNOWN` assignment is
+skeleton construction before firmware data lands — so treating it as `Present`
+would briefly show filament in a lane that has none.
+
+Loaded-ness and error are **decorations** layered over a base state, from their
+own subjects. A blocked lane still has filament; an active lane is still
+`Present`.
+
+The classification is published per lane as `ams_slot_<n>_lane_state`;
+`ams_lane_bar` consumes it. Converting the remaining surfaces
+(`ui_ams_mini_status` bar and spool modes, `ui_panel_ams_overview` mini-bars,
+`ams_slot`) is tracked in prestonbrown/helixscreen#1368, which also carries the
+open question of how much of the per-lane loop can be expressed in XML.
+
+---
+
 ## UI Panels
 
 ### AMS Panel (`ui_panel_ams`)
@@ -997,6 +1040,81 @@ Per-slot error indicators and per-unit error badges, driven by `SlotInfo.error` 
 - Happy Hare: system-level error mapped to `current_slot` via `reason_for_pause`
 - Mock: `set_slot_error()` / `set_unit_buffer_health()` + pre-populated errors in AFC mode
 
+### Clog / flow meter
+
+Three sources (encoder, Flowguard, AFC buffer) feed one set of `clog_meter_*`
+subjects, derived in `AmsState::sync_clog_meter_from_info()`
+(`src/printer/ams_state.cpp`). Source precedence is **flowguard > encoder > AFC
+buffer**, overridable per-widget via `set_source_override()`.
+
+**Two presentations, one model.** `UiClogBar` draws a wide horizontal scale,
+`UiClogMeter` a compact arc. Neither owns any interpretation:
+
+| Piece | Where | What it decides |
+|-------|-------|-----------------|
+| `ClogMeterSample` | `include/clog_meter_geometry.h` | `is_safe()`, `is_symmetrical()`, `status()` — pure, tested without LVGL |
+| `clog_bar_geometry()` | same | Track-local pixel layout for the bar |
+| `clog_meter_tint()` | same | Indicator colour, as token names rather than resolved colours |
+| `ClogMeterModel` | `include/clog_meter_model.h` | Subscribes to the five subjects once, publishes whole samples |
+
+Both renderers hold a `ClogMeterModel` and are handed a complete
+`ClogMeterSample` on every change — never a single changed field, or a renderer
+would position a new value against an old threshold for one frame. Anything both
+presentations must answer identically goes on the sample; when it lived in the
+renderers they drifted (the arc treated an untracked AFC buffer as "nothing to
+report" while the bar drew an empty track).
+
+Construct the model **last**, after the by-name widget lookups, and destroy it
+**first**, before clearing those pointers — its callback reads them. It also
+suppresses the initial observer fire, which lands while the owning renderer is
+still in its constructor.
+
+**One job per text slot.** The subjects are authored so no slot repeats another:
+`clog_meter_mode_text` names only the source, `clog_meter_center_text` is the one
+number, `clog_meter_label_{left,right}` are the axis ends and are **empty in the
+linear modes** (only Flowguard's two directions mean different faults).
+`clog_meter_status` is an int driving a glyph, not a status word.
+
+> `clog_meter_mode_text` is drawn in `ams_loaded_card.xml` beside the material
+> name in a content-sized flex column. Anything appended to it steals width and
+> clips the filament name. Keep it to the source's name.
+
+**Where it renders:** `clog_bar_body.xml` is the bar itself at content height;
+`clog_bar_page.xml` is a centring shell around it for the carousel cell, and
+`buffer_status_modal.xml` embeds the body directly. The arc is authored twice —
+`clog_meter_page.xml` and `ams_loaded_card.xml` — so a named child added to one
+(e.g. `clog_safe_icon`) must be added to both, or `UiClogMeter` silently finds
+nothing under that parent.
+
+**Mock scenarios:** `helix-screen ctl scenario <name>` drives the mock *backend*,
+so the whole derivation runs — `clog_healthy`, `clog_warning`, `clog_blocked`,
+`flowguard_neutral`, `flowguard_tangle`, `flowguard_clog`, `buffer_safe`,
+`buffer_fault`, `clog_off`.
+
+### AFC buffers: switched vs FPS_PSF
+
+`AFC_buffer` accepts `type: switched` (TurtleNeck, two endstops — the default and
+what every BoxTurtle ships with) or `type: FPS_PSF` (`AFCFPSBuffer`, AFC v1.2.0+),
+which reads an analog filament pressure sensor over ADC.
+
+An FPS buffer adds exactly three keys to `get_status`: `fps_value`,
+`smoothed_fps` and `set_point`. **`low_point`, `high_point` and `deadband` are
+config-only and never published**, so the tuning range cannot be read at runtime
+— `BufferHealth::afc_fps_to_bias()` normalizes each side against the sensor's own
+0..1 rail instead. Read `smoothed_fps`, not `fps_value`: AFC's own
+advance/trailing triggers compare the smoothed one.
+
+The result is published as `sync_feedback_bias`, the same signal Happy Hare
+reports, so `UiBufferMeter` and the path-canvas tint work on both without knowing
+the backend. A switched buffer sends none of these keys, leaves
+`fps_reported` false, and is unchanged.
+
+> **Unverified on hardware.** The only AFC rig here is a BoxTurtle with a
+> switched buffer; its live status carries none of the FPS fields. The mapping is
+> pinned against a source read of AFC v1.2.0 (`a06f14d`) in
+> `tests/unit/test_afc_fps_buffer.cpp` — re-check those against a real FPS_PSF
+> buffer before trusting the scale.
+
 ### Two error channels
 
 A backend fault reaches the user through one of **two independent channels**. They are not alternatives and not a fallback pair — they are fed by different transports, fire at different moments, and a backend may implement either, both, or neither. Getting this wrong is how a fault double-surfaces or vanishes.
@@ -1005,7 +1123,7 @@ A backend fault reaches the user through one of **two independent channels**. Th
 |---|---|---|
 | Hook | `AmsBackend::classify_error(raw_line, ctx)` | `AmsBackend::current_error()` |
 | Transport | Moonraker `notify_gcode_response` | Moonraker `notify_status_update` |
-| Dispatched from | `GcodeErrorRouter::process_line()`, `src/application/gcode_error_router.cpp:474` — **exactly once per line**, before the generic `error_classify::classify()` | `AmsErrorBridge::on_action_changed()`, `src/application/ams_error_bridge.cpp:68` — **only on the rising edge** into `AmsAction::ERROR` |
+| Dispatched from | `GcodeErrorRouter::process_line()`, `src/application/gcode_error_router.cpp#on_notify_gcode_response` — **exactly once per line**, before the generic `error_classify::classify()` | `AmsErrorBridge::on_action_changed()`, `src/application/ams_error_bridge.cpp#on_action_changed` — **only on the rising edge** into `AmsAction::ERROR` |
 | Pre-filtering | **None.** Every response line is handed to every backend. Each override gates itself | The `AmsAction::ERROR` edge is the entire gate. A backend that never assigns that action is never asked, even if it overrides the hook |
 | Presentation | `decide_presentation()` → toast / modal / `MODAL_WITH_RECOVER` | `RecoveryModalPresenter::present()` directly |
 | Returning `nullopt` | Defers to `error_classify::classify()` | Falls through to the bridge's last-resort toast (`surface_unhandled_error()`) |
@@ -1036,14 +1154,14 @@ silences Channel A for a fault nobody saw. See `RPC_ERROR_OWNERSHIP.md`.
 
 | Ledger | Window | Guards | Recorded by | Checked by |
 |--------|--------|--------|-------------|------------|
-| `rpc_error_correlation` (`src/api/rpc_error_correlation.cpp`) | 1.5 s | JSON-RPC error reply ↔ the `!!` broadcast of the same rejection | `MoonrakerRequestTracker::route_response()`, only when `rpc_error_policy::decide()` says someone is definitely reporting it | `GcodeErrorRouter::already_reported_via_rpc()` (`gcode_error_router.cpp:173-177`), including a re-check when the deferred toast timer fires |
-| `fault_surface_correlation` (`src/application/fault_surface_correlation.cpp`) | 3 s | Channel A ↔ Channel B | `GcodeErrorRouter` records every detail it surfaces | `AmsErrorBridge`'s fallback toast, and the router's own toast arms (`gcode_error_router.cpp:413-418`) |
+| `rpc_error_correlation` (`src/api/rpc_error_correlation.cpp`) | 1.5 s | JSON-RPC error reply ↔ the `!!` broadcast of the same rejection | `MoonrakerRequestTracker::route_response()`, only when `rpc_error_policy::decide()` says someone is definitely reporting it | `GcodeErrorRouter::already_reported_via_rpc()` (`src/application/gcode_error_router.cpp#already_reported_via_rpc`), including a re-check when the deferred toast timer fires |
+| `fault_surface_correlation` (`src/application/fault_surface_correlation.cpp`) | 3 s | Channel A ↔ Channel B | `GcodeErrorRouter` records every detail it surfaces | `AmsErrorBridge`'s fallback toast, and the router's own toast arms (`src/application/gcode_error_router.cpp#process_line`) |
 
 A merely-`silent` request records **nothing** in the RPC ledger. `silent` means "no automatic toast from us", not "the user was told" — recording on it would mute the `!!` copy for a failure that reached no one. Only a caller that declared `caller_surfaces_errors`, or the generic fallback actually firing, earns a record. See `RPC_ERROR_OWNERSHIP.md`.
 
 `RecoveryModalPresenter` separately dedups on `detail` **plus** the action set — the action set is part of the identity because AFC legitimately emits byte-identical text on both channels with different affordances (#1171). Backends should populate `ErrorEvent::raw_detail` with the firmware's untranslated wording when `detail` has been rewritten, or the ledger has nothing the other channel can match.
 
-**Who owns the runout surface.** Both channels compete with a third, older surface: the generic sensor-driven modal (`FilamentRunoutHandler` on the pause edge, `PrintStatusWidget` when idle), gated by `RuntimeConfig::should_show_runout_modal()`. The rule is **one surface per printer**: that predicate returns false exactly for the backends in the table above that raise their own runout fault (AFC, Happy Hare, AD5X IFS, CFS), and true for hub backends that raise nothing (ACE, QIDI Box) — which the old blanket "is it a hub AMS" test silenced with nothing put in its place (#1250).
+**Who owns the runout surface.** Both channels compete with a third, older surface: the generic sensor-driven modal (`FilamentRunoutHandler` on the pause edge, `PrintStatusWidget` when idle), gated by `RuntimeConfig::should_show_runout_modal()`. A fourth entry point, the home-panel "Filament Sensor" tile (`FilamentSensorWidget`), opens the same `RunoutGuidanceModal` on a deliberate tap while printing or paused, and `SensorSettingsOverlay` when the tracked sensor is disabled - see "The five dispatch surfaces" below. The rule is **one surface per printer**: that predicate returns false exactly for the backends in the table above that raise their own runout fault (AFC, Happy Hare, AD5X IFS, CFS), and true for hub backends that raise nothing (ACE, QIDI Box) — which the old blanket "is it a hub AMS" test silenced with nothing put in its place (#1250).
 
 Note that for AFC, Happy Hare, AD5X IFS and CFS the generic surface is *also* structurally blind: each claims its own sensors through `owns_filament_sensor()`, so `PrinterHardware::is_ams_sensor()` hides them from the wizard's sensor picker, they never get a `FilamentSensorRole`, and `FilamentSensorManager::has_real_runout()` skips them. The suppression above is belt-and-braces for the configs where an AMS lane sensor *does* carry a role (AFC's `...eN_filament` naming is the case `has_real_runout()`'s lane-mapping branch exists for).
 
@@ -1067,25 +1185,28 @@ presented.
 |--------|------|
 | `include/filament_op_dispatch.h` | `plan_load()` / `plan_unload()` — which tier, which backend call, or which refusal. Also `unload_target_is_loaded()`. Header-only, takes plain values (`AmsSystemInfo` + `BackendCaps`), no `AmsBackend*` |
 | `include/filament_op_slot_resolver.h` | `resolve_op_button_slot()` — which slot a tool's buttons act on; `compute_op_button_gating()` — whether Load/Unload are enabled |
-| `src/ui/filament_op_router.{h,cpp}` | Tiers 2 and 3: `dispatch_filament_macro()` with its `ParamPolicy`, the shared `MacroParamModal`, and `filament_load_fallback_gcode()` / `filament_unload_fallback_gcode()` |
+| `src/ui/filament_op_router.{h,cpp}` | Tiers 2 and 3: `dispatch_filament_macro()` with its `ParamPolicy`, the shared `MacroParamModal`, and `filament_load_fallback_gcode()` / `filament_unload_fallback_gcode()` / `filament_purge_fallback_gcode()` |
+| `include/filament_op_execute.h` | `execute_filament_load()` / `execute_filament_unload()` / `execute_filament_purge()` - shared EXECUTION of a plan once `plan_load()`/`plan_unload()` has picked the tier: switches over `FilamentTier`, dispatches the configured macro or falls back to raw gcode. Used by `PrintStatusWidget`, `FilamentRunoutHandler`, and `FilamentSensorWidget` |
 
-Tier 1 deliberately stays with the callers — the backend call is inseparable from each
-surface's own guard, stepper, and spinner bookkeeping.
+Tier 1 deliberately stays with the callers on `FilamentPanel` and `AmsOperationSidebar` - the
+backend call there is inseparable from each surface's own guard, stepper, and spinner
+bookkeeping (the preheat state machine on the sidebar, `operation_guard_` and the on-button
+spinner on the panel). The other three surfaces share one execution layer instead
+(`filament_op_execute.h`) because none of them carry that kind of surface-owned bookkeeping.
 
-### The four dispatch surfaces
+### The five dispatch surfaces
 
 | Surface | Entry point | Raised by | Dispatches? |
 |---------|-------------|-----------|-------------|
-| Filament panel | `FilamentPanel::execute_load()` / `execute_unload()` | The Load / Unload buttons on the Filament nav panel | Yes — full ladder, `ParamPolicy::Prompt` |
-| AMS operation sidebar | `AmsOperationSidebar::handle_load_with_preheat(slot)` / `handle_unload(slot)` | Slot grid + context menu on the AMS panel and the AMS Overview panel (both own a `unique_ptr` to one) | Yes — full ladder, `ParamPolicy::Prompt` |
-| Mid-print runout dialog | `FilamentRunoutHandler::dispatch_load()` | `RunoutGuidanceModal`'s Load button during a print or runout pause | Yes — full ladder, `ParamPolicy::Suppress` |
-| Idle runout dialog | `PrintStatusWidget::show_idle_runout_modal()` | A real runout detected while STANDBY / COMPLETE / CANCELLED | **No** — hands off to the Filament panel |
+| Filament panel | `FilamentPanel::execute_load()` / `execute_unload()` | The Load / Unload buttons on the Filament nav panel | Yes - full ladder, `ParamPolicy::Prompt`, own execution |
+| AMS operation sidebar | `AmsOperationSidebar::handle_load_with_preheat(slot)` / `handle_unload(slot)` | Slot grid + context menu on the AMS panel and the AMS Overview panel (both own a `unique_ptr` to one) | Yes - full ladder, `ParamPolicy::Prompt`, own execution |
+| Mid-print runout dialog | `FilamentRunoutHandler::dispatch_load()` | `RunoutGuidanceModal`'s Load button during a print or runout pause | Yes - full ladder, `ParamPolicy::Suppress`, via `filament_op_execute.h` |
+| Idle runout dialog | `PrintStatusWidget::show_idle_runout_modal()` | A real runout detected while STANDBY / COMPLETE / CANCELLED | Yes - `PrintStatusWidget::dispatch_load()` calls `filament_op_execute.h` directly (`src/ui/panel_widgets/print_status_widget.cpp#set_config`); it does not hand off to the Filament panel |
+| Home tile | `FilamentSensorWidget::handle_click()` | Tap on the "Filament Sensor" home-panel tile | Depends on state - disabled sensor opens `SensorSettingsOverlay` (no dispatch); printing shows `RunoutGuidanceModal` status-only (no dispatch); otherwise the full Load/Unload/Purge modal dispatches via `filament_op_execute.h`, same as the runout dialogs |
 
-The idle dialog is the one surviving "navigate away", and it is correct *because* it never
-dispatches: with the printer idle the Filament panel is reachable, so `set_active(PanelId::
-Filament)` inherits that panel's routing instead of forking a fourth answer. That is only
-true while it stays a pure hand-off. The moment it wants to load without leaving the modal,
-it goes through `plan_load()` like the other three.
+None of the five surfaces navigate away to dispatch anymore. `plan_load()` /
+`plan_unload()` answer the tier decision for all of them; `filament_op_execute.h` runs
+that decision for the three surfaces above that don't own a per-surface execution ladder.
 
 ### The dispatch ladder
 
@@ -1191,6 +1312,7 @@ carry a comment saying so. Read `include/filament_op_dispatch.h` before "fixing"
 | Is there anything at this slot to unload? | `unload_target_is_loaded()` — actively loaded, **or** filament at the toolhead, **or** it is the current slot (the runout-recovery case, #995 / #1199) |
 | Which slot do this tool's buttons act on? | `resolve_op_button_slot()` |
 | Are Load / Unload enabled right now? | `compute_op_button_gating()` — load state *and* print state |
+| How does a plan actually run? | `filament_op_execute.h` - `execute_filament_load()` / `execute_filament_unload()` / `execute_filament_purge()`, shared by `PrintStatusWidget`, `FilamentRunoutHandler`, and `FilamentSensorWidget` |
 
 **Per-surface — presentation, and correctly different.**
 
@@ -1199,7 +1321,8 @@ carry a comment saying so. Read `include/filament_op_dispatch.h` before "fixing"
 | `FilamentPanel` | `begin_operation_guard()` / `operation_guard_`, the `backend_op_active_` gate on `ams_action_observer_`, the on-button spinner (`op_started` / `op_succeeded` / `op_failed`), and `navigate_to_ams_panel()` on `SelectSlot` |
 | `AmsOperationSidebar` | The step model (`start_operation(StepOperationType::LOAD_FRESH / LOAD_SWAP / UNLOAD)`) and the preheat state machine (`get_load_temp_for_slot()`, `pending_load_slot_`, `check_pending_load()`, `ui_initiated_heat_`) |
 | `FilamentRunoutHandler` | Staying put. Every outcome is a toast; navigating would tear down the dialog the user is standing in |
-| All three | Toast copy, and whether to toast at all. On a *dispatch* failure that is not purely presentational: the send's `caller_surfaces_errors` says whether this surface's `on_error` really shows the user something, and a surface that claims it silences `GcodeErrorRouter`'s `!!` report of the same rejection. A surface that only logs must pass `false` — see `RPC_ERROR_OWNERSHIP.md` |
+| `FilamentSensorWidget` (home tile) | No navigation either - toast-only refusals, and the modal stays up for a repeated Purge tap. Also owns the tap-routing decision itself (`decide_tap_destination()` in `filament_widget_tap_policy.h`): disabled sensor vs. printing vs. everything else |
+| All of the above | Toast copy, and whether to toast at all. On a *dispatch* failure that is not purely presentational: the send's `caller_surfaces_errors` says whether this surface's `on_error` really shows the user something, and a surface that claims it silences `GcodeErrorRouter`'s `!!` report of the same rejection. A surface that only logs must pass `false` — see `RPC_ERROR_OWNERSHIP.md` |
 
 Two consequences worth naming, because they look like bugs and are not:
 
@@ -1373,7 +1496,7 @@ unit-testable (`tests/unit/test_ams_endless_spool.cpp`).
 | Axis | Type | Values |
 |------|------|--------|
 | Availability | `EndlessSpoolAvailability` | `Unsupported` / `RequiresPlugin` / `Available` |
-| Enablement | `EndlessSpoolEnabled` | `Unknown` / `Off` / `On` |
+| Enablement | `EndlessSpoolEnabled` | `Unknown` / `Off` / `On` / `OnWithoutBackup` |
 | Editability | `EndlessSpoolEditability` | `ReadOnly` / `PerSlot` / `Group` |
 
 The axes are independent because real backends occupy the corners. CFS is
@@ -1382,7 +1505,9 @@ rendered both states identically. `RequiresPlugin` is retained in the enum for a
 backend whose package genuinely can be missing; no backend currently uses it, since the
 AD5X stock-zMod path moved to `Available`/`FirmwareManaged` once source-read of
 `ANALOG_PRUTOK` established that switchover is always-on there. `Unknown` is not `Off`: only
-`Off` justifies telling the user that no automatic switchover will happen.
+`Off` justifies telling the user that no automatic switchover will happen. `OnWithoutBackup`
+(CFS, #1391) is `On` plus a grouping-derived negative: the setting is on, but no two lanes
+currently group, so a runout would stop the print anyway.
 
 Editability carries a shape, not just a yes/no, because the write shape matters to the UI: a
 `PerSlot` write touches one slot (AFC `SET_RUNOUT`), while a `Group` write can move other
@@ -1738,8 +1863,8 @@ The `AmsDeviceOperationsOverlay` (`ui_ams_device_operations_overlay.h`) consolid
 The table's last row names the backend calls, not the UI path. Three surfaces flip bypass,
 and all three route through one shared policy object, `BypassToggleController`
 (`src/ui/ui_bypass_toggle_controller.cpp`, extracted from the sidebar's handler in
-03f784219): the AMS sidebar's toggle (`include/ui_ams_sidebar.h:195`), the home-panel
-Bypass tile (`src/ui/panel_widgets/bypass_widget.h:33`), and this overlay's own switch
+03f784219): the AMS sidebar's toggle (`include/ui_ams_sidebar.h#bypass_toggle_`), the home-panel
+Bypass tile (`src/ui/panel_widgets/bypass_widget.h#toggle_`), and this overlay's own switch
 (`include/ui_ams_device_operations_overlay.h`). Each owns an instance and forwards its
 click to `toggle()`, which runs every guard before touching the backend:
 
@@ -1801,13 +1926,13 @@ Where the override lands, by backend:
 | Backend | `supports_bypass` | Override row shown | `enable_bypass()` with override on |
 |---------|-------------------|--------------------|------------------------------------|
 | AFC | `afc_defaults` caps, default `true` | no | Consults `bypass_available_for()` |
-| AD5X IFS | `true` (`ams_backend_ad5x_ifs.cpp:134`) | no | Real command via `less_waste_external` |
+| AD5X IFS | Hardcoded `false` (`src/printer/ams_backend_ad5x_ifs.cpp#AmsSubscriptionBackend`) - no bypass is fitted | yes | Writes `external=1`, but the false capability keeps every caller from offering it |
 | Happy Hare | Runtime from `[mmu_machine] has_bypass`; `false` until first status | Only when `has_bypass: 0` | Consults `bypass_available_for()`; `MMU_SELECT_BYPASS` runs |
 | CFS | Converges on first full box frame: true (Fork: + payload `external` entry) | no | Consults `bypass_available_for()` — real `T<external>` on Fork, sensor-derived declaration on stock |
-| ACE | Hardcoded `false` (`ams_backend_ace.cpp:44`) | yes | `not_supported` |
-| Snapmaker | Hardcoded `false` (`ams_backend_snapmaker.cpp:260`) | yes | `not_supported` |
-| Tool Changer | Hardcoded `false` (`:31`) | yes | `not_supported` |
-| QIDI Box | Hardcoded `false` (`:193`) | yes | `not_supported` |
+| ACE | Hardcoded `false` (`src/printer/ams_backend_ace.cpp#AmsSubscriptionBackend`) | yes | `not_supported` |
+| Snapmaker | Hardcoded `false` (`src/printer/ams_backend_snapmaker.cpp#AmsSubscriptionBackend`) | yes | `not_supported` |
+| Tool Changer | Hardcoded `false` (`src/printer/ams_backend_toolchanger.cpp#AmsSubscriptionBackend`) | yes | `not_supported` |
+| QIDI Box | Hardcoded `false` (`src/printer/ams_backend_qidi.cpp#AmsSubscriptionBackend`) | yes | `not_supported` |
 
 Happy Hare is the one backend where the override changes machine behavior rather than only the
 UI: `cmd_MMU_SELECT_BYPASS` never checks `has_bypass`, it deselects the gear steppers and
@@ -1836,7 +1961,7 @@ The input is `AmsState::any_bypass_active()`, which polls every backend's `is_by
 Two things it is deliberately **not**:
 
 - **Not `AmsSystemInfo::current_slot == -2`.** The AFC backend sets that at
-  `ams_backend_afc.cpp:2241` while parsing `bypass_state`, but nine later writes in the same
+  `src/printer/ams_backend_afc.cpp#parse_afc_state` while parsing `bypass_state`, but nine later writes in the same
   file can overwrite it — including the mount-state derivation from #1229, which is
   intentionally unguarded so it cannot re-latch. `is_bypass_active()` returns the firmware's own
   report and is stable.
@@ -2120,6 +2245,39 @@ enum class AmsType {
 
 Update `ams_type_to_string()`, `ams_type_from_string()`, and the `is_filament_system()` / `is_tool_changer()` helpers as appropriate.
 
+### 1b. Declare the firmware default routing (only if it is not lane-per-tool)
+
+`AmsBackend::firmware_default_routing()` answers which physical head a logical
+tool routes to with **no remap applied** - the firmware's own default map. The
+base implementation is lane-per-tool (tool N owns lane N), which is correct for
+AFC, Happy Hare, klipper-toolchanger, CFS, QIDI and ACE, so most backends
+override nothing.
+
+Override only when the hardware genuinely disagrees:
+
+```cpp
+// Snapmaker U1: four physical heads, up to 32 logical tools -> [0,1,2,3,0,0,...]
+[[nodiscard]] helix::FirmwareRouting firmware_default_routing() const override {
+    return helix::FirmwareRouting::fixed_heads(NUM_TOOLS, 0);
+}
+```
+
+`AmsBackendAd5xIfs` is the third shape: it publishes an arbitrary 16-entry
+tool -> port table, so it builds `FirmwareRouting::head_for_tool` directly (ports
+are 1-based there and `5` is the unmapped sentinel).
+
+**This is not the live map.** `AmsSystemInfo::tool_to_slot_map` carries what the
+firmware is doing right now, and it is not uniformly available - an AFC tracks it,
+a U1 freezes `mapped_tool` at 1:1 while its real map lives in
+`print_task_config.extruder_map_table`. Seeding from the live map therefore means
+different things per backend; seed from the default map instead.
+
+Three consumers read this and they must all agree: the mapping-card seed
+(`FilamentMapper::use_current_assignments`), the wire filter
+(`FilamentMapper::identity_filtered_remap`), and the runout lane scan
+(`FilamentSensorManager`). Answering them differently is a silent bug - a
+lane-per-tool identity read as a genuine remap, or a runout watch on lane 0.
+
 ### 2. Add Detection in PrinterDiscovery
 
 In `printer_discovery.h`, add detection logic in `parse_objects()`:
@@ -2154,7 +2312,7 @@ Create include/ams_backend_mysystem.h and src/printer/ams_backend_mysystem.cpp. 
 - `recover_lane_position()` -- Physical retract of a stranded lane (default: NOT_SUPPORTED)
 - `get_dryer_info()`, `start_drying()`, `stop_drying()`, `update_drying()` -- Dryer control
 - `get_endless_spool_capabilities()`, `get_endless_spool_config()` -- Endless spool state. `set_endless_spool_backup()` is **not** an override point: it is non-virtual and owns every rejection. Supply `apply_endless_spool_backup()` (protected, transport only), `endless_spool_slot_count()` (protected, only if `total_slots` is wrong for you), and `endless_spool_backup_eligibility()` (only to tighten the default polymer-plus-grade rule; return `Eligible`/`Incompatible` only, unless your firmware genuinely has a soft case). `reset_endless_spool()` already works for any editable backend by looping the setter with -1 - override it only if your firmware has a real reset primitive. See § [Endless Spool](#endless-spool-shared-model).
-- `get_tool_mapping_capabilities()`, `get_tool_mapping()` -- Tool mapping
+- `get_remap_strategy()`, `remap_ready()`, `owns_tool_mapping_table()`, `get_tool_mapping()` -- Tool mapping. **Three questions, one spelling each.** `get_remap_strategy()` says HOW a user's tool->lane pick is carried out (`Native` writes your table, `GcodeRewrite` rewrites the job, `SnapmakerNative` is a firmware pre-print send, `None` means it cannot be). `remap_ready()` says whether that route is usable YET -- default true, override only where discovery gates it, as AD5X IFS does on `_IFS_VARS`. `owns_tool_mapping_table()` says whether you hold a tool->slot table for `ToolState` to adopt; the Snapmaker U1 answers **no** and still honors every pick, through its pre-print send, which is why this is not the same question as the first two. Ask them through `helix::printer::can_remap()` and `remap_is_persistent()` in `ams_remap.h` -- never by combining them at a call site, which is how one question came to have six answers that could disagree.
 - `get_device_sections()`, `get_device_actions()`, `execute_device_action()` -- Device-specific actions
 - `set_discovered_lanes()`, `set_discovered_tools()` -- Discovery configuration
 - `supports_auto_heat_on_load()` -- Auto-heat capability

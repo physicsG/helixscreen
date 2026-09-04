@@ -353,6 +353,9 @@ _user_dir_name_ok() {
 
 # Accept only scratch directories the installer created, or the staging dir the
 # in-app updater hands over via TMP_DIR (update_checker.cpp STAGING_NAME).
+# Mod-owned refusal is NOT here: common.sh is the bundle's first module and
+# must not call into later ones, so that guard rides detect_tmp_dir's user
+# override branch in platform.sh.
 validate_tmp_dir() {
     local d="$1"
     if _user_dir_name_ok "$d" '*helixscreen-install*' '.helix-update-staging'; then
@@ -369,6 +372,8 @@ validate_tmp_dir() {
 # Accept only install directories that name themselves after us. Every
 # auto-detected value already does (/opt/helixscreen, $HOME/helixscreen,
 # /usr/data/helixscreen, /srv/helixscreen, /user-resource/helixscreen, ...).
+# Mod-owned refusal is NOT here (same reason as validate_tmp_dir above):
+# it rides set_install_paths' final gate in platform.sh.
 validate_install_dir() {
     local d="$1"
     if _user_dir_name_ok "$d" '*helixscreen*'; then
@@ -429,7 +434,7 @@ cleanup_on_success() {
 # Kill process(es) by name — SIGTERM first, then SIGKILL any survivors.
 # helix-watchdog and helix-screen catch SIGTERM but don't always exit (e.g.
 # during splash handoff or when blocked on I/O), so the installer must
-# escalate or uninstall leaves zombie processes behind (#xxx observed on CC1).
+# escalate or uninstall leaves zombie processes behind.
 # Works on both GNU systems and BusyBox (AD5M/K1/CC1).
 # Args: process_name [process_name2 ...]
 # Returns: 0 if any process was killed, 1 if none found
@@ -570,7 +575,19 @@ clean_helix_state_dirs() {
 
 # Print post-install commands for the user
 # Reads: INIT_SYSTEM, SERVICE_NAME, INIT_SCRIPT_DEST, INSTALL_DIR
+# $1:   service mechanism, passed BY THE CALLER (the prober's answer;
+#       this module is bundle position 1 and must not reach forward for
+#       any later module's globals)
 print_post_install_commands() {
+    if [ "${1:-}" = "mod-managed" ]; then
+        # Payload install: the service lives in the mod's chroot, which the
+        # mod's own start.sh runs at boot. Nothing is running yet, so the
+        # useful instruction is how to get there.
+        echo "Useful commands:"
+        echo "  Reboot to start the UI (installed as ${INIT_SCRIPT_DEST})"
+        echo "  tail -f ${INSTALL_DIR}/logs/launcher.log   # View logs"
+        return 0
+    fi
     echo "Useful commands:"
     if [ "$INIT_SYSTEM" = "systemd" ]; then
         # journalctl and restart need privilege: a service user outside adm/
@@ -591,6 +608,300 @@ print_post_install_commands() {
 }
 
 # ============================================
+# Module: host_profile.sh
+# ============================================
+
+#
+# Host capability profile. Probes ONCE (host_profile_probe, called from main()
+# before set_install_paths) and exports answers; downstream code asks these
+# instead of testing vendor markers. The mod's own .shell/platform.sh is the
+# source of truth for its presence — reading it survives their refactors of
+# everything around it.
+#
+# Candidate roots are env-overridable so the BATS suite can point the probe at
+# a sandbox tree instead of the real /usr/data (same convention as
+# HELIX_STATE_VAR_LIB in common.sh). Production leaves them unset.
+#
+# THE BOTH-PLACES RULE: a mod tree location appears in this file TWICE, in the
+# probe candidate lists right here (env-overridable, marker-gated) AND in the
+# hard-coded canonical literals inside host_path_is_mod_owned below (not
+# overridable, marker-free). The two shapes are deliberate: the probe may be
+# redirected or miss a half-uninstalled marker, while ownership of the
+# namespace must not depend on either. Adding a new mod location means adding
+# it to BOTH lists -- one without the other is either a path the guard does
+# not recognize or a path the probe can never find.
+# Blank at source time on purpose: this variable is the ONE switch that arms
+# the mod-owned destruct exemption (host_mod_destruct_blocked below), so it
+# must never be inherited from the environment - a stale HELIX_MOD_PAYLOAD=1
+# exported by an old self-update or a user shell would silently license every
+# destructive step against the mod's tree. Only two legitimate setters exist,
+# both reached from an explicit command line: parse_installer_args /
+# mod_payload_autodetect in main.sh (install direction) and the uninstaller
+# bundle's --mod-payload parse (uninstall direction).
+HELIX_MOD_PAYLOAD=""
+
+HOST_MOD_ROOT=""
+HOST_MOD_CHROOT=""
+HOST_CHROOT_STATE="none"
+HOST_SERVICE_MECHANISM="systemd"
+# shellcheck disable=SC2034  # consumed by set_install_paths (install-root selection)
+HOST_INSTALL_ROOT=""
+# shellcheck disable=SC2034  # consumed by set_install_paths (config-dir selection)
+HOST_CONFIG_DIR=""
+# shellcheck disable=SC2034  # consumed by moonraker.conf discovery on mod hosts
+HOST_MOONRAKER_USER_CONF=""
+# shellcheck disable=SC2034  # consumed by install_platform_hooks (hook key)
+HOST_PLATFORM_HOOK_KEY=""
+# shellcheck disable=SC2034  # consumed by stop_competing_uis (mod owns the sweep)
+HOST_OWNS_COMPETING_UIS=0
+# The pre-payload standalone install an AD5M Forge-X rig may still carry
+# (our own installer put ad5m+forge_x at /opt/helixscreen with an
+# S90helixscreen service). Empty when the rig has none; the adopt-or-warn
+# offer in main.sh's mod_payload_mode_block consumes both.
+# shellcheck disable=SC2034  # consumed by payload_legacy_adopt_or_warn (main.sh)
+HOST_LEGACY_INSTALL_ROOT=""
+# shellcheck disable=SC2034  # consumed by payload_legacy_adopt_or_warn (main.sh)
+HOST_LEGACY_INIT_SCRIPT=""
+
+host_profile_probe() {
+    local cand legacy_root
+    # The probe owns these answers: reset before probing so a second call (or
+    # a caller that pre-set them) can never leave a stale answer behind.
+    HOST_MOD_ROOT=""
+    HOST_MOD_CHROOT=""
+    HOST_CHROOT_STATE="none"
+    HOST_SERVICE_MECHANISM="systemd"
+    HOST_INSTALL_ROOT=""
+    HOST_CONFIG_DIR=""
+    HOST_MOONRAKER_USER_CONF=""
+    HOST_PLATFORM_HOOK_KEY=""
+    HOST_OWNS_COMPETING_UIS=0
+    HOST_LEGACY_INSTALL_ROOT=""
+    HOST_LEGACY_INIT_SCRIPT=""
+
+    # shellcheck disable=SC2086  # word splitting is the point: a candidate path list
+    for cand in ${HELIX_MOD_TREE_CANDIDATES:-/usr/data/config/mod /opt/config/mod}; do
+        # Two descriptor spellings exist: upstream 1.4.2 ships .shell/common.sh
+        # (a flat AD5M file - S99root sources it), while the AD5X port fork
+        # renamed/extended it into .shell/platform.sh (per-board blocks).
+        # Either marks a live mod tree; keying on one fork's spelling made the
+        # probe blind to every upstream AD5M install.
+        if [ -f "$cand/.shell/common.sh" ] || [ -f "$cand/.shell/platform.sh" ]; then
+            HOST_MOD_ROOT="$cand"; break
+        fi
+    done
+    # The chroot is the mod's Buildroot rootfs, one derivation off each
+    # board's DATA_MNT in the mod's own descriptor (.shell/platform.sh):
+    # /usr/data on the AD5X, /data on the AD5M. Z-Mod's chroot shares the
+    # AD5X location; no /data/.mod/.zmod arm on purpose - the AD5M Z-Mod
+    # population keeps its standalone flow until its shape is verified.
+    # shellcheck disable=SC2086  # word splitting is the point: a candidate path list
+    for cand in ${HELIX_MOD_CHROOT_CANDIDATES:-/usr/data/.mod/.forge-x /usr/data/.mod/.zmod /data/.mod/.forge-x}; do
+        if [ -d "$cand/usr/bin" ]; then HOST_MOD_CHROOT="$cand"; break; fi
+    done
+    if [ -n "$HOST_MOD_CHROOT" ]; then
+        # Inside the chroot, "/" IS the chroot root: same device:inode pair.
+        # Both stats must succeed before the comparison counts — on a host
+        # without a usable stat(1) two empty strings compare equal and would
+        # report "inside", the wrong answer for the AD5X chroot guard.
+        local root_id chroot_id
+        root_id=$(stat -c %d:%i / 2>/dev/null) || root_id=""
+        chroot_id=$(stat -c %d:%i "$HOST_MOD_CHROOT" 2>/dev/null) || chroot_id=""
+        # shellcheck disable=SC2034  # consumed by the AD5X chroot-context gate
+        if [ -n "$root_id" ] && [ -n "$chroot_id" ] && [ "$root_id" = "$chroot_id" ]; then
+            HOST_CHROOT_STATE="inside"
+        else
+            HOST_CHROOT_STATE="outside:$HOST_MOD_CHROOT"
+        fi
+    fi
+    # The payload-contract answers are scoped to the mod's own shape: the
+    # tree WITH its Buildroot chroot, which both Forge-X layouts carry (each
+    # board's DATA_MNT). A tree without a chroot is a mod mid-install or
+    # half-removed - still recognized above (flavor detection, the forgex
+    # takeover paths, mod-owned guarding), but nothing verified that shape
+    # can run a payload, so the contract stays available there by explicit
+    # --payload-root only.
+    # shellcheck disable=SC2034  # consumed by set_install_paths / stop_competing_uis /
+    # shellcheck disable=SC2034  # install_platform_hooks / moonraker.conf discovery
+    if [ -n "$HOST_MOD_ROOT" ] && [ -n "$HOST_MOD_CHROOT" ]; then
+        HOST_SERVICE_MECHANISM="mod-managed"
+        HOST_OWNS_COMPETING_UIS=1
+        HOST_INSTALL_ROOT="$HOST_MOD_ROOT/.bin/helixscreen"
+        # mod_data is a sibling of the mod tree on every layout: /usr/data on
+        # the AD5X (Z-Mod), /opt on the AD5M (Forge-X) — derive, never pin.
+        HOST_CONFIG_DIR="$(dirname "$HOST_MOD_ROOT")/mod_data/helixscreen/config"
+        HOST_MOONRAKER_USER_CONF="$(dirname "$HOST_MOD_ROOT")/mod_data/user.moonraker.conf"
+        # The hook key names the RIG, not the mod: the two payload layouts
+        # differ (the AD5M hook's cache paths assume the host's own /data,
+        # which the AD5X chroot does not have). The split follows the mod's
+        # own descriptor rule - .shell/platform.sh selects its block by
+        # uname, mips -> AD5X, everything else -> AD5M.
+        case "$(uname -m)" in
+            mips*) HOST_PLATFORM_HOOK_KEY="ad5x-forgex" ;;
+            *)     HOST_PLATFORM_HOOK_KEY="ad5m-forgex" ;;
+        esac
+        # The legacy standalone population: before the payload contract, our
+        # own installer put ad5m+forge_x rigs at /opt/helixscreen with an
+        # S90helixscreen service. The payload install must see that root
+        # before it can offer to adopt it (main.sh) - and an AD5X rig must
+        # never answer one, since its /opt is the bind of /usr/data and a
+        # /opt/helixscreen there is a data-partition path, not an install to
+        # adopt. Candidates are env-overridable like the probe lists above.
+        if [ "$HOST_PLATFORM_HOOK_KEY" = "ad5m-forgex" ]; then
+            legacy_root="${HELIX_LEGACY_INSTALL_ROOT:-/opt/helixscreen}"
+            if [ -d "$legacy_root" ]; then
+                HOST_LEGACY_INSTALL_ROOT="$legacy_root"
+                HOST_LEGACY_INIT_SCRIPT="${HELIX_LEGACY_INIT_SCRIPT:-/etc/init.d/S90helixscreen}"
+            fi
+        fi
+    fi
+}
+
+# True when path (symlinks resolved) is managed by the mod: the probed tree,
+# the probed chroot, or one of the canonical mod roots. Never mv, rm, or chmod
+# these outside --mod-payload's in-place contract.
+host_path_is_mod_owned() {
+    [ -n "$1" ] || return 1
+    local p
+    p=$(readlink -f "$1" 2>/dev/null) || p="$1"
+    # Each probed root matches only when the probe found one — an empty
+    # "$HOST_MOD_ROOT"/* pattern degenerates to /* and would claim every
+    # absolute path on a host with no mod.
+    if [ -n "$HOST_MOD_ROOT" ]; then
+        case "$p" in
+            "$HOST_MOD_ROOT"|"$HOST_MOD_ROOT"/*) return 0 ;;
+        esac
+    fi
+    if [ -n "$HOST_MOD_CHROOT" ]; then
+        case "$p" in
+            "$HOST_MOD_CHROOT"|"$HOST_MOD_CHROOT"/*) return 0 ;;
+        esac
+    fi
+    # The canonical roots are hard-coded, like HELIX_INSTALL_DIRS: those
+    # namespaces are the mod's whether or not a probe found them. The probe's
+    # marker (.shell/platform.sh) is refactorable, and a half-uninstall can
+    # remove it while the payload still sits in the tree — recognition must
+    # not depend on it.
+    case "$p" in
+        /usr/data/.mod|/usr/data/.mod/*)                 return 0 ;;
+        /data/.mod|/data/.mod/*)                         return 0 ;;
+        /usr/data/config/mod|/usr/data/config/mod/*)     return 0 ;;
+        /opt/config/mod|/opt/config/mod/*)               return 0 ;;
+    esac
+    return 1
+}
+
+# The one mod-payload exemption test: true when this run must NOT touch the
+# path destructively — it is mod-owned and --mod-payload (the in-place update
+# contract) was not given. The fatal guard and the uninstall sweeps both route
+# through here so the exemption lives in exactly one place.
+host_mod_destruct_blocked() {
+    [ "$HELIX_MOD_PAYLOAD" != "1" ] && host_path_is_mod_owned "$1"
+}
+
+# mod_data as a sibling of the mod tree on every layout: /usr/data on the AD5X
+# (Z-Mod), /opt on the AD5M (Forge-X) — the same rule host_profile_probe
+# applies to HOST_CONFIG_DIR. Derived, never pinned; forgex.sh's
+# forgex_mod_data() delegates here so installer state files share one path.
+host_mod_data() {
+    printf '%s\n' "$(dirname "${HOST_MOD_ROOT:-/opt/config/mod}")/mod_data"
+}
+
+# The mod's data mount (its descriptor's DATA_MNT): the parent of the .mod
+# namespace — /usr/data on the AD5X, /data on the AD5M. The one location per
+# board where a payload root outside the mod's git tree both exists and
+# survives an OTA, which is why the OD1 escape-hatch example derives from
+# here rather than a hard-coded AD5X path. Echoes nothing when the probe
+# found no chroot (callers keep their own fallback).
+host_mod_data_mount() {
+    [ -n "${HOST_MOD_CHROOT:-}" ] || return 0
+    printf '%s\n' "$(dirname "$(dirname "$HOST_MOD_CHROOT")")"
+}
+
+# Where the payload root of the LAST payload install is recorded, beside the
+# display-mode record. An install can land outside the probed default
+# (--payload-root, the OTA-durable seam); without this note a later armed
+# uninstall removes the default while the real payload sits where the
+# operator put it. Latest install wins — current state, not history.
+host_payload_root_record() {
+    printf '%s\n' "$(host_mod_data)/helixscreen_payload_root"
+}
+
+# Record the payload root this install actually used (payload contract only).
+record_payload_root() {
+    # mod_data exists on any host the probe recognized; mkdir -p covers a
+    # half-built sandbox and costs nothing where it already stands.
+    $SUDO mkdir -p "$(host_mod_data)" 2>/dev/null
+    printf '%s\n' "$1" | $SUDO tee "$(host_payload_root_record)" >/dev/null 2>/dev/null \
+        || log_warn "Could not record the payload root ($(host_payload_root_record))"
+}
+
+# The recorded payload root, or empty when no payload install left one. Never
+# fails: callers capture its output, and a failing command substitution aborts
+# them under the bundles' set -e.
+read_payload_root_record() {
+    [ -f "$(host_payload_root_record)" ] || return 0
+    cat "$(host_payload_root_record)" 2>/dev/null || true
+}
+
+# Resolve the payload root this run's uninstall acts on: the --payload-root
+# flag, else the root the install recorded in mod_data, else the probed
+# default (INSTALL_DIR). ONE resolver for every uninstall entry point — the
+# standalone arm and install.sh's HELIX_INSTALL_DIRS sweep. A caller that
+# resolves from the probe or flag alone misses a --payload-root install: it
+# removes the probed default while the real payload, and its updater clone,
+# survives and the record goes stale.
+#
+# Echoes the resolved path (empty when nothing resolves). Returns 1 to
+# REFUSE: a flag or a corrupted record can name an arbitrary existing
+# directory, and that must fail loudly with the offending source named —
+# never removed, never silently fallen back from; the operator re-runs with
+# an explicit flag. Resolution happens once per run: the cached answer
+# (HOST_PAYLOAD_ROOT) keeps the arm and the sweep on the same root.
+resolve_payload_root() {
+    if [ -n "${HOST_PAYLOAD_ROOT:-}" ]; then
+        printf '%s\n' "$HOST_PAYLOAD_ROOT"
+        return 0
+    fi
+
+    rpr_root="${MOD_PAYLOAD_ROOT:-}"
+    rpr_src="the --payload-root flag"
+    if [ -z "$rpr_root" ]; then
+        rpr_root=$(read_payload_root_record 2>/dev/null || true)
+        rpr_src="the payload-root record ($(host_payload_root_record))"
+    fi
+
+    if [ -z "$rpr_root" ]; then
+        # The probed default already passed set_install_paths' own validate
+        # gate in every entry point that reaches here armed.
+        rpr_root="${INSTALL_DIR:-}"
+    elif ! _user_dir_name_ok "$rpr_root" '*helixscreen*' 2>/dev/null; then
+        # A missing gate helper fails the test too (rc 127): refusing without
+        # it is fail-safe, acting without it is not.
+        log_error "Refusing to uninstall the payload root named by ${rpr_src}:"
+        log_error "  ${rpr_root}"
+        log_error "Its last path component must contain 'helixscreen' - the same name"
+        log_error "gate every install root passes. Re-run with an explicit --payload-root."
+        return 1
+    fi
+
+    HOST_PAYLOAD_ROOT="$rpr_root"
+    printf '%s\n' "$rpr_root"
+    return 0
+}
+
+# $1=what the caller was about to do, $2=path — call before any destructive
+# step. Exits 1 when the path is mod-owned and this is not a payload update.
+host_refuse_mod_owned() {
+    if host_mod_destruct_blocked "$2"; then
+        log_error "refusing ${1} on mod-owned path: $2"
+        log_error "this tree belongs to the firmware mod; the payload contract updates"
+        log_error "it in place (a bare install here, or --payload-root to name a root)"
+        exit 1
+    fi
+}
+
+# ============================================
 # Module: platform.sh
 # ============================================
 
@@ -606,6 +917,13 @@ _USER_INSTALL_DIR="${INSTALL_DIR}"
 [ "$_USER_INSTALL_DIR" = "/opt/helixscreen" ] && _USER_INSTALL_DIR=""
 INIT_SCRIPT_DEST=""
 PREVIOUS_UI_SCRIPT=""
+# The firmware-mod flavor (forge_x | zmod | klipper_mod | stock), detected for
+# BOTH ad5m and ad5x. AD5M_FIRMWARE stays as a compat alias: consumers
+# written before the ad5x rework (uninstall restore paths, forgex.sh) still
+# read it, so main() assigns both from one detect_mod_flavor call.
+# shellcheck disable=SC2034  # consumed by main.sh (set_install_paths dispatch)
+MOD_FLAVOR=""
+# shellcheck disable=SC2034  # compat alias, consumed by main.sh consumers
 AD5M_FIRMWARE=""
 # shellcheck disable=SC2034  # consumed by main.sh and competing_uis.sh
 K1_FIRMWARE=""
@@ -768,9 +1086,14 @@ detect_platform() {
     fi
 
     # Check for FlashForge AD5X (MIPS with /usr/data and FlashForge indicators)
-    # AD5X uses Ingenic X2600 (MIPS); identified by /usr/prog/ dir or /ZMOD file alongside /usr/data/
+    # AD5X uses Ingenic X2600 (MIPS); identified by /usr/prog/ dir or /ZMOD file
+    # alongside /usr/data/. A Forge-X host carries neither marker: there the
+    # host profile's probe (mod git tree or chroot) is the evidence, so the
+    # probe globals qualify on their own — which also keeps this clause
+    # testable through the probe's env-overridable candidate roots.
     if [ "$arch" = "mips" ]; then
-        if [ -d "/usr/data" ] && { [ -d "/usr/prog" ] || [ -f "/ZMOD" ]; }; then
+        if { [ -d "/usr/data" ] && { [ -d "/usr/prog" ] || [ -f "/ZMOD" ]; }; } \
+           || [ -n "${HOST_MOD_ROOT:-}" ] || [ -n "${HOST_MOD_CHROOT:-}" ]; then
             echo "ad5x"
             return
         fi
@@ -983,19 +1306,30 @@ helix_self_update_asset() {
     esac
 }
 
-# AD5X (FlashForge / ZMOD) preflight: refuse to run outside the chroot.
+# Mod-host (FlashForge AD5X) preflight: refuse to run outside the ZMOD chroot.
 #
-# ZMOD installs HelixScreen into an overlay rooted at /usr/data/.mod/.zmod/.
-# Inside the chroot the rootfs is the overlay (/, /etc, /opt, /srv all live
-# under that overlay). Outside, those same paths point at the squashfs base
-# view that helix-screen never sees — so a curl|sh, --local, --update, or
-# --uninstall run from a fresh SSH session writes to the wrong filesystem
-# entirely. The `/usr/data/.mod/.zmod` directory is only visible from outside
-# the chroot, so its presence is the reliable "you forgot to chroot" tell.
+# The FlashForge mods run out of chroots under /usr/data/.mod — ZMOD's overlay
+# at .zmod, Forge-X's environment at .forge-x — and only ZMOD's layout needs
+# the installer INSIDE it. ZMOD installs HelixScreen into an overlay rooted at
+# /usr/data/.mod/.zmod/: inside the chroot the rootfs is the overlay (/, /etc,
+# /opt, /srv all live under it), while outside those same paths point at the
+# squashfs base view that helix-screen never sees — so a curl|sh, --local,
+# --update, or --uninstall run from a fresh SSH session writes to the wrong
+# filesystem entirely. The chroot root is only visible from outside it, so its
+# presence is the reliable "you forgot to chroot" tell.
 #
-# Aborts with an actionable message when called outside the chroot.
-ad5x_check_chroot_context() {
-    [ -d "/usr/data/.mod/.zmod" ] || return 0
+# A Forge-X host never trips this: its install is host-side into the mod's git
+# tree, and it has no .zmod root — hence the mod-generic name.
+#
+# Aborts with an actionable message when called outside the ZMOD chroot.
+mod_check_chroot_context() {
+    local zmod_root="/usr/data/.mod/.zmod"
+    # The probe's candidate roots are env-overridable (sandboxed tests); honour
+    # a probed ZMOD chroot so the refusal is exercisable without a real device.
+    case "${HOST_MOD_CHROOT:-}" in
+        */.zmod) zmod_root="$HOST_MOD_CHROOT" ;;
+    esac
+    [ -d "$zmod_root" ] || return 0
 
     log_error ""
     log_error "=========================================================="
@@ -1003,7 +1337,7 @@ ad5x_check_chroot_context() {
     log_error "=========================================================="
     log_error ""
     log_error "ZMOD installs HelixScreen into an overlay at:"
-    log_error "  /usr/data/.mod/.zmod/"
+    log_error "  $zmod_root/"
     log_error ""
     log_error "Running this installer from your default SSH shell writes"
     log_error "into the squashfs base view, not the overlay HelixScreen"
@@ -1013,7 +1347,7 @@ ad5x_check_chroot_context() {
     log_error ""
     log_error "Enter the chroot first, then re-run your command:"
     log_error ""
-    log_error "  chroot /usr/data/.mod/.zmod"
+    log_error "  chroot $zmod_root"
     log_error "  # then re-run: curl ... | sh   OR   sh install.sh --local <zip>"
     log_error "  # OR:          sh install.sh --update / --uninstall"
     log_error ""
@@ -1022,6 +1356,12 @@ ad5x_check_chroot_context() {
     log_error "specific versions, or troubleshooting."
     log_error ""
     exit 1
+}
+
+# Compat wrapper for the pre-rework name. The uninstaller bundle's main()
+# still calls this; it delegates rather than forking the guard.
+ad5x_check_chroot_context() {
+    mod_check_chroot_context "$@"
 }
 
 # Detect the Klipper ecosystem user (who runs klipper/moonraker services)
@@ -1092,10 +1432,25 @@ detect_klipper_user() {
     return 0
 }
 
-# Detect AD5M firmware variant (Klipper Mod vs Forge-X vs ZMOD)
-# Only called when platform is "ad5m"
-# Returns: "klipper_mod", "forge_x", or "zmod"
-detect_ad5m_firmware() {
+# Detect the firmware-mod flavor (Forge-X vs ZMOD vs Klipper Mod vs stock).
+# Called for BOTH "ad5m" and "ad5x" — the mods ship for the whole FlashForge
+# Adventurer line and share their markers across the two platforms.
+# Returns: "forge_x", "zmod", "klipper_mod", or "stock"
+detect_mod_flavor() {
+    # Forge-X indicators — the host profile's probe. The mod's git tree is the
+    # primary evidence and its chroot root the fallback (matched by basename so
+    # a sandboxed probe qualifies); both are checked BEFORE the /ZMOD test so
+    # a Forge-X AD5X — no /ZMOD, no /usr/prog — is not misread as stock.
+    # The ZMOD chroot deliberately does not match here: it owns the branch
+    # below.
+    if [ -n "${HOST_MOD_ROOT:-}" ]; then
+        echo "forge_x"
+        return
+    fi
+    case "${HOST_MOD_CHROOT:-}" in
+        */.forge-x) echo "forge_x"; return ;;
+    esac
+
     # ZMOD indicator - check for /ZMOD marker file
     # ZMOD is used on AD5M, AD5M Pro, and AD5X (FlashForge series)
     if [ -f "/ZMOD" ]; then
@@ -1112,14 +1467,23 @@ detect_ad5m_firmware() {
         return
     fi
 
-    # Forge-X indicators - check for its mod overlay structure
+    # Forge-X on the AD5M: the mod overlay structure marker, for hosts the
+    # probe did not recognize (its .shell/platform.sh marker is refactorable)
     if [ -d "/opt/config/mod/.root" ]; then
         echo "forge_x"
         return
     fi
 
-    # Default to forge_x (original behavior, most common)
-    echo "forge_x"
+    # No mod evidence at all: stock FlashForge firmware
+    echo "stock"
+}
+
+# UNCALLED_OK: compat wrapper for the pre-rework name, kept for external
+# callers that source this module (its behavior is pinned by
+# test_platform_detection.bats); the installer and the uninstaller bundle both
+# call detect_mod_flavor directly now.
+detect_ad5m_firmware() {
+    detect_mod_flavor "$@"
 }
 
 # Detect K1 firmware variant (Simple AF, Guilouz helper-script, or stock)
@@ -1270,11 +1634,15 @@ detect_pi_install_dir() {
 # User can override via TMP_DIR env var.
 # Sets: TMP_DIR
 detect_tmp_dir() {
-    # User already set TMP_DIR — respect it, but only after the name guard.
-    # TMP_DIR is rm -rf'd on both the success and the failure path, so an
-    # unvalidated override erases whatever it points at (validate_tmp_dir in
-    # common.sh; the /mnt/UDISK incident).
+    # User already set TMP_DIR — respect it, but only after the ownership and
+    # name guards. TMP_DIR is rm -rf'd on both the success and the failure
+    # path, so an unvalidated override erases whatever it points at
+    # (validate_tmp_dir in common.sh). The mod-owned refusal rides HERE, one
+    # layer above the validator: common.sh is the bundle's first module and
+    # must stay free of later-module calls, so this module (which loads after
+    # the profile) owns the guard call. It runs BEFORE the name check.
     if [ -n "${TMP_DIR:-}" ]; then
+        host_refuse_mod_owned "stage the download in" "$TMP_DIR"
         validate_tmp_dir "$TMP_DIR" || exit 1
         log_info "Temp directory (user override): $TMP_DIR"
         return 0
@@ -1306,11 +1674,14 @@ detect_tmp_dir() {
     if [ -n "${TMP_DIR_PREFERRED:-}" ]; then
         # Name-guard it like any other TMP_DIR: whatever wins here is rm -rf'd
         # on exit, so a declared root that is a bare mountpoint (the /mnt/UDISK
-        # incident shape) must be dropped rather than staged into.
-        if _user_dir_name_ok "$TMP_DIR_PREFERRED" '*helixscreen-install*' '.helix-update-staging'; then
-            candidates="$TMP_DIR_PREFERRED"
-        else
+        # incident shape) must be dropped rather than staged into. Mod-owned is
+        # dropped for the same reason as the candidate loop below.
+        if ! _user_dir_name_ok "$TMP_DIR_PREFERRED" '*helixscreen-install*' '.helix-update-staging'; then
             log_warn "Ignoring TMP_DIR_PREFERRED='$TMP_DIR_PREFERRED' (not an installer scratch dir name)"
+        elif host_path_is_mod_owned "$TMP_DIR_PREFERRED"; then
+            log_warn "Ignoring TMP_DIR_PREFERRED='$TMP_DIR_PREFERRED' (inside the firmware mod's tree)"
+        else
+            candidates="$TMP_DIR_PREFERRED"
         fi
     fi
     if [ -n "${INSTALL_DIR:-}" ]; then
@@ -1328,6 +1699,14 @@ detect_tmp_dir() {
     candidates="$candidates /user-resource/helixscreen-install /data/helixscreen-install /mnt/data/helixscreen-install /usr/data/helixscreen-install /var/tmp/helixscreen-install /tmp/helixscreen-install"
 
     for candidate in $candidates; do
+        # Never AUTO-stage inside the mod's tree, in any mode: the scratch dir
+        # is untracked in their git repo, so their OTA's git clean removes it
+        # mid-run, and the installer's own cleanup rm -rf's it later. This is
+        # our choice, not the operator's, so the next candidate simply wins -
+        # a user-set TMP_DIR keeps its explicit --mod-payload exemption in the
+        # ownership guard on this function's override branch instead.
+        host_path_is_mod_owned "$candidate" && continue
+
         local check_dir
         check_dir=$(dirname "$candidate")
 
@@ -1360,6 +1739,50 @@ detect_tmp_dir() {
 
 # Set installation paths based on platform and firmware
 # Sets: INSTALL_DIR, INIT_SCRIPT_DEST, PREVIOUS_UI_SCRIPT, TMP_DIR, KLIPPER_CONFIG_DIR
+# The install root as the SERVICE will see it, from inside the mod's chroot.
+#
+# A mod tree can be reachable by more than one host path — the AD5X carries
+# both /usr/data/config/mod and /opt/config/mod for one directory — and only
+# some of those spellings are bind-mounted into the chroot. The service runs
+# inside it, so a DAEMON_DIR that resolves only on the host makes the init
+# script cd into nothing and exit 0 silently, which looks like a healthy boot
+# with no UI.
+#
+# Sets HELIX_CHROOT_DAEMON_DIR to a spelling that resolves in-chroot, trying
+# INSTALL_DIR first and then the same path under each other mod-tree candidate.
+# Leaves it empty and warns when none does: a wrong DAEMON_DIR fails silently,
+# so it must be said out loud here.
+# shellcheck disable=SC2034  # consumed by service.sh (install_service_sysv)
+resolve_chroot_daemon_dir() {
+    HELIX_CHROOT_DAEMON_DIR=""
+    [ -n "${HOST_MOD_CHROOT:-}" ] && [ -n "${INSTALL_DIR:-}" ] || return 0
+
+    if [ -d "${HOST_MOD_CHROOT}${INSTALL_DIR}" ]; then
+        # shellcheck disable=SC2034  # consumed by service.sh (install_service_sysv)
+        HELIX_CHROOT_DAEMON_DIR="$INSTALL_DIR"
+        return 0
+    fi
+
+    local cand suffix candidate
+    suffix="${INSTALL_DIR#"${HOST_MOD_ROOT}"}"
+    # shellcheck disable=SC2086  # word splitting is the point: a candidate list
+    for cand in ${HELIX_MOD_TREE_CANDIDATES:-/usr/data/config/mod /opt/config/mod}; do
+        [ "$cand" = "${HOST_MOD_ROOT:-}" ] && continue
+        candidate="${cand}${suffix}"
+        if [ -d "${HOST_MOD_CHROOT}${candidate}" ]; then
+            # shellcheck disable=SC2034  # consumed by service.sh (install_service_sysv)
+            HELIX_CHROOT_DAEMON_DIR="$candidate"
+            log_info "Mod host: service reaches the payload in-chroot as ${candidate}"
+            return 0
+        fi
+    done
+
+    log_warn "No install-root spelling resolves inside ${HOST_MOD_CHROOT}."
+    log_warn "The service starts from in there, so it would find nothing at boot."
+    log_warn "Checked: ${INSTALL_DIR}"
+    return 0
+}
+
 set_install_paths() {
     local platform=$1
     local firmware=${2:-}
@@ -1518,14 +1941,101 @@ set_install_paths() {
         detect_pi_install_dir
     fi
 
+    # A probed mod host installs into the mod's own payload root: the mod owns
+    # the UI's service and its OTA manages the tree, so the per-platform roots
+    # above (/srv, /opt, ...) are not where this install may write. The
+    # validate gate below then refuses the run unless the payload contract
+    # (auto-detected in main.sh) accepted the in-place update, which is the
+    # point: on a mod host, that IS the default contract. --standalone opts
+    # back into the self-managed install, which keeps the platform root above.
+    # An explicitly user-provided INSTALL_DIR still wins over auto-detection,
+    # same as everywhere else in this file -- the branches above overwrite
+    # INSTALL_DIR, so restore the captured value here.
+    if [ -n "${HOST_INSTALL_ROOT:-}" ]; then
+        if [ -n "${_USER_INSTALL_DIR:-}" ]; then
+            INSTALL_DIR="$_USER_INSTALL_DIR"
+            log_info "Mod host: honoring the explicitly requested install directory"
+        elif [ "${STANDALONE_INSTALL:-}" != "1" ]; then
+            INSTALL_DIR="$HOST_INSTALL_ROOT"
+            log_info "Mod host: install root is the firmware mod's payload tree"
+            # The payload boots from inside the mod's chroot, so its init
+            # script goes in the chroot's /etc/init.d, not the host's. The mod
+            # runs `chroot $MOD .root/start.sh`, which starts every S* it finds
+            # in /etc/init.d in any display mode -- the add-on mechanism
+            # upstream documents (DrA1ex/ff5m#74). A stock rig has no such
+            # directory; install_service_sysv creates it.
+            #
+            # Only the directory moves. The S-number stays whatever this
+            # platform chose above, preserving its ordering intent.
+            if [ -n "${HOST_MOD_CHROOT:-}" ] && [ -n "${INIT_SCRIPT_DEST:-}" ]; then
+                INIT_SCRIPT_DEST="${HOST_MOD_CHROOT}/etc/init.d/$(basename "$INIT_SCRIPT_DEST")"
+                log_info "Mod host: service installs into the chroot: ${INIT_SCRIPT_DEST}"
+                resolve_chroot_daemon_dir
+            fi
+        else
+            log_info "Mod host: --standalone keeps the platform root for this install"
+        fi
+        log_info "Install directory: ${INSTALL_DIR}"
+    fi
+
     # Final gate on whatever INSTALL_DIR we ended up with. Every hard-coded
     # platform path above already satisfies it; this catches a future branch
     # (or an override route added later) that would hand a bare data directory
-    # to the mv/rm -rf in release.sh and uninstall.sh.
+    # to the mv/rm -rf in release.sh and uninstall.sh. The mod-owned refusal
+    # rides HERE, one layer above the name validator: common.sh is the
+    # bundle's first module and must not call into later ones, and this module
+    # loads after host_profile.sh. Order matters - the ownership refusal must
+    # run BEFORE the name check.
+    host_refuse_mod_owned "install into" "$INSTALL_DIR"
     validate_install_dir "$INSTALL_DIR" || exit 1
 
     # Auto-detect best temp directory (all platforms)
     detect_tmp_dir
+}
+
+# Decide which platform-hook file a host needs, without installing anything.
+#
+# The ONE implementation of this rule. Two consumers: the installer, which
+# deploys the answer, and the dev-deploy path, which asks for it over ssh
+# (scripts/device-profile.sh, used by mk/cross.mk's deploy-ad5m). Neither may
+# re-derive it -- a wrong key installs a hook that runs and points nowhere.
+#
+# $1 = platform (detect_platform's answer). Echoes the hook key, or nothing
+# when the platform ships no hooks.
+resolve_platform_hook_key() {
+    local platform="$1"
+    local platform_hook=""
+    case "${AD5M_FIRMWARE:-}" in
+        forge_x)     platform_hook="ad5m-forgex" ;;
+        klipper_mod) platform_hook="ad5m-kmod" ;;
+        zmod)        platform_hook="ad5m-zmod" ;;
+    esac
+
+    # Platform hooks (pi32 shares Pi hooks). AD5X gets its own key, never
+    # ad5m-zmod: it runs inside the chroot at /usr/data/.mod/.zmod, installs to
+    # /srv/helixscreen, and has no /data, so the AD5M hook's
+    # HELIX_CACHE_DIR=/data/helixscreen/cache does not exist there.
+    case "$platform" in
+        pi|pi32)       platform_hook="pi" ;;
+        k1)            platform_hook="k1" ;;
+        k2)            platform_hook="k2" ;;
+        cc1)           platform_hook="cc1" ;;
+        m1)            platform_hook="m1" ;;
+        ad5x)          platform_hook="ad5x" ;;
+        snapmaker-u1)  platform_hook="snapmaker-u1" ;;
+    esac
+
+    # A probed mod host outranks both dispatches above. HOST_PLATFORM_HOOK_KEY
+    # is set only when the mod's own tree layout was found, and names the
+    # payload layout that rig actually runs. Without this a Forge-X AD5X
+    # reports platform=ad5x AND flavor=forge_x — the flavor case picks
+    # ad5m-forgex, the platform case overrides to ad5x (the Z-Mod hook) — and
+    # neither dispatch knows the forge-x payload layout exists.
+    if [ -n "${HOST_PLATFORM_HOOK_KEY:-}" ]; then
+        platform_hook="$HOST_PLATFORM_HOOK_KEY"
+    fi
+
+    echo "$platform_hook"
 }
 
 # User-editable config files that live in printer_data/config/helixscreen/.
@@ -2305,6 +2815,24 @@ install_runtime_deps() {
     fi
 }
 
+# Real-write space probe: can <dir> take a <kb>-KB file? Leaves nothing
+# behind. Free-space numbers cannot see a read-only filesystem (df happily
+# reports room on a squashfs), so where a wrong answer costs a mid-install
+# ENOSPC the filesystem is asked directly instead. Shared by
+# check_service_dest_space and check_disk_space's no-df-target fallback so
+# both ask the same way.
+_fs_probe_write_kb() {
+    local dir="$1" kb="$2"
+    local probe="${dir%/}/.helixscreen-space-probe.$$"
+    if $SUDO dd if=/dev/zero of="$probe" bs=1024 count="$kb" \
+            >/dev/null 2>&1; then
+        $SUDO rm -f "$probe" 2>/dev/null || true
+        return 0
+    fi
+    $SUDO rm -f "$probe" 2>/dev/null || true
+    return 1
+}
+
 # Check available disk space
 # Requires at least 50MB free on the install directory's filesystem, then hands
 # off to check_service_dest_space for the filesystem that receives the service
@@ -2321,24 +2849,58 @@ check_disk_space() {
     while [ ! -d "$check_dir" ] && [ "$check_dir" != "/" ]; do
         check_dir=$(dirname "$check_dir")
     done
+
+    # The walk ran out at "/": no ancestor of INSTALL_DIR exists. Pointing df
+    # at "/" would measure the read-only squashfs the embedded hosts boot
+    # from -- on a stock AD5X "/" is a 12.5M squashfs with no /srv on it,
+    # while the install's bytes actually land on the writable data partition
+    # (4.7G free on the same box). Measure the first conventional data mount
+    # instead. With none present, leave check_dir at "/" and fall through to
+    # the real-write probe below, which also refuses a read-only root that df
+    # would report as roomy.
     if [ "$check_dir" = "/" ]; then
-        check_dir="/"
+        local cand data_mount=""
+        # shellcheck disable=SC2086  # word splitting is the point: a candidate path list
+        for cand in ${HELIX_DATA_MOUNT_CANDIDATES:-/usr/data /mnt/UDISK /data}; do
+            if [ -d "$cand" ]; then
+                data_mount="$cand"
+                break
+            fi
+        done
+        [ -n "$data_mount" ] && check_dir="$data_mount"
     fi
 
-    # Get available space in MB
-    local available_mb
-    case "$platform" in
-        ad5m|ad5x|k1|k2)
-            # BusyBox df: blocks are in KB by default
-            available_mb=$(df "$check_dir" 2>/dev/null | tail -1 | awk '{print int($4/1024)}')
-            ;;
-        *)
-            # GNU df with -m flag outputs in MB
-            available_mb=$(df -m "$check_dir" 2>/dev/null | tail -1 | awk '{print $4}')
-            ;;
-    esac
+    # Get available space in MB (skipped when there is nothing trustworthy to
+    # point df at)
+    local available_mb=""
+    if [ "$check_dir" != "/" ]; then
+        case "$platform" in
+            ad5m|ad5x|k1|k2)
+                # BusyBox df: blocks are in KB by default
+                available_mb=$(df "$check_dir" 2>/dev/null | tail -1 | awk '{print int($4/1024)}')
+                ;;
+            *)
+                # GNU df with -m flag outputs in MB
+                available_mb=$(df -m "$check_dir" 2>/dev/null | tail -1 | awk '{print $4}')
+                ;;
+        esac
+    fi
 
-    if [ -n "$available_mb" ] && [ "$available_mb" -lt "$required_mb" ]; then
+    if [ -z "$available_mb" ]; then
+        # df could not answer (no directory to point it at, or df itself
+        # failed). Ask the filesystem with a real write instead.
+        if _fs_probe_write_kb "$check_dir" "$SERVICE_DEST_PROBE_KB"; then
+            log_info "Disk space check: $check_dir accepts a real write"
+            # INSTALL_DIR is not the only filesystem this install writes to.
+            check_service_dest_space
+            return 0
+        fi
+        log_error "Cannot write to $check_dir -- full or read-only."
+        log_error "Install target: ${INSTALL_DIR:-/opt/helixscreen}"
+        exit 1
+    fi
+
+    if [ "$available_mb" -lt "$required_mb" ]; then
         log_error "Insufficient disk space on $check_dir"
         log_error "Required: ${required_mb}MB, Available: ${available_mb}MB"
         exit 1
@@ -2420,14 +2982,10 @@ check_service_dest_space() {
     done
     [ "$(_fs_id "$dest_dir")" != "$(_fs_id "$install_probe")" ] || return 0
 
-    local probe="${dest_dir}/.helixscreen-space-probe.$$"
-    if $SUDO dd if=/dev/zero of="$probe" bs=1024 count="$SERVICE_DEST_PROBE_KB" \
-            >/dev/null 2>&1; then
-        $SUDO rm -f "$probe" 2>/dev/null || true
+    if _fs_probe_write_kb "$dest_dir" "$SERVICE_DEST_PROBE_KB"; then
         log_info "Service directory check: $(_fs_free_mb "$dest_dir")MB available on $dest_dir"
         return 0
     fi
-    $SUDO rm -f "$probe" 2>/dev/null || true
 
     local upper
     upper=$(_overlay_upperdir)
@@ -2563,6 +3121,62 @@ Moonraker is running but not responding on http://127.0.0.1:7125."
     esac
 }
 
+# Verify a binary that was built for the mod's chroot, from outside it.
+#
+# The binary's interpreter and libraries live under the chroot rootfs, so a
+# host-side ldd resolves against the HOST's libc and reports the chroot's
+# glibc as "not found" -- false errors for a binary that runs fine where the
+# mod actually runs it (audit item 8). Ask the chroot's own ldd via chroot(1)
+# instead, trying the in-chroot spellings of the install tree the chroot can
+# expose: the same host path (the chroot may mount the data partition at the
+# same node), plus each host->chroot prefix bind (the Forge-X chroot binds
+# /usr/data at /opt). When no spelling exists there is no way to verify from
+# outside: say so and carry on. Never fails the install.
+#
+# The bind list is env-overridable so the BATS suite can point the mapping at
+# a sandbox tree (same convention as HELIX_MOD_TREE_CANDIDATES in
+# host_profile.sh). Production leaves it unset.
+_verify_binary_deps_via_chroot() {
+    local chroot_dir="$1"
+    local binary="$2"
+
+    local candidates="$binary"
+    local bind
+    # shellcheck disable=SC2086  # word splitting is the point: a bind list
+    for bind in ${HELIX_CHROOT_BINDS:-/usr/data=/opt}; do
+        candidates="$candidates ${bind#*=}${binary#"${bind%%=*}"}"
+    done
+
+    local ldd_out=""
+    local cand
+    # shellcheck disable=SC2086  # word splitting is the point: a candidate list
+    for cand in $candidates; do
+        [ -f "${chroot_dir}${cand}" ] || continue
+        ldd_out=$($SUDO chroot "$chroot_dir" ldd "$cand" 2>/dev/null || true)
+        [ -n "$ldd_out" ] && break
+    done
+
+    if [ -n "$ldd_out" ]; then
+        local missing
+        missing=$(echo "$ldd_out" | grep "not found" || true)
+        if [ -z "$missing" ]; then
+            log_success "All shared library dependencies satisfied (verified inside the mod chroot)"
+            return 0
+        fi
+        log_warn "Missing shared libraries inside the mod chroot:"
+        echo "$missing" | while IFS= read -r line; do
+            log_warn "  $line"
+        done
+        return 0
+    fi
+
+    log_warn "HelixScreen's binary is built for the firmware mod's chroot"
+    log_warn "($chroot_dir) and cannot be dependency-checked from the host rootfs."
+    log_warn "Host-side ldd would only report the chroot's libc as missing."
+    log_warn "To check it by hand, run inside the chroot:"
+    log_warn "  chroot $chroot_dir ldd <install root as seen inside the chroot>/bin/helix-screen"
+}
+
 # Verify the installed binary can find all shared libraries
 # Runs ldd on the binary and checks for "not found" entries.
 # If libssl.so.1.1 is missing (Bullseye→Bookworm upgrade), tries to install compat package.
@@ -2572,14 +3186,26 @@ verify_binary_deps() {
     local platform=$1
     local binary="${INSTALL_DIR}/bin/helix-screen"
 
-    # Only relevant for platforms with dynamic linking and ldd
-    if ! command -v ldd >/dev/null 2>&1; then
-        return 0
-    fi
-
     # Binary must exist
     if [ ! -f "$binary" ]; then
         log_warn "Binary not found at $binary, skipping dependency check"
+        return 0
+    fi
+
+    # Mod chroot host: the binary is linked against the chroot's libc, not
+    # the host's, so host-side ldd's answers there are false (see
+    # _verify_binary_deps_via_chroot). Verify against the chroot and only
+    # ever WARN. Inside the chroot ("/" IS the chroot root) the host-side
+    # check below is already the right environment.
+    case "${HOST_CHROOT_STATE:-}" in
+        outside:*)
+            _verify_binary_deps_via_chroot "${HOST_CHROOT_STATE#outside:}" "$binary"
+            return 0
+            ;;
+    esac
+
+    # Only relevant for platforms with dynamic linking and ldd
+    if ! command -v ldd >/dev/null 2>&1; then
         return 0
     fi
 
@@ -2666,33 +3292,189 @@ verify_binary_deps() {
 # ============================================
 
 #
-# Configure ForgeX display settings for HelixScreen
-# We use GUPPY mode because ForgeX handles backlight properly in this mode.
-# STOCK mode expects ffstartup-arm to manage display/backlight which doesn't work for us.
-# We disable GuppyScreen's init scripts so HelixScreen takes over the display.
-configure_forgex_display() {
-    var_file="/opt/config/mod_data/variables.cfg"
-    guppy_init="/opt/config/mod/.root/S80guppyscreen"
-    tslib_init="/opt/config/mod/.root/S35tslib"
-    changed=false
+# Display modes we take over from, in the order they are probed. HEADLESS is
+# probed as an arrival state too (configure_forgex_display) but is not a mode
+# we transition FROM, so it is absent here.
+FORGEX_DISPLAY_MODES="STOCK FEATHER GUPPY"
 
-    # Set display mode to GUPPY (required for backlight to work)
+# The mod tree sits at different roots by host: /opt/config/mod in the AD5M
+# (Forge-X) layout and inside the mod's own chroot, /usr/data/config/mod
+# host-side on the AD5X (Z-Mod Buildroot; the mod bind-mounts /opt/config at
+# the same path only IN-chroot, where the installer does not run). The probe
+# (host_profile.sh) is the authority; /opt/config/mod stays the fallback for
+# callers that never probed one.
+forgex_mod_root() {
+    printf '%s\n' "${HOST_MOD_ROOT:-/opt/config/mod}"
+}
+
+# mod_data derivation lives in host_profile.sh (host_mod_data) -- the
+# payload-root record and the forgex state files share one path rule.
+forgex_mod_data() {
+    host_mod_data
+}
+
+# Where the pre-install display mode is recorded so uninstall can restore it
+# (forgex_record_prev_display writes it, uninstall_forgex reads it).
+forgex_prev_display_f() {
+    printf '%s\n' "$(forgex_mod_data)/helixscreen_prev_display"
+}
+
+# Replace a vendor script with its rewrite only after the rewrite parses.
+# Every screen.sh surgery funnels through here: the candidate stays a .tmp
+# beside the target until it passes a shell syntax check, so a botched edit -
+# an awk state machine that eats one fi too many, a grep -v that orphans one -
+# is discarded and the vendor's file survives byte-identical. The untouched
+# original IS the backup; there is nothing to restore.
+forgex_apply_patch() {
+    apply_tmp="$1"
+    apply_dest="$2"
+
+    if [ ! -s "$apply_tmp" ]; then
+        rm -f "$apply_tmp" 2>/dev/null
+        log_warn "Empty rewrite candidate for ${apply_dest} - original left untouched"
+        return 1
+    fi
+
+    # bash -n parses without running. sh -n is the best-effort fallback for a
+    # host without bash; a screen.sh carrying bash-isms (arrays) can fail it,
+    # but every Forge-X screen.sh has a #!/bin/bash shebang, so bash is there.
+    apply_bad=""
+    if command -v bash >/dev/null 2>&1; then
+        bash -n "$apply_tmp" 2>/dev/null || apply_bad=1
+    else
+        sh -n "$apply_tmp" 2>/dev/null || apply_bad=1
+    fi
+
+    if [ -n "$apply_bad" ]; then
+        rm -f "$apply_tmp" 2>/dev/null
+        log_warn "Rewrite of ${apply_dest} failed the shell syntax check - original left untouched"
+        return 1
+    fi
+
+    if ! $SUDO mv "$apply_tmp" "$apply_dest"; then
+        rm -f "$apply_tmp" 2>/dev/null
+        log_warn "Could not install rewrite of ${apply_dest}"
+        return 1
+    fi
+    $SUDO chmod +x "$apply_dest"
+    return 0
+}
+
+# Copy $1 to $3 minus every HelixScreen guard block whose marker comment
+# matches the ERE in $2. A block is its marker comment line(s) plus everything
+# through its closing fi.
+#
+# Arming on the MARKER COMMENT - never on a bare "if [ -f /tmp/helixscreen_
+# active ]" line - is what keeps the guard families from eating each other:
+# the backlight, old-style backlight and draw-command guards share
+# byte-identical if-lines, but their comments are distinct. Arming on the
+# if-line instead would consume a neighbouring family's if/exit/fi and leave
+# its comment behind, and the next unpatch pass then runs away from that
+# orphaned comment.
+#
+# A marker comment not followed (after further comments only) by a
+# helixscreen_active line arms nothing - the state machine never starts on a
+# foreign block. If a block's fi never arrives, everything after it is
+# dropped; forgex_apply_patch's syntax check is the net that catches that.
+forgex_strip_guard_blocks() {
+    awk -v arm_re="$2" '
+        $0 ~ arm_re { armed = 1; next }
+        armed && /^[[:space:]]*#/ { next }
+        armed && /helixscreen_active/ { skip = 1; armed = 0; next }
+        armed { armed = 0 }
+        skip && /^[[:space:]]*fi[[:space:]]*$/ { skip = 0; next }
+        skip { next }
+        { print }
+    ' "$1" > "$3"
+}
+
+# Record the display mode the printer arrived on, so uninstall can restore it.
+# The write goes through $SUDO like every other privileged write: mod_data is
+# root-owned on a real device and a bare redirect fails silently there.
+# The first record wins: a re-run
+# (upgrade) finds HEADLESS because we set it, and overwriting would make
+# uninstall "restore" HEADLESS, leaving an uninstalled printer with no UI.
+forgex_record_prev_display() {
+    record_f="$(forgex_prev_display_f)"
+    if [ -s "$record_f" ]; then
+        return 0
+    fi
+    printf '%s\n' "$1" | $SUDO tee "$record_f" >/dev/null 2>/dev/null \
+        || log_warn "Could not record the previous ForgeX display mode (${record_f})"
+}
+
+# Configure ForgeX display settings for HelixScreen.
+#
+# HEADLESS is the slot DrA1ex asked custom screens to occupy (DrA1ex/ff5m#74).
+# Any other mode risks failed OTA updates and repeated Moonraker recovery
+# prompts. It is also the quietest: under HEADLESS, start.sh starts neither
+# tslib nor GuppyScreen on 1.4.0, 1.4.1 or 1.4.2.
+#
+# All three other modes have to be handled. 1.4.2 moved the stock default from
+# STOCK to FEATHER, and Feather cannot be stopped as a process - it is Klipper
+# macros in config/feather.cfg driving screen.sh - so leaving it selected means
+# it keeps drawing over HelixScreen.
+#
+# The GuppyScreen init scripts and launcher are de-execed regardless: a SET_MOD
+# display change can reach .root/guppyscreen through zdisplay.sh without going
+# through start.sh at all, whatever mode variables.cfg names.
+configure_forgex_display() {
+    var_file="$(forgex_mod_data)/variables.cfg"
+    guppy_init="$(forgex_mod_root)/.root/S80guppyscreen"
+    guppy_bin="$(forgex_mod_root)/.root/guppyscreen"
+    tslib_init="$(forgex_mod_root)/.root/S35tslib"
+    changed=false
+    display_set=false
+
     if [ -f "$var_file" ]; then
-        if grep -q "display[[:space:]]*=[[:space:]]*'STOCK'" "$var_file"; then
-            log_info "Setting ForgeX display mode to GUPPY..."
-            $SUDO sed -i "s/display[[:space:]]*=[[:space:]]*'STOCK'/display = 'GUPPY'/" "$var_file"
+        # HEADLESS closes the list as an arrival state: a printer already on
+        # it (a prior HelixScreen install, or DrA1ex's slot for custom
+        # screens) must be recorded as such, or uninstall "restores" it to
+        # GUPPY - a mode that printer never had, and one that starts a UI the
+        # operator had turned off.
+        for mode in $FORGEX_DISPLAY_MODES HEADLESS; do
+            grep -q "display[[:space:]]*=[[:space:]]*'$mode'" "$var_file" || continue
+
+            # Remember where we found it so uninstall can put it back. 1.4.0
+            # and 1.4.1 default to STOCK, 1.4.2 to FEATHER, so a fixed restore
+            # target would strand one of them on a mode it never had.
+            forgex_record_prev_display "$mode"
+            display_set=true
+
+            if [ "$mode" = "HEADLESS" ]; then
+                log_info "ForgeX display mode is already HEADLESS"
+                break
+            fi
+
+            log_info "Setting ForgeX display mode to HEADLESS (was $mode)..."
+            $SUDO sed -i "s/display[[:space:]]*=[[:space:]]*'$mode'/display = 'HEADLESS'/" "$var_file"
             changed=true
-        elif grep -q "display[[:space:]]*=[[:space:]]*'HEADLESS'" "$var_file"; then
-            log_info "Setting ForgeX display mode to GUPPY..."
-            $SUDO sed -i "s/display[[:space:]]*=[[:space:]]*'HEADLESS'/display = 'GUPPY'/" "$var_file"
-            changed=true
+            break
+        done
+
+        if [ "$display_set" != true ]; then
+            log_warn "ForgeX display mode in ${var_file} was not recognized - left unchanged"
         fi
     fi
 
-    # Disable GuppyScreen init script (remove execute permission)
+    # Disable GuppyScreen init script (remove execute permission). HEADLESS
+    # never invokes it via start.sh, but belt-and-braces: nothing may be able
+    # to relaunch GuppyScreen while HelixScreen owns the framebuffer.
     if [ -x "$guppy_init" ]; then
         log_info "Disabling GuppyScreen init script..."
         $SUDO chmod a-x "$guppy_init"
+        changed=true
+    fi
+
+    # Disable the GuppyScreen launcher too. start.sh runs S80guppyscreen at
+    # boot, but zdisplay.sh's apply_display_off() calls .root/guppyscreen
+    # directly, so disabling only the init script leaves GuppyScreen reachable
+    # on every SET_MOD display change and the framebuffer collision returns.
+    # That path is independent of the selected display mode, so it stays
+    # closed under HEADLESS as well.
+    if [ -x "$guppy_bin" ]; then
+        log_info "Disabling GuppyScreen launcher..."
+        $SUDO chmod a-x "$guppy_bin"
         changed=true
     fi
 
@@ -2704,22 +3486,99 @@ configure_forgex_display() {
         changed=true
     fi
 
+    if [ "$display_set" != true ] && [ -f "$var_file" ]; then
+        # A variables.cfg whose display spelling we did not recognize means
+        # the takeover failed - the vendor UI keeps the slot - and that must
+        # not be reported as success just because the chmod arms above fired.
+        return 1
+    fi
     if [ "$changed" = true ]; then
-        log_success "ForgeX configured for HelixScreen (GUPPY mode, GuppyScreen disabled)"
+        log_success "ForgeX configured for HelixScreen (HEADLESS mode, GuppyScreen disabled)"
         return 0
     fi
     return 1
 }
 
+# Pre-dismiss ForgeX's "Try the new Feather screen" offer.
+#
+# ForgeX ships config/display_offer.cfg, a [delayed_gcode] that fires a few
+# seconds after every Klipper start and raises an action:prompt offering to
+# switch the display to Feather. Accepting it takes the screen away from
+# HelixScreen, and the prompt returns on each startup until answered.
+#
+# The macro is gated on the mod_params variable show_feather_promo, and its
+# "Never show again" button does nothing but set that variable to 0. Seeding
+# the variable is therefore exactly equivalent to the user having dismissed
+# it, and the prompt is never composed at all.
+#
+# Only touched when the installed ForgeX actually ships the offer, so older
+# releases never gain a variable their mod_params does not define. Only a
+# pending (non-zero) value is rewritten, so a user who already dismissed it
+# by hand is left alone -- and for the same reason uninstall does not restore
+# it, since we cannot tell our 0 from theirs.
+dismiss_forgex_feather_promo() {
+    var_file="${FORGEX_VAR_FILE:-$(forgex_mod_data)/variables.cfg}"
+    offer_cfg="${FORGEX_OFFER_CFG:-$(forgex_mod_root)/config/display_offer.cfg}"
+
+    if [ ! -f "$offer_cfg" ]; then
+        log_info "ForgeX has no Feather display offer, nothing to dismiss"
+        return 0
+    fi
+
+    if [ ! -f "$var_file" ]; then
+        log_info "ForgeX variables.cfg not found, cannot dismiss Feather offer"
+        return 1
+    fi
+
+    if grep -qE "^[[:space:]]*show_feather_promo[[:space:]]*=[[:space:]]*0[[:space:]]*$" "$var_file"; then
+        log_info "ForgeX Feather offer already dismissed"
+        return 0
+    fi
+
+    log_info "Dismissing ForgeX Feather display offer..."
+    tmp_file="${var_file}.tmp"
+
+    if grep -qE "^[[:space:]]*show_feather_promo[[:space:]]*=" "$var_file"; then
+        sed "s/^[[:space:]]*show_feather_promo[[:space:]]*=.*/show_feather_promo = 0/" \
+            "$var_file" > "$tmp_file"
+    else
+        # Klipper's [Variables] block is the only valid home for the key.
+        awk '
+        /^\[Variables\]/ && !done { print; print "show_feather_promo = 0"; done = 1; next }
+        { print }
+        ' "$var_file" > "$tmp_file"
+    fi
+
+    if [ -s "$tmp_file" ] && \
+       grep -qE "^show_feather_promo = 0$" "$tmp_file" 2>/dev/null; then
+        # A deliberate non-site of forgex_apply_patch: variables.cfg is a
+        # Klipper config, not a shell script, so bash -n is the wrong
+        # validator here. The grep above IS this write's postcondition.
+        $SUDO mv "$tmp_file" "$var_file"
+        log_success "ForgeX Feather display offer dismissed"
+        return 0
+    fi
+
+    rm -f "$tmp_file"
+    log_warn "Failed to dismiss ForgeX Feather display offer"
+    return 1
+}
+
 # Patch ForgeX screen.sh to skip non-100 backlight control when HelixScreen is active
-# ForgeX's headless.cfg runs a delayed_gcode that dims the backlight 3 seconds after
-# Klipper starts. This patch blocks dimming calls but allows the S99root 0→100 cycle.
+#
+# A `reset_screen` delayed_gcode dims the backlight 3 seconds after Klipper
+# starts. Which config carries it moved: in 1.4.0/1.4.1 it is guppy.cfg only,
+# and 1.4.2 added it to headless.cfg as well. Since the backlight case in
+# screen.sh is identical across all three, patch it unconditionally rather than
+# reasoning about which mode is selected.
+#
+# This blocks dimming calls but allows the S99root 0->100 cycle.
 #
 # The smart patch:
 # - Allows "backlight 100" (needed for S99root initialization cycle)
 # - Blocks other values (10, 0, etc.) when helixscreen_active flag exists
 patch_forgex_screen_sh() {
-    screen_sh="/opt/config/mod/.shell/screen.sh"
+    screen_sh="$(forgex_mod_root)/.shell/screen.sh"
 
     if [ ! -f "$screen_sh" ]; then
         log_info "ForgeX screen.sh not found, skipping patch"
@@ -2732,13 +3591,17 @@ patch_forgex_screen_sh() {
         return 0
     fi
 
-    # Remove old-style patch if present (blocks ALL backlight when flag exists)
-    if grep -q "helixscreen_active" "$screen_sh" 2>/dev/null; then
+    # Remove old-style patch if present (blocks ALL backlight when flag
+    # exists, from pre-smart-patch HelixScreen installs). Stripped by marker
+    # comment, never by a whole-file `grep -v helixscreen_active`: the
+    # draw-command guards mention the flag on identical if-lines, and grep -v
+    # drops those while leaving their exit 0/fi behind - an unbalanced script.
+    if grep -qE '^[[:space:]]*# Skip if HelixScreen' "$screen_sh" 2>/dev/null; then
         log_info "Removing old-style patch from screen.sh..."
         tmp_file="${screen_sh}.tmp"
-        grep -v "helixscreen_active\|# Skip if HelixScreen" "$screen_sh" > "$tmp_file"
-        $SUDO mv "$tmp_file" "$screen_sh"
-        $SUDO chmod +x "$screen_sh"
+        forgex_strip_guard_blocks "$screen_sh" \
+            '^[[:space:]]*# Skip if HelixScreen' "$tmp_file"
+        forgex_apply_patch "$tmp_file" "$screen_sh" || return 1
     fi
 
     # Find the backlight) case and add our guard
@@ -2766,8 +3629,7 @@ patch_forgex_screen_sh() {
     ' "$screen_sh" > "$tmp_file"
 
     if [ -s "$tmp_file" ] && grep -q 'helixscreen_active.*!=.*100' "$tmp_file" 2>/dev/null; then
-        $SUDO mv "$tmp_file" "$screen_sh"
-        $SUDO chmod +x "$screen_sh"
+        forgex_apply_patch "$tmp_file" "$screen_sh" || return 1
         log_success "ForgeX screen.sh patched with smart backlight control"
         return 0
     else
@@ -2779,47 +3641,48 @@ patch_forgex_screen_sh() {
 
 # Remove HelixScreen patch from ForgeX screen.sh (for uninstall)
 unpatch_forgex_screen_sh() {
-    screen_sh="/opt/config/mod/.shell/screen.sh"
+    screen_sh="$(forgex_mod_root)/.shell/screen.sh"
 
     if [ ! -f "$screen_sh" ]; then
         return 1
     fi
 
-    # Check if patched
-    if ! grep -q "helixscreen_active" "$screen_sh" 2>/dev/null; then
-        log_info "ForgeX screen.sh not patched, nothing to remove"
+    # Is OUR patch here? Ask the backlight case, not the whole file: the
+    # draw-command guards' if-lines are byte-identical to ours, so a
+    # whole-file grep for helixscreen_active cannot tell ours from theirs -
+    # the confusion that made this function eat their blocks.
+    if ! forgex_case_is_guarded "$screen_sh" backlight \
+       && ! grep -qE '^[[:space:]]*# Skip (non-100 backlight changes|if HelixScreen)' "$screen_sh" 2>/dev/null; then
+        log_info "ForgeX screen.sh has no backlight patch, nothing to remove"
         return 0
     fi
 
-    log_info "Removing HelixScreen patch from ForgeX screen.sh..."
+    log_info "Removing HelixScreen backlight patch from ForgeX screen.sh..."
 
-    # Use awk to remove only our specific block (BusyBox compatible)
-    # Match and skip: comment line, if line with helixscreen_active, exit 0, fi
+    # Strip both of our backlight spellings - the smart block and the
+    # old-style one a pre-smart install may have left - by marker comment.
     tmp_file="${screen_sh}.tmp"
-    awk '
-    /# Skip if HelixScreen is controlling the display/ { skip=1; next }
-    /if \[ -f \/tmp\/helixscreen_active \]; then/ { skip=1; next }
-    skip && /^[[:space:]]*exit 0[[:space:]]*$/ { next }
-    skip && /^[[:space:]]*fi[[:space:]]*$/ { skip=0; next }
-    { print }
-    ' "$screen_sh" > "$tmp_file"
+    forgex_strip_guard_blocks "$screen_sh" \
+        '^[[:space:]]*# Skip (non-100 backlight changes|if HelixScreen)' "$tmp_file"
 
-    if [ -s "$tmp_file" ]; then
-        $SUDO mv "$tmp_file" "$screen_sh"
-        $SUDO chmod +x "$screen_sh"
-    else
+    if [ ! -s "$tmp_file" ]; then
         rm -f "$tmp_file"
         log_warn "Failed to unpatch ForgeX screen.sh"
         return 1
     fi
 
-    # Verify removal
-    if grep -q "helixscreen_active" "$screen_sh" 2>/dev/null; then
-        log_warn "Could not fully remove patch from screen.sh"
+    forgex_apply_patch "$tmp_file" "$screen_sh" || return 1
+
+    # Verify against the backlight case only, for the same reason as the
+    # pre-check above: helixscreen_active elsewhere belongs to other patches,
+    # and requiring the whole file clean made this warn on every uninstall
+    # where the draw guards were still in place.
+    if forgex_case_is_guarded "$screen_sh" backlight; then
+        log_warn "Could not fully remove backlight patch from screen.sh"
         return 1
     fi
 
-    log_success "ForgeX screen.sh patch removed"
+    log_success "ForgeX screen.sh backlight patch removed"
     return 0
 }
 
@@ -2857,56 +3720,114 @@ restore_stock_firmware_ui() {
     return 1
 }
 
-# Patch ForgeX screen.sh to skip screen drawing when HelixScreen is active
-# ForgeX's S99root calls draw_splash, draw_loading, and boot_message which write
-# directly to the framebuffer, overwriting our splash screen during boot.
+# screen.sh commands that draw to the framebuffer and must stand down while
+# HelixScreen owns it. Unguarded, these overwrite our splash during boot:
+# S99root and S00init both drive them.
+#
+# Forge-X 1.4.0 and 1.4.1 ship draw_loading, draw_splash and boot_message.
+# 1.4.2 drops the first and third, and adds splash_start, which launches a
+# long-running splash process over a control FIFO. Which ones exist is decided
+# per firmware at install time rather than by version number.
+#
+# splash_stop is deliberately absent: blocking it would strand that splash
+# process on screen for the rest of the boot.
+FORGEX_DRAW_COMMANDS="draw_loading draw_splash boot_message splash_start"
+
+# Is the case label for $2 in screen.sh $1 already followed by our guard?
+# Looks only at the lines immediately under the label, so an unrelated guard
+# elsewhere in the file cannot vouch for this one.
+forgex_case_is_guarded() {
+    awk -v lbl="$2" '
+        $0 ~ "^[[:space:]]*" lbl "\\)" { found = 1; next }
+        found {
+            if ($0 ~ /helixscreen_active/) { hit = 1; exit }
+            if (++n >= 5) exit
+        }
+        END { exit !hit }
+    ' "$1"
+}
+
+# Guard every draw command this firmware has, and prove each one took.
+# Reports failure rather than success when a command it found could not be
+# guarded, so a future Forge-X that reshapes screen.sh is loud instead of
+# quietly leaving the framebuffer contended.
 patch_forgex_screen_drawing() {
-    screen_sh="/opt/config/mod/.shell/screen.sh"
+    screen_sh="$(forgex_mod_root)/.shell/screen.sh"
 
     if [ ! -f "$screen_sh" ]; then
         log_info "ForgeX screen.sh not found, skipping screen drawing patch"
         return 1
     fi
 
-    # Check if already patched (look for our signature in draw_splash)
-    if grep -q 'draw_splash)' "$screen_sh" && \
-       grep -A2 'draw_splash)' "$screen_sh" | grep -q 'helixscreen_active'; then
+    # Which draw commands this firmware actually has, and which of those still
+    # need a guard. Re-running only patches what is missing, so the function is
+    # idempotent and also repairs a partially patched screen.sh.
+    present=""
+    unguarded=""
+    for cmd in $FORGEX_DRAW_COMMANDS; do
+        grep -q "^[[:space:]]*${cmd})" "$screen_sh" || continue
+        present="$present $cmd"
+        forgex_case_is_guarded "$screen_sh" "$cmd" || unguarded="$unguarded $cmd"
+    done
+
+    if [ -z "$present" ]; then
+        log_warn "ForgeX screen.sh has no known draw commands - not patching"
+        return 1
+    fi
+
+    if [ -z "$unguarded" ]; then
         log_info "ForgeX screen.sh already has screen drawing patches"
         return 0
     fi
 
     log_info "Patching ForgeX screen.sh to skip drawing when HelixScreen active..."
 
-    # Patch draw_loading, draw_splash, and boot_message cases
-    # Add helixscreen_active check after each case label
     tmp_file="${screen_sh}.tmp"
-    awk '
-    /^[[:space:]]*(draw_loading|draw_splash|boot_message)\)/ {
+    awk -v cmds="$unguarded" '
+    BEGIN { n = split(cmds, want, " ") }
+    {
         print
-        print "        # Skip when HelixScreen is controlling display"
-        print "        if [ -f /tmp/helixscreen_active ]; then"
-        print "            exit 0"
-        print "        fi"
-        next
+        for (i = 1; i <= n; i++) {
+            if ($0 ~ "^[[:space:]]*" want[i] "\\)") {
+                print "        # Skip when HelixScreen is controlling display"
+                print "        if [ -f /tmp/helixscreen_active ]; then"
+                print "            exit 0"
+                print "        fi"
+                break
+            }
+        }
     }
-    { print }
     ' "$screen_sh" > "$tmp_file"
 
-    if [ -s "$tmp_file" ] && grep -q 'helixscreen_active' "$tmp_file" 2>/dev/null; then
-        $SUDO mv "$tmp_file" "$screen_sh"
-        $SUDO chmod +x "$screen_sh"
-        log_success "ForgeX screen.sh patched for screen drawing"
-        return 0
-    else
+    if [ ! -s "$tmp_file" ]; then
         rm -f "$tmp_file"
         log_warn "Failed to patch ForgeX screen.sh for screen drawing"
         return 1
     fi
+
+    # Verify every command we set out to guard actually got one, on the
+    # candidate file, before it replaces the original. A whole-file grep for
+    # helixscreen_active cannot do this: one successful insertion would vouch
+    # for every label that silently failed to match.
+    still_unguarded=""
+    for cmd in $unguarded; do
+        forgex_case_is_guarded "$tmp_file" "$cmd" || still_unguarded="$still_unguarded $cmd"
+    done
+
+    if [ -n "$still_unguarded" ]; then
+        rm -f "$tmp_file"
+        log_warn "Failed to guard ForgeX draw commands:${still_unguarded}"
+        return 1
+    fi
+
+    forgex_apply_patch "$tmp_file" "$screen_sh" || return 1
+    log_success "ForgeX screen.sh patched for screen drawing (${unguarded# })"
+    return 0
 }
 
 # Remove screen drawing patches from ForgeX screen.sh (for uninstall)
 unpatch_forgex_screen_drawing() {
-    screen_sh="/opt/config/mod/.shell/screen.sh"
+    screen_sh="$(forgex_mod_root)/.shell/screen.sh"
 
     if [ ! -f "$screen_sh" ]; then
         return 1
@@ -2920,24 +3841,19 @@ unpatch_forgex_screen_drawing() {
 
     log_info "Removing HelixScreen drawing patches from ForgeX screen.sh..."
 
-    # Remove our 4-line block: comment + if + exit 0 + fi
+    # Remove our 4-line block: comment + if + exit 0 + fi, armed on the
+    # comment (see forgex_strip_guard_blocks).
     tmp_file="${screen_sh}.tmp"
-    awk '
-    /# Skip when HelixScreen is controlling display/ { skip=1; next }
-    skip && /if \[ -f \/tmp\/helixscreen_active \]; then/ { next }
-    skip && /^[[:space:]]*exit 0[[:space:]]*$/ { next }
-    skip && /^[[:space:]]*fi[[:space:]]*$/ { skip=0; next }
-    { print }
-    ' "$screen_sh" > "$tmp_file"
+    forgex_strip_guard_blocks "$screen_sh" \
+        '# Skip when HelixScreen is controlling display' "$tmp_file"
 
-    if [ -s "$tmp_file" ]; then
-        $SUDO mv "$tmp_file" "$screen_sh"
-        $SUDO chmod +x "$screen_sh"
-    else
+    if [ ! -s "$tmp_file" ]; then
         rm -f "$tmp_file"
         log_warn "Failed to unpatch ForgeX screen.sh drawing patches"
         return 1
     fi
+
+    forgex_apply_patch "$tmp_file" "$screen_sh" || return 1
 
     # Verify removal
     if grep -q '# Skip when HelixScreen is controlling display' "$screen_sh" 2>/dev/null; then
@@ -2953,9 +3869,9 @@ unpatch_forgex_screen_drawing() {
 # ForgeX's 'logged' binary writes directly to /dev/fb0 when --send-to-screen is used,
 # bypassing our screen.sh patches. This wrapper strips that flag when HelixScreen is active.
 install_forgex_logged_wrapper() {
-    logged_bin="/opt/config/mod/.bin/exec/logged"
-    logged_real="/opt/config/mod/.bin/exec/logged-real"
-    logged_wrapper="/opt/config/mod/.bin/exec/logged-wrapper"
+    logged_bin="$(forgex_mod_root)/.bin/exec/logged"
+    logged_real="$(forgex_mod_root)/.bin/exec/logged-real"
+    logged_wrapper="$(forgex_mod_root)/.bin/exec/logged-wrapper"
 
     if [ ! -f "$logged_bin" ]; then
         log_info "ForgeX logged binary not found, skipping wrapper"
@@ -2973,7 +3889,11 @@ install_forgex_logged_wrapper() {
         log_info "Installing ForgeX logged wrapper..."
     fi
 
-    # Create the wrapper script
+    # Create the wrapper script. Its /opt/config/mod paths are the IN-CHROOT
+    # spelling on purpose: the wrapper runs inside the mod's chroot, where
+    # /opt/config is bind-mounted onto the same path on every host layout
+    # (the host-side root this module derives from the probe does not exist
+    # in there).
     cat > "$logged_wrapper" << 'WRAPPER_EOF'
 #!/bin/sh
 # Wrapper for logged that strips --send-to-screen when HelixScreen is active
@@ -3004,7 +3924,10 @@ WRAPPER_EOF
 
     $SUDO chmod +x "$logged_wrapper"
 
-    # Move original to logged-real and symlink logged to wrapper (skip if already done)
+    # Move original to logged-real and symlink logged to wrapper (skip if
+    # already done). Deliberate non-sites of forgex_apply_patch: these move
+    # BINARIES, not rewritten scripts -- there is nothing to syntax-check, and
+    # the symlink/existence checks around the moves are the postcondition.
     if [ ! -L "$logged_bin" ]; then
         $SUDO mv "$logged_bin" "$logged_real"
         $SUDO ln -s "$logged_wrapper" "$logged_bin"
@@ -3024,9 +3947,9 @@ WRAPPER_EOF
 
 # Remove logged wrapper (for uninstall)
 uninstall_forgex_logged_wrapper() {
-    logged_bin="/opt/config/mod/.bin/exec/logged"
-    logged_real="/opt/config/mod/.bin/exec/logged-real"
-    logged_wrapper="/opt/config/mod/.bin/exec/logged-wrapper"
+    logged_bin="$(forgex_mod_root)/.bin/exec/logged"
+    logged_real="$(forgex_mod_root)/.bin/exec/logged-real"
+    logged_wrapper="$(forgex_mod_root)/.bin/exec/logged-wrapper"
 
     if [ ! -f "$logged_real" ]; then
         return 0  # Not installed
@@ -3034,6 +3957,8 @@ uninstall_forgex_logged_wrapper() {
 
     log_info "Removing ForgeX logged wrapper..."
 
+    # Binary moves, not text surgery -- same non-site reasoning as the install
+    # side above.
     $SUDO rm -f "$logged_bin"
     $SUDO mv "$logged_real" "$logged_bin"
     $SUDO rm -f "$logged_wrapper"
@@ -3047,19 +3972,48 @@ uninstall_forgex_logged_wrapper() {
 # and cleans up backup files from manual patches.
 # Note: Sets caller's `restored_ui` variable via dynamic scoping.
 uninstall_forgex() {
-    # Restore ForgeX display mode to GUPPY (from HEADLESS or STOCK)
-    if [ -f "/opt/config/mod_data/variables.cfg" ]; then
-        if grep -q "display[[:space:]]*=[[:space:]]*'HEADLESS'" "/opt/config/mod_data/variables.cfg"; then
-            log_info "Restoring ForgeX display mode to GUPPY..."
-            $SUDO sed -i "s/display[[:space:]]*=[[:space:]]*'HEADLESS'/display = 'GUPPY'/" "/opt/config/mod_data/variables.cfg"
-        elif grep -q "display[[:space:]]*=[[:space:]]*'STOCK'" "/opt/config/mod_data/variables.cfg"; then
-            log_info "Restoring ForgeX display mode to GUPPY..."
-            $SUDO sed -i "s/display[[:space:]]*=[[:space:]]*'STOCK'/display = 'GUPPY'/" "/opt/config/mod_data/variables.cfg"
+    # Once per run. Callers stack -- the payload arm, then
+    # restore_previous_ui_platform, then the uninstaller's own forge_x branch
+    # -- and the first call consumes the restore record. A second call would
+    # find it gone, fall back to GUPPY, and rewrite a still-HEADLESS rig to a
+    # mode it never had. The first call performs every effect (record
+    # restore, stock-UI re-enable, unpatches, wrapper removal, re-execs) and
+    # caches its restored-ui claim; later calls in the same run touch nothing
+    # and hand their caller the same claim.
+    if [ "${_FORGEX_UNINSTALL_DONE:-}" = "1" ]; then
+        # shellcheck disable=SC2034  # consumed by uninstall.sh (dynamic scoping) and the uninstaller bundle
+        restored_ui="${_FORGEX_RESTORED_UI:-}"
+        return 0
+    fi
+
+    var_file="$(forgex_mod_data)/variables.cfg"
+
+    # Put the display mode back where install found it. 1.4.0/1.4.1 default to
+    # STOCK and 1.4.2 to FEATHER, so a hardcoded restore target would leave one
+    # of them on a mode the printer never had. GUPPY is the fallback for
+    # installs predating the recorded value; it exists in every supported
+    # Forge-X.
+    restore_mode="GUPPY"
+    mode_restored=false
+    if [ -r "$(forgex_prev_display_f)" ]; then
+        saved_mode=$(cat "$(forgex_prev_display_f)" 2>/dev/null)
+        case "$saved_mode" in
+            STOCK|FEATHER|GUPPY|HEADLESS) restore_mode="$saved_mode" ;;
+        esac
+    fi
+
+    if [ -f "$var_file" ]; then
+        if grep -q "display[[:space:]]*=[[:space:]]*'HEADLESS'" "$var_file"; then
+            log_info "Restoring ForgeX display mode to ${restore_mode}..."
+            $SUDO sed -i "s/display[[:space:]]*=[[:space:]]*'HEADLESS'/display = '${restore_mode}'/" "$var_file"
+            mode_restored=true
         fi
+        $SUDO rm -f "$(forgex_prev_display_f)"
     fi
 
     # Restore stock FlashForge UI in auto_run.sh
-    restore_stock_firmware_ui || true
+    stock_ui_restored=false
+    restore_stock_firmware_ui && stock_ui_restored=true
 
     # Remove HelixScreen patches from screen.sh
     unpatch_forgex_screen_sh || true
@@ -3068,23 +4022,66 @@ uninstall_forgex() {
     # Remove logged wrapper
     uninstall_forgex_logged_wrapper || true
 
-    # Re-enable GuppyScreen and tslib init scripts
-    if [ -f "/opt/config/mod/.root/S80guppyscreen" ]; then
-        $SUDO chmod +x "/opt/config/mod/.root/S80guppyscreen" 2>/dev/null || true
-        # shellcheck disable=SC2034  # consumed by uninstall.sh (previous-UI restore chain) and the uninstaller bundle
-        restored_ui="GuppyScreen (/opt/config/mod/.root/S80guppyscreen)"
+    # What we tell the operator is coming back follows the mode actually
+    # restored, not the file layout: claiming GuppyScreen on a STOCK or
+    # FEATHER printer points at a UI that is not the one returning. HEADLESS
+    # claims nothing - that printer had no vendor UI displaced in the first
+    # place, and silence is the honest report.
+    if [ "$mode_restored" = true ]; then
+        case "$restore_mode" in
+            STOCK)
+                if [ "$stock_ui_restored" = true ]; then
+                    # shellcheck disable=SC2034  # consumed by uninstall.sh (dynamic scoping) and the uninstaller bundle
+                    restored_ui="stock FlashForge UI (/opt/auto_run.sh)"
+                fi
+                ;;
+            FEATHER)
+                # shellcheck disable=SC2034  # consumed by uninstall.sh (dynamic scoping) and the uninstaller bundle
+                restored_ui="Feather (ForgeX display mode)"
+                ;;
+            GUPPY)
+                if [ -f "$(forgex_mod_root)/.root/S80guppyscreen" ]; then
+                    # shellcheck disable=SC2034  # consumed by uninstall.sh (dynamic scoping) and the uninstaller bundle
+                    restored_ui="GuppyScreen ($(forgex_mod_root)/.root/S80guppyscreen)"
+                fi
+                ;;
+            HEADLESS)
+                ;;
+        esac
     fi
-    if [ -f "/opt/config/mod/.root/S35tslib" ]; then
-        $SUDO chmod +x "/opt/config/mod/.root/S35tslib" 2>/dev/null || true
+
+    # Re-enable GuppyScreen and tslib init scripts. This is not in tension
+    # with configure_forgex_display's deliberate de-exec: that exists to keep
+    # GuppyScreen from relaunching WHILE HelixScreen owns the framebuffer (a
+    # SET_MOD display change reaches .root/guppyscreen through zdisplay.sh
+    # whatever mode variables.cfg names). Uninstall ends that ownership - the
+    # display mode above is already restored - so the vendor UI must be
+    # executable again. Nothing is started here; the next boot launches
+    # whatever the restored mode names, which the caller's messages say.
+    if [ -f "$(forgex_mod_root)/.root/S80guppyscreen" ]; then
+        $SUDO chmod +x "$(forgex_mod_root)/.root/S80guppyscreen" 2>/dev/null || true
+    fi
+    if [ -f "$(forgex_mod_root)/.root/S35tslib" ]; then
+        $SUDO chmod +x "$(forgex_mod_root)/.root/S35tslib" 2>/dev/null || true
+    fi
+    # configure_forgex_display de-execs the launcher as well as the init
+    # script (see the restore_mode selection above), so the launcher must be
+    # re-executed too or the restored UI never starts.
+    if [ -f "$(forgex_mod_root)/.root/guppyscreen" ]; then
+        $SUDO chmod +x "$(forgex_mod_root)/.root/guppyscreen" 2>/dev/null || true
     fi
 
     # Clean up any leftover backup files from manual patches
-    for backup_file in /opt/config/mod/.shell/*.helix-backup /opt/config/mod/.shell/*.bak; do
+    for backup_file in "$(forgex_mod_root)"/.shell/*.helix-backup "$(forgex_mod_root)"/.shell/*.bak; do
         if [ -f "$backup_file" ] 2>/dev/null; then
             log_info "Removing leftover backup: $backup_file"
             $SUDO rm -f "$backup_file"
         fi
     done
+
+    # Run-once sentinel + the claim every later stacked caller re-receives.
+    _FORGEX_UNINSTALL_DONE=1
+    _FORGEX_RESTORED_UI="${restored_ui:-}"
 }
 
 # ============================================
@@ -3447,6 +4444,9 @@ stop_cc1_competing_uis() {
 
 # Stop competing screen UIs (GuppyScreen, KlipperScreen, Xorg, etc.)
 # Dispatches platform-specific logic, then runs generic UI stopping
+#
+# Reads: AD5M_FIRMWARE/MOD_FLAVOR, K1_FIRMWARE, HOST_OWNS_COMPETING_UIS,
+#        INIT_SYSTEM, PREVIOUS_UI_SCRIPT, SUDO, INSTALL_DIR
 stop_competing_uis() {
     # During self-update, competing UIs were already disabled during initial install.
     # Re-running this would chmod -x init scripts that may have been restored or
@@ -3458,11 +4458,17 @@ stop_competing_uis() {
 
     log_info "Checking for competing screen UIs..."
 
+    # Mod hosts the probe recognized: the mod owns its UI lifecycle. Stopping,
+    # killing, and de-execing its init scripts is its business, not the
+    # standalone installer's — the generic loop's chmod a-x on the mod's .root
+    # scripts is a footprint on firmware we do not manage. Our display
+    # takeover lives in configure_forgex_display instead.
+    [ "$HOST_OWNS_COMPETING_UIS" = "1" ] && return 0
+
     found_any=false
 
     # Platform-specific competing UI handling
     case "${AD5M_FIRMWARE:-}" in
-        forge_x)    stop_forgex_competing_uis ;;
         klipper_mod) stop_kmod_competing_uis ;;
         zmod)
             # ZMOD manages its own init scripts (S80guppyscreen etc.)
@@ -3471,6 +4477,12 @@ stop_competing_uis() {
             return 0
             ;;
     esac
+
+    # Stock FlashForge UI kill — keyed on the stock UI's own startup manager
+    # (/opt/PROGRAM/ffstartup-arm), not the mod flavor: a mod-less AD5M
+    # (flavor stock) ships it too, and the file guard makes every other host
+    # a no-op. Unprobed ZMOD hosts still return at the arm above.
+    stop_forgex_competing_uis
 
     # K1 platform: stop stock Creality UI
     case "${K1_FIRMWARE:-}" in
@@ -5577,6 +6589,135 @@ detect_rollback_dir() {
     return 1
 }
 
+# Roomy-partition half of the update swap: pick the backup name, clear a stale
+# one, and mv the old install aside so the new tree can take its place.
+# One caller — extract_release()'s same-filesystem swap branch. The mod-owned
+# guard runs first: an INSTALL_DIR under the firmware mod's tree is the mod's
+# payload root, and moving it aside (then rm -rf'ing the .old on the NEXT
+# update) is exactly the destructive step --mod-payload exists to replace.
+# Sets INSTALL_BACKUP on success; returns 1 when the mv fails.
+backup_install_dir_for_update() {
+    host_refuse_mod_owned "update backup" "$INSTALL_DIR"
+
+    # Prefer INSTALL_DIR.old; if it exists and can't be removed (e.g. root-owned
+    # under NoNewPrivileges), fall back to a timestamped name so the swap succeeds.
+    INSTALL_BACKUP="${INSTALL_DIR}.old"
+    if [ -d "$INSTALL_BACKUP" ]; then
+        log_info "Removing stale backup from previous install..."
+        if ! rm -rf "$INSTALL_BACKUP" 2>/dev/null && ! $SUDO rm -rf "$INSTALL_BACKUP" 2>/dev/null; then
+            INSTALL_BACKUP="${INSTALL_DIR}.old.$(date +%s)"
+            log_warn "Could not remove stale .old dir (root-owned?); using $INSTALL_BACKUP instead"
+        fi
+    fi
+
+    # Atomic swap: move old install to backup
+    if ! $(path_sudo "${INSTALL_DIR}") mv "${INSTALL_DIR}" "$INSTALL_BACKUP"; then
+        return 1
+    fi
+    return 0
+}
+
+# Payload-root env preservation (mod hosts): keep an operator-authored
+# config/helixscreen.env byte-identical across a payload update by renaming
+# the incoming archive's copy to helixscreen.env.new inside the staged tree,
+# before any swap or in-place merge can land it on top of the live file.
+#
+# The env on a mod host is the rig's own runtime configuration
+# (HELIX_CONFIG_DIR, log routing the mod's bootstrap reads); silently swapping
+# in the bundled default would reroute the install, and the generic
+# backup/restore round-trip is not byte-stable — extract_release's one-time
+# LOG_LEVEL migration rewrites the restored file. The .new copy keeps new
+# template keys visible to the operator without touching the live file.
+#
+# Sets PAYLOAD_ENV_PRESERVED=1 when it renamed the incoming copy; extract_release
+# reads that to skip the env migration. Always returns 0 — a payload with no
+# existing env, or an archive shipping none, is not an error.
+preserve_payload_env() {
+    local new_root="$1" dest_root="$2"
+    [ -f "${dest_root}/config/helixscreen.env" ] || return 0
+    [ -f "${new_root}/config/helixscreen.env" ] || return 0
+    if mv "${new_root}/config/helixscreen.env" \
+          "${new_root}/config/helixscreen.env.new"; then
+        PAYLOAD_ENV_PRESERVED=1
+        log_info "Preserved existing helixscreen.env (incoming copy kept as helixscreen.env.new)"
+    else
+        log_warn "Could not set the incoming helixscreen.env aside; restoring the existing one from backup instead"
+    fi
+    return 0
+}
+
+# --mod-payload's in-place content replacement.
+#
+# The payload root itself is never moved or removed: inside the mod's tree it
+# is untracked-but-theirs (their OTA and their bootstrap both know the path),
+# and under --mod-payload-root it is the operator's chosen root. Only the
+# root's CHILDREN are replaced, and config/ and platform/ survive wholesale -
+# config/ holds the operator's runtime configuration (preserve_payload_env's
+# byte-identical contract) and platform/ holds the deployed hooks the mod's
+# launcher sources; both are re-merged, never swapped.
+#
+# Args: NEW_ROOT (the extracted tree) DEST_ROOT (the live payload root).
+# Returns 0 on success; 1 aborts the install (the caller exits).
+payload_replace_contents() {
+    local new_root="$1" dest_root="$2"
+    local item base
+
+    mkdir -p "$dest_root"
+
+    # Out with the old payload's children, config/ and platform/ excepted.
+    # A failed rm must abort: mv below cannot overwrite a non-empty dir.
+    for item in "$dest_root"/* "$dest_root"/.*; do
+        [ -e "$item" ] || continue
+        base=$(basename "$item")
+        case "$base" in
+            .|..|config|platform) continue ;;
+        esac
+        if ! rm -rf "$item"; then
+            log_error "Failed to remove old payload entry: $base"
+            return 1
+        fi
+    done
+
+    # In with the new, same two exceptions.
+    for item in "$new_root"/* "$new_root"/.*; do
+        [ -e "$item" ] || continue
+        base=$(basename "$item")
+        case "$base" in
+            .|..|config|platform) continue ;;
+        esac
+        if ! mv "$item" "$dest_root/$base"; then
+            log_error "Failed to install payload entry: $base"
+            return 1
+        fi
+    done
+
+    # Merge the incoming config/ defaults without overwriting operator files
+    # - the same rule the read-only-parent in-place update applies: only
+    # entries the payload does not already have land, and directories present
+    # on both sides merge at file level.
+    if [ -d "$new_root/config" ]; then
+        local subitem subbase
+        mkdir -p "$dest_root/config"
+        for item in "$new_root/config"/*; do
+            [ -e "$item" ] || continue
+            base=$(basename "$item")
+            if [ ! -e "$dest_root/config/$base" ]; then
+                mv "$item" "$dest_root/config/$base" 2>/dev/null || true
+                log_info "Added new payload config default: $base"
+            elif [ -d "$item" ] && [ -d "$dest_root/config/$base" ]; then
+                for subitem in "$item"/*; do
+                    [ -e "$subitem" ] || continue
+                    subbase=$(basename "$subitem")
+                    if [ ! -e "$dest_root/config/$base/$subbase" ]; then
+                        mv "$subitem" "$dest_root/config/$base/$subbase" 2>/dev/null || true
+                    fi
+                done
+            fi
+        done
+    fi
+    return 0
+}
+
 # Extract archive with atomic swap and rollback protection.
 # Dispatches on _ARCHIVE_FORMAT for zip vs tar.gz. Expects the archive already
 # staged at _archive_tmp_path() by download_release() or use_local_tarball().
@@ -5699,6 +6840,32 @@ extract_release() {
         exit 1
     fi
 
+    # Payload roots (mod-managed hosts) preserve an existing env file exactly:
+    # the incoming copy is set aside as .new here, before any Phase 4 swap or
+    # in-place merge can land it on top of the operator's file.
+    PAYLOAD_ENV_PRESERVED=0
+    if [ "${HOST_SERVICE_MECHANISM:-}" = "mod-managed" ]; then
+        preserve_payload_env "$new_install" "$INSTALL_DIR"
+    fi
+
+    # --mod-payload: replace the payload root's contents in place and stop
+    # here. Everything below (backup/swap, config restore, legacy-file prune)
+    # is the standalone-install contract; the payload root must never be mv'd
+    # aside or rm -rf'd as a whole, so none of it may run in this mode.
+    if [ "${HELIX_MOD_PAYLOAD:-}" = "1" ]; then
+        [ -d "${INSTALL_DIR}" ] && ORIGINAL_INSTALL_EXISTS=true
+        if ! payload_replace_contents "$new_install" "${INSTALL_DIR}"; then
+            log_error "Payload update failed at ${INSTALL_DIR}; entries already replaced are gone."
+            cd / 2>/dev/null || true
+            rm -rf "$extract_dir"
+            exit 1
+        fi
+        cd / 2>/dev/null || true
+        rm -rf "$extract_dir"
+        log_success "Payload contents replaced in place at ${INSTALL_DIR}"
+        return 0
+    fi
+
     # Phase 4: Backup existing installation (if present)
     if [ -d "${INSTALL_DIR}" ]; then
         ORIGINAL_INSTALL_EXISTS=true
@@ -5759,6 +6926,10 @@ extract_release() {
                 # Fall through to the standard atomic swap path below
             else
                 log_info "Self-update: replacing install contents in-place (parent read-only)..."
+
+                # The loops below rm -rf every child of INSTALL_DIR — refuse
+                # before the first one touches a mod-owned payload root.
+                host_refuse_mod_owned "in-place update of" "$INSTALL_DIR"
 
                 # Remove old contents (except config/).
                 # Don't use || true — if rm fails, we must not proceed to mv
@@ -5875,6 +7046,9 @@ extract_release() {
                 log_info "Install partition tight (${install_free_mb}MB free, need ~${new_install_mb}MB); staging rollback backup off-partition at ${HELIX_OFFSITE_ROLLBACK_DIR}"
 
                 # Cross-fs move (copy to roomy + delete) frees the install fs.
+                # Same ownership rule as the same-fs swap: a mod-owned
+                # INSTALL_DIR is not ours to relocate.
+                host_refuse_mod_owned "update backup" "$INSTALL_DIR"
                 if ! $(path_sudo "${INSTALL_DIR}") mv "${INSTALL_DIR}" "$INSTALL_BACKUP"; then
                     log_error "Failed to relocate existing installation off-partition."
                     rm -rf "$extract_dir"
@@ -5890,19 +7064,7 @@ extract_release() {
             fi
         else
             # Roomy: keep the existing same-fs atomic swap behavior.
-            # Prefer INSTALL_DIR.old; if it exists and can't be removed (e.g. root-owned
-            # under NoNewPrivileges), fall back to a timestamped name so the swap succeeds.
-            INSTALL_BACKUP="${INSTALL_DIR}.old"
-            if [ -d "$INSTALL_BACKUP" ]; then
-                log_info "Removing stale backup from previous install..."
-                if ! rm -rf "$INSTALL_BACKUP" 2>/dev/null && ! $SUDO rm -rf "$INSTALL_BACKUP" 2>/dev/null; then
-                    INSTALL_BACKUP="${INSTALL_DIR}.old.$(date +%s)"
-                    log_warn "Could not remove stale .old dir (root-owned?); using $INSTALL_BACKUP instead"
-                fi
-            fi
-
-            # Atomic swap: move old install to backup
-            if ! $(path_sudo "${INSTALL_DIR}") mv "${INSTALL_DIR}" "$INSTALL_BACKUP"; then
+            if ! backup_install_dir_for_update; then
                 log_error "Failed to backup existing installation."
                 rm -rf "$extract_dir"
                 exit 1
@@ -6041,7 +7203,16 @@ extract_release() {
     # Level setting on every restart. Comment it out IFF it still matches the
     # exact old default, so users who deliberately set a different value keep
     # their customization.
-    if [ -f "$_env_dest" ] && grep -q '^HELIX_LOG_LEVEL=info[[:space:]]*$' "$_env_dest"; then
+    #
+    # A mod-managed host never runs it: the env there is the rig's own runtime
+    # configuration regardless of what this payload shipped, so the HOST
+    # CAPABILITY is the gate. PAYLOAD_ENV_PRESERVED alone is not sufficient --
+    # it stays unset when the archive shipped no env at all
+    # (preserve_payload_env returns before setting it).
+    if [ "${PAYLOAD_ENV_PRESERVED:-0}" != "1" ] \
+        && [ "${HOST_SERVICE_MECHANISM:-}" != "mod-managed" ] \
+        && [ -f "$_env_dest" ] \
+        && grep -q '^HELIX_LOG_LEVEL=info[[:space:]]*$' "$_env_dest"; then
         $(file_sudo "$_env_dest") sed -i 's/^HELIX_LOG_LEVEL=info[[:space:]]*$/#HELIX_LOG_LEVEL=info/' "$_env_dest" 2>/dev/null && \
             log_info "Migrated helixscreen.env: commented out default HELIX_LOG_LEVEL=info (in-app Log Level setting now applies)"
     fi
@@ -6131,23 +7302,18 @@ extract_release() {
     log_success "Extracted to ${INSTALL_DIR}"
 }
 
-# Remove backup of previous installation (call after service starts successfully)
-# Reclaim directories a previous version left on the wrong filesystem.
-#
-# Two kinds, both measured on a K2 whose root overlay is ~240MB while its user
-# partition at /mnt/UDISK is 27.5GB:
-#   - caches: the app used to cache thumbnails and modified gcode under
-#     /usr/data, i.e. on the overlay. It now caches on /mnt/UDISK.
-#   - scratch dirs: before cleanup was armed on EXIT (it hung off a bash-only
-#     ERR trap that never fired under ash/dash), an interrupted install left the
-#     whole download behind. One unit held a 60MB archive for two months.
+# Reclaim directories an older version left on the wrong filesystem — sized
+# against a K2 whose root overlay is ~240MB while /mnt/UDISK is 27.5GB:
+#   - caches: thumbnails and modified gcode written under /usr/data, i.e. on
+#     the overlay; the app caches on /mnt/UDISK.
+#   - scratch dirs: staged downloads from installs interrupted before the
+#     scratch dir was removed.
 #
 # Platforms declare what to reclaim in STALE_CACHE_DIRS; a no-op elsewhere.
 #
 # SAFETY: same guard shape as the off-partition rollback cleanup below — the
 # final path component must be exactly "cache" or name itself an installer
-# scratch dir, and never a top-level directory. A past incident wiped a K2's
-# /mnt/UDISK mount root via an unguarded rm -rf.
+# scratch dir, never a top-level directory and never a mount root.
 cleanup_stale_cache_dirs() {
     [ -n "${STALE_CACHE_DIRS:-}" ] || return 0
 
@@ -6178,6 +7344,7 @@ cleanup_stale_cache_dirs() {
     return 0
 }
 
+# Remove backup of previous installation (call after service starts successfully)
 cleanup_old_install() {
     # Keep .old as a last-resort recovery path if config wasn't restored.
     # Without this guard, a failed Phase 6 + cleanup = permanent config loss.
@@ -6245,8 +7412,7 @@ _has_no_new_privs() {
 # Init scripts shipped before 2026-04-20 sourced platform hooks from
 # ${DAEMON_DIR}/assets/config/platform/hooks.sh, but the installer (and the
 # deploy makefile) write hooks to ${DAEMON_DIR}/platform/hooks.sh.  Result:
-# the file was never found, platform_stop_competing_uis() stayed a no-op,
-# and stock UIs (Creality K2 /etc/init.d/app, etc.) ran alongside HelixScreen.
+# platform_stop_competing_uis() silently stays a no-op there.
 #
 # Self-update deliberately skips copying the init script to preserve
 # platform customizations (#314), so a pure source-tree fix can't reach
@@ -6267,6 +7433,10 @@ _migrate_init_script_hooks_path() {
 install_service() {
     local platform=$1
 
+    # A mod host installs its service like any other SysV host: the mod does
+    # not start the payload, so the installer owns its own lifecycle.
+    # set_install_paths has already pointed INIT_SCRIPT_DEST at the mod
+    # chroot's /etc/init.d, which is where the mod's start.sh looks.
     if [ "$platform" = "snapmaker-u1" ]; then
         install_service_snapmaker_u1
         return
@@ -6314,12 +7484,11 @@ install_procd_shim_k2() {
     $SUDO cp "$shim_src" "$shim_dest"
     $SUDO chmod +x "$shim_dest"
 
-    # Older installs (and `make deploy-k2` before mk/cross.mk was fixed)
-    # symlinked /etc/rc.d/S99helixscreen directly to the SysV script,
-    # which procd skips at boot. Drop those, then let rc.common's `enable`
+    # procd skips an /etc/rc.d/S99helixscreen that points straight at the
+    # SysV script, so drop any such symlink, then let rc.common's `enable`
     # create fresh S99/K01 symlinks pointing at the shim. Verify the rc.d
-    # entry before returning — `enable` exits 0 even on weird edge cases,
-    # and a silently-wrong symlink is the original bug we're fixing here.
+    # entry before returning — `enable` exits 0 even when it produced no
+    # symlink at all, so a silently-wrong entry is otherwise invisible.
     $SUDO rm -f /etc/rc.d/S99helixscreen /etc/rc.d/K01helixscreen
     if ! $SUDO "$shim_dest" enable; then
         log_warn "K2 procd shim: enable failed — UI will not autostart at boot"
@@ -6563,13 +7732,20 @@ install_service_sysv() {
         exit 1
     fi
 
-    # Use the dynamically set INIT_SCRIPT_DEST (varies by firmware)
+    # Use the dynamically set INIT_SCRIPT_DEST (varies by firmware).
+    # The mod chroot's /etc/init.d does not exist until we create it.
+    $SUDO mkdir -p "$(dirname "$INIT_SCRIPT_DEST")"
     $SUDO cp "$init_src" "$INIT_SCRIPT_DEST"
     $SUDO chmod +x "$INIT_SCRIPT_DEST"
 
     # Update the DAEMON_DIR in the init script to match the install location
-    # This is important for Klipper Mod which uses a different path
-    _sed_inplace "s|DAEMON_DIR=.*|DAEMON_DIR=\"${INSTALL_DIR}\"|" "$INIT_SCRIPT_DEST"
+    # This is important for Klipper Mod which uses a different path.
+    #
+    # On a mod host the script runs inside the chroot, where the install root
+    # may have a different spelling than it does on the host (see
+    # resolve_chroot_daemon_dir). Use the in-chroot one when we have it.
+    _daemon_dir="${HELIX_CHROOT_DAEMON_DIR:-$INSTALL_DIR}"
+    _sed_inplace "s|DAEMON_DIR=.*|DAEMON_DIR=\"${_daemon_dir}\"|" "$INIT_SCRIPT_DEST"
 
     log_success "Installed SysV init script at $INIT_SCRIPT_DEST"
 }
@@ -6579,6 +7755,18 @@ install_service_sysv() {
 # Snapmaker U1 uses its own init script path (patched S99screen, not S99helixscreen).
 start_service() {
     local platform=${1:-}
+
+    # Keyed on the HOST CAPABILITY, not on --mod-payload: a plain install at
+    # an operator-chosen INSTALL_DIR on a mod host runs the whole install and
+    # would otherwise die here at start_service_sysv's missing-init-script
+    # exit - after which the error names a script this host never had and the
+    # .old backups sit uncollected. The installed service starts from inside
+    # the mod's chroot at boot; the host cannot usefully start it now, since
+    # on the AD5X the binary only loads against the chroot's glibc.
+    if [ "${HOST_SERVICE_MECHANISM:-}" = "mod-managed" ]; then
+        log_info "mod host: the UI starts from the chroot at boot; not starting now"
+        return 0
+    fi
 
     if [ "$platform" = "snapmaker-u1" ]; then
         start_service_snapmaker_u1
@@ -6740,10 +7928,10 @@ deploy_platform_hooks() {
     local install_dir="$1"
     local platform="$2"  # "ad5m-forgex", "ad5m-kmod", "pi", "k1"
     # Tarball ships platform hooks under assets/config/ as part of the
-    # read-only seed bundle (see scripts/package.sh). Older installers looked
-    # in config/platform/ — that path moved in the config/→assets/config/
-    # refactor and the deploy_platform_hooks lookup got left behind,
-    # silently dropping the hooks file for every sysv platform (#k2-no-hooks).
+    # read-only seed bundle (see scripts/package.sh). The lookup path must
+    # match that layout exactly: a wrong one fails silently — no hooks file is
+    # copied, platform_stop_competing_uis() stays a no-op, and the stock UI
+    # keeps running alongside HelixScreen on every sysv platform.
     local hooks_src="${install_dir}/assets/config/platform/hooks-${platform}.sh"
 
     if [ ! -f "$hooks_src" ]; then
@@ -6774,12 +7962,11 @@ fix_install_ownership() {
     [ -n "$user" ] || return 0
     [ -d "$INSTALL_DIR" ] || return 0
 
-    # Root-run platforms (ad5m/ad5x/k1/k2/cc1/u1) still need normalising, and
-    # used to be skipped entirely.  Root's tar extract restores the uid/gid
-    # baked into the release archive, so the tree ends up owned by the build
-    # machine's numeric ids — a measured K2 had 890 of 915 files owned by uid
-    # 1001, which has no /etc/passwd entry there.  The extract now passes -o so
-    # fresh installs land as root, and this repairs installs made before that.
+    # Root-run platforms (ad5m/ad5x/k1/k2/cc1/u1) need normalising too.  Root's
+    # tar extract restores the uid/gid baked into the release archive, so the
+    # tree ends up owned by the build machine's numeric ids, which need not
+    # exist in the device's /etc/passwd.  The extract passes -o so a fresh
+    # install lands as root; this re-chowns the whole tree regardless.
     log_info "Setting ownership to ${user}:${group}..."
 
     # Try without sudo first: during self-update under NoNewPrivileges,
@@ -7123,14 +8310,28 @@ moonraker_asset_name_support() {
 
 # Find moonraker.conf
 # Returns: path to moonraker.conf or empty string
+#
+# NEVER returns a mod-owned path (host_path_is_mod_owned): the firmware mods
+# keep their moonraker.conf git-tracked in their own repo, so a stanza written
+# there dirties their checkout and their OTA drops it again. On a mod host the
+# sanctioned include point is the mod's user.moonraker.conf (included by the
+# mod's conf), which the host profile recorded in HOST_MOONRAKER_USER_CONF.
 find_moonraker_conf() {
+    # Mod host: answer before any filesystem discovery can find the mod's own
+    # conf (or a symlink to it). The user conf may not exist yet; the stanza
+    # writer creates it there.
+    if [ -n "${HOST_MOONRAKER_USER_CONF:-}" ]; then
+        echo "$HOST_MOONRAKER_USER_CONF"
+        return 0
+    fi
+
     # Dynamic: the platform's own config dir first -- KLIPPER_CONFIG_DIR when a
     # firmware declared one (COSMOS), else <KLIPPER_HOME>/printer_data/config.
     local config_dir
     config_dir="$(klipper_config_dir)"
     if [ -n "$config_dir" ]; then
         local user_conf="${config_dir}/moonraker.conf"
-        if [ -f "$user_conf" ]; then
+        if [ -f "$user_conf" ] && ! host_path_is_mod_owned "$user_conf"; then
             echo "$user_conf"
             return 0
         fi
@@ -7138,7 +8339,7 @@ find_moonraker_conf() {
 
     # Static fallback
     for conf in $MOONRAKER_CONF_PATHS; do
-        if [ -f "$conf" ]; then
+        if [ -f "$conf" ] && ! host_path_is_mod_owned "$conf"; then
             echo "$conf"
             return 0
         fi
@@ -7176,6 +8377,16 @@ EOF
 add_update_manager_section() {
     local conf="$1"
     local fs
+
+    # The stanza's `path:` hands INSTALL_DIR to Moonraker's NetDeploy, whose
+    # update flow rmtree()s the path before extracting. Every writer funnels
+    # through here (fresh add + migrate_to_web_type), so this one guard covers
+    # every UNARMED stanza write. Armed payload runs are exempt BY DESIGN - the
+    # armed path is instead refused upstream in configure_moonraker_updates
+    # whenever INSTALL_DIR is mod-owned, so the exemption this guard grants can
+    # never put an updater against the mod's tree.
+    host_refuse_mod_owned "arming the Moonraker updater against" "$INSTALL_DIR"
+
     fs=$(file_sudo "$conf")
 
     # Create backup
@@ -7578,6 +8789,39 @@ configure_moonraker_updates() {
     # ZMOD chroot, which ships Mainsail/Fluidd.
     if [ "$platform" = "ad5m" ]; then
         log_info "Skipping Moonraker update_manager on AD5M (typically no web UI)"
+        return 0
+    fi
+
+    # A payload install writes NOTHING to any Moonraker conf unless the
+    # operator opted in with --auto-update. The stanza arms Moonraker's
+    # NetDeploy against `path:` (its update flow rmtree()s the path), and on a
+    # mod host the payload's lifecycle belongs to the mod's OTA, not to a
+    # second updater. With the opt-in the stanza lands in the mod's
+    # user.moonraker.conf - find_moonraker_conf's mod-host answer - never in
+    # the mod's git-tracked conf.
+    if [ "${HELIX_MOD_PAYLOAD:-}" = "1" ] && [ "${HELIX_MOD_PAYLOAD_UPDATES:-}" != "1" ]; then
+        log_info "Payload install: skipping Moonraker update_manager"
+        log_info "(pass --auto-update to write the stanza into the mod's user.moonraker.conf)"
+        return 0
+    fi
+
+    # --auto-update is refused while the payload root sits INSIDE the mod's
+    # tree: the stanza's updater REPLACES the whole root on update, which
+    # would destroy the config/ and platform/ preservation the payload
+    # contract exists to provide. The option is refused, not the install -
+    # completing without the updater armed is the safe outcome (nothing
+    # remote-triggered can touch the root). The durable shape is a payload
+    # root outside the tree (--payload-root), which keeps the stanza.
+    if [ "${HELIX_MOD_PAYLOAD_UPDATES:-}" = "1" ] \
+       && host_path_is_mod_owned "${INSTALL_DIR:-}" 2>/dev/null; then
+        log_error "--auto-update refused: the payload root is inside the firmware mod's tree:"
+        log_error "  ${INSTALL_DIR}"
+        log_error "Moonraker's type:web updater replaces the whole root on update, destroying"
+        log_error "the config/ and platform/ preservation the payload contract provides."
+        log_error "Re-run with --payload-root outside the mod's tree (e.g. /usr/data/helixscreen)."
+        # TODO(OD2): a persistent-files-aware stanza shape could make the
+        # mod-owned root safe for --auto-update - open decision 2 in
+        # docs/devel/plans/2026-08-31-forgex-ad5x-installer-rework.md.
         return 0
     fi
 
@@ -9109,16 +10353,14 @@ undo_seeded_settings() {
     $(path_sudo "$state_file") rm -f "$state_file" 2>/dev/null || true
 }
 
-# Uninstall HelixScreen
-# Args: platform (optional)
 # Restore whatever screen UI HelixScreen displaced at install time, for the
-# platform passed in $1. Split out of uninstall() so the STANDALONE uninstaller can
-# reach it too. `install.sh --uninstall` calls uninstall() and always could;
-# bundle-uninstaller.sh builds its own main() around reenable_previous_ui() instead,
-# so every platform branch below — COSMOS, Snapmaker U1, AD5M zmod, Creality app —
-# was unreachable from the uninstall.sh that ships into the install dir. On a U1 that
-# left /usr/bin/gui non-executable and /oem/.debug set: no bootable stock UI and the
-# firmware's overlay-wipe disabled for good.
+# platform passed in $1. Split out of uninstall() so BOTH removal doors reach
+# it: `install.sh --uninstall` calls uninstall(), while bundle-uninstaller.sh
+# builds its own main() around reenable_previous_ui() and never calls
+# uninstall() at all. Every platform branch below — COSMOS, Snapmaker U1, AD5M
+# zmod, Creality app — must stay reachable from both, or the standalone
+# uninstaller leaves that platform with no bootable stock UI (on a U1: a
+# non-executable /usr/bin/gui and /oem/.debug still set).
 #
 # Communicates results through HELIX_RESTORED_UI / HELIX_RESTORED_XORG rather
 # than a return value, because callers need both.
@@ -9272,6 +10514,141 @@ restore_previous_ui_platform() {
     HELIX_RESTORED_XORG="$restored_xorg"
 }
 
+# Emit HELIX_INSTALL_DIRS (common.sh) widened to whatever THIS run may sweep.
+# In --mod-payload mode the run's ACTUAL payload root joins the list via
+# resolve_payload_root (flag > the root the install recorded > INSTALL_DIR) -
+# the sweep must remove what THIS run targeted, not whatever the probe last
+# found, or a custom-root payload survives a "successful" uninstall while a
+# stale in-tree root is removed instead. The sweeps' mod-owned skip (host_mod_destruct_blocked)
+# exempts exactly the flag-armed run, so a plain uninstall still leaves the
+# mod's tree alone.
+#
+# Lives here rather than beside HELIX_INSTALL_DIRS: it asks the payload-root
+# resolver (host_profile.sh, bundle position 2) and common.sh is position 1 -
+# the foundation module must not depend on a later one, so the list-for-run
+# stays with its only consumers, the two sweeps below.
+helix_install_dirs_for_run() {
+    if [ "${HELIX_MOD_PAYLOAD:-}" = "1" ] && [ -n "${INSTALL_DIR:-}" ]; then
+        # Same resolver the standalone arm uses. A root that fails the
+        # resolver's name gate never enters this list: the uninstall entry
+        # points resolve fatally BEFORE sweeping (see uninstall() and
+        # clean_old_installation below), so a refusal surfacing here means a
+        # caller skipped that - drop the entry rather than rm -rf an ungated
+        # path.
+        hpr=$(resolve_payload_root 2>/dev/null || true)
+        if [ -n "$hpr" ]; then
+            echo "$HELIX_INSTALL_DIRS $hpr"
+            return 0
+        fi
+    fi
+    echo "$HELIX_INSTALL_DIRS"
+}
+
+# Undo a payload-contract install — the STANDALONE uninstaller's --mod-payload
+# arm. The generic sweeps refuse mod-owned paths by design, so this arm is the
+# only route past the mod-owned gate: the payload subtree, the display takeover
+# and the optional user.moonraker.conf stanza are reachable nowhere else.
+#
+# Only a run that armed the payload contract may remove the mod's tree:
+# HELIX_MOD_PAYLOAD — the same single switch install.sh's destruct exemption
+# keys on. The two doors arm it differently, on purpose: install.sh --uninstall
+# AUTO-ARMS (the payload contract's bare-run behavior is symmetrical in both
+# directions on a verified mod host), while THIS standalone uninstaller only
+# arms via its explicit --mod-payload flag — run bare, it must refuse rather
+# than make removal the destructive default.
+#
+# Ordering follows uninstall(): the display mode is restored FIRST, while the
+# payload is still in place — the rig is never left with neither UI nor a
+# restore record — then the optional stanza, then the payload subtree itself.
+uninstall_mod_payload() {
+    if [ "${HELIX_MOD_PAYLOAD:-}" != "1" ]; then
+        log_warn "--mod-payload not armed: leaving the firmware mod's tree untouched"
+        return 0
+    fi
+
+    # Resolve THIS run's payload root through the ONE shared resolver
+    # (flag > recorded root > probed default) — see resolve_payload_root, and
+    # helix_install_dirs_for_run, which sweeps install.sh's uninstalls off the
+    # same answer. A refusal (a flag or record naming a directory that is not
+    # ours) fails the run here: the offending source is already logged.
+    payload_root=$(resolve_payload_root) || return 1
+
+    if [ -z "$payload_root" ]; then
+        log_warn "--mod-payload: no payload root resolved; nothing to remove"
+        return 0
+    fi
+
+    # The resolved root is this run's one install target: repoint INSTALL_DIR
+    # so the generic sweeps that follow the arm agree with what it removed.
+    if [ "$payload_root" != "${INSTALL_DIR:-}" ]; then
+        log_info "Payload root: ${payload_root} (was ${INSTALL_DIR:-unset})"
+        INSTALL_DIR="$payload_root"
+    fi
+
+    # Restore the mod's display mode while the payload still exists. Gated on
+    # the flavor the takeover targeted (configure_platform runs the forgex
+    # display takeover only for forge_x), not on the module merely being
+    # present: a Z-Mod payload install never took the display over.
+    if [ "${AD5M_FIRMWARE:-}" = "forge_x" ] && type uninstall_forgex >/dev/null 2>&1; then
+        uninstall_forgex || true
+    fi
+
+    # Drop the --auto-update stanza if this install wrote one. find_moonraker_conf
+    # answers the mod's user.moonraker.conf on mod hosts
+    # (HOST_MOONRAKER_USER_CONF), so this touches nothing of the mod's own.
+    if type remove_update_manager_section >/dev/null 2>&1; then
+        remove_update_manager_section || true
+    fi
+
+    # Remove the service from the mod's chroot. HELIX_INIT_SCRIPTS is a list of
+    # host-absolute paths and never names anything under the chroot, so the
+    # generic SysV sweep cannot find this one. Left behind, the mod's start.sh
+    # runs it at every boot against a payload root that no longer exists.
+    if [ -n "${HOST_MOD_CHROOT:-}" ] && [ -d "${HOST_MOD_CHROOT}/etc/init.d" ]; then
+        for _chroot_init in "${HOST_MOD_CHROOT}"/etc/init.d/S*helixscreen; do
+            [ -e "$_chroot_init" ] || continue
+            $SUDO rm -f "$_chroot_init"
+            log_success "Removed chroot service ${_chroot_init}"
+        done
+        # Drop the directory too when we are the only thing that ever used it.
+        rmdir "${HOST_MOD_CHROOT}/etc/init.d" 2>/dev/null \
+            || $SUDO rmdir "${HOST_MOD_CHROOT}/etc/init.d" 2>/dev/null || true
+    fi
+
+    if [ -d "$INSTALL_DIR" ]; then
+        # The armed flag is exactly what host_mod_destruct_blocked exempts, so
+        # this guard can only fire on a wiring mistake — and must, loudly.
+        if host_mod_destruct_blocked "$INSTALL_DIR"; then
+            log_warn "Refusing to remove mod-owned ${INSTALL_DIR}"
+            return 1
+        fi
+        $SUDO rm -rf "$INSTALL_DIR"
+        log_success "Removed payload root ${INSTALL_DIR}"
+        if [ -d "${INSTALL_DIR}-repo" ]; then
+            $SUDO rm -rf "${INSTALL_DIR}-repo"
+        fi
+    else
+        log_info "Payload root ${INSTALL_DIR} already absent"
+    fi
+
+    # An ADOPTED root sits outside the mod's chroot, so the service installed
+    # into that chroot cannot reach it: the legacy standalone service is what
+    # booted it. With this root gone that service is stale at every boot. Name
+    # it for the operator; removal stays theirs, exactly as adoption kept the
+    # service theirs.
+    if [ -n "${HOST_LEGACY_INIT_SCRIPT:-}" ] \
+       && [ "$INSTALL_DIR" = "${HOST_LEGACY_INSTALL_ROOT:-}" ] \
+       && [ -e "$HOST_LEGACY_INIT_SCRIPT" ]; then
+        log_warn "The standalone service that booted this root is now stale;"
+        log_warn "remove it yourself: rm $HOST_LEGACY_INIT_SCRIPT"
+    fi
+
+    # Consume the record with the root it directed at, so a later plain run
+    # cannot chase a stale pointer.
+    $SUDO rm -f "$(host_payload_root_record)" 2>/dev/null || true
+    return 0
+}
+
 uninstall() {
     local platform=${1:-}
 
@@ -9390,10 +10767,35 @@ uninstall() {
     # is removed.
     undo_seeded_settings
 
+    # --mod-payload: this uninstall's one install target is the mod's payload
+    # root (HELIX_INSTALL_DIRS gains it via helix_install_dirs_for_run below).
+    # Restore the mod's display mode FIRST - while the payload is still in
+    # place, the rig is never left with neither UI nor a restore record.
+    # Flavor-gated exactly like the standalone arm: the takeover ran for
+    # forge_x only, and a Z-Mod payload install never took the display over.
+    if [ "${HELIX_MOD_PAYLOAD:-}" = "1" ]; then
+        if [ "${AD5M_FIRMWARE:-}" = "forge_x" ] && type uninstall_forgex >/dev/null 2>&1; then
+            uninstall_forgex || true
+        fi
+        # Resolve the payload root before any sweep removes anything: a flag
+        # or a corrupted record naming a directory that is not ours refuses
+        # the whole uninstall here rather than after the damage. The resolver
+        # has already logged the offending source; its cached answer is what
+        # the sweep below consumes.
+        resolve_payload_root >/dev/null || exit 1
+    fi
+
     # Remove installation (check all possible locations)
     local removed_dir=""
-    for install_dir in $HELIX_INSTALL_DIRS; do
+    for install_dir in $(helix_install_dirs_for_run); do
         if [ -d "$install_dir" ]; then
+            # A mod-owned entry belongs to the firmware mod, not to this
+            # uninstall — skip it (a hard exit here would strand the rest of
+            # the uninstall on one unremovable directory).
+            if host_mod_destruct_blocked "$install_dir"; then
+                log_warn "Skipping mod-owned ${install_dir} (managed by the firmware mod)"
+                continue
+            fi
             $SUDO rm -rf "$install_dir"
             log_success "Removed ${install_dir}"
             removed_dir="$install_dir"
@@ -9407,6 +10809,13 @@ uninstall() {
 
     if [ -z "$removed_dir" ]; then
         log_warn "No HelixScreen installation found"
+    fi
+
+    # Consume the payload-root record with the root it directed the sweep at
+    # — the same contract as the standalone arm, so a later plain run cannot
+    # chase a stale pointer.
+    if [ "${HELIX_MOD_PAYLOAD:-}" = "1" ] && [ -n "${HOST_PAYLOAD_ROOT:-}" ]; then
+        $SUDO rm -f "$(host_payload_root_record)" 2>/dev/null || true
     fi
 
     # Re-enable the previous UI based on firmware
@@ -9531,9 +10940,24 @@ clean_old_installation() {
     # Stop any running services
     stop_service
 
-    # Remove installation directories (check all possible locations)
-    for install_dir in $HELIX_INSTALL_DIRS; do
+    # Remove installation directories (check all possible locations). The
+    # payload-mode list adds the mod's payload root via
+    # helix_install_dirs_for_run; the mod-owned skip below exempts only the
+    # flag-armed run, so --clean without --mod-payload cannot touch it.
+    # Resolve fatally first, exactly like uninstall(): an armed --clean whose
+    # flag or record names a directory that is not ours refuses before the
+    # sweep. The record itself survives - see the note by the consume below.
+    if [ "${HELIX_MOD_PAYLOAD:-}" = "1" ]; then
+        resolve_payload_root >/dev/null || exit 1
+    fi
+    for install_dir in $(helix_install_dirs_for_run); do
         if [ -d "$install_dir" ]; then
+            # Same ownership rule as uninstall()'s sweep: never rm -rf a
+            # mod-owned directory out from under the firmware mod.
+            if host_mod_destruct_blocked "$install_dir"; then
+                log_warn "Skipping mod-owned ${install_dir} (managed by the firmware mod)"
+                continue
+            fi
             log_info "Removing $install_dir..."
             $SUDO rm -rf "$install_dir"
         fi
@@ -9594,9 +11018,35 @@ clean_old_installation() {
         fi
     fi
 
+    # A --clean must also remove the root the PREVIOUS install recorded:
+    # mod_payload_mode_block re-records THIS run's root before this sweep
+    # runs, so without this the old custom payload root - and any
+    # --auto-update stanza still pointing at it - survives a mode whose
+    # contract is "remove old installation completely". Name-gated like every
+    # other root the uninstall side acts on.
+    if [ -n "${HELIX_PRIOR_PAYLOAD_ROOT:-}" ] \
+       && [ "$HELIX_PRIOR_PAYLOAD_ROOT" != "${HOST_PAYLOAD_ROOT:-}" ] \
+       && _user_dir_name_ok "$HELIX_PRIOR_PAYLOAD_ROOT" '*helixscreen*' 2>/dev/null; then
+        log_info "Removing previously recorded payload root: $HELIX_PRIOR_PAYLOAD_ROOT"
+        $SUDO rm -rf "$HELIX_PRIOR_PAYLOAD_ROOT"
+        if [ -d "${HELIX_PRIOR_PAYLOAD_ROOT}-repo" ]; then
+            $SUDO rm -rf "${HELIX_PRIOR_PAYLOAD_ROOT}-repo"
+        fi
+        if type remove_update_manager_section >/dev/null 2>&1; then
+            remove_update_manager_section || true
+        fi
+    fi
+
     # Sweep state dirs holding rolling config backups
     clean_helix_state_dirs
 
+    # NOTE: unlike uninstall(), the clean step does NOT consume the
+    # payload-root record. --clean is not a terminating removal: main() ran
+    # mod_payload_mode_block first (recording the resolved root) and continues
+    # into a fresh install that never re-records, so eating the record here
+    # would leave the fresh payload unrecorded and a later flagless uninstall
+    # would sweep the probed default instead. Consume only where the removal
+    # is final: uninstall() and the standalone arm.
     log_success "Old installation cleaned"
     echo ""
 }
@@ -9614,9 +11064,9 @@ trap 'error_handler $LINENO' ERR 2>/dev/null || true
 # Remove the scratch dir however the installer ends.
 #
 # The ERR trap above is a bash extension and is silently discarded on the
-# ash/dash shells every embedded platform runs, so an interrupted or failing
-# install used to leak the whole download: a K2 was found holding a 60MB
-# helixscreen.zip from four months earlier, on a 240MB overlay partition.
+# ash/dash shells every embedded platform runs, so without this trap an
+# interrupted or failing install leaks the whole download - tens of megabytes
+# stranded on a partition that may only have a couple of hundred.
 #
 # cleanup_on_success is idempotent (it tests for the directory first) so the
 # explicit call on the success path is unaffected, and it routes through
@@ -9641,6 +11091,19 @@ usage() {
     echo "  --local FILE   Install from local archive (.zip or .tar.gz, skip download)"
     echo "  --skip-kiauh-registration"
     echo "                 Skip KIAUH extension registration (default: install if KIAUH detected)"
+    echo "  --standalone   Self-managed install beside your printer's mod"
+    echo "                 (Forge-X / Z-Mod). Default on such hosts is the"
+    echo "                 payload install: contents replaced in place, no"
+    echo "                 service installed or started (the mod owns the UI"
+    echo "                 service), config/ and platform/ preserved."
+    echo "  --payload-root PATH  Payload root (default: the mod's own tree on"
+    echo "                 Forge-X hosts, AD5X and AD5M alike). A host that"
+    echo "                 still carries an older standalone install is"
+    echo "                 offered adoption of that root; declining leaves it"
+    echo "                 untouched, with the migration steps printed"
+    echo "  --auto-update  Also write the [update_manager helixscreen] stanza"
+    echo "                 into the mod's user.moonraker.conf (opt-in: a stanza"
+    echo "                 is a real side effect)"
     echo "  --help         Show this help message"
     echo ""
     echo "Examples:"
@@ -9650,15 +11113,368 @@ usage() {
     echo "  $0 --clean --yes      # Same, without the interactive confirmation"
     echo "  $0 --version v1.1.0   # Install specific version"
     echo "  $0 --local /tmp/helixscreen-ad5m.tar.gz  # Install from local file"
+    echo "  $0 --standalone       # Self-managed install beside the mod (mod hosts)"
+}
+
+# Parse the command line into the mode globals main() reads. Split out of
+# main() so the parser is testable on its own (the mode flags especially:
+# HELIX_MOD_PAYLOAD is the one variable that arms the mod-owned destruct
+# exemption, and only this function may set it).
+parse_installer_args() {
+    update_mode=false
+    uninstall_mode=false
+    clean_mode=false
+    ASSUME_YES=false
+    version=""
+    local_tarball=""
+    skip_kiauh_registration=false
+    MOD_PAYLOAD_ROOT=""
+    HELIX_MOD_PAYLOAD_UPDATES=""
+    STANDALONE_INSTALL=""
+    MOD_PAYLOAD_FLAG_GIVEN=""
+
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --update)
+                update_mode=true
+                shift
+                ;;
+            --uninstall)
+                uninstall_mode=true
+                shift
+                ;;
+            --clean)
+                clean_mode=true
+                shift
+                ;;
+            --yes|-y|--force)
+                # Explicit non-interactive consent for destructive prompts.
+                # ASSUME_YES is read by clean_old_installation (uninstall.sh);
+                # it is deliberately NOT inferred from a non-TTY stdin, since
+                # the documented `curl ... | sh` invocation always has one.
+                # shellcheck disable=SC2034  # consumed by uninstall.sh (clean_old_installation)
+                ASSUME_YES=true
+                shift
+                ;;
+            --version)
+                if [ -z "${2:-}" ]; then
+                    log_error "--version requires a version argument"
+                    exit 1
+                fi
+                version="$2"
+                shift 2
+                ;;
+            --local)
+                if [ -z "${2:-}" ]; then
+                    log_error "--local requires a file path argument"
+                    exit 1
+                fi
+                local_tarball="$2"
+                shift 2
+                ;;
+            --skip-kiauh-registration)
+                skip_kiauh_registration=true
+                shift
+                ;;
+            --standalone)
+                STANDALONE_INSTALL=1
+                shift
+                ;;
+            --payload-root)
+                if [ -z "${2:-}" ]; then
+                    log_error "--payload-root requires a path argument"
+                    exit 1
+                fi
+                MOD_PAYLOAD_ROOT="$2"
+                shift 2
+                ;;
+            --auto-update)
+                # shellcheck disable=SC2034  # consumed by moonraker.sh (configure_moonraker_updates)
+                HELIX_MOD_PAYLOAD_UPDATES=1
+                shift
+                ;;
+            --no-mod-payload)
+                # Deprecated alias for --standalone (pre-release courtesy).
+                log_info "--no-mod-payload is deprecated; use --standalone"
+                STANDALONE_INSTALL=1
+                shift
+                ;;
+            --mod-payload-root)
+                # Deprecated alias for --payload-root.
+                if [ -z "${2:-}" ]; then
+                    log_error "--mod-payload-root requires a path argument"
+                    exit 1
+                fi
+                log_info "--mod-payload-root is deprecated; use --payload-root"
+                MOD_PAYLOAD_ROOT="$2"
+                shift 2
+                ;;
+            --mod-payload-updates)
+                # Deprecated alias for --auto-update.
+                log_info "--mod-payload-updates is deprecated; use --auto-update"
+                # shellcheck disable=SC2034  # consumed by moonraker.sh (configure_moonraker_updates)
+                HELIX_MOD_PAYLOAD_UPDATES=1
+                shift
+                ;;
+            --mod-payload)
+                # Compat no-op: the payload contract is auto-detected on hosts
+                # the mod profile recognizes. Kept so documented invocations
+                # keep working; mod_payload_mode_block logs the no-op notice.
+                MOD_PAYLOAD_FLAG_GIVEN=1
+                shift
+                ;;
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+
+    # A payload root is a payload-contract request; it cannot also name where
+    # a self-managed install goes (that is INSTALL_DIR).
+    if [ "${STANDALONE_INSTALL:-}" = "1" ] && [ -n "$MOD_PAYLOAD_ROOT" ]; then
+        log_error "--payload-root cannot be combined with --standalone"
+        exit 1
+    fi
+}
+
+# Auto-detect the payload contract: a bare install on a host the mod profile
+# recognizes IS a payload install - the mod owns the payload tree and its OTA,
+# so the in-place payload contract is the default and every standalone
+# destructive shape stays refused. Runs BEFORE
+# set_install_paths: its validate gate needs the contract armed to accept the
+# mod's payload root as INSTALL_DIR.
+#
+# Overrides: --standalone opts back into the self-managed install; naming a
+# payload root opts into the contract on any host (on a mod host that is
+# already the default). HELIX_MOD_PAYLOAD stays env-scrubbed (host_profile.sh)
+# - the probe and these flags are its only setters.
+mod_payload_autodetect() {
+    [ "${STANDALONE_INSTALL:-}" = "1" ] && return 0
+    # An explicit --payload-root opts in on any host: the operator named the
+    # root, which is the whole decision.
+    if [ -n "${MOD_PAYLOAD_ROOT:-}" ]; then
+        HELIX_MOD_PAYLOAD=1
+        return 0
+    fi
+    # Auto-detect only the mod's own shape: the tree WITH its Buildroot
+    # chroot, which both Forge-X layouts carry (AD5X and AD5M alike - one
+    # mod, one contract shape, one descriptor). A probed tree without a
+    # chroot is a mod mid-install or half-removed, so it requires an explicit
+    # --payload-root. The chroot answer exists from host_profile_probe, which
+    # main() runs before this.
+    [ "${HOST_CHROOT_STATE:-none}" = "none" ] && return 0
+    if [ -n "${HOST_MOD_ROOT:-}" ]; then
+        HELIX_MOD_PAYLOAD=1
+    fi
+}
+
+# The legacy AD5M population's adopt-or-warn. ad5m+forge_x hosts exist in the
+# field with an install at /opt/helixscreen and an S90helixscreen service, and
+# a payload install that silently relocated to the mod's default root would
+# strand them. So the armed install OFFERS to adopt the legacy root as its
+# payload root - outside the mod's git tree, which is also the OTA-durable
+# answer - and a declined or unanswerable offer proceeds at the mod default
+# with the exact manual migration commands.
+#
+# Nothing is ever deleted here: the legacy root and its service are the
+# operator's to remove, with the commands printed below or the shipped
+# uninstaller. An adoption IS recorded (the record write later in
+# mod_payload_mode_block), which is also how the next run resumes it without
+# re-asking.
+payload_legacy_adopt_or_warn() {
+    # Only an armed, bare payload install reaching for the mod's default
+    # root: an explicit --payload-root or INSTALL_DIR is the operator's own
+    # choice, --standalone never reaches here armed, and uninstall is not an
+    # install.
+    [ "${HELIX_MOD_PAYLOAD:-}" = "1" ] || return 0
+    [ -z "${MOD_PAYLOAD_ROOT:-}" ] || return 0
+    [ -z "${_USER_INSTALL_DIR:-}" ] || return 0
+    [ "$uninstall_mode" != true ] || return 0
+    [ "${STANDALONE_INSTALL:-}" != "1" ] || return 0
+    [ -n "${HOST_LEGACY_INSTALL_ROOT:-}" ] || return 0
+    [ "${INSTALL_DIR:-}" = "${HOST_INSTALL_ROOT:-}" ] || return 0
+
+    local legacy="$HOST_LEGACY_INSTALL_ROOT"
+    local svc="${HOST_LEGACY_INIT_SCRIPT:-/etc/init.d/S90helixscreen}"
+
+    # A prior adopt recorded its choice; resuming it is not relocation.
+    if [ "$(read_payload_root_record 2>/dev/null || true)" = "$legacy" ]; then
+        INSTALL_DIR="$legacy"
+        validate_install_dir "$INSTALL_DIR" || exit 1
+        log_info "Payload root: resuming the adopted root $INSTALL_DIR"
+        log_info "(recorded in $(host_payload_root_record); clear that file to re-choose)"
+        return 0
+    fi
+
+    if payload_legacy_prompt_adopt "$legacy"; then
+        INSTALL_DIR="$legacy"
+        # The probe's platform-keyed candidate, not an operator path: the
+        # name gate still applies (a legacy root is a canonical platform
+        # root, so this cannot fail on a real rig).
+        validate_install_dir "$INSTALL_DIR" || exit 1
+        log_info "Adopted the existing install at $INSTALL_DIR as the payload root"
+        log_info "(outside the mod's git tree, so a Forge-X OTA cannot remove it)"
+        # The service STAYS: it is the ONE boot path this adopted root has,
+        # and the in-place update keeps the launcher it starts current. The
+        # mod starts nothing of ours - a payload install at the mod's own root
+        # gets OUR service inside the mod chroot's /etc/init.d, where
+        # set_install_paths points INIT_SCRIPT_DEST and where Forge-X's
+        # .root/start.sh (running inside the chroot) starts every S* it finds.
+        # An adopted legacy root sits outside that chroot, so its host-side
+        # S90 script is what boots it.
+        # It is named for removal only at uninstall time, when it is stale.
+        log_info "Keeping the standalone service $svc - it is this payload's"
+        log_info "boot path: an adopted root sits outside the mod's chroot, so"
+        log_info "the chroot's init.d cannot reach it."
+        return 0
+    fi
+
+    log_warn "An older standalone HelixScreen install exists at $legacy"
+    log_warn "(service: $svc). This payload install uses the mod's root instead:"
+    log_warn "  $INSTALL_DIR"
+    log_warn "The old install is left untouched. To finish the migration by hand:"
+    log_warn "  cp $legacy/config/settings.json ${HOST_CONFIG_DIR:-}/settings.json"
+    log_warn "  rm $svc"
+    log_warn "  rm -rf $legacy"
+    log_warn "Or adopt that root as the payload root:"
+    log_warn "  --payload-root $legacy"
+}
+
+# Ask the adopt question where it can be answered: a TTY. The curl|sh pipe
+# cannot answer (stdin carries the script), so every other stdin declines -
+# the same rule confirm_clean_install applies, except a decline proceeds at
+# the mod default rather than aborting.
+# Returns 0 to adopt.
+payload_legacy_prompt_adopt() {
+    [ -t 0 ] || return 1
+    printf "Adopt the existing install at %s as the payload root? [y/N] " "$1"
+    read -r response
+    case "$response" in
+        [yY][eE][sS]|[yY]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Payload-mode wiring. Runs after set_install_paths (INSTALL_DIR holds the
+# mod's payload root, an explicit env INSTALL_DIR, or the platform default)
+# and before the pre-flight checks, so every later step sees the mode's
+# answers.
+#
+# Root precedence: --payload-root > an adopted legacy root (the operator's
+# recorded or just-given choice) > whatever set_install_paths chose (an
+# explicit env INSTALL_DIR > the host profile's HOST_INSTALL_ROOT).
+mod_payload_mode_block() {
+    if [ -n "${MOD_PAYLOAD_ROOT:-}" ]; then
+        INSTALL_DIR="$MOD_PAYLOAD_ROOT"
+        # The override gets the same gate every other INSTALL_DIR passes: it
+        # must name helixscreen, and a mod-owned root needs the payload
+        # contract this run is already in (mod_payload_autodetect arms it on
+        # the flag, and --standalone + a payload root is refused at parse -
+        # so the guard below is the enforced form of that invariant, not an
+        # expectation about a caller elsewhere).
+        host_refuse_mod_owned "install into" "$INSTALL_DIR"
+        validate_install_dir "$INSTALL_DIR" || exit 1
+        log_info "Payload root (--payload-root): $INSTALL_DIR"
+    fi
+
+    # The legacy-population choice, before anything reads or records the
+    # root: it may move INSTALL_DIR off the mod default.
+    payload_legacy_adopt_or_warn
+
+    # Compat no-op notice for the old opt-in flag, whichever way it lands.
+    if [ "${MOD_PAYLOAD_FLAG_GIVEN:-}" = "1" ]; then
+        if [ "${HOST_SERVICE_MECHANISM:-}" = "mod-managed" ]; then
+            log_info "--mod-payload is implied on this host (no effect)"
+        else
+            log_info "--mod-payload has no effect here; the payload contract applies"
+            log_info "where your printer's mod (Forge-X / Z-Mod) owns the UI"
+        fi
+    fi
+
+    # A payload root inside the mod's git tree does not survive a Forge-X
+    # OTA -- their update_manager is type: git_repo and git clean -fd removes
+    # .bin/helixscreen, which is untracked there.
+    # Only the payload contract can reach a mod-owned INSTALL_DIR
+    # (set_install_paths' install-dir gate refuses it otherwise), so this
+    # fires in payload mode and never else.
+    if host_path_is_mod_owned "${INSTALL_DIR:-}"; then
+        log_warn "This payload root lives inside the firmware mod's git tree."
+        log_warn "A Forge-X OTA removes it: their updater cleans untracked files"
+        log_warn "in the mod's repo. Prefer a root outside the tree:"
+        # The example must exist on THIS rig: the mod's data mount (/usr/data
+        # on the AD5X, /data on the AD5M), not the hard-coded AD5X path an
+        # AD5M operator would follow onto a partition their rig does not
+        # have. Unprobed corner (flag-armed, no chroot): fall back to the
+        # AD5X literal.
+        local od1_mount
+        od1_mount="$(host_mod_data_mount)"
+        [ -n "$od1_mount" ] || od1_mount="/usr/data"
+        log_warn "  --payload-root $od1_mount/helixscreen"
+    fi
+
+    if [ "${HELIX_MOD_PAYLOAD:-}" != "1" ]; then
+        # A self-managed install on a mod host is the operator's choice
+        # (--standalone, or an explicit INSTALL_DIR); it is not refused, but
+        # the service starts from the mod's chroot at boot, not from here.
+        if [ "${HOST_SERVICE_MECHANISM:-}" = "mod-managed" ]; then
+            log_warn "The firmware mod on this host owns the UI service."
+            log_warn "This standalone install will not be started automatically."
+            if [ "${STANDALONE_INSTALL:-}" = "1" ]; then
+                log_warn "Re-run without --standalone for the payload install."
+            else
+                log_warn "An explicit INSTALL_DIR picks the root, not the contract;"
+                log_warn "re-run without it, or name the root with --payload-root."
+            fi
+        fi
+        return 0
+    fi
+
+    if [ "$uninstall_mode" != true ]; then
+        # Capture what the PREVIOUS install recorded before this run's write
+        # replaces it: --clean must sweep the root that exists on disk, and
+        # its sweep runs after this block (clean_old_installation reads this
+        # capture, since the record now names THIS run's root instead).
+        # shellcheck disable=SC2034  # consumed by uninstall.sh (clean_old_installation sweeps it)
+        HELIX_PRIOR_PAYLOAD_ROOT=$(read_payload_root_record 2>/dev/null || true)
+        # Record where this payload install actually landed, so a later armed
+        # uninstall removes THIS root (its own --payload-root, else this
+        # record, else the probed default). Install runs only: an uninstall
+        # must not re-point the record on its way out the door.
+        record_payload_root "$INSTALL_DIR"
+
+        if [ "${MOD_PAYLOAD_FLAG_GIVEN:-}" = "1" ]; then
+            log_info "--mod-payload: replacing payload contents in place at $INSTALL_DIR"
+        else
+            log_info "Payload install (auto-detected): replacing contents in place at $INSTALL_DIR"
+        fi
+        log_info "Service installs into the mod's chroot; it starts at boot"
+    fi
+    if [ "${HOST_SERVICE_MECHANISM:-}" != "mod-managed" ]; then
+        log_warn "--payload-root names a root this host's profile did not find;"
+        log_warn "applying the in-place payload contract anyway."
+    fi
 }
 
 # Configure platform-specific settings before stopping competing UIs
 # (ForgeX display mode, stock UI disable, screen.sh patching)
 configure_platform() {
+    # The stock FlashForge UI's own files gate this, not the mod flavor: a
+    # mod-less AD5M (flavor stock) still ships /opt/auto_run.sh starting
+    # ffstartup-arm, and that UI fights us for the framebuffer whatever
+    # firmware is on the box. disable_stock_firmware_ui no-ops wherever those
+    # files are absent.
+    disable_stock_firmware_ui || true
+
     case "${AD5M_FIRMWARE:-}" in
         forge_x)
             configure_forgex_display || true
-            disable_stock_firmware_ui || true
+            dismiss_forgex_feather_promo || true
             patch_forgex_screen_sh || true
             patch_forgex_screen_drawing || true
             install_forgex_logged_wrapper || true
@@ -9672,27 +11488,8 @@ configure_platform() {
 # Deploy platform-specific hooks for the init script
 # Must be called after extract_release (hooks are in the release package)
 install_platform_hooks() {
-    local platform_hook=""
-    case "${AD5M_FIRMWARE:-}" in
-        forge_x)     platform_hook="ad5m-forgex" ;;
-        klipper_mod) platform_hook="ad5m-kmod" ;;
-        zmod)        platform_hook="ad5m-zmod" ;;
-    esac
-
-    # Platform hooks (pi32 shares Pi hooks). The AD5X used to share ad5m-zmod on
-    # the assumption that both ZMOD firmwares have the same layout; they do not.
-    # The AD5X runs inside a chroot at /usr/data/.mod/.zmod, installs to
-    # /srv/helixscreen, and has no /data at all, so the AD5M hook's
-    # HELIX_CACHE_DIR=/data/helixscreen/cache pointed at a path that is not there.
-    case "$platform" in
-        pi|pi32)       platform_hook="pi" ;;
-        k1)            platform_hook="k1" ;;
-        k2)            platform_hook="k2" ;;
-        cc1)           platform_hook="cc1" ;;
-        m1)            platform_hook="m1" ;;
-        ad5x)          platform_hook="ad5x" ;;
-        snapmaker-u1)  platform_hook="snapmaker-u1" ;;
-    esac
+    local platform_hook
+    platform_hook=$(resolve_platform_hook_key "$platform")
 
     if [ -n "$platform_hook" ]; then
         deploy_platform_hooks "$INSTALL_DIR" "$platform_hook"
@@ -9706,7 +11503,7 @@ install_platform_hooks() {
 # the friendly hardware label and reframe "pi" as the install package. Plain
 # "Detected platform: pi" reads as wrong to anyone whose printer says QIDI on
 # the lid — they see "pi" first and assume we mis-identified their device.
-# Actual Raspberry Pi owners keep the original ordering.
+# Actual Raspberry Pi owners get the platform-first ordering.
 #
 # All other platforms (k1, k2, ad5m, snapmaker-u1, x86, …) get the single
 # "Detected platform: X" line — there's no device-name ambiguity to clear up.
@@ -9802,69 +11599,16 @@ _refuse_if_firmware_managed() {
 
 # Main installation flow
 main() {
-    update_mode=false
-    uninstall_mode=false
-    clean_mode=false
-    ASSUME_YES=false
-    version=""
-    local_tarball=""
-    skip_kiauh_registration=false
+    # Probe the host once, before anything consults it: the mod-ownership
+    # guard backs set_install_paths' install-dir gate (and detect_tmp_dir's
+    # override branch), so HOST_MOD_ROOT must already be probed by then.
+    host_profile_probe
 
-    # Parse arguments
-    while [ $# -gt 0 ]; do
-        case $1 in
-            --update)
-                update_mode=true
-                shift
-                ;;
-            --uninstall)
-                uninstall_mode=true
-                shift
-                ;;
-            --clean)
-                clean_mode=true
-                shift
-                ;;
-            --yes|-y|--force)
-                # Explicit non-interactive consent for destructive prompts.
-                # ASSUME_YES is read by clean_old_installation (uninstall.sh);
-                # it is deliberately NOT inferred from a non-TTY stdin, since
-                # the documented `curl ... | sh` invocation always has one.
-                # shellcheck disable=SC2034  # consumed by uninstall.sh (clean_old_installation)
-                ASSUME_YES=true
-                shift
-                ;;
-            --version)
-                if [ -z "${2:-}" ]; then
-                    log_error "--version requires a version argument"
-                    exit 1
-                fi
-                version="$2"
-                shift 2
-                ;;
-            --local)
-                if [ -z "${2:-}" ]; then
-                    log_error "--local requires a file path argument"
-                    exit 1
-                fi
-                local_tarball="$2"
-                shift 2
-                ;;
-            --skip-kiauh-registration)
-                skip_kiauh_registration=true
-                shift
-                ;;
-            --help|-h)
-                usage
-                exit 0
-                ;;
-            *)
-                log_error "Unknown option: $1"
-                usage
-                exit 1
-                ;;
-        esac
-    done
+    # Parse arguments, then settle the payload contract BEFORE set_install_paths:
+    # its install-dir gate needs to know whether the mod's payload root is ours
+    # to write. Autodetect (probe) plus the operator's overrides decide.
+    parse_installer_args "$@"
+    mod_payload_autodetect
 
     # Self-delete safety guard runs as early as possible — before platform
     # detection, which exits on "unsupported" hardware and would otherwise
@@ -9896,9 +11640,11 @@ main() {
     print_platform_banner "$platform"
 
     # AD5X: refuse to run outside the ZMOD chroot — applies to fresh install,
-    # --update, --uninstall, and --local. Inside the chroot the check is a no-op.
+    # --update, --uninstall, and --local. Inside the chroot the check is a
+    # no-op, and a Forge-X host never trips it (its install is host-side into
+    # the mod's git tree, so the guard is inert there).
     if [ "$platform" = "ad5x" ]; then
-        ad5x_check_chroot_context
+        mod_check_chroot_context
     fi
 
     if [ "$platform" = "unsupported" ]; then
@@ -9912,16 +11658,25 @@ main() {
         exit 1
     fi
 
-    # For AD5M/K1, detect firmware variant and set appropriate paths
+    # For AD5M/AD5X/K1, detect the firmware/mod flavor and set appropriate paths.
+    # The FlashForge mods ship for both Adventurer platforms, so ad5m and ad5x
+    # share one detector — a Forge-X AD5X gets the Forge-X layout, not the
+    # ZMOD one the bare ad5x paths describe. AD5M_FIRMWARE is the compat alias
+    # for MOD_FLAVOR.
     local firmware=""
-    if [ "$platform" = "ad5m" ]; then
-        AD5M_FIRMWARE=$(detect_ad5m_firmware)
-        firmware="$AD5M_FIRMWARE"
+    if [ "$platform" = "ad5m" ] || [ "$platform" = "ad5x" ]; then
+        MOD_FLAVOR=$(detect_mod_flavor)
+        AD5M_FIRMWARE="$MOD_FLAVOR"
+        firmware="$MOD_FLAVOR"
     elif [ "$platform" = "k1" ]; then
         K1_FIRMWARE=$(detect_k1_firmware)
         firmware="$K1_FIRMWARE"
     fi
     set_install_paths "$platform" "$firmware"
+
+    # --mod-payload mode wiring (root precedence, OTA warning, mod-host
+    # notice) - after detection, before the requirements checks.
+    mod_payload_mode_block
 
     # Check permissions
     check_permissions "$platform"
@@ -9937,8 +11692,7 @@ main() {
 
     # Defensive: if uninstall_mode is still true at this point, the early
     # exit above is broken — fail loudly rather than running the install
-    # path, which is the failure mode that caused user reports of
-    # "--uninstall reinstalled HelixScreen".
+    # path, which REINSTALLS HelixScreen in answer to --uninstall.
     if [ "$uninstall_mode" = true ]; then
         log_error "internal error: install path entered with uninstall_mode=true"
         log_error "please report at https://github.com/${GITHUB_REPO}/issues"
@@ -10026,8 +11780,8 @@ main() {
     # Install KIAUH extension if KIAUH is detected
     install_kiauh_extension "$skip_kiauh_registration" || true
 
-    # K1: ensure SSH (dropbear) is running — recovers from #535 where disabling
-    # S99start_app also killed SSH. Runs on both fresh install and self-update.
+    # K1: ensure SSH (dropbear) is running — disabling S99start_app also stops
+    # SSH (#535). Runs on both fresh install and self-update.
     if [ "$platform" = "k1" ]; then
         ensure_k1_ssh
     fi
@@ -10102,7 +11856,7 @@ main() {
     printf '\n'
     echo "HelixScreen ${version} installed to ${INSTALL_DIR}"
     echo ""
-    print_post_install_commands
+    print_post_install_commands "${HOST_SERVICE_MECHANISM:-}"
     echo ""
 
     if [ "$platform" = "ad5m" ] || [ "$platform" = "k1" ] || [ "$platform" = "k2" ]; then

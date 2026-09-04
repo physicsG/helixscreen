@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -13,8 +14,9 @@
 
 #include "../test_fixtures.h"
 
-#include "../catch_amalgamated.hpp"
 #include <lvgl.h>
+
+#include "../catch_amalgamated.hpp"
 
 using helix::ui::UpdateQueue;
 

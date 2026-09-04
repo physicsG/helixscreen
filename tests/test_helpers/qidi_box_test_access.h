@@ -1,14 +1,16 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 #include "ams_backend_qidi.h"
 #include "ams_types.h"
-#include "hv/json.hpp"
 
 #include <functional>
 #include <map>
 #include <optional>
 #include <string>
+
+#include "hv/json.hpp"
 
 using json = nlohmann::json;
 

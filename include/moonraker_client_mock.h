@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -24,6 +25,11 @@ class MockPrinterState;
 
 // Forward declaration for MoonrakerClientMock (needed for internal handler registry)
 class MoonrakerClientMock;
+
+// Forward declaration for the test-access friend (tests/test_helpers/)
+namespace helix {
+class MoonrakerClientMockTestAccess;
+} // namespace helix
 
 // Forward declaration for internal handler registry
 namespace mock_internal {
@@ -612,6 +618,30 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     }
 
     /**
+     * @brief Path the mock writes SHAPER_CALIBRATE data to, for @p axis_lower
+     *
+     * Per-process, because `make test-run` shards the suite across as many
+     * helix-tests PROCESSES as the box has jobs, and three test files touch this
+     * file: the panel integration and calibrator fixtures both std::remove() it
+     * between cases, and the API test asserts on it. On a fixed path those land
+     * in different shards and delete each other's fixture mid-run - the writer
+     * then parses an absent CSV, freq_response comes back empty, and the verdict
+     * row silently never populates. Embedding the PID makes concurrent shards
+     * disjoint. Tests MUST use this rather than rebuilding the literal.
+     */
+    static std::string shaper_csv_path(char axis_lower);
+
+    /**
+     * @brief Delete both axes' CSVs for THIS process
+     *
+     * Fixtures call it on the way in (so a previous case in this process cannot
+     * leak a stale file into the next) and on the way out (so a shard does not
+     * strand its files in /tmp - each process now writes its own, where the old
+     * fixed path was simply overwritten).
+     */
+    static void remove_shaper_csvs();
+
+    /**
      * @brief Set the [resonance_tester] sweep range the mock reports and replays
      *
      * Drives both `configfile.settings.resonance_tester` and the frequencies
@@ -873,12 +903,54 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     void dispatch_gcode_response(const std::string& line);
 
     /**
+     * @brief Append chamber-backend status objects to a synthesized frame
+     *
+     * Emits the nominal diagnostics payload + filter-pin value for appliance
+     * chamber-heater backends (e.g. dragonbreath) whose objects were
+     * materialized via HELIX_MOCK_OBJECTS. `requested` (a
+     * printer.objects.subscribe objects filter) limits emission to subscribed
+     * keys; null emits every present backend object.
+     */
+    void append_chamber_backend_status(json& status_obj, double sim_time,
+                                       const json* requested = nullptr) const;
+
+    /**
+     * @brief Bare gcode name of the resolved chamber heater
+     * @return e.g. "chamber" or "dragonbreath" (the HEATER= form), empty if none
+     */
+    std::string chamber_heater_bare_name() const;
+
+    /**
+     * @brief Full filter-fan pin object of the chamber backend, when materialized
+     * @return e.g. "output_pin dragonbreath_filter", empty when absent
+     */
+    std::string chamber_filter_pin_object() const;
+
+    /// Current mock z-offset for a tool, in mm. Seeded distinct per tool and
+    /// updated by SET_TOOL_PARAMETER, so a value set earlier in the session
+    /// survives into a later status snapshot instead of silently reverting.
+    /// Public because the object handlers are free-function lambdas taking a
+    /// MoonrakerClientMock*, not members.
+    double tool_z_offset(int tool) const;
+
+    /// Klipper's configfile.save_config_pending - whether a SAVE_CONFIG is owed.
+    /// Set by anything routed through configfile.set() (here:
+    /// SAVE_TOOL_PARAMETER), cleared when SAVE_CONFIG commits.
+    bool save_config_pending() const;
+
+    /// Klipper's configfile.save_config_pending_items, {section: {option:
+    /// value}} with STRING values - configfile.set() stores str(value).
+    nlohmann::json save_config_pending_items() const;
+
+    /**
      * @brief Simulate a Klipper restart - the ONE model of what a restart does
      *
      * Sets klippy_state to STARTUP, clears the active print, zeroes heater
-     * targets, drops excluded objects, dispatches the webhooks status update a
-     * real restart arrives as, then returns to READY after a delay on a tracked
-     * thread (not an lv_timer - this must work in tests that never pump LVGL).
+     * targets, drops excluded objects, reloads everything Klipper would re-read
+     * from printer.cfg (per-tool z-offsets), dispatches the webhooks status
+     * update a real restart arrives as, then returns to READY after a delay on a
+     * tracked thread (not an lv_timer - this must work in tests that never pump
+     * LVGL).
      * Temps continue cooling naturally during the restart period.
      *
      * Public because the printer.restart / printer.firmware_restart handlers are
@@ -907,6 +979,10 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     nlohmann::json pin_watch_status_json() const;
 
   private:
+    // Test visibility into the chamber-key cache and the synchronous initial
+    // state dispatch (see tests/test_helpers/moonraker_client_mock_test_access.h).
+    friend class helix::MoonrakerClientMockTestAccess;
+
     /**
      * @brief Populate hardware lists based on configured printer type
      *
@@ -1111,6 +1187,23 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @brief Dispatch gcode_move status update (for Z offset changes)
      */
     void dispatch_gcode_move_update();
+    /// Republish one tool's gcode_z_offset after SET_TOOL_PARAMETER.
+    void dispatch_tool_update(int tool);
+
+    /// Klipper's configfile.set(): stage one option for the next SAVE_CONFIG.
+    /// Does NOT change any runtime value - on a real printer the runtime write
+    /// already happened (SET_TOOL_PARAMETER) and this only marks the config
+    /// dirty.
+    void stage_config_change(const std::string& section, const std::string& option,
+                             const std::string& value);
+
+    /// Klipper's cmd_SAVE_CONFIG: fold the staged options into the durable
+    /// stores and clear the pending set. The restart is the caller's, matching
+    /// Klipper, where writing the file and restarting are separate steps.
+    void commit_pending_config();
+
+    /// Republish configfile.save_config_pending{,_items}.
+    void dispatch_configfile_update();
 
     /**
      * @brief Dispatch manual_probe status update (for Z-offset calibration)
@@ -1466,6 +1559,25 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
 
     // G-code offset tracking
     std::atomic<double> gcode_offset_z_{0.0}; // Z offset from SET_GCODE_OFFSET
+    /// Per-tool z-offsets, indexed by tool number, driven by
+    /// SET_TOOL_PARAMETER. Seeded DISTINCT rather than all-zero: an all-zero
+    /// seed makes "every tool reads the same value" — the exact bug a per-tool
+    /// display can have — look correct.
+    mutable std::mutex tool_z_offsets_mutex_;
+    std::map<int, double> tool_z_offsets_;
+    /// The durable copy - what printer.cfg holds, i.e. what the tool comes back
+    /// with after a restart. SAVE_CONFIG commits the staged values into here.
+    ///
+    /// Keeping this SEPARATE from the runtime map is the whole point: without
+    /// it an offset that was set and never saved survived a restart too, so the
+    /// mock could not tell a persisted save from a forgotten one and no test of
+    /// the persist path could fail.
+    std::map<int, double> tool_z_offsets_saved_;
+
+    /// Klipper's configfile.save_config_pending_items - {section: {option:
+    /// value}}, values stringified as configfile.set() does.
+    mutable std::mutex pending_config_mutex_;
+    std::map<std::string, std::map<std::string, std::string>> pending_config_items_;
 
     // Manual probe state (for Z-offset calibration: PROBE_CALIBRATE, TESTZ, ACCEPT, ABORT)
     std::atomic<bool> manual_probe_active_{false}; // true when in probe mode
@@ -1588,11 +1700,44 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     /// Advance the armed swap by one notification interval. No-op when idle.
     void advance_medusa_swap();
 
+    // --- Standalone IFS module mock -----------------------------------------
+    // HELIX_MOCK_AMS=ifs-module: pushes the module's objects (ifs /
+    // ifs_materials plus its stock-named lane/toolhead sensors) so real
+    // discovery sets AmsType::AD5X_IFS and the PRODUCTION AmsBackendAd5xIfs
+    // runs against pushed frames — try_create_mock() declines this value, same
+    // rule as the MedusaHC modes. gcode_script() folds T<n> and the IFS_*
+    // macros into the state below; the periodic notification publishes it.
+    bool is_mock_ifs_module() const;
+    /// The `ifs` object frame.
+    [[nodiscard]] nlohmann::json ifs_module_status_json() const;
+    /// The `ifs_materials` object frame (slot registry view).
+    [[nodiscard]] nlohmann::json ifs_module_materials_json() const;
+    /// The save_variables fragment carrying the module's own records.
+    [[nodiscard]] nlohmann::json ifs_module_vars_json() const;
+    /// Apply one IFS-module gcode command token. @return true when the token
+    /// was one of ours (the caller then stops walking the generic chain).
+    bool apply_ifs_module_gcode(const std::string& cmd, const std::string& gcode);
+    /// Lane in the nozzle (1-4, 0 = none) — the module's `ifs_loaded` record.
+    std::atomic<int> ifs_module_loaded_{0};
+    /// Per-lane silk presence bitmask, bit i = lane i+1.
+    std::atomic<uint8_t> ifs_module_presence_{0x0F};
+    /// Slot -> {type, bare-hex colour}; IFS_SET_MATERIAL writes land here.
+    mutable std::mutex ifs_module_materials_mutex_;
+    std::map<int, std::pair<std::string, std::string>> ifs_module_materials_{
+        {1, {"PLA", "A03CF7"}},
+        {2, {"PETG", "00FF00"}},
+        {3, {"ABS", "FF8800"}},
+        {4, {"TPU", "FFFFFF"}}};
+
     // Additional objects for testing (e.g., "mmu", "AFC", "toolchanger")
     std::vector<std::string> additional_objects_;
 
     // Cached chamber heater status key (updated by override_chamber_heater / populate)
     std::string cached_chamber_status_key_;
+
+    // Chamber filter-fan pin value (SET_PIN target; drives fan_percent in
+    // synthesized chamber-backend diagnostics frames)
+    std::atomic<double> chamber_filter_value_{0.0};
 
     // Calibration simulation timers (PID, MPC, shaper) — must be cleaned up
     // in destructor to prevent use-after-free when mock is destroyed before

@@ -184,20 +184,35 @@ cp config/settings.json.template config/settings.json  # First-time setup
 
 ## DPI & Hardware Profiles
 
-LVGL scales UI based on DPI. Default: 160 (reference, no scaling).
+`--dpi <n>` declares the **panel's physical DPI**. `DisplayMetrics` turns it into a UI
+scale factor that multiplies every px token, the grid cell, and the font ladder; LVGL's
+own DPI is then set to `LV_DPI_DEF * scale`, never to `n` directly. UI constants are
+authored against a 160 DPI reference.
+
+The scale is flat at exactly **1.0 up to 225 DPI**, which covers every shipping printer,
+so passing a printer's real DPI is a no-op. It only does something on phone-class panels:
 
 ```bash
-./build/bin/helix-screen --dpi 170  # 7" @ 1024x600 (BTT Pad 7)
-./build/bin/helix-screen --dpi 187  # 5" @ 800x480
-./build/bin/helix-screen --dpi 201  # 4.3" @ 720x480 (AD5M)
+./build/bin/helix-screen --test -s 1080x2400 --dpi 405   # ~1.578x — a 405 DPI handset
 ```
 
-| Hardware | Resolution | DPI |
-|----------|------------|-----|
-| Reference | — | 160 |
-| 7" LCD | 1024×600 | 170 |
-| 5" LCD | 800×480 | 187 |
-| AD5M | 720×480 | 201 |
+Measured true DPI of the test fleet (over `FBIOGET_VSCREENINFO`, corrected against the
+panels' real diagonals — **not** the values the kernel reports, which are wrong or absent
+on 6 of the 8):
+
+| Hardware | Resolution | True DPI | Scale |
+|----------|------------|----------|-------|
+| Reference (authoring) | — | 160 | 1.0 |
+| CC1 | 480×272 | 131 | 1.0 |
+| SonicPad | 1024×600 | 170 | 1.0 |
+| CB1 + BTT HDMI5 | 800×480 | 187 | 1.0 |
+| Raspberry Pi rig | 800×480 | 206 | 1.0 |
+| K1C, K2 Plus | 480×800 | 218 | 1.0 |
+| AD5M | 800×480 | 221 | 1.0 |
+| Phone (Android) | 1080×2400 | ~405 | 1.578 |
+
+Do not read a panel's DPI off the kernel to fill this in. See
+[THEME_SYSTEM.md § The high-DPI UI scale factor](THEME_SYSTEM.md#the-high-dpi-ui-scale-factor).
 
 ## Multi-Display (macOS)
 
@@ -382,7 +397,7 @@ void ui_panel_motion_init(lv_obj_t* parent);
 
 **Naming conventions:**
 - Functions/variables: `snake_case` (`ui_panel_home_init`, `temp_target`)
-- XML files: `snake_case` (`bed_temp_panel.xml`)
+- XML files: `snake_case` (`history_dashboard_panel.xml`)
 - Constants: `UPPER_SNAKE_CASE` (`MAX_TEMP`) — including `constexpr`, file-scope
   `static const`, and enum enumerators. **Not** Google's `kCamelCase`: the tree
   drifted into it for a while and was swept back, so a `kFoo` you find in a diff
@@ -394,6 +409,11 @@ void ui_panel_motion_init(lv_obj_t* parent);
 helpers in `helix::ui::`, sensor managers in `helix::sensors`):
 - No `using` declarations in headers — always fully-qualified names in `.h`
   files; `using namespace helix;` is acceptable in `.cpp` files only
+- Gated by `scripts/check_namespace_compliance.py` (ratcheting baseline, run from
+  `quality-checks.sh`). It counts declarations outside `helix::`, not files, and
+  never counts `extern "C"`, file-local statics in `.cpp`, or forward declarations
+  of third-party types. A genuinely-global site takes `// NAMESPACE_OK: <reason>`.
+  The baseline may fall, never rise — see prestonbrown/helixscreen#1370
 - Enums are `enum class` within `helix::` (e.g., `helix::PanelId`, `helix::PrintState`)
 - JSON forward declarations come from `#include "json_fwd.h"`
 

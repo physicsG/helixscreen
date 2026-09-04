@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -24,6 +25,7 @@
 #include "grid_layout.h"
 #include "panel_widget_config.h"
 #include "panel_widget_manager.h"
+#include "panel_widget_registry.h"
 #include "theme_manager.h"
 
 #include <cmath>
@@ -121,16 +123,21 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
     lv_subject_t* bp_subj = theme_manager_get_breakpoint_subject();
     REQUIRE(bp_subj != nullptr);
     REQUIRE(as_breakpoint(lv_subject_get_int(bp_subj)) == UiBreakpoint::Medium);
-    const int ncols = GridLayout::get_cols(UiBreakpoint::Medium);
-    const int nrows = GridLayout::get_rows(UiBreakpoint::Medium);
-    REQUIRE(ncols > 0);
-    REQUIRE(nrows > 0);
-
-    // Container sized so every track is an exact 30px cell (no LVGL remainder
-    // distribution to muddy the arithmetic): content = cols*cell + (cols-1)*gutter.
-    constexpr int CELL_PX = 30;
-    const int content_w = ncols * CELL_PX + (ncols - 1) * gutter;
-    const int content_h = nrows * CELL_PX + (nrows - 1) * gutter;
+    // The content box decides the track count, so it is fixed first and the
+    // grid derived from it. 715x475 is the one geometry near this fixture's
+    // display that gives Medium a 12x8 grid AND divides into exact 55px tracks,
+    // so there is no LVGL remainder distribution to muddy the arithmetic:
+    // content = tracks*cell + (tracks-1)*gutter, both axes.
+    constexpr int CELL_PX = 55;
+    constexpr int content_w = 715;
+    constexpr int content_h = 475;
+    const auto dims = GridLayout::get_dimensions(UiBreakpoint::Medium, content_w, content_h);
+    const int ncols = dims.cols;
+    const int nrows = dims.rows;
+    REQUIRE(ncols == 12);
+    REQUIRE(nrows == 8);
+    REQUIRE(content_w == ncols * CELL_PX + (ncols - 1) * gutter);
+    REQUIRE(content_h == nrows * CELL_PX + (nrows - 1) * gutter);
 
     lv_obj_t* container = lv_obj_create(test_screen());
     lv_obj_remove_flag(container, LV_OBJ_FLAG_SCROLLABLE);
@@ -145,19 +152,19 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
     // the descriptor for that), but so LVGL's own grid engine positions our
     // child widget for real, which is what the press points below are read
     // from.
-    auto col_dsc = GridLayout::make_col_dsc(UiBreakpoint::Medium);
-    auto row_dsc = GridLayout::make_row_dsc(UiBreakpoint::Medium);
+    auto col_dsc = GridLayout::make_col_dsc(ncols);
+    auto row_dsc = GridLayout::make_row_dsc(nrows);
     lv_obj_set_grid_dsc_array(container, col_dsc.data(), row_dsc.data());
     lv_obj_set_style_pad_column(container, gutter, 0);
     lv_obj_set_style_pad_row(container, gutter, 0);
 
-    // Dragged widget: 2x2 cells at the origin. Big enough (2*30+gutter ~= 65px
-    // per side) that its center sits comfortably outside the resize-edge grab
-    // band (edge_hit_band() in grid_edit_mode.cpp, which derives it from the
-    // cell size and floors it at 14px) — this test wants a plain move, not a
-    // resize.
-    constexpr int COLSPAN = 2;
-    constexpr int ROWSPAN = 2;
+    // Dragged widget: one authored cell at the origin, which is TRACKS_PER_CELL
+    // tracks on each axis (spans are in tracks everywhere below). At 2*55+gutter
+    // = 115px per side its center sits far outside the resize-edge grab band
+    // (edge_hit_band() in grid_edit_mode.cpp, which derives it from the cell size
+    // and caps it at 32px) — this test wants a plain move, not a resize.
+    constexpr int COLSPAN = GridLayout::TRACKS_PER_CELL;
+    constexpr int ROWSPAN = GridLayout::TRACKS_PER_CELL;
     lv_obj_t* widget = lv_obj_create(container);
     lv_obj_set_name(widget, "temperature");
     lv_obj_remove_flag(widget, LV_OBJ_FLAG_SCROLLABLE);
@@ -218,25 +225,41 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: real drag lands on the gutter-aw
     // build the expectation could not tell a correct helper from a broken
     // one.
     //
-    // Column target = 3, landing point picked so the CORRECT pitch rounds it
-    // down to 3 with real margin from the 3/4 cell boundary, while the
-    // GUTTER-BLIND pitch (m.gutter treated as 0, content/cols instead of
-    // (content-(n-1)*gutter)/n + gutter) rounds the SAME pixel up to 4 —
-    // exactly the mutation Step 6 introduces. Both 3 and 4 are <= the max
-    // valid target_col (ncols - colspan), so neither result gets clamped back
-    // to the other — the mutation is genuinely observable, not masked.
+    // Snap resolution: "temperature" halves on neither axis, so
+    // snap_step_for() hands round_to_grid_cell() a step of TRACKS_PER_CELL and
+    // every reachable target is an EVEN track index. Assert that here — if the
+    // registry ever grants this widget half-cell support the step drops to 1,
+    // every expectation below shifts, and the test must be re-derived rather
+    // than left to fail on an arithmetic mismatch that looks like a geometry
+    // regression.
+    const auto* drag_def = helix::find_widget_def("temperature");
+    REQUIRE(drag_def != nullptr);
+    REQUIRE_FALSE(drag_def->supports_half_col);
+    REQUIRE_FALSE(drag_def->supports_half_row);
+    constexpr int STEP = GridLayout::TRACKS_PER_CELL;
+
+    // Column target = track 8. With step 2 the decision boundary between
+    // landing on 8 and on 10 sits at track 9, so the landing point is placed
+    // midway between where the CORRECT pitch puts track 9 (9*60 = 540px) and
+    // where the GUTTER-BLIND pitch puts it (m.gutter treated as 0, content/cols
+    // instead of (content-(n-1)*gutter)/n + gutter: 9*59.58 = 536.25px). That
+    // single pixel is below the correct boundary and above the buggy one, so
+    // the mutation flips the result from 8 to 10 — exactly what Step 6
+    // introduces. Both 8 and 10 are <= the max valid target_col
+    // (ncols - colspan == 10), so neither gets clamped back onto the other and
+    // the mutation stays observable rather than masked.
     const float pitch_correct_col =
         static_cast<float>(content_w + gutter) / static_cast<float>(ncols);
     const float pitch_buggy_col = static_cast<float>(content_w) / static_cast<float>(ncols);
-    constexpr int EXPECTED_COL = 3;
+    constexpr int EXPECTED_COL = 4 * STEP;
     const int target_px_x = static_cast<int>(
-        std::lround((EXPECTED_COL + 0.5f) * (pitch_correct_col + pitch_buggy_col) / 2.0f));
+        std::lround((EXPECTED_COL + STEP * 0.5f) * (pitch_correct_col + pitch_buggy_col) / 2.0f));
 
-    // Row target = 1, landing exactly on the correct track origin. The row
-    // axis isn't the boundary-straddling case above (that needs only one
-    // axis to prove the point) but it still exercises real gutter-aware
-    // pixel math, and a bug that only broke rows would still fail it.
-    constexpr int EXPECTED_ROW = 1;
+    // Row target = track 2, landing exactly on the correct track origin. The
+    // row axis isn't the boundary-straddling case above (that needs only one
+    // axis to prove the point) but it still exercises real gutter-aware pixel
+    // math, and a bug that only broke rows would still fail it.
+    constexpr int EXPECTED_ROW = 1 * STEP;
     const int target_px_y = EXPECTED_ROW * (CELL_PX + gutter);
 
     lv_area_t content_area;
@@ -291,21 +314,24 @@ TEST_CASE_METHOD(XMLTestFixture,
                  "[grid_edit][grid_edit_drag]") {
     // PanelWidgetManager sizes the row axis from rows actually IN USE
     // (max_row_used, floored by a cached count), not from the breakpoint
-    // table (panel_widget_manager.cpp:585-608). A page holding one widget at
-    // row 0 gets a container built with a single row track even though the
-    // Medium breakpoint's table says 4. current_metrics() must read that
-    // single-row descriptor back off the container rather than asking
-    // GridLayout for the breakpoint's row count, or the snap target it
-    // computes describes a lattice the live grid does not have.
+    // table. A page holding one widget at row 0 gets a container built with a
+    // single row track even though the breakpoint table asks for many more.
+    // current_metrics() must read that single-row descriptor back off the
+    // container rather than asking GridLayout for the breakpoint's row count,
+    // or the snap target it computes describes a lattice the live grid does
+    // not have.
     const int gutter = theme_manager_get_spacing("space_xs");
     REQUIRE(gutter > 0);
 
     lv_subject_t* bp_subj = theme_manager_get_breakpoint_subject();
     REQUIRE(bp_subj != nullptr);
     REQUIRE(as_breakpoint(lv_subject_get_int(bp_subj)) == UiBreakpoint::Medium);
-    const int ncols = GridLayout::get_cols(UiBreakpoint::Medium);
-    const int breakpoint_rows = GridLayout::get_rows(UiBreakpoint::Medium);
-    REQUIRE(ncols > 0);
+    // Same 12-column content width as the test above; the row axis is the point
+    // of divergence, so the container gets a single row track regardless.
+    constexpr int CONTENT_W = 715;
+    const int ncols = GridLayout::get_cols(UiBreakpoint::Medium, CONTENT_W, CONTENT_W);
+    const int breakpoint_rows = GridLayout::get_rows(UiBreakpoint::Medium, CONTENT_W, CONTENT_W);
+    REQUIRE(ncols == 12);
     // The whole point of this test: the container we are about to build has
     // fewer rows than the breakpoint table, so a fix that still reads
     // GridLayout::get_rows() would not diverge from this test's expectation.
@@ -321,7 +347,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     constexpr int CELL_PX = 80;
     constexpr int COLSPAN = 2;
     constexpr int ROWSPAN = 1;
-    const int content_w = ncols * CELL_PX + (ncols - 1) * gutter;
+    const int content_w = CONTENT_W;
     // Exactly one row's worth of content — no interior gutter since there is
     // only one track.
     const int content_h = CELL_PX;
@@ -337,7 +363,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // cached_rows) — cols always come from GridLayout::get_cols()). Row
     // descriptor is deliberately a single track, standing in for a page whose
     // widgets only occupy row 0.
-    auto col_dsc = GridLayout::make_col_dsc(UiBreakpoint::Medium);
+    auto col_dsc = GridLayout::make_col_dsc(ncols);
     std::vector<int32_t> row_dsc = {LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
     lv_obj_set_grid_dsc_array(container, col_dsc.data(), row_dsc.data());
     lv_obj_set_style_pad_column(container, gutter, 0);
@@ -406,9 +432,9 @@ TEST_CASE_METHOD(XMLTestFixture,
     // final std::min(target_row, nrows - rowspan) clamp, so this lands
     // squarely at whatever the LAST valid row index is. With the container's
     // real row count (1), that final clamp is min(_, 1 - 1) == 0: the snap
-    // target can only ever be row 0. Reading the breakpoint's row count (4)
-    // instead would clamp to min(_, 4 - 1) == 3 — a row this grid does not
-    // have.
+    // target can only ever be row 0. Reading breakpoint_rows instead would
+    // clamp to min(_, breakpoint_rows - 1), which is >= 1 by the REQUIRE above
+    // — a row this grid does not have.
     const int target_x = sel_area.x1;
     const int target_y = content_area.y1 + content_h + 500;
     indev.send(target_x, target_y, LV_INDEV_STATE_PRESSED);
@@ -462,18 +488,19 @@ GuardFixture make_guard_fixture(lv_obj_t* parent, const std::string& panel_id) {
     const int gutter = theme_manager_get_spacing("space_xs");
     REQUIRE(gutter > 0); // see the cwd note on the first test
 
-    const int ncols = GridLayout::get_cols(UiBreakpoint::Medium);
-    const int nrows = GridLayout::get_rows(UiBreakpoint::Medium);
-    REQUIRE(ncols >= 2);
-    REQUIRE(nrows >= 2);
-
-    // 80px cells: the 2x2 widget is then ~160px per side, so its vertical
-    // centre sits ~80px from the top and bottom edges — far outside the grab
-    // band, which keeps the right-edge press below unambiguous rather than a
-    // corner that detect_resize_edge() could resolve to Top or Bottom.
-    constexpr int CELL_PX = 80;
-    const int content_w = ncols * CELL_PX + (ncols - 1) * gutter;
-    const int content_h = nrows * CELL_PX + (nrows - 1) * gutter;
+    // Track counts are quantised from the content rectangle
+    // (GridLayout::get_dimensions()), so the rectangle is the input and the
+    // counts fall out of it — there is no per-breakpoint count to ask for.
+    // 960x640 lands tracks near 80px, so the one-cell widget below is ~160px per
+    // side and its vertical centre sits ~80px from the top and bottom edges —
+    // far outside the grab band, which keeps the right-edge press unambiguous
+    // rather than a corner that detect_resize_edge() could resolve to Top.
+    const int content_w = 960;
+    const int content_h = 640;
+    const int ncols = GridLayout::get_cols(UiBreakpoint::Medium, content_w, content_h);
+    const int nrows = GridLayout::get_rows(UiBreakpoint::Medium, content_w, content_h);
+    REQUIRE(ncols >= GridLayout::TRACKS_PER_CELL);
+    REQUIRE(nrows >= GridLayout::TRACKS_PER_CELL);
 
     GuardFixture f;
     f.panel_id = panel_id;
@@ -484,14 +511,14 @@ GuardFixture make_guard_fixture(lv_obj_t* parent, const std::string& panel_id) {
     lv_obj_set_style_border_width(f.container, 0, 0);
     lv_obj_set_size(f.container, content_w, content_h);
 
-    f.col_dsc = GridLayout::make_col_dsc(UiBreakpoint::Medium);
-    f.row_dsc = GridLayout::make_row_dsc(UiBreakpoint::Medium);
+    f.col_dsc = GridLayout::make_col_dsc(ncols);
+    f.row_dsc = GridLayout::make_row_dsc(nrows);
     lv_obj_set_grid_dsc_array(f.container, f.col_dsc.data(), f.row_dsc.data());
     lv_obj_set_style_pad_column(f.container, gutter, 0);
     lv_obj_set_style_pad_row(f.container, gutter, 0);
 
-    constexpr int COLSPAN = 2;
-    constexpr int ROWSPAN = 2;
+    constexpr int COLSPAN = GridLayout::TRACKS_PER_CELL;
+    constexpr int ROWSPAN = GridLayout::TRACKS_PER_CELL;
     f.widget = lv_obj_create(f.container);
     lv_obj_set_name(f.widget, "temperature");
     lv_obj_remove_flag(f.widget, LV_OBJ_FLAG_SCROLLABLE);

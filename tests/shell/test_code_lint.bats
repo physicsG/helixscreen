@@ -665,3 +665,225 @@ EOF
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+# --- AmsState is initialized with its XML names, always -------------------------
+#
+# AmsState is a process-wide singleton, so a single init_subjects(false) -
+# written because the test under it binds through the C++ accessors - publishes
+# no `ams_*` names, and every later case in the same shard that does not itself
+# re-enter init_subjects(true) sees lv_xml_get_subject() answer null; an XML
+# layout that binds one of those names comes up empty rather than erroring.
+# Publishing costs a test nothing: XML subjects share one global scope in the
+# test build whatever this argument says.
+
+ams_state_unpublished_init_files() {
+    # test_ams_lane_state_subject.cpp owns the one deliberate false init: its
+    # [1374] case exercises re-entry publishing and republishes the names itself.
+    grep -rlE 'AmsState::instance\(\)\.init_subjects\([[:space:]]*false' "$@" 2>/dev/null |
+        grep -v 'test_ams_lane_state_subject\.cpp' || true
+}
+
+@test "no test initializes AmsState without its XML names" {
+    run ams_state_unpublished_init_files tests/ --include='*.cpp' --include='*.h'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the AmsState init gate fires on a false register_xml" {
+    # Meta-test: a gate that cannot fail is not a gate.
+    local d="${BATS_TEST_TMPDIR}/ams_unpublished"
+    mkdir -p "$d"
+    cat > "$d/offender.cpp" <<'EOF'
+TEST_CASE("binds through the C++ accessor only") {
+    AmsState::instance().init_subjects(false);
+}
+EOF
+    run ams_state_unpublished_init_files "$d" --include='*.cpp'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"offender.cpp"* ]]
+}
+
+@test "the AmsState init gate stays quiet on a published init" {
+    local d="${BATS_TEST_TMPDIR}/ams_published"
+    mkdir -p "$d"
+    cat > "$d/ok.cpp" <<'EOF'
+TEST_CASE("publishes the names") {
+    AmsState::instance().init_subjects(true);
+    AmsState::instance().init_subjects();
+}
+EOF
+    run ams_state_unpublished_init_files "$d" --include='*.cpp'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# --- History lazy loads must use ensure_loaded(), never fetch() ---
+# PrintHistoryManager::fetch() is the INVALIDATION entry point: when a request
+# is already out it arms one re-issue, because a response issued before a delete
+# cannot describe that delete. ensure_loaded() is the LAZY-LOAD entry point and
+# returns instead, since the in-flight response already serves the caller.
+#
+# Every invalidation lives inside the manager itself, driven by Moonraker's
+# notify_history_changed / notify_filelist_changed. So fetch() has no legitimate
+# caller in src/ outside print_history_manager.cpp, and any that reappears is a
+# lazy load that pulls the whole 500-job list twice.
+#
+# 19bfc451e split the two intents and converted the three panels, leaving the
+# two home-panel widgets on fetch(). Bundles G3FE69L7 / P6HCTHQH (AD5X,
+# v0.99.116) then caught four lazy loads arming the re-issue during startup,
+# queued behind a first list that took 9.0s. tests/ is out of scope: a fixture
+# priming a fresh manager with nothing in flight is an honest fetch().
+
+history_lazy_fetch_offenders() {
+    local dir="$1"
+    grep -rnE '(history[A-Za-z_]*|hm)->fetch\(' "$dir" --include='*.cpp' --include='*.h' \
+        | grep -v '/print_history_manager\.cpp:' || true
+}
+
+@test "history lazy loads use ensure_loaded(), not fetch()" {
+    run history_lazy_fetch_offenders src
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "the history lazy-load gate fires on a reintroduced fetch()" {
+    # Meta-test: a gate that cannot fail is not a gate. This is the exact shape
+    # the four converted call sites had.
+    local d="${BATS_TEST_TMPDIR}/history_bad"
+    mkdir -p "$d"
+    cat > "$d/offender.cpp" <<'EOF'
+    if (auto* hm = get_print_history_manager()) {
+        hm->add_observer(&history_cb_);
+        if (!hm->is_loaded()) {
+            hm->fetch();
+        }
+    }
+EOF
+    cat > "$d/deferred.cpp" <<'EOF'
+    auto* history = get_print_history_manager();
+    if (history && !history->is_loaded()) {
+        history->fetch();
+    }
+EOF
+    run history_lazy_fetch_offenders "$d"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hm->fetch("* ]]
+    [[ "$output" == *"history->fetch("* ]]
+}
+
+@test "the history lazy-load gate stays quiet on ensure_loaded and other fetchers" {
+    local d="${BATS_TEST_TMPDIR}/history_ok"
+    mkdir -p "$d"
+    cat > "$d/converted.cpp" <<'EOF'
+    if (auto* hm = get_print_history_manager()) {
+        hm->add_observer(&history_cb_);
+        hm->ensure_loaded();
+    }
+EOF
+    cat > "$d/job_queue.cpp" <<'EOF'
+    if (auto* jqs = get_job_queue_state()) {
+        jqs->fetch();
+    }
+    get_thumbnail_cache().fetch(path, cb);
+EOF
+    run history_lazy_fetch_offenders "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# --- SubjectManager::deinit_all() must not log ---
+# A SubjectManager owned by a static (PrintStatusWidget::s_formatter_) reaches
+# deinit_all() through the C++ atexit chain. spdlog's registry is a lazily
+# constructed function-local static, so it registers for destruction after any
+# object built during dynamic initialization and is therefore torn down before
+# them: a log call here reads a freed logger. The empty-subjects early-out
+# spares an app that ran Application::shutdown(); a binary that never does -
+# every unit test - arrives with subjects still registered and takes the full
+# path, where the trace fires.
+
+check_deinit_all_does_not_log() {
+    local file="$1"
+    local body
+    body=$(awk '/void deinit_all\(\) \{/{f=1} f{print} f && /^    \}$/{exit}' "$file")
+
+    if [ -z "$body" ]; then
+        echo "could not locate SubjectManager::deinit_all() in $file"
+        return 1
+    fi
+
+    if echo "$body" | grep -q 'spdlog::'; then
+        echo "spdlog call inside deinit_all(), which runs during static destruction:"
+        echo "$body" | grep -n 'spdlog::'
+        return 1
+    fi
+    return 0
+}
+
+@test "SubjectManager::deinit_all() makes no spdlog calls" {
+    run check_deinit_all_does_not_log include/subject_managed_panel.h
+    [ "$status" -eq 0 ]
+}
+
+@test "the deinit_all logging gate fires when a log call is reintroduced" {
+    local mutated="${BATS_TEST_TMPDIR}/subject_managed_panel_logs.h"
+    sed -e 's@^        subjects_.clear();@        spdlog::trace("clearing");\n        subjects_.clear();@' \
+        include/subject_managed_panel.h > "$mutated"
+
+    run check_deinit_all_does_not_log "$mutated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"static destruction"* ]]
+}
+
+@test "the deinit_all logging gate fails closed when the function is renamed" {
+    local mutated="${BATS_TEST_TMPDIR}/subject_managed_panel_renamed.h"
+    sed -e 's@^    void deinit_all() {@    void deinit_everything() {@' \
+        include/subject_managed_panel.h > "$mutated"
+
+    run check_deinit_all_does_not_log "$mutated"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not locate"* ]]
+}
+
+# --- the vacuous-test ceiling has one home ---
+# The nightly and mk/tests.mk both need the number. Written twice they drift,
+# and the copy that drifts is the enforcing one, so the tree silently stops
+# being held to the value it claims.
+
+@test "the nightly reads the vacuous ceiling from the makefile, not a literal" {
+    run grep -A2 'check_vacuous_tests.py' .github/workflows/nightly.yml
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"print-vacuous-max"* ]]
+    # A bare --max-allowed <number> is the shape that drifts.
+    [[ ! "$output" =~ --max-allowed[[:space:]]+[0-9]+ ]]
+}
+
+@test "print-vacuous-max resolves to a bare integer" {
+    run bash -c 'make -s print-vacuous-max 2>/dev/null | tail -1'
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]+$ ]]
+}
+
+# --- the vacuous baseline can express a test name that starts with '#' ---
+# Entries are keyed by exact test-case name, and names carry issue references.
+# A parser that treats any leading '#' as a comment drops those entries in
+# silence: the case reappears as a finding and the ratchet reads one too high.
+
+@test "the vacuous baseline honours a test name beginning with a hash" {
+    local base="${BATS_TEST_TMPDIR}/baseline.txt"
+    cat > "$base" <<'EOF'
+# a real comment
+#1127 seeding state costs no extra bytes per layer entry  # static_assert on sizeof
+EOF
+    run python3 -c "
+import sys; sys.path.insert(0, 'scripts')
+from pathlib import Path
+import importlib.util
+spec = importlib.util.spec_from_file_location('cvt', 'scripts/check_vacuous_tests.py')
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+b = m.load_baseline(Path('$base'))
+print(sorted(b))
+"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"#1127 seeding state costs no extra bytes per layer entry"* ]]
+    [[ "$output" != *"a real comment"* ]]
+}

@@ -29,6 +29,7 @@
 #include "hv/requests.h"
 #include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "platform_info.h"
 #include "print_lifecycle_state.h"
 #include "printer_state.h"
 #include "spdlog/spdlog.h"
@@ -306,24 +307,6 @@ bool parse_github_release(const std::string& json_str, UpdateChecker::ReleaseInf
 }
 
 /**
- * @brief Check if update is available by comparing versions
- *
- * @param current_version Current installed version
- * @param latest_version Latest release version
- * @return true if latest > current
- */
-bool is_update_available(const std::string& current_version, const std::string& latest_version) {
-    auto current = helix::version::parse_version(current_version);
-    auto latest = helix::version::parse_version(latest_version);
-
-    if (!current || !latest) {
-        return false; // Can't determine, assume no update
-    }
-
-    return *latest > *current;
-}
-
-/**
  * @brief Resolve a system tool to an absolute path, falling back to bare name.
  *
  * Searches well-known absolute locations before falling back to the bare name
@@ -357,10 +340,6 @@ std::string resolve_tool(const std::string& name) {
     spdlog::warn("[UpdateChecker] resolve_tool: '{}' not found in standard paths, using bare name",
                  name);
     return name; // fallback: rely on PATH
-}
-
-bool tool_available(const std::string& name) {
-    return !find_tool_path(name).empty();
 }
 
 /// Populate ReleaseInfo download URLs from a per-platform manifest asset
@@ -644,10 +623,9 @@ std::string strip_ansi_codes(const std::string& s) {
 // Channel Version Comparison
 // ============================================================================
 
-// Deliberately at global scope, not in the anonymous namespace above with
-// is_update_available(): this one is declared in the header and exercised
-// directly by tests/unit/test_update_checker.cpp. (is_update_available() has
-// internal linkage, which is why that test file carries its own copy of it.)
+// Deliberately at global scope rather than in the anonymous namespace above:
+// it is declared in the header and exercised directly by
+// tests/unit/test_update_checker.cpp.
 ChannelVersionRelation compare_channel_version(const std::string& installed,
                                                const std::string& channel_version) {
     auto current = helix::version::parse_version(installed);
@@ -1263,8 +1241,7 @@ void UpdateChecker::start_download() {
     // Safety: refuse download while a job owns the machine. Preparing counts —
     // a user who just committed to a print should not have the CPU and network
     // pulled out from under the pre-start block.
-    const auto lifecycle = static_cast<PrintState>(
-        lv_subject_get_int(get_printer_state().get_print_lifecycle_subject()));
+    const auto lifecycle = get_printer_state().get_print_lifecycle();
     if (job_holds_machine(lifecycle)) {
         spdlog::warn("[UpdateChecker] Cannot download update while printing");
         report_download_status(DownloadStatus::Error, 0,
@@ -2844,6 +2821,16 @@ std::string UpdateChecker::effective_r2_base_url() {
     return url;
 }
 
+std::string UpdateChecker::mips_runtime_platform_key(const std::string& probe_root) {
+    // The AD5X side of the mips K1/AD5X split is the AD5X mod-tree layout
+    // question — ZMOD (the /ZMOD marker or FlashForge's /usr/prog dir) or
+    // Forge-X (mod git tree reachable) — answered by the same predicate the
+    // launcher and log collector use. A Forge-X rig carries none of the ZMOD
+    // markers, so the old marker-only test here classified it as K1 and a rig
+    // self-update would fetch K1 builds.
+    return helix::ad5x_mod_layout_present(probe_root) ? "ad5x" : "k1";
+}
+
 std::string UpdateChecker::get_platform_key() {
 #ifdef HELIX_PLATFORM_AD5M
     return "ad5m";
@@ -2852,16 +2839,8 @@ std::string UpdateChecker::get_platform_key() {
 #elif defined(HELIX_PLATFORM_AD5X)
     return "ad5x";
 #elif defined(HELIX_PLATFORM_MIPS)
-    // Same binary runs on K1 and AD5X — detect at runtime.
-    // AD5X has /usr/prog dir (FlashForge layout) or /ZMOD file; K1 has neither.
-    {
-        struct stat st;
-        if ((stat("/usr/prog", &st) == 0 && S_ISDIR(st.st_mode)) ||
-            (stat("/ZMOD", &st) == 0 && S_ISREG(st.st_mode))) {
-            return "ad5x";
-        }
-        return "k1";
-    }
+    // Same binary runs on K1 and AD5X — classify at runtime.
+    return mips_runtime_platform_key();
 #elif defined(HELIX_PLATFORM_K1)
     // k1-dynamic build variant: dev/debug dynamic-linked K1 binary. Not in the
     // release matrix today — map to "k1" so if it ever ships, self-update
@@ -3044,8 +3023,7 @@ void UpdateChecker::start_auto_check() {
                 }
 
                 // Skip while a job owns the machine, Preparing included.
-                const auto lifecycle = static_cast<PrintState>(
-                    lv_subject_get_int(get_printer_state().get_print_lifecycle_subject()));
+                const auto lifecycle = get_printer_state().get_print_lifecycle();
                 if (job_holds_machine(lifecycle)) {
                     spdlog::info("[UpdateChecker] Auto-check: skipping notification during print");
                     return;

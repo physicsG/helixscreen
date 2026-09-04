@@ -35,21 +35,37 @@ std::string config_resolve_path(const std::string& current_file, const std::stri
 }
 
 bool config_glob_match(const std::string& pattern, const std::string& text) {
+    // Mirrors Python's glob.glob(pattern, recursive=True), which is what Klipper
+    // resolves [include] with (klippy/configfile.py). Under recursive=True only
+    // `**` spans directories; a single `*` and `?` never match a '/'. Letting a
+    // single star cross separators makes `[include conf.d/*.cfg]` appear to pull
+    // in conf.d/nested/*.cfg, so a section gets attributed to a file Klipper
+    // never read - and an edit written there has no effect.
     size_t pi = 0, ti = 0;
     size_t star_pi = std::string::npos, star_ti = 0;
+    bool star_spans_dirs = false;
 
     while (ti < text.size()) {
-        if (pi < pattern.size() && (pattern[pi] == text[ti] || pattern[pi] == '?')) {
+        const bool have_pat = pi < pattern.size();
+        if (have_pat && pattern[pi] == '?' && text[ti] != '/') {
             ++pi;
             ++ti;
-        } else if (pi < pattern.size() && pattern[pi] == '*') {
-            star_pi = pi;
-            star_ti = ti;
+        } else if (have_pat && pattern[pi] != '*' && pattern[pi] != '?' &&
+                   pattern[pi] == text[ti]) {
             ++pi;
-        } else if (star_pi != std::string::npos) {
-            pi = star_pi + 1;
+            ++ti;
+        } else if (have_pat && pattern[pi] == '*') {
+            const bool doubled = (pi + 1 < pattern.size() && pattern[pi + 1] == '*');
+            star_pi = pi;
+            star_spans_dirs = doubled;
+            star_ti = ti;
+            pi += doubled ? 2 : 1;
+        } else if (star_pi != std::string::npos && (star_spans_dirs || text[star_ti] != '/')) {
+            // Backtrack: let the star swallow one more character. A plain star
+            // may not swallow a separator.
             ++star_ti;
             ti = star_ti;
+            pi = star_pi + (star_spans_dirs ? 2 : 1);
         } else {
             return false;
         }

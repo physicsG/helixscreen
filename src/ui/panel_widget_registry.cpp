@@ -3,6 +3,9 @@
 
 #include "panel_widget_registry.h"
 
+#include "grid_layout.h"
+#include "translation_loader.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -29,6 +32,7 @@ void register_shutdown_widget();
 void register_lock_widget();
 void register_macros_widget();
 void register_motion_widget();
+void register_filament_sensor_widget();
 void register_clock_widget();
 void register_control_buttons_widget();
 void register_job_queue_widget();
@@ -52,52 +56,106 @@ void register_camera_widget();
 // Vector order defines the default display order on the home panel.
 // NOTE: Factories are registered at runtime via init_widget_registrations(),
 // NOT during static initialization. Do not add file-scope self-registration.
+//
+// Spans are in GRID TRACKS, and a track is half a cell
+// (GridLayout::TRACKS_PER_CELL). A widget with neither half-cell flag set must
+// therefore span an even number of tracks on that axis: edit mode snaps it to a
+// whole cell, so an odd span is a size the user could never restore after one
+// drag. Only the axes marked half_c / half_r may carry an odd number.
+//
+// The grid divides each panel axis by the same cell edge, so a track is very
+// nearly the same number of pixels on every panel and these numbers are authored
+// once for all of them. tests/unit/test_registry_span_bands.cpp pins the pixel
+// band each span lands in, per shipping geometry.
+
+// Max colspan for a band-shaped widget — one that reads as a full-width strip
+// rather than a tile. There is no width that is wrong for these, and any finite
+// cap makes a full-width default layout unauthorable on the wider grids: large
+// and xlarge are 16 tracks, xxlarge reaches 26 at 1080p, and an ultrawide panel
+// reaches 46. MAX_TRACKS is the widest grid the layout engine will ever build,
+// so this is "uncapped" spelled in the same units. The cap still bounds the
+// edit-mode resize handle, which is its real job.
+constexpr int BAND_COLSPAN = GridLayout::MAX_TRACKS;
+
+// Category shorthands — the table below is column-aligned and the fully
+// qualified enumerators would not fit.
+constexpr WidgetCategory CAT_PRINT = WidgetCategory::PrintStatus;
+constexpr WidgetCategory CAT_TEMP = WidgetCategory::Temperature;
+constexpr WidgetCategory CAT_FILAMENT = WidgetCategory::Filament;
+constexpr WidgetCategory CAT_CONTROLS = WidgetCategory::Controls;
+constexpr WidgetCategory CAT_SYSTEM = WidgetCategory::System;
+
 // clang-format off
 static std::vector<PanelWidgetDef> s_widget_defs = {
-    //                                                                                                        gate_subject          gate_hint                              default col row min_c min_r max_c max_r  multi  half_c half_r
-    {"printer_image",    "Printer Image",    "rotate_3d",        "3D printer visualization",    nullptr,              nullptr,                               true,  2, 2, 1, 1, 4, 3},
-    {"print_status",     "Print Status",     "printer_3d",       "Print progress and file selection",     nullptr,              nullptr,                               true,  2, 2, 2, 1, 4, 3},
-    {"shutdown",         "Shutdown/Reboot",   "power",            "Shutdown or reboot the printer host",  "platform_host_power_supported", "Not available on Android",       false, 1, 1, 1, 1, 1, 1, false, true, false},
-    {"lock",             "Lock Screen",       "lock",             "PIN-protected screen lock",      nullptr,              nullptr,                               false, 1, 1, 1, 1, 1, 1, false, true, false},
-    {"power_device",     "Power",            "power_cycle",      "Toggle Moonraker power devices",            "power_device_count", "Requires Moonraker power device",     false, 1, 1, 1, 1, 1, 1, true},
-    {"network",          "Network",          "wifi_strength_4",  "Wi-Fi and ethernet connection status",          nullptr,              nullptr,                               false, 1, 1, 1, 1, 2, 1},
-    {"firmware_restart", "Firmware Restart",  "refresh",          "Restart Klipper firmware", nullptr,              nullptr,                               false, 1, 1, 1, 1, 1, 1, false, true, false},
-    {"tool_switcher",    "Tool Switcher",     "arrow_left_right", "Quick tool switching for multi-tool printers",    nullptr,              nullptr,                               false, 1, 1, 1, 1, 2, 2},
-    {"led",              "LED Light",         "lightbulb_outline","Quick toggle, long press for full control",        "led_controllable",   "No LED strips detected",              true,  1, 1, 1, 1, 2, 1},
-    {"led_controls",     "LED Controls",      "led_strip",        "Open LED color and brightness controls",     "led_controllable",   "No LED strips detected",              false, 1, 1, 1, 1, 1, 1, false, true, false},
-    {"fan_stack",        "Fan Speeds",        "fan",              "Part, hotend, and auxiliary fan speeds",       nullptr,              nullptr,                               true,  1, 1, 1, 1, 3, 2, true},
-    {"fan",              "Fan",               "fan",              "Monitor a single fan speed",              nullptr,              nullptr,                               false, 1, 1, 1, 1, 2, 1, true},
-    {"temperature",      "Nozzle Temperature","thermometer",      "Monitor and set nozzle temperature", nullptr,            nullptr,                               true,  1, 1, 1, 1, 2, 2},
-    {"nozzle_temps",     "Nozzle Temperatures","thermometer",      "All extruder temperatures with progress bars", nullptr,           nullptr,                               false, 1, 2, 1, 1, 2, 3},
-    {"bed_temperature",  "Bed Temperature",   "radiator",         "Monitor and set bed temperature",    nullptr,            nullptr,                               false, 1, 1, 1, 1, 2, 2},
-    {"chamber_temperature", "Chamber Temperature", "fridge_industrial", "Monitor and set chamber temperature", "printer_has_chamber", "No chamber temperature sensor detected", false, 1, 1, 1, 1, 2, 2},
-    {"temp_stack",       "Temperatures",      "thermometer",      "Nozzle, bed, and chamber temps stacked",     nullptr,              nullptr,                               false, 1, 1, 1, 1, 3, 2},
-    {"thermistor",       "Temperature Sensors", "thermometer",    "Monitor temperature sensors (single or carousel)", "temp_sensor_count", "No temperature sensors detected", false, 1, 1, 1, 1, 2, 1, true},
-    {"temp_graph",       "Temperature Graph", "chart_line",       "Live temperature graph with configurable sensors", nullptr,         nullptr,                               false, 2, 2, 1, 1, 6, 4, true},
-    {"preheat",          "Preheat",           "heat_wave",        "Quick preheat with material selection",            nullptr,            nullptr,                               false, 3, 1, 2, 1, 4, 1},
-    {"ams",              "Multi-Filament System Status",        "filament",         "Multi-Filament System spool status and control",       "ams_slot_count",     "Requires Multi-Filament System or MMU hardware",        false, 1, 1, 1, 1, 4, 2},
-    {"bypass",           "Bypass",            "source_branch",    "Toggle external spool bypass",  "ams_supports_bypass", "Requires a filament system with bypass", false, 1, 1, 1, 1, 2, 1},
-    {"active_spool",     "Active Spool",      "inventory",  "Currently loaded spool info",     nullptr,                  nullptr,                           false, 1, 1, 1, 1, 4, 2},
-    {"filament",         "Filament Sensor",   "filament_alert",   "Filament runout detection status",  "filament_sensor_count", "No filament sensor detected",      true, 1, 1, 1, 1, 2, 1},
-    {"humidity",         "Humidity",          "water",            "Enclosure humidity sensor readings",         "humidity_sensor_count", "No humidity sensor detected",       false, 1, 1, 1, 1, 2, 2},
-    {"width_sensor",     "Width Sensor",      "ruler",            "Filament width sensor readings",     "width_sensor_count", "No width sensor detected",            false, 1, 1, 1, 1, 2, 2},
-    {"favorite_macro", "Macro Button",    "play",             "Run a configured macro with one tap",     nullptr,              nullptr,                               false, 1, 1, 1, 1, 2, 1, true},
-    {"macros",           "Macros",            "script_text",      "Browse and execute Klipper macros",           nullptr,              nullptr,                               false, 1, 1, 1, 1, 1, 1},
-    {"motion",           "Motion",            "cursor_move",      "Jump directly to motion control / jogging",           nullptr,              nullptr,                               false, 1, 1, 1, 1, 1, 1},
-    {"clock",            "Digital Clock",     "clock",            "Current time and date",    nullptr,              nullptr,                               false, 2, 1, 1, 1, 3, 3, false, true, true},
-    {"control_buttons",  "Print Controls",    "pause",            "Pause/resume and stop the active print",   nullptr,              nullptr,                               false, 2, 1, 2, 1, 2, 1},
-    {"job_queue",        "Job Queue",         "progress_clock",   "Queued print jobs",        nullptr,              nullptr,                               false, 2, 2, 2, 1, 4, 3},
-    //                                                                                                        gate_subject          gate_hint                              default col row min_c min_r max_c max_r  multi  half_c half_r
-    {"tips",             "Tips",              "help_circle",      "Rotating tips and helpful information",             nullptr,              nullptr,                               true,  4, 2, 2, 1, 6, 2},
-    {"clog_detection",   "Clog Detection",    "gauge",            "Filament clog/flow detection meter",   "clog_meter_mode",    "Requires clog detection hardware",    false, 1, 1, 1, 1, 2, 2},
-    {"print_stats",      "Print Stats",       "printer_3d",       "Print history statistics",      nullptr,              nullptr,                               false, 2, 2, 2, 1, 3, 2},
-    {"gcode_console",    "GCode Console",     "console",          "Open G-code command console",    nullptr,              nullptr,                               false, 1, 1, 1, 1, 1, 1},
+    //                                                                                                                                          hint                                cat              en  col row min_c min_r max_c max_r  multi  half_c half_r merges_card
+    {"printer_image",    TR_NOOP("Printer Image"),    "rotate_3d",        TR_NOOP("A picture of your printer"),    nullptr,              nullptr,                               CAT_PRINT,    true,  4, 4, 2, 2, 8, 6, false, true, true, false},
+    {"print_status",     TR_NOOP("Print Status"),     "printer_3d",       TR_NOOP("Progress, file, and time remaining"),     nullptr,              nullptr,                               CAT_PRINT,    true,  4, 4, 4, 2, BAND_COLSPAN, 6, false, true, true, false},
+    {"shutdown",         TR_NOOP("Shutdown/Reboot"),   "power",            TR_NOOP("Shut down or restart the host"),  "platform_host_power_supported", "Not available on Android",                               CAT_SYSTEM,   false, 2, 2, 2, 2, 2, 2, false, true, false},
+    {"lock",             TR_NOOP("Lock Screen"),       "lock",             TR_NOOP("Lock the screen with your PIN"),      nullptr,              nullptr,                               CAT_SYSTEM,   false, 2, 2, 2, 2, 2, 2, false, true, false},
+    {"power_device",     TR_NOOP("Power"),            "power_cycle",      TR_NOOP("Switch a power device on or off"),            "power_device_count", "Requires Moonraker power device",     CAT_CONTROLS, false, 2, 2, 2, 2, 2, 2, true},
+    {"network",          TR_NOOP("Network"),          "wifi_strength_4",  TR_NOOP("Wi-Fi or ethernet connection status"),          nullptr,              nullptr,                               CAT_SYSTEM,   false, 2, 2, 2, 2, 4, 2},
+    {"firmware_restart", TR_NOOP("Firmware Restart"),  "refresh",          TR_NOOP("Restart Klipper without rebooting"), nullptr,              nullptr,                               CAT_SYSTEM,   false, 2, 2, 2, 2, 2, 2, false, true, false},
+    {"tool_switcher",    TR_NOOP("Tool Switcher"),     "arrow_left_right", TR_NOOP("Switch the active tool or extruder"),    nullptr,              nullptr,                               CAT_CONTROLS, false, 2, 2, 2, 2, 4, 4, false, true, true},
+    {"led",              TR_NOOP("LED Light"),         "lightbulb_outline",TR_NOOP("Turn the printer's lights on or off"),        "led_controllable",   "No LED strips detected",              CAT_CONTROLS, true,  2, 2, 2, 2, 4, 2},
+    {"led_controls",     TR_NOOP("LED Controls"),      "led_strip",        TR_NOOP("Open color and brightness controls"),     "led_controllable",   "No LED strips detected",              CAT_CONTROLS, false, 2, 2, 2, 2, 2, 2, false, true, false},
+    {"fan_stack",        TR_NOOP("Fan Speeds"),        "fan",              TR_NOOP("Part, hotend, and auxiliary fan speeds"),       nullptr,              nullptr,                               CAT_TEMP,     true,  2, 2, 2, 2, 6, 4, true, true, true},
+    {"fan",              TR_NOOP("Fan"),               "fan",              TR_NOOP("The speed of one fan you choose"),              nullptr,              nullptr,                               CAT_TEMP,     false, 2, 2, 2, 2, 4, 2, true, true, false},
+    {"temperature",      TR_NOOP("Nozzle Temperature"),"thermometer",      TR_NOOP("Set and watch the nozzle temperature"), nullptr,            nullptr,                               CAT_TEMP,     true,  2, 2, 2, 2, 4, 4},
+    {"nozzle_temps",     TR_NOOP("Nozzle Temperatures"),"thermometer",      TR_NOOP("Every extruder's temperature at once"), nullptr,           nullptr,                               CAT_TEMP,     false, 2, 4, 2, 2, 4, 6, false, true, true, false},
+    {"bed_temperature",  TR_NOOP("Bed Temperature"),   "radiator",         TR_NOOP("Set and watch the bed temperature"),    nullptr,            nullptr,                               CAT_TEMP,     true, 2, 2, 2, 2, 4, 4},
+    {"chamber_temperature", TR_NOOP("Chamber Temperature"), "fridge_industrial", TR_NOOP("Set and watch the chamber temperature"), "printer_has_chamber", "No chamber temperature sensor detected", CAT_TEMP,     false, 2, 2, 2, 2, 4, 4},
+    {"temp_stack",       TR_NOOP("Temperatures"),      "thermometer",      TR_NOOP("Nozzle, bed, and chamber in one widget"),     nullptr,              nullptr,                               CAT_TEMP,     false, 2, 2, 2, 2, 6, 4, false, true, true},
+    {"thermistor",       TR_NOOP("Temperature Sensors"), "thermometer",    TR_NOOP("Readings from extra temperature sensors"), "temp_sensor_count", "No temperature sensors detected", CAT_TEMP,     false, 2, 2, 2, 2, 4, 2, true, true, false},
+    {"temp_graph",       TR_NOOP("Temperature Graph"), "chart_line",       TR_NOOP("Temperatures plotted over time"), nullptr,         nullptr,                               CAT_TEMP,     false, 4, 4, 2, 2, BAND_COLSPAN, 8, true, true, true, false},
+    {"preheat",          TR_NOOP("Preheat"),           "heat_wave",        TR_NOOP("Warm up for a material in one tap"),            nullptr,            nullptr,                               CAT_TEMP,     false, 6, 2, 4, 2, 8, 2, false, true, false},
+    {"ams",              TR_NOOP("Multi-Filament System Status"),        "filament",         TR_NOOP("Slot colors, materials, and levels"),       "ams_slot_count",     "Requires Multi-Filament System or MMU hardware",        CAT_FILAMENT, false, 2, 2, 2, 2, 8, 4, false, true, true},
+    {"bypass",           TR_NOOP("Bypass"),           "source_branch",    TR_NOOP("Toggle external spool bypass"), "ams_supports_bypass", "Requires a filament system with bypass", CAT_FILAMENT, false, 2, 2, 2, 2, 4, 2, false, true, false},
+    {"active_spool",     TR_NOOP("Active Spool"),      "inventory",  TR_NOOP("The Spoolman spool currently loaded"),     nullptr,                  nullptr,                           CAT_FILAMENT, false, 2, 2, 2, 2, 8, 4, false, true, true},
+    {"filament",         TR_NOOP("Filament Sensor"),   "filament_alert",   TR_NOOP("Whether filament is loaded"),  "filament_sensor_count", "No filament sensor detected",      CAT_FILAMENT, true, 2, 2, 2, 2, 4, 2},
+    {"humidity",         TR_NOOP("Humidity"),          "water",            TR_NOOP("Humidity inside the enclosure"),         "humidity_sensor_count", "No humidity sensor detected",       CAT_FILAMENT, false, 2, 2, 2, 2, 4, 4},
+    {"width_sensor",     TR_NOOP("Width Sensor"),      "ruler",            TR_NOOP("Measured filament diameter"),     "width_sensor_count", "No width sensor detected",            CAT_FILAMENT, false, 2, 2, 2, 2, 4, 4},
+    {"favorite_macro", TR_NOOP("Macro Button"),    "play",             TR_NOOP("Run a macro you choose, in one tap"),     nullptr,              nullptr,                               CAT_CONTROLS, false, 2, 2, 2, 2, 4, 2, true, true, false},
+    {"macros",           TR_NOOP("Macros"),            "script_text",      TR_NOOP("Browse and run your Klipper macros"),           nullptr,              nullptr,                               CAT_CONTROLS, false, 2, 2, 2, 2, 2, 2},
+    {"motion",           TR_NOOP("Motion"),            "cursor_move",      TR_NOOP("Open motion controls for jogging"),           nullptr,              nullptr,                               CAT_CONTROLS, false, 2, 2, 2, 2, 2, 2},
+    {"clock",            TR_NOOP("Digital Clock"),     "clock",            TR_NOOP("The time, date, and system uptime"),    nullptr,              nullptr,                               CAT_SYSTEM,   false, 4, 2, 2, 2, 6, 6, false, true, true},
+    {"control_buttons",  TR_NOOP("Print Controls"),    "pause",            TR_NOOP("Pause, resume, or stop the print"),   nullptr,              nullptr,                               CAT_PRINT,    false, 4, 2, 4, 2, 4, 2},
+    {"job_queue",        TR_NOOP("Job Queue"),         "progress_clock",   TR_NOOP("Print jobs waiting to run"),        nullptr,              nullptr,                               CAT_PRINT,    false, 4, 4, 4, 4, 8, 6, false, true, true},
+    //                                                                                                                                          hint                                cat              en  col row min_c min_r max_c max_r  multi  half_c half_r merges_card
+    {"tips",             TR_NOOP("Tips"),              "help_circle",      TR_NOOP("Rotating tips for using your printer"),             nullptr,              nullptr,                               CAT_SYSTEM,   true,  8, 4, 4, 2, BAND_COLSPAN, 4, false, true, true, false},
+    // Two cells wide by one tall: the FlowGuard scale is horizontal, and it
+    // carries a label at each end (#1017). One cell across had the arc, its
+    // value and its mode text stacked in a box narrower than the words —
+    // reported as showing "nothing useful". The minimum matches the default so
+    // a drag cannot put it back there; height still scales down to one cell.
+    {"clog_detection",   TR_NOOP("Clog Detection"),    "gauge",            TR_NOOP("Clog and flow health while printing"),   "clog_meter_mode",    "Requires clog detection hardware",    CAT_FILAMENT, false, 4, 2, 4, 2, 8, 4, false, true, true},
+    {"print_stats",      TR_NOOP("Print Stats"),       "printer_3d",       TR_NOOP("Total prints, success rate, and time"),      nullptr,              nullptr,                               CAT_PRINT,    false, 4, 4, 4, 2, 6, 4, false, true, true},
+    {"gcode_console",    TR_NOOP("GCode Console"),     "console",          TR_NOOP("Send G-code and read the replies"),    nullptr,              nullptr,                               CAT_CONTROLS, false, 2, 2, 2, 2, 2, 2},
 #if HELIX_HAS_CAMERA
-    {"camera",           "Camera",            "video",            "Live webcam feed",           nullptr,              nullptr,                               false, 2, 2, 1, 1, 4, 3},
+    {"camera",           TR_NOOP("Camera"),            "webcam",           TR_NOOP("Live view from your webcam"),           nullptr,              nullptr,                               CAT_PRINT,    false, 4, 4, 2, 2, 8, 6, false, true, true, false},
 #endif
-    {"notifications",    "Notifications",     "notifications",    "Pending alerts and system messages",    nullptr,              nullptr,                               true,  1, 1, 1, 1, 2, 1},
+    {"notifications",    TR_NOOP("Notifications"),     "notifications",    TR_NOOP("Alerts and messages waiting for you"),    nullptr,              nullptr,                               CAT_SYSTEM,   true,  2, 2, 2, 2, 4, 2},
 };
 // clang-format on
+
+// Vector order is the catalog display order — most-reached group first.
+// Intentionally coarser than the doc's section list; see WidgetCategory.
+static const std::vector<WidgetCategoryDef> s_widget_categories = {
+    {WidgetCategory::PrintStatus, "Print & Status", "Print & Status", "printer_3d"},
+    {WidgetCategory::Temperature, "Temperature & Cooling", "Temperature & Cooling", "thermometer"},
+    {WidgetCategory::Filament, "Filament", "Filament", "filament"},
+    {WidgetCategory::Controls, "Controls", "Controls", "script_text"},
+    {WidgetCategory::System, "System", "System", "power"},
+};
+
+const std::vector<WidgetCategoryDef>& get_widget_categories() {
+    return s_widget_categories;
+}
+
+const WidgetCategoryDef* find_widget_category(WidgetCategory id) {
+    auto it = std::find_if(s_widget_categories.begin(), s_widget_categories.end(),
+                           [id](const WidgetCategoryDef& cat) { return cat.id == id; });
+    return it != s_widget_categories.end() ? &*it : nullptr;
+}
 
 const std::vector<PanelWidgetDef>& get_all_widget_defs() {
     return s_widget_defs;
@@ -181,6 +239,7 @@ void init_widget_registrations() {
     register_gcode_console_widget();
     register_macros_widget();
     register_motion_widget();
+    register_filament_sensor_widget();
     register_preheat_widget();
     register_active_spool_widget();
     register_bypass_widget();

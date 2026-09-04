@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
@@ -35,6 +36,30 @@ class CameraWidgetTestAccess {
     /// test asserting that branch's call count must confirm this first.
     static bool active(const CameraWidget& w) {
         return w.active_;
+    }
+
+    /// Cached tile-tree pointers. The teardown-uaf contract is exactly WHICH
+    /// raw pointers survive WHICH deletion path (detach vs a raw
+    /// lv_obj_delete of the page tree), and that is only observable on the
+    /// privates. Read-only.
+    static lv_obj_t* camera_image(const CameraWidget& w) {
+        return w.camera_image_;
+    }
+    static lv_obj_t* camera_overlay(const CameraWidget& w) {
+        return w.camera_overlay_;
+    }
+    static lv_obj_t* camera_status(const CameraWidget& w) {
+        return w.camera_status_;
+    }
+    static lv_obj_t* widget_obj(const CameraWidget& w) {
+        return w.widget_obj_;
+    }
+
+    /// A token off the stream guard, the same way start_stream() takes one for
+    /// its frame callback. Lets a test assert the raw-delete hook does NOT
+    /// expire it - the camera's deliberate divergence from the other three.
+    static helix::LifetimeToken stream_token(const CameraWidget& w) {
+        return w.lifetime_.token();
     }
 };
 

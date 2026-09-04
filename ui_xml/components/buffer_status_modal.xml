@@ -15,6 +15,24 @@
       </ui_button>
     </lv_obj>
 
+    <!-- The clog reading, full width above the columns.
+
+         This modal opens off the FlowGuard tile, and used to show strictly
+         less than the tile that opened it: a "Clog detection" row naming the
+         mode, with no value, no threshold and no peak. The bar carries all
+         three. It wants width rather than height, so it spans both columns
+         instead of sharing meter_col with the plunger — which measures a
+         different sensor entirely.
+
+         Gated on clog_meter_mode by clog_bar_body's own binding, not on the
+         modal: this is the buffer modal, and it is reachable on a printer with
+         no clog detection at all. -->
+    <lv_obj width="100%"
+            height="content" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="#space_xs"
+            style_pad_bottom="0" scrollable="false">
+      <clog_bar_body/>
+    </lv_obj>
+
     <!-- Content area: info column (left) + meter column (right) -->
     <lv_obj width="100%"
             height="content" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="#space_sm"
@@ -51,12 +69,6 @@
             <text_small bind_text="buf_gear_sync_value" flex_grow="1"/>
           </lv_obj>
 
-          <!-- Clog detection row -->
-          <lv_obj width="100%" height="content" flex_flow="row" style_pad_gap="#space_sm">
-            <text_small name="lbl_clog" width="110" text="Clog detection" translation_tag="Clog detection"/>
-            <text_small bind_text="buf_clog_value" flex_grow="1"/>
-          </lv_obj>
-
           <!-- Flow row -->
           <lv_obj name="flow_row" width="100%" height="content" flex_flow="row" style_pad_gap="#space_sm">
             <bind_flag_if_eq subject="buf_show_flow" flag="hidden" ref_value="0"/>
@@ -76,12 +88,6 @@
           <lv_obj name="distance_row" width="100%" height="content" flex_flow="row" style_pad_gap="#space_sm">
             <bind_flag_if_eq subject="buf_show_distance" flag="hidden" ref_value="0"/>
             <text_small name="afc_distance_label" width="100%" bind_text="buf_afc_distance" long_mode="wrap"/>
-          </lv_obj>
-
-          <!-- Clog detection row -->
-          <lv_obj width="100%" height="content" flex_flow="row" style_pad_gap="#space_sm">
-            <text_small name="lbl_afc_clog" width="110" text="Clog detection" translation_tag="Clog detection"/>
-            <text_small name="val_afc_clog" bind_text="buf_clog_value" flex_grow="1"/>
           </lv_obj>
         </lv_obj>
 

@@ -22,12 +22,12 @@
 #include "ui_update_queue.h"
 
 #include "ams_state.h"
-#include "config.h"
-#include "host_identity.h"
+#include "app_globals.h"
 #include "http_executor.h"
 #include "hv/requests.h"
 #include "i_moonraker_api.h"
 #include "moonraker_config_manager.h"
+#include "printer_state.h"
 #include "runtime_config.h"
 #include "settings_manager.h"
 #include "spoolman_manager.h"
@@ -1232,14 +1232,12 @@ void SpoolmanOverlay::resolve_config_location(const std::string& host, const std
 
 void SpoolmanOverlay::try_local_config_fallback(const std::string& detail, const std::string& host,
                                                 const std::string& port) {
-    std::string moonraker_host;
-    if (Config* cfg = Config::get_instance())
-        moonraker_host = cfg->get<std::string>(cfg->df() + "moonraker_host", "localhost");
-
     // Both gates must hold. Our /proc says nothing about a printer across the
     // network, and without a writable root there is nowhere to put the file the
     // include would name — an include with no matching file stops Moonraker dead.
-    if (!helix::is_moonraker_on_same_host(moonraker_host) || config_root_abs_.empty()) {
+    // Locality follows the live connection verdict (moonraker_is_remote), not
+    // the Config host.
+    if (get_printer_state().is_moonraker_remote() || config_root_abs_.empty()) {
         fail_config_unreachable(detail);
         return;
     }
@@ -1641,16 +1639,12 @@ void SpoolmanOverlay::on_cancel_setup_clicked(lv_event_t* /*e*/) {
 void SpoolmanOverlay::on_remove_clicked(lv_event_t* /*e*/) {
     LVGL_SAFE_EVENT_CB_BEGIN("[SpoolmanOverlay] on_remove_clicked");
 
-    modal_show_confirmation(
+    helix::ui::modal_confirm(
         lv_tr("Remove Spoolman?"),
         lv_tr(
             "This will remove the Spoolman configuration from Moonraker and restart the service."),
         ModalSeverity::Warning, lv_tr("Remove"),
-        [](lv_event_t*) {
-            auto& overlay = get_spoolman_overlay();
-            overlay.remove_spoolman_config();
-        },
-        nullptr, nullptr);
+        [] { get_spoolman_overlay().remove_spoolman_config(); });
 
     LVGL_SAFE_EVENT_CB_END();
 }

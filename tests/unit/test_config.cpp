@@ -1728,10 +1728,18 @@ TEST_CASE("Config: v3→v4 migration restructures single printer to multi-printe
     // Filament should have moved under printer entry
     REQUIRE(test_config.get<int>(test_config.df() + "filament/extrude_speed") == 10);
 
-    // Panel widgets should have moved under printer entry
+    // Panel widgets should have moved under printer entry. This drives the whole
+    // migration chain, so the v22 step has since lifted the legacy flat array
+    // into the multi-page shape — the widget set and its order are what v3->v4
+    // is responsible for carrying across, not the container.
     auto pw = test_config.get<json>(test_config.df() + "panel_widgets/home", json());
-    REQUIRE(pw.is_array());
-    REQUIRE(pw.size() == 1);
+    REQUIRE(pw.is_object());
+    REQUIRE(pw.contains("pages"));
+    REQUIRE(pw["pages"].size() == 1);
+    auto pw_widgets = pw["pages"][0]["widgets"];
+    REQUIRE(pw_widgets.is_array());
+    REQUIRE(pw_widgets.size() == 1);
+    REQUIRE(pw_widgets[0]["id"] == "temp");
 
     // wizard_completed should be copied to printer entry
     REQUIRE(test_config.get<bool>(test_config.df() + "wizard_completed") == true);

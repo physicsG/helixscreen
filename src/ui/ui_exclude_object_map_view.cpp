@@ -5,6 +5,7 @@
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
+#include "bed_dimensions.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "printer_excluded_objects_state.h"
@@ -21,44 +22,6 @@ namespace helix::ui {
 
 // File-scope pointer so static callbacks can reach the active view.
 static ExcludeObjectMapView* g_active_map_view = nullptr;
-
-// ============================================================================
-// CoordMapper
-// ============================================================================
-
-ExcludeObjectMapView::CoordMapper::CoordMapper(float bed_w_mm, float bed_h_mm, int viewport_w_px,
-                                               int viewport_h_px, float origin_x, float origin_y)
-    : origin_x_(origin_x), origin_y_(origin_y), viewport_h_(viewport_h_px) {
-    float scale_x = static_cast<float>(viewport_w_px) / bed_w_mm;
-    float scale_y = static_cast<float>(viewport_h_px) / bed_h_mm;
-    scale_ = std::min(scale_x, scale_y);
-    float rendered_w = bed_w_mm * scale_;
-    float rendered_h = bed_h_mm * scale_;
-    offset_x_ = (static_cast<float>(viewport_w_px) - rendered_w) / 2.0f;
-    offset_y_ = (static_cast<float>(viewport_h_px) - rendered_h) / 2.0f;
-}
-
-std::pair<float, float> ExcludeObjectMapView::CoordMapper::mm_to_px(float x_mm, float y_mm) const {
-    // Subtract origin to handle non-zero-based coordinate systems
-    float px = offset_x_ + (x_mm - origin_x_) * scale_;
-    float bed_h_px = static_cast<float>(viewport_h_) - 2.0f * offset_y_;
-    float py = offset_y_ + bed_h_px - (y_mm - origin_y_) * scale_;
-    return {px, py};
-}
-
-ExcludeObjectMapView::PixelRect
-ExcludeObjectMapView::CoordMapper::bbox_to_rect(glm::vec2 bbox_min, glm::vec2 bbox_max) const {
-    auto [x1, y1] = mm_to_px(bbox_min.x, bbox_max.y);
-    auto [x2, y2] = mm_to_px(bbox_max.x, bbox_min.y);
-    float raw_w = x2 - x1, raw_h = y2 - y1;
-    float w = std::max(raw_w, MIN_TOUCH_TARGET_PX);
-    float h = std::max(raw_h, MIN_TOUCH_TARGET_PX);
-    if (w > raw_w)
-        x1 -= (w - raw_w) / 2.0f;
-    if (h > raw_h)
-        y1 -= (h - raw_h) / 2.0f;
-    return {x1, y1, w, h};
-}
 
 // ============================================================================
 // KeyBarMode
@@ -104,8 +67,9 @@ void ExcludeObjectMapView::create(lv_obj_t* parent, helix::PrinterExcludedObject
     state_ = state;
     exclude_manager_ = exclude_manager;
     parsed_file_ = std::move(parsed_file);
-    bed_w_mm_ = (bed_w_mm > 0.0f) ? bed_w_mm : 235.0f;
-    bed_h_mm_ = (bed_h_mm > 0.0f) ? bed_h_mm : 235.0f;
+    const auto bed = helix::bed_dimensions_from_volume(0.0f, bed_w_mm, 0.0f, bed_h_mm);
+    bed_w_mm_ = bed.w_mm;
+    bed_h_mm_ = bed.h_mm;
 
     // Register XML event callback once (idempotent — registration only takes
     // effect the first time; subsequent calls are harmless no-ops).

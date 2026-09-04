@@ -33,6 +33,18 @@ bool toolhead_is_homed(const PrinterState& ps) {
            s.find('z') != std::string::npos;
 }
 
+bool axis_is_homed(const PrinterState& ps, Axis axis) {
+    // Same const_cast as toolhead_is_homed() directly above: the subject
+    // accessors are all non-const, but this only reads the string value.
+    const char* axes =
+        lv_subject_get_string(const_cast<PrinterState&>(ps).get_homed_axes_subject());
+    if (axes == nullptr) {
+        return false;
+    }
+    const char c = (axis == Axis::X) ? 'x' : (axis == Axis::Y) ? 'y' : 'z';
+    return std::string(axes).find(c) != std::string::npos;
+}
+
 void ensure_homed_then(IMoonrakerAPI* api, AsyncLifetimeGuard& guard, std::function<void()> then,
                        std::function<void(const MoonrakerError&)> on_error) {
     if (toolhead_is_homed(get_printer_state())) {

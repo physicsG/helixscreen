@@ -37,7 +37,33 @@ TEXT_ATTRIBUTES = {"text", "label", "description", "title", "subtitle", "placeho
 
 # Attributes that ARE the translation key rather than a rendered default. They
 # are extracted unconditionally -- see the note at the extraction site.
-EXPLICIT_TAG_ATTRIBUTES = ("translation_tag", "label_tag")
+# title_tag pairs with title= the way label_tag pairs with label= (section
+# headers via setting_group_header); leaving it out kept every section title
+# out of the catalogs, so non-English devices rendered them in English.
+#
+# Every other *_tag prop a component forwards to an inner widget's
+# translation_tag= belongs here too. They were covered only by accident, by the
+# same literal appearing somewhere else in the tree -- console_settings_overlay's
+# "Suppress periodic temperature status lines" is the one that had no twin, and
+# that row rendered in English on all nine non-English locales. The list is the
+# full set of forwarding props in ui_xml/ (header_bar, modal_button_row,
+# context_menu_card, setting_toggle_row, favorite_macro_config_modal); the three
+# deliberate omissions are value_tag and options_tag, which have their own loops
+# below because they carry list semantics, and placeholder_tag, which rides
+# TEXT_ATTRIBUTES.
+EXPLICIT_TAG_ATTRIBUTES = (
+    "translation_tag",
+    "label_tag",
+    "title_tag",
+    "description_tag",
+    "action_button_text_tag",
+    "action_button_2_text_tag",
+    "primary_tag",
+    "secondary_tag",
+    "tertiary_tag",
+    "close_text_tag",
+    "text_tag",
+)
 
 # Inline element text: <text_muted>Foo</text_muted>. The C parser
 # (lib/helix-xml/src/xml/lv_xml.c) applies this as text= + translation_tag=,
@@ -158,6 +184,10 @@ CPP_TRANSLATABLE_PATTERNS = [
     # lv_tr("text") - explicitly marked for translation (handles escaped quotes
     # and adjacent literal concatenation across multiple lines)
     r"lv_tr\s*\(\s*" + ADJACENT_LITERALS_GROUP,
+    # TR_NOOP("text") - marks a literal in a static table for extraction;
+    # the lookup happens later at the call site via lv_tr(). See
+    # include/translation_loader.h.
+    r"TR_NOOP\s*\(\s*" + ADJACENT_LITERALS_GROUP,
     # lv_label_set_text(label, "text")
     r"lv_label_set_text\s*\([^,]+,\s*" + ADJACENT_LITERALS_GROUP,
     # return "Status Text"  (for status strings) — single literal only

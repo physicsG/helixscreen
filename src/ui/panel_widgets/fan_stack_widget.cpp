@@ -18,13 +18,16 @@
 #include "app_globals.h"
 #include "display_settings_manager.h"
 #include "format_utils.h"
+#include "grid_layout.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "i_moonraker_api.h"
+#include "lvgl/src/misc/lv_text_private.h" // lv_text_get_width, lv_text_attributes_t
 #include "observer_factory.h"
 #include "panel_widget_registry.h"
 #include "panel_widget_size.h"
 #include "printer_fan_state.h"
 #include "printer_state.h"
+#include "stacked_row_layout.h"
 #include "theme_manager.h"
 #include "ui/fan_spin_animation.h"
 
@@ -75,6 +78,33 @@ void apply_icon_cell_highlight(lv_obj_t* cell, bool selected) {
     }
 }
 
+} // namespace
+
+namespace {
+// Text font token for the stacked icon-above layout, and the token the fit is
+// measured at. One name so the measurement and the applied font cannot drift.
+constexpr const char* FONT_STACKED = "font_body";
+
+// Widest speed the label ever shows. Measured instead of the live value so the
+// name beside it does not reflow when a fan spins up from 0% to 100%.
+constexpr const char* WIDEST_SPEED_TEXT = "100%";
+
+// Pixel width of a UTF-8 string in the given font. lv_text_get_width
+// dereferences its attributes argument, so a zeroed attributes block (no
+// recolor, zero letter/line space, unbounded width) is required — NULL crashes.
+int measure_text_px(const char* txt, const lv_font_t* font) {
+    if (!txt || !font)
+        return 0;
+    lv_text_attributes_t attrs;
+    lv_text_attributes_init(&attrs);
+    attrs.letter_space = 0;
+    attrs.max_width = LV_COORD_MAX;
+    return lv_text_get_width(txt, LV_TEXT_LEN_MAX, font, &attrs);
+}
+
+// How much of a fan's name a row has room for, longest first. Letter is the
+// floor: it is used when nothing longer fits.
+enum class NameForm { Resolved, Short, Letter };
 } // namespace
 
 using namespace helix;
@@ -229,29 +259,59 @@ void FanStackWidget::on_size_changed(int colspan, int rowspan, int width_px, int
     if (!widget_obj_ || is_carousel_mode())
         return;
 
-    // Size tiers, decided from physical pixels rather than grid span so the
+    static_assert(ICON_ABOVE_MIN_ROWSPAN == GridLayout::TRACKS_PER_CELL + 1,
+                  "The stacked layout starts one track above a whole authored cell");
+
+    const char* row_names[] = {"fan_stack_part_row", "fan_stack_hotend_row", "fan_stack_aux_row"};
+
+    // Width tiers, decided from physical pixels rather than grid span so the
     // same authored layout reads correctly on every panel:
     //   compact: xs fonts, single-letter labels (P, H, C)
     //   bigger:  sm fonts, resolved display names from PrinterFanState
     //
-    // Width-only: each row is icon + name + speed laid out horizontally
-    // (panel_widget_fan_stack.xml), so a resolved name ("Hotend") only ever
-    // competes for room along the width axis. Extra height centers the same
-    // three rows with more breathing space but never widens one, so height
-    // carries no information about whether a resolved name fits.
+    // The name is a width question and only a width question: it shares a line
+    // with the speed in both layouts (the fan_stack_*_value wrapper in
+    // panel_widget_fan_stack.xml keeps them together), so a resolved name
+    // competes for room along the width axis whichever way the row flows.
     //
     // The band is per-tier: what has to fit is text, and font_small runs
     // 10..26px across the tiers, so a width that holds "Part Cooling Fan" at
     // Small does not hold it at XXLarge.
     bool bigger = (width_px >= widget_size::w_normal());
 
-    const char* font_token = bigger ? "font_small" : "font_xs";
+    // Height tier: above one authored cell, and with room to draw two lines
+    // per fan, the glyph moves above its name+speed pair. Same rule and same
+    // arithmetic as temp_stack — see stacked_row_layout.h.
+    int visible_rows = 0;
+    for (const char* rn : row_names) {
+        lv_obj_t* row = lv_obj_find_by_name(widget_obj_, rn);
+        if (row && !lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN))
+            visible_rows++;
+    }
+
+    const int icon_gap_px = static_cast<int>(theme_manager_get_spacing("space_xxs"));
+    const int row_gap_px = static_cast<int>(theme_manager_get_spacing("space_xs"));
+
+    // Measure the layout being considered, not the one on screen: stacking
+    // buys its vertical room back as type, so ask whether the LARGER text fits.
+    const lv_font_t* stacked_font = theme_manager_get_font(FONT_STACKED);
+    const StackedRowMetrics stacked_row{
+        static_cast<int>(mdi_icons_24.line_height),
+        stacked_font ? static_cast<int>(stacked_font->line_height) : 0, icon_gap_px};
+
+    const bool icon_above =
+        wants_icon_above(rowspan, height_px, visible_rows, stacked_row, row_gap_px);
+
+    const char* font_token = icon_above ? FONT_STACKED : (bigger ? "font_small" : "font_xs");
     const lv_font_t* text_font = theme_manager_get_font(font_token);
     if (!text_font)
         return;
 
-    // Icon font: xs=16px, sm=24px
-    const lv_font_t* icon_font = bigger ? &mdi_icons_24 : &mdi_icons_16;
+    // Icon font: xs=16px, sm/md=24px. The glyph does not follow the text a
+    // third rung up - a 32px fan over a body-size percentage reads as an icon
+    // with a caption. The spin pivot is LV_PCT(50) (set_icon_pivot), so it
+    // stays centred at either glyph size.
+    const lv_font_t* icon_font = (bigger || icon_above) ? &mdi_icons_24 : &mdi_icons_16;
 
     // Apply text font to all speed labels
     for (auto* label : {part_label_, hotend_label_, aux_label_}) {
@@ -267,40 +327,157 @@ void FanStackWidget::on_size_changed(int colspan, int rowspan, int width_px, int
             lv_obj_set_style_text_font(icon, icon_font, 0);
     }
 
-    // Name labels: 1x1 = single letter, 2x1+ = resolved display name
+    // Name labels: narrow = single letter, wider = resolved display name.
     struct NameMapping {
+        const char* row_name;
         const char* obj_name;
-        const char* compact;        // 1x1: single letter
-        const std::string* display; // 2x1+: resolved fan display name
-        const char* fallback;       // fallback if display name empty
+        const char* compact;        // narrow: single letter
+        const std::string* display; // wider: resolved fan display name
+        const char* short_word;     // one word; also the fallback when unresolved
     };
     const NameMapping name_map[] = {
-        {"fan_stack_part_name", "P", &part_display_name_, "Part"},
-        {"fan_stack_hotend_name", "H", &hotend_display_name_, "Hotend"},
-        {"fan_stack_aux_name", "C", &aux_display_name_, "Chamber"},
+        {"fan_stack_part_row", "fan_stack_part_name", "P", &part_display_name_, "Part"},
+        {"fan_stack_hotend_row", "fan_stack_hotend_name", "H", &hotend_display_name_, "Hotend"},
+        {"fan_stack_aux_row", "fan_stack_aux_name", "C", &aux_display_name_, "Chamber"},
     };
-    for (const auto& m : name_map) {
-        lv_obj_t* lbl = lv_obj_find_by_name(widget_obj_, m.obj_name);
-        if (lbl) {
-            lv_obj_set_style_text_font(lbl, text_font, 0);
-            if (bigger) {
-                const char* text = m.display->empty() ? m.fallback : m.display->c_str();
-                lv_label_set_text(lbl, lv_tr(text));
-            } else {
-                lv_label_set_text(lbl, lv_tr(m.compact));
+
+    auto name_text = [&](const NameMapping& m, NameForm f) -> const char* {
+        switch (f) {
+        case NameForm::Resolved:
+            return lv_tr(m.display->empty() ? m.short_word : m.display->c_str());
+        case NameForm::Short:
+            return lv_tr(m.short_word);
+        case NameForm::Letter:
+            break;
+        }
+        return lv_tr(m.compact);
+    };
+
+    // Stacked rows can afford a longer name than the width band allows. The
+    // band answers "does a resolved name fit BESIDE the glyph", but a stacked
+    // row puts the name on its own line, so the glyph is no longer competing
+    // for that width - the name+speed pair gets the widget's whole content
+    // width. Measure what actually fits there rather than inferring it from a
+    // band calibrated for the other layout.
+    //
+    // One form for the whole stack, not the longest each row can manage on its
+    // own: a column reading "Part / Hotend / C" looks like a rendering fault
+    // rather than a deliberate abbreviation. The longest form every VISIBLE
+    // row can carry wins - a hidden aux fan must not hold the other two down.
+    NameForm stacked_form = NameForm::Letter;
+    if (icon_above) {
+        int content_w = lv_obj_get_content_width(widget_obj_);
+        if (content_w <= 0)
+            content_w = width_px;
+        const int avail_px = content_w - measure_text_px(WIDEST_SPEED_TEXT, text_font) - row_gap_px;
+
+        auto fits_every_row = [&](NameForm f) {
+            for (const auto& m : name_map) {
+                lv_obj_t* row = lv_obj_find_by_name(widget_obj_, m.row_name);
+                if (!row || lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN))
+                    continue;
+                if (measure_text_px(name_text(m, f), text_font) > avail_px)
+                    return false;
+            }
+            return true;
+        };
+        for (NameForm f : {NameForm::Resolved, NameForm::Short}) {
+            if (fits_every_row(f)) {
+                stacked_form = f;
+                break;
             }
         }
     }
 
-    // Center the content block when the widget is wider than 1x.
-    // Each row is LV_SIZE_CONTENT so it shrink-wraps its text.
-    // Setting cross_place to CENTER on the flex-column parent centers
-    // the rows horizontally, but that causes ragged left edges.
-    // Instead: keep rows at SIZE_CONTENT and set the parent's
-    // cross_place to CENTER — but use a uniform min_width on all rows
-    // so they share the same left edge.
-    const char* row_names[] = {"fan_stack_part_row", "fan_stack_hotend_row", "fan_stack_aux_row"};
-    if (bigger) {
+    for (const auto& m : name_map) {
+        lv_obj_t* lbl = lv_obj_find_by_name(widget_obj_, m.obj_name);
+        if (!lbl)
+            continue;
+        lv_obj_set_style_text_font(lbl, text_font, 0);
+
+        if (icon_above) {
+            lv_label_set_text(lbl, name_text(m, stacked_form));
+        } else {
+            lv_label_set_text(lbl, name_text(m, bigger ? NameForm::Resolved : NameForm::Letter));
+        }
+    }
+
+    // DECLARATIVE_OK: measured layout. Which way a row flows depends on the
+    // resolved font line heights and the pixel box the grid handed us, neither
+    // of which XML can express - the same exception decide_nozzle_layout()
+    // runs under. The row-flow values restore what panel_widget_fan_stack.xml
+    // authors.
+    for (const char* rn : row_names) {
+        lv_obj_t* row = lv_obj_find_by_name(widget_obj_, rn);
+        if (row) {
+            lv_obj_set_flex_flow(row, icon_above ? LV_FLEX_FLOW_COLUMN : LV_FLEX_FLOW_ROW);
+            lv_obj_set_style_pad_gap(row, icon_above ? icon_gap_px : row_gap_px, 0);
+        }
+    }
+
+    if (icon_above) {
+        // Stacked: the glyph and the name+speed pair are both centred under
+        // each other, so there is no shared left edge to align to. Full-width
+        // rows let the column's cross_place=center do the centring.
+        for (const char* rn : row_names) {
+            lv_obj_t* row = lv_obj_find_by_name(widget_obj_, rn);
+            if (row) {
+                lv_obj_set_width(row, LV_PCT(100));
+                lv_obj_set_style_flex_main_place(row, LV_FLEX_ALIGN_START, 0);
+            }
+        }
+    } else {
+        // Beside, both tiers: line the rows up on one shared left edge.
+        // Per-row centering puts no two icons at the same x once rows hold
+        // different-width text ("0%" vs "100%", "P" vs "Hotend"), so level
+        // all three rows to the widest line and let the flex-column parent's
+        // cross_place=center (XML) center the equal-width block on the tile.
+        //
+        // Speed text keeps changing after layout ("0%" -> "100%"), but the
+        // rows are leveled once, here. Reserve every speed label at the
+        // widest string it can show so a fan ramping up later cannot outgrow
+        // its row and clip - and right-align the number inside that box, so
+        // every row ends at the same right edge and the leveled block reads
+        // as justified across the widest line's width rather than left-packed.
+        for (auto* label : {part_label_, hotend_label_, aux_label_}) {
+            if (!label)
+                continue;
+            lv_point_t worst = {0, 0};
+            lv_text_get_size(&worst, WIDEST_SPEED_TEXT, text_font,
+                             lv_obj_get_style_text_letter_space(label, LV_PART_MAIN), 0,
+                             LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+            lv_obj_set_style_min_width(label, worst.x, 0);
+            lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_RIGHT, 0);
+        }
+
+        // Level the name column the same way: per-row names differ in
+        // advance width ("P" vs "H" vs "C", "Hotend" vs "Part Cooling Fan"),
+        // which would leave the speed column's right edge ragged by a pixel
+        // or two even with the boxes reserved above. A shared name-box width
+        // pins both column edges for every row.
+        lv_obj_t* name_labels[] = {lv_obj_find_by_name(widget_obj_, "fan_stack_part_name"),
+                                   lv_obj_find_by_name(widget_obj_, "fan_stack_hotend_name"),
+                                   lv_obj_find_by_name(widget_obj_, "fan_stack_aux_name")};
+        // lv_coord_t, not int: it is compared with sz.x in std::max below, and
+        // on the xtensa ESP32 toolchain int32_t (lv_coord_t) is long - a
+        // plain int makes the max() template deduction fail there while
+        // compiling clean on desktop builds.
+        lv_coord_t name_w = 0;
+        for (lv_obj_t* lbl : name_labels) {
+            const char* text = lbl ? lv_label_get_text(lbl) : nullptr;
+            if (!text)
+                continue;
+            lv_point_t sz = {0, 0};
+            lv_text_get_size(&sz, text, text_font,
+                             lv_obj_get_style_text_letter_space(lbl, LV_PART_MAIN), 0, LV_COORD_MAX,
+                             LV_TEXT_FLAG_NONE);
+            name_w = std::max(name_w, sz.x);
+        }
+        for (lv_obj_t* lbl : name_labels) {
+            if (lbl)
+                lv_obj_set_style_min_width(lbl, name_w, 0);
+        }
+
         // First pass: set rows to content width and measure the widest
         for (const char* rn : row_names) {
             lv_obj_t* row = lv_obj_find_by_name(widget_obj_, rn);
@@ -327,19 +504,12 @@ void FanStackWidget::on_size_changed(int colspan, int rowspan, int width_px, int
             if (row)
                 lv_obj_set_width(row, max_w);
         }
-    } else {
-        // 1x1: center content within each row (labels are short: P, H, C)
-        for (const char* rn : row_names) {
-            lv_obj_t* row = lv_obj_find_by_name(widget_obj_, rn);
-            if (row) {
-                lv_obj_set_width(row, LV_PCT(100));
-                lv_obj_set_style_flex_main_place(row, LV_FLEX_ALIGN_CENTER, 0);
-            }
-        }
     }
 
-    spdlog::debug("[FanStackWidget] on_size_changed {}x{} -> font {}", colspan, rowspan,
-                  font_token);
+    spdlog::debug("[FanStackWidget] on_size_changed {}x{} {}x{}px visible_rows={} -> font {} "
+                  "layout {}",
+                  colspan, rowspan, width_px, height_px, visible_rows, font_token,
+                  icon_above ? "icon-above" : "icon-beside");
 }
 
 void FanStackWidget::bind_fans() {

@@ -316,6 +316,10 @@ class MoonrakerSpoolmanAPIMock : public MoonrakerSpoolmanAPI {
     bool mock_spoolman_enabled_ = true;
     int mock_active_spool_id_ = 1;
     std::vector<SpoolInfo> mock_spools_;
+    /// Spools PATCHed to archived=true. They stay in mock_spools_ (the
+    /// single-spool GET still serves them) but are filtered from list GETs,
+    /// mirroring real Spoolman.
+    std::set<int> archived_spool_ids_;
     std::vector<FilamentInfo> mock_filaments_;
     std::vector<VendorInfo> mock_vendors_;
     int next_filament_id_ = 300;
@@ -511,6 +515,29 @@ class MoonrakerFileTransferAPIMock : public MoonrakerFileTransferAPI {
     ~MoonrakerFileTransferAPIMock() override = default;
 
     // ========================================================================
+    // In-memory config root (test injection)
+    // ========================================================================
+
+    /**
+     * @brief Seed an in-memory "config" root keyed by FULL relative path
+     *
+     * The on-disk fallback resolves by basename, so a nested path such as
+     * conf.d/options.cfg can never be served from it. When this map is
+     * non-empty, download_file(root == "config", path) looks the path up
+     * exactly, and upload_file records what was written back into it.
+     *
+     * @param files Map of path (relative to the config root) -> file content
+     */
+    void set_config_files(std::map<std::string, std::string> files);
+
+    /// Content the mock currently holds for a config path, including anything
+    /// uploaded since seeding. std::nullopt when the path is unknown.
+    std::optional<std::string> get_uploaded_config(const std::string& path) const;
+
+    /// Every config path the mock currently holds (for list_files mirroring)
+    std::map<std::string, std::string> get_config_files() const;
+
+    // ========================================================================
     // Overridden HTTP File Transfer Methods (use local files instead of HTTP)
     // ========================================================================
 
@@ -555,6 +582,34 @@ class MoonrakerFileTransferAPIMock : public MoonrakerFileTransferAPI {
     /// Fallback path prefixes to search (from various CWDs)
     /// Note: Base directory is RuntimeConfig::TEST_GCODE_DIR (defined in runtime_config.h)
     static const std::vector<std::string> PATH_PREFIXES;
+
+    /// Injected config root: full relative path -> content. Empty = use disk.
+    std::map<std::string, std::string> config_files_;
+};
+
+/**
+ * @brief Mock File Management API for testing without a Moonraker connection
+ *
+ * Only list_files() on the "config" root is mocked, and only when config files
+ * have been injected via set_config_files(). Everything else falls through to
+ * the real implementation.
+ */
+class MoonrakerFileAPIMock : public MoonrakerFileAPI {
+  public:
+    using ErrorCallback = MoonrakerFileAPI::ErrorCallback;
+
+    explicit MoonrakerFileAPIMock(helix::IMoonrakerClient& client);
+    ~MoonrakerFileAPIMock() override = default;
+
+    void list_files(const std::string& root, const std::string& path, bool recursive,
+                    FileListCallback on_success, ErrorCallback on_error) override;
+
+    /// Seed the paths list_files("config", ...) reports. See
+    /// MoonrakerFileTransferAPIMock::set_config_files().
+    void set_config_files(std::map<std::string, std::string> files);
+
+  private:
+    std::map<std::string, std::string> config_files_;
 };
 
 /**
@@ -729,6 +784,28 @@ class MoonrakerAPIMock : public MoonrakerAPI {
      * @return Reference to MoonrakerFileTransferAPIMock
      */
     MoonrakerFileTransferAPIMock& transfers_mock();
+
+    /**
+     * @brief Get the File Management mock sub-API for mock-specific access
+     *
+     * @return Reference to MoonrakerFileAPIMock
+     */
+    MoonrakerFileAPIMock& files_mock();
+
+    /**
+     * @brief Seed an in-memory "config" root for both file sub-APIs
+     *
+     * Wires the same map into list_files() and download_file()/upload_file() so
+     * the async config-editing paths (KlipperConfigEditor, include resolution)
+     * can be exercised without a printer or on-disk fixtures.
+     *
+     * @param files Map of path relative to the config root -> file content
+     */
+    void set_config_files(std::map<std::string, std::string> files);
+
+    /// Content the config root currently holds for @p path, including anything
+    /// uploaded since seeding. std::nullopt when the path is unknown.
+    std::optional<std::string> get_uploaded_config(const std::string& path) const;
 
     // ========================================================================
     // Spoolman Mock Access

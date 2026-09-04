@@ -10,6 +10,7 @@ This document is a reference for the environment variables HelixScreen reads at 
 | [Touch Calibration](#touch-calibration) | `HELIX_TOUCH_*` / `HELIX_SCROLL_*` |
 | [G-Code Viewer](#g-code-viewer) | `HELIX_` |
 | [Bed Mesh](#bed-mesh) | `HELIX_` |
+| [Audio](#audio) | `HELIX_` |
 | [Networking](#networking) | `HELIX_` |
 | [Mock & Testing](MOCK_ENVIRONMENT_VARIABLES.md) | `HELIX_MOCK_*` |
 | [UI Automation](#ui-automation) | `HELIX_AUTO_*` |
@@ -518,6 +519,43 @@ when the accelerated one is unavailable. Audio is silenced automatically too:
 when you want to debug audio under a headless window). See `docs/devel/HELIXCTL.md`
 § "Running headless".
 
+### `HELIX_KEY_DEPTH`
+
+Force the on-screen keyboard's key depth treatment instead of picking it from
+the detected hardware tier. Set it on a device that renders slower than its
+RAM/core count suggests, or to check a branch you do not have hardware for.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `skirt` (hard-edged rim under each key), `emboss` (an edge on the key face, no shadow), `flat` (neither) |
+| **Default** | Auto — `emboss` on the `EMBEDDED` tier, `skirt` above it, `flat` on ESP32 builds |
+| **Files** | `include/ui_keycap_style.h`, `src/ui/ui_keycap_style.cpp`, `src/ui/ui_keyboard_manager.cpp` |
+
+```bash
+# A device where 30-plus per-key box shadows cost more than its tier implies
+HELIX_KEY_DEPTH=emboss ./build/bin/helix-screen -vv
+
+# Check the constrained-hardware look on a desktop
+HELIX_KEY_DEPTH=emboss ./build/bin/helix-screen --test -vv
+```
+
+The depth is resolved once per process, so this cannot be changed while running.
+`skirt` costs one box shadow per key at blur width 1; `emboss` draws the key's own
+edge as a border and costs no shadow at all, which is why constrained hardware
+falls back to it rather than to `flat`. How deep the skirt sits comes from the
+active theme's `shadow_intensity` (0, which is what 16 of the 18 shipped themes
+use, means default depth rather than off).
+
+Which way that edge faces depends on the mode, not on taste: a light theme shades
+the underside of the key, a dark theme lights the top. A shadow needs the
+background to contrast against, and a dark theme's keyboard background is darker
+than the keys themselves — measured on a stock dark theme the rim landed within
+four values of the background, i.e. invisible — so there the depth comes from a lit
+top edge drawn inside the key face instead. `skirt` on a dark theme draws both.
+Holding a key flips the edge to the opposite corner.
+
+---
+
 ---
 
 ## Touch Calibration
@@ -796,13 +834,21 @@ HELIX_GCODE_STREAMING=auto ./build/bin/helix-screen --test -vv &
 
 ### `HELIX_SSAO`
 
-Control enhanced 2D G-code shading. When enabled (default), the 2D layer renderer applies per-segment directional lighting, anti-aliased line drawing (Wu's algorithm), and a silhouette outline post-process for improved depth perception.
+Control enhanced 2D G-code shading: per-segment directional lighting, a
+silhouette outline post-process, and anti-aliased line drawing (Wu's algorithm).
+
+The outline pass and the antialiasing are **separate flags** internally, because
+they cost very different amounts. `HELIX_SSAO` overrides both together so a
+forced comparison covers all of it; the device tier sets them independently.
 
 | Property | Value |
 |----------|-------|
-| **Values** | `0` (disable), unset (enabled by default) |
-| **Default** | Enabled |
-| **File** | `src/ui/ui_gcode_viewer.cpp`, `src/rendering/gcode_layer_renderer.cpp` |
+| **Values** | `1` (force both on), `0` (force both off), unset (device tier decides) |
+| **Default** | Unconstrained: both on. Constrained: outline on, antialiasing off. |
+| **File** | `include/gcode_ssao_policy.h`, `src/ui/ui_gcode_viewer.cpp`, `src/rendering/gcode_layer_renderer.cpp` |
+
+Only the exact strings `0` and `1` are honoured; anything else (including empty,
+`true`, `yes`) falls through to the tier.
 
 ```bash
 # Disable enhanced shading (use original flat rendering)
@@ -816,7 +862,15 @@ HELIX_SSAO=0 ./build/bin/helix-screen --test --gcode-file model.gcode -vv &
 - **Anti-aliased lines:** Wu's line algorithm replaces Bresenham for smoother edges
 - **Silhouette outline:** 1px darkened border on the alpha boundary of the model for edge definition
 
-Performance impact is minimal (~2ms post-process pass for the outline, negligible overhead for AA lines and normal shading).
+**Performance.** The outline pass is ~2 ms per cache revalidation, measured on a
+real AD5M. The antialiasing is not minimal and this doc used to claim it was:
+Wu's algorithm measures about **6.1x** the aliased rasterization cost
+(`tests/unit/test_gcode_raster_bench.cpp`, run with
+`./build/bin/helix-tests "[raster_bench]"`). On the 135,197-segment test plate
+that is roughly 29 ms aliased against 178 ms antialiased, and the adaptive
+controller settles at 49 layers per frame instead of 22 - so a preview appears
+about 2.2x faster with antialiasing off. That is why the constrained tier keeps
+the outline and drops the antialiasing rather than turning everything off.
 
 ---
 
@@ -839,6 +893,44 @@ HELIX_BED_MESH_2D=1 ./build/bin/helix-screen
 
 ---
 
+## Audio
+
+### `HELIX_PWM_MIN_NOTE_MS`
+
+Audible floor for one theme note on the PWM sysfs buzzer backend (ad5m/ad5m-br/ad5x platform builds). The piezo needs ~20 ms of drive to register a tone; the sequencer quantizes every theme step up to this value, so a sub-floor tone+rest pair plays as one floor-length tone instead of a click. Read once at backend `initialize()` — relaunch to change it.
+
+| Property | Value |
+|----------|-------|
+| **Values** | milliseconds, clamped to 10-100; non-numeric or <= 0 keeps the default |
+| **Default** | `20` |
+| **File** | `src/system/pwm_sound_backend.cpp` (`PWMSoundBackend::initialize`) |
+
+```bash
+# Rig tuning: stretch the audible floor
+HELIX_PWM_MIN_NOTE_MS=35 ./build/bin/helix-screen
+```
+
+### `HELIX_JZ_*` (jz_pwm rig tuning)
+
+Ear-sweep knobs for the AD5X jz_pwm backend's tracker voice path — one variable per listening round, read at backend `initialize()`. These exist for the piezo rig; they are not user settings.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `HELIX_JZ_VOICE_MS` | `1900` | Phrase length in ms (one daemon buffer) |
+| `HELIX_JZ_ATTACK_MS` | `2` | Per-voice attack envelope (ms) |
+| `HELIX_JZ_RELEASE_MS` | `10` | Per-voice release envelope (ms) |
+| `HELIX_JZ_SWING` | `0.4` | Duty depth around 50% |
+| `HELIX_JZ_WAVE` | `0` | Waveform: 0=triangle, 1=square, 2=saw (clamped 0-2) |
+| `HELIX_JZ_OCTAVE` | `0` | Global octave shift (clamped 0-5; piezo band is ~1-4 kHz) |
+| `HELIX_JZ_CARRIER` | `32768` | Carrier Hz — upload time scales with it (see `JzPwmVoiceKnobs` in the header) |
+| `HELIX_JZ_LOG_VOICE` | off | `1` appends voice rows to `/tmp/jz-voice.log` |
+
+| Property | Value |
+|----------|-------|
+| **File** | `src/system/jz_pwm_sound_backend.cpp` (`JzPwmSoundBackend::initialize`) |
+
+---
+
 ## Networking
 
 ### `HELIX_WPA_SOCKET_DIR`
@@ -857,6 +949,77 @@ The WiFi backend normally finds the control socket automatically: it auto-detect
 # Point HelixScreen at a vendor's non-standard control socket directory
 HELIX_WPA_SOCKET_DIR=/data/misc/wifi/sockets ./build/bin/helix-screen
 ```
+
+### `HELIX_WPA_NET_SYSFS`
+
+Override the sysfs directory the WiFi hardware probe scans for radio
+interfaces.
+
+The wpa backend's pre-flight check reads `/sys/class/net` looking for
+`wlan*`/`wlp*`/`wlx*`/`wifi*` interfaces with a `wireless` subdirectory, and
+refuses to start when none exist. This variable points that probe at a
+different tree. It exists for the fake-supplicant unit tests
+(`tests/test_helpers/wpa_fake_supplicant.h`), which provide a hermetic
+`wlan0` so the suite runs on machines without a radio (CI runners); no
+device deployment should ever need it.
+
+| Property | Value |
+|----------|-------|
+| **Values** | Absolute directory path to use in place of `/sys/class/net` |
+| **Default** | Unset — the real `/sys/class/net` |
+| **File** | `src/api/wifi_backend_wpa_supplicant.cpp` |
+
+### `HELIX_NETD_SOCKET`
+
+Override the control socket of the printer's network daemon (`netd`, the
+exclusive owner of WiFi/ethernet on the firmwares that ship it).
+
+Both the WiFi and Ethernet backends speak to the daemon over this AF_UNIX
+socket, and backend selection itself probes it. The daemon is detected by
+socket presence OR the on-disk binary — never by a version string, which is
+untrustworthy across these firmware releases. Set this only to repoint at a
+non-standard deployment or at a test double.
+
+| Property | Value |
+|----------|-------|
+| **Values** | Absolute path to an AF_UNIX SOCK_STREAM socket |
+| **Default** | `/run/netd.sock` |
+| **File** | `src/api/netd_protocol.cpp` |
+
+```bash
+# Run the app against a fake daemon on a dev box
+HELIX_NETD_SOCKET=/tmp/fake-netd.sock ./build/bin/helix-screen
+```
+
+Also the seam the netd unit tests use to drive the real backends against an
+in-test listener (`tests/unit/netd_test_server.h`).
+
+### `HELIX_NETD_BIN`
+
+Override the on-disk daemon binary path used as the second half of the
+presence probe when the socket is down (the daemon exists on disk even
+before it has created its socket at boot). When neither the socket nor an
+executable at this path exists, the netd backends stand down entirely and
+the factory falls through to NetworkManager/wpa_supplicant.
+
+| Property | Value |
+|----------|-------|
+| **Values** | Absolute path to an executable file |
+| **Default** | `/opt/config/mod/.bin/exec/netd` |
+| **File** | `src/api/netd_protocol.cpp` |
+
+```bash
+# Force the netd backends active on a dev box by naming any executable
+HELIX_NETD_BIN=/bin/true HELIX_NETD_SOCKET=/tmp/fake-netd.sock ./build/bin/helix-screen
+```
+
+Recovery-boot note: a boot that ships the daemon but runs the stock stack
+(the firmware's own netd-failure fallback, or a `SKIP_MOD_SOFT` boot) still
+selects the netd backends — the binary is present, so the probe commits.
+WiFi then reads unavailable until the daemon returns; Ethernet still shows
+kernel state (the netd ethernet backend falls back to the kernel reading
+when the daemon is unreachable). Point `HELIX_NETD_BIN` at a nonexistent
+path in `helixscreen.env` to make such a boot use the stock backends.
 
 ---
 
@@ -982,6 +1145,64 @@ Measured on a Creality K2 Plus (456x102 gradient, 2 series): 167ms median per re
 skip ineffective, ~10ms after coalescing equal-height column runs, with ~47% of frames skipped
 outright. Most of the original cost was `lv_canvas_finish_layer()` rasterising 456 separate
 single-column fills, not the pixels themselves.
+
+### `HELIX_BELT_CAPTURE_DIR`
+
+Write every resolved pluck event from the live belt tuner (`BeltListenSession`) to disk, in the
+same format `tests/fixtures/belt_plucks/` already uses. Diagnostic only, for the reference-machine
+hardware pass: every threshold in `PluckDetector` and `pitch_estimator` was measured against a
+small, fixed capture set, and the algorithm has since been tuned against that same set. This is
+the instrument that collects the next round — a capture drops straight in as a new fixture with no
+conversion step.
+
+Off unless set: unset costs nothing (no buffering, no allocation, no branch on the sample path) and
+a normal user run never writes these files. When set, each resolved event (accepted **and**
+rejected — a rejection is the case most worth diagnosing) writes the live detection window and,
+once one was extracted, the separate ring-down as two files, since conflating those two buffers is
+exactly the mistake `PluckDetector`'s doc comments exist to prevent. The quiet buffer a session
+learned its noise floor and quiet spectrum from is written once, alongside `learn_noise_floor()`.
+Filenames carry an incrementing sequence number so same-second events cannot collide:
+`event_0000_ACCEPTED_detection.csv` / `event_0000_ACCEPTED_ringdown.csv`, `quiet_0000_quiet.csv`.
+
+| Property | Value |
+|----------|-------|
+| **Values** | Any writable directory path (created if missing); unset disables the writer entirely |
+| **Default** | Unset |
+| **File** | `include/belt_capture.h`, `src/calibration/belt_capture.cpp`, `src/calibration/belt_listen_session.cpp` |
+
+```bash
+mkdir -p /tmp/belt-captures
+HELIX_BELT_CAPTURE_DIR=/tmp/belt-captures ./build/bin/helix-screen --test -vv
+# ... drive the belt tuner (ctl navigate belt_tension, or physically pluck on real hardware) ...
+ls /tmp/belt-captures
+```
+
+Each rendered file's header extends the existing `sample_rate_hz=` / `rms_over_noise_floor=` line
+with the verdict fields (`verdict=`, `onset_rise=`, `decay_end_ratio=`, `harmonic_concentration=`,
+`estimate_hz=`, `median_hz=`) rather than inventing a second header line, so an old and a new
+capture still parse identically "by eye". A field never evaluated on that event's path (e.g.
+`harmonic_concentration` on a strike rejected before pitch estimation ran) renders as `n/a`, not a
+misleading `0`.
+
+To see a capture rendered back in the live panel — confirming the spectrum and its peak-frequency
+label actually draw, not just that the file parses — set the `bt_replay_path` subject on a running
+instance:
+
+```bash
+./build/bin/helix-screen ctl set bt_replay_path /tmp/belt-captures/event_0000_ACCEPTED_ringdown.csv
+```
+
+> **Setting the same path twice is a no-op.** The replay runs from a string-subject
+> observer, and LVGL does not notify observers when the value written equals the value
+> already there, so a second `ctl set` with an identical path never reaches
+> `replay_capture()` and the panel simply keeps drawing what it drew before. To replay
+> the same file again, set the subject to `""` first, or alternate between two paths.
+
+The panel's `bt_target_freq` and its estimated-frequency tick are driven by the span the
+panel currently holds, which is `TARGET_SPAN_MM` unless a live session already parked. A
+capture taken at a different span is searched in the wrong harmonic window; that is
+deliberate (this is a diagnostic replay, not a file importer) and shows up immediately as
+an implausible peak label.
 
 ### `HELIX_HOT_RELOAD`
 
@@ -1855,12 +2076,17 @@ Launcher-only knobs for splash handling, scheduling priority, and boot-time resp
 |----------|-------------|---------|
 | `HELIX_NO_SPLASH` | `1` disables the splash entirely — no `--splash-pid`, no `--splash-bin`, no heartbeat write. For debugging. | `0` |
 | `HELIX_NICE` | Nice value applied to the launcher (children inherit it) when co-hosted with Klipper/Moonraker. `0` disables the renice. | `10` |
+| `HELIX_OOM_SCORE_ADJ` | `oom_score_adj` that `helix-screen` applies to itself when co-hosted with Klipper/Moonraker, so the OOM killer takes the UI instead of Klipper. `0` disables. Clamped to the kernel's `[-1000, 1000]`. | `300` |
 | `HELIX_BOOT_RESPAWN_MAX` | Max boot-time respawns after an early death. `0` disables the self-heal. | `0` (disabled) |
 | `HELIX_BOOT_RESPAWN_WINDOW` | Seconds after launch within which a death counts as "lost the boot race" rather than a deliberate quit. | `25` |
 | `HELIX_BOOT_RESPAWN_DELAY` | Seconds to wait before each respawn. | `3` |
 
 **Usage Notes:**
 - The renice only happens when `helix_klipper_co_hosted` is true — a standalone display (remote Sonic Pad, dev workstation, kiosk pointed at a network printer) is never deprioritized. Raising nice is unprivileged, so it works as the non-root service user.
+- `helix_klipper_co_hosted` reads `/proc/<pid>/cmdline` directly rather than calling `pgrep`. `pgrep` is absent entirely on some BusyBox rootfs — Forge-X on the AD5M ships none — and the old socket fallback checked only `/tmp/klippy_uds` and `/tmp/moonraker.sock`, which Forge-X does not use (its klippy socket is `/tmp/uds`). Both probes missed there, so the UI ran at nice 0 against Klipper on exactly the boards this protects. `HELIX_PROC_ROOT` overrides the scan root for tests.
+- The co-host patterns match the klippy.py and moonraker.py script names, plus `moonraker-env` and `-m moonraker`. They are deliberately narrow: a bare `moonraker` would also match a standalone kiosk started as `helix-screen --moonraker ws://host:7125`, which must stay at nice 0.
+- `HELIX_OOM_SCORE_ADJ` is **exported** by the launcher, not applied by it. `oom_score_adj` is inherited across `fork` and preserved across `exec`, so setting it in the launcher would mark the launcher shell and `helix-watchdog` too — and killing the watchdog is what stops `helix-screen` from coming back. `helix-screen` writes it to `/proc/self/oom_score_adj` instead. Raising the value is unprivileged; only lowering it below 0 needs `CAP_SYS_RESOURCE`.
+- Measured on an AD5M (110 MB total, Forge-X 1.4.0): every process sat at `oom_score_adj` 0, leaving the OOM kill order Moonraker (score 156), Klipper (92), `helix-screen` (69) — exactly backwards, since `helix-screen` is the only one with a supervisor behind it.
 - The boot-respawn self-heal exists for firmwares that send `helix-screen` a single SIGTERM during a busy boot. `helix-screen` handles SIGTERM with a fast `_exit(0)` expecting a supervisor to restart it — on an unsupervised SysV boot (no `helix-watchdog`; BusyBox init does not respawn S99 children) that one signal is permanent. On the Snapmaker U1 that also strands the device off-network, since `helix-screen` owns the WiFi association.
 - A boot-time SIGTERM and a deliberate user quit both exit 0, so they are told apart by **uptime**: a process that dies inside `HELIX_BOOT_RESPAWN_WINDOW` seconds of launch is presumed to have lost the boot race. Opted into by the Snapmaker U1 platform hook.
 - A real `init stop` kills the launcher itself (its cleanup trap sets `HELIX_SHUTTING_DOWN`), so the respawn loop never fires for an intentional stop.

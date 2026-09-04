@@ -72,23 +72,6 @@ std::string strip_version_prefix(const std::string& tag) {
 }
 
 /**
- * @brief Determine if an update is available
- *
- * Returns true if latest > current (newer version available)
- * Returns false if latest <= current (up to date or ahead)
- */
-bool is_update_available(const std::string& current_version, const std::string& latest_version) {
-    auto current = parse_version(current_version);
-    auto latest = parse_version(latest_version);
-
-    if (!current || !latest) {
-        return false; // Can't determine, assume no update
-    }
-
-    return *latest > *current;
-}
-
-/**
  * @brief Parse ReleaseInfo from GitHub API JSON response
  *
  * Expected JSON format:
@@ -162,36 +145,13 @@ ParsedRelease parse_github_release(const std::string& json_str) {
 } // anonymous namespace
 
 // ============================================================================
-// Version Comparison for Update Detection
+// Version Parsing Behind Update Detection
 // ============================================================================
 
-TEST_CASE("Version comparison for update detection", "[update_checker][version]") {
-    SECTION("update available when latest > current") {
-        // Minor version bump
-        REQUIRE(is_update_available("1.0.0", "1.1.0"));
-        // Patch version bump
-        REQUIRE(is_update_available("1.0.0", "1.0.1"));
-        // Major version bump
-        REQUIRE(is_update_available("1.0.0", "2.0.0"));
-        // Multiple component differences
-        REQUIRE(is_update_available("1.2.3", "1.2.4"));
-        REQUIRE(is_update_available("1.2.3", "1.3.0"));
-        REQUIRE(is_update_available("1.2.3", "2.0.0"));
-    }
-
-    SECTION("no update when versions are equal") {
-        REQUIRE_FALSE(is_update_available("1.0.0", "1.0.0"));
-        REQUIRE_FALSE(is_update_available("2.5.3", "2.5.3"));
-        REQUIRE_FALSE(is_update_available("0.0.1", "0.0.1"));
-    }
-
-    SECTION("no update when current is ahead (don't downgrade)") {
-        // Current is newer than remote (development build scenario)
-        REQUIRE_FALSE(is_update_available("1.1.0", "1.0.0"));
-        REQUIRE_FALSE(is_update_available("2.0.0", "1.9.9"));
-        REQUIRE_FALSE(is_update_available("1.0.1", "1.0.0"));
-    }
-
+// The three-way update rule lives in compare_channel_version() and is pinned
+// against that shipped function at the bottom of this file. What remains here
+// is the parse_version behaviour the rule is built on.
+TEST_CASE("Version parsing semantics update detection rests on", "[update_checker][version]") {
     SECTION("handles v prefix in version strings") {
         // parse_version already handles v prefix
         auto v1 = parse_version("v1.0.0");
@@ -209,21 +169,6 @@ TEST_CASE("Version comparison for update detection", "[update_checker][version]"
         REQUIRE(release.has_value());
         // Both parse to 1.0.0, so they're equal
         REQUIRE(*beta == *release);
-    }
-
-    SECTION("pre-release to release is NOT an update (same base version)") {
-        // v1.0.0-beta -> v1.0.0 should NOT be an update
-        // (pre-release suffix is stripped, versions are equal)
-        REQUIRE_FALSE(is_update_available("1.0.0-beta", "1.0.0"));
-        REQUIRE_FALSE(is_update_available("1.0.0", "1.0.0-beta"));
-    }
-
-    SECTION("invalid version strings return no update") {
-        REQUIRE_FALSE(is_update_available("", "1.0.0"));
-        REQUIRE_FALSE(is_update_available("1.0.0", ""));
-        REQUIRE_FALSE(is_update_available("invalid", "1.0.0"));
-        REQUIRE_FALSE(is_update_available("1.0.0", "invalid"));
-        REQUIRE_FALSE(is_update_available("", ""));
     }
 }
 
@@ -653,36 +598,6 @@ TEST_CASE("Real-world update scenarios", "[update_checker][scenarios]") {
         REQUIRE(release.download_url.find("helixscreen-1.5.0-arm64.tar.gz") != std::string::npos);
         REQUIRE(release.release_notes.find("Auto-update support") != std::string::npos);
     }
-
-    SECTION("update from 1.4.0 to 1.5.0") {
-        const std::string current = "1.4.0";
-        const std::string latest = "1.5.0";
-
-        REQUIRE(is_update_available(current, latest));
-
-        // Verify version comparison logic
-        auto current_v = parse_version(current);
-        auto latest_v = parse_version(latest);
-        REQUIRE(current_v.has_value());
-        REQUIRE(latest_v.has_value());
-        REQUIRE(latest_v->minor == current_v->minor + 1);
-    }
-
-    SECTION("no update when running development build ahead of release") {
-        // Developer might be on 1.6.0-dev while latest release is 1.5.0
-        const std::string current = "1.6.0";
-        const std::string latest = "1.5.0";
-
-        REQUIRE_FALSE(is_update_available(current, latest));
-    }
-
-    SECTION("update available for security patch") {
-        // Security patches bump patch version
-        const std::string current = "1.5.0";
-        const std::string latest = "1.5.1";
-
-        REQUIRE(is_update_available(current, latest));
-    }
 }
 
 // ============================================================================
@@ -690,18 +605,6 @@ TEST_CASE("Real-world update scenarios", "[update_checker][scenarios]") {
 // ============================================================================
 
 TEST_CASE("Version edge cases", "[update_checker][edge]") {
-    SECTION("major version zero (0.x.x)") {
-        // Pre-1.0 versions should still compare correctly
-        REQUIRE(is_update_available("0.1.0", "0.2.0"));
-        REQUIRE(is_update_available("0.9.9", "1.0.0"));
-        REQUIRE_FALSE(is_update_available("0.5.0", "0.5.0"));
-    }
-
-    SECTION("large version numbers") {
-        REQUIRE(is_update_available("1.0.0", "100.0.0"));
-        REQUIRE(is_update_available("99.99.99", "100.0.0"));
-    }
-
     SECTION("version with build metadata") {
         // Build metadata should be ignored
         auto v1 = parse_version("1.0.0+build.123");
@@ -1689,6 +1592,51 @@ TEST_CASE("get_platform_key matches compiled binary architecture",
 #endif
 }
 
+TEST_CASE("mips_runtime_platform_key classifies an AD5X mod layout as ad5x, not k1",
+          "[update_checker][platform]") {
+    // The mips binary ships for K1 and AD5X alike, so the split is a runtime
+    // question. A Forge-X rig carries none of the ZMOD markers (no /ZMOD, no
+    // /usr/prog, and no /usr/data inside the chroot) — only the mod git tree —
+    // so the classification must ask the same layout question the launcher and
+    // log collector ask, or the rig self-updates from K1 builds. Layouts are
+    // built under a temp root (the probe_root seam); the real / is never
+    // touched. Both spellings of the mod tree count: the chroot binds
+    // /usr/data at /opt, so exactly one is reachable per side.
+    SECTION("Forge-X chroot spelling (/opt/config/mod) -> ad5x") {
+        std::string root = make_temp_dir("helix_mips_fx");
+        std::filesystem::create_directories(root + "/opt/config/mod/.shell");
+        create_file(root + "/opt/config/mod/.shell/platform.sh", "#!/bin/sh\n");
+        REQUIRE(UpdateChecker::mips_runtime_platform_key(root) == "ad5x");
+        remove_dir(root);
+    }
+    SECTION("Forge-X host-side spelling (/usr/data/config/mod) -> ad5x") {
+        std::string root = make_temp_dir("helix_mips_fxh");
+        std::filesystem::create_directories(root + "/usr/data/config/mod/.shell");
+        create_file(root + "/usr/data/config/mod/.shell/platform.sh", "#!/bin/sh\n");
+        REQUIRE(UpdateChecker::mips_runtime_platform_key(root) == "ad5x");
+        remove_dir(root);
+    }
+    SECTION("ZMOD marker file -> ad5x") {
+        std::string root = make_temp_dir("helix_mips_zmod");
+        std::filesystem::create_directories(root);
+        create_file(root + "/ZMOD", "marker\n");
+        REQUIRE(UpdateChecker::mips_runtime_platform_key(root) == "ad5x");
+        remove_dir(root);
+    }
+    SECTION("FlashForge /usr/prog dir -> ad5x") {
+        std::string root = make_temp_dir("helix_mips_prog");
+        std::filesystem::create_directories(root + "/usr/prog");
+        REQUIRE(UpdateChecker::mips_runtime_platform_key(root) == "ad5x");
+        remove_dir(root);
+    }
+    SECTION("plain layout (K1) -> k1") {
+        std::string root = make_temp_dir("helix_mips_plain");
+        std::filesystem::create_directories(root);
+        REQUIRE(UpdateChecker::mips_runtime_platform_key(root) == "k1");
+        remove_dir(root);
+    }
+}
+
 TEST_CASE("get_platform_display_name returns non-empty string for all known platforms",
           "[update_checker][platform]") {
     // Mirror the known_platforms list from "get_platform_key returns a known platform".
@@ -2284,6 +2232,8 @@ TEST_CASE("compare_channel_version: channel ahead is an ordinary update",
     CHECK(compare_channel_version("1.0.0", "1.0.1") == ChannelVersionRelation::Newer);
     CHECK(compare_channel_version("1.0.0", "2.0.0") == ChannelVersionRelation::Newer);
     CHECK(compare_channel_version("0.99.111", "1.0.0") == ChannelVersionRelation::Newer);
+    // Components are ordered numerically, not lexicographically ("99" > "100").
+    CHECK(compare_channel_version("99.99.99", "100.0.0") == ChannelVersionRelation::Newer);
 }
 
 TEST_CASE("compare_channel_version: channel behind is reported, not swallowed",
@@ -2298,6 +2248,8 @@ TEST_CASE("compare_channel_version: equal versions are Same, not Newer or Older"
           "[update_checker][version][channel]") {
     CHECK(compare_channel_version("1.0.0", "1.0.0") == ChannelVersionRelation::Same);
     CHECK(compare_channel_version("2.5.3", "2.5.3") == ChannelVersionRelation::Same);
+    // Pre-1.0 versions, which is the entire shipped history so far.
+    CHECK(compare_channel_version("0.0.1", "0.0.1") == ChannelVersionRelation::Same);
 }
 
 TEST_CASE("compare_channel_version: unparseable versions do nothing",
@@ -2307,6 +2259,10 @@ TEST_CASE("compare_channel_version: unparseable versions do nothing",
     CHECK(compare_channel_version("1.0.0", "") == ChannelVersionRelation::Unknown);
     CHECK(compare_channel_version("", "1.0.0") == ChannelVersionRelation::Unknown);
     CHECK(compare_channel_version("1.0.0", "not-a-version") == ChannelVersionRelation::Unknown);
+    // Garbled on the installed side too: a corrupt version.h must not offer a
+    // "downgrade" to whatever the channel happens to serve.
+    CHECK(compare_channel_version("invalid", "1.0.0") == ChannelVersionRelation::Unknown);
+    CHECK(compare_channel_version("", "") == ChannelVersionRelation::Unknown);
 }
 
 TEST_CASE("compare_channel_version: prerelease suffixes are still discarded",
@@ -2317,6 +2273,9 @@ TEST_CASE("compare_channel_version: prerelease suffixes are still discarded",
     // RELEASE_CHANNEL file and use plain monotonic versions instead.
     CHECK(compare_channel_version("1.1.0-dev1", "1.1.0-dev2") == ChannelVersionRelation::Same);
     CHECK(compare_channel_version("1.1.0", "1.1.0-rc.1") == ChannelVersionRelation::Same);
+    // And with the suffix on the installed side: a beta build is not offered
+    // the plain release of the same x.y.z as an update.
+    CHECK(compare_channel_version("1.0.0-beta", "1.0.0") == ChannelVersionRelation::Same);
 }
 
 TEST_CASE("ReleaseInfo::is_downgrade defaults to false", "[update_checker][channel]") {

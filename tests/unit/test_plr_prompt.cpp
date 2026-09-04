@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Phase 2 tests for the power-loss-recovery UI layer. The connect-time offer

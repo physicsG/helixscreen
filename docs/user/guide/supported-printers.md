@@ -12,7 +12,7 @@ This page is the detailed breakdown of what actually works on those specially-su
 
 **2. Your printer is auto-detected.** The first-run setup wizard identifies your printer from a database of 90+ models — filling in the right name, image, bed size, probe type, and preset options automatically. The **printer type** this sets drives features and calibration dialogs; the image picker in Printer Manager is cosmetic only. When detection isn't confident enough to commit (best guess under 85%), no type is saved and the wizard's **Printer Setup: Identity** step has you pick your model by hand instead.
 
-**Wrong model picked? It's a one-tap fix in Printer Manager.** The model row on the printer's Printer Manager card (tap the printer image on the Home panel) opens the same model picker the wizard's identity step uses — pick your model and it applies on the spot, no re-setup needed. HelixScreen also watches for this itself: if the saved type stops matching what detection finds on the printer, you're asked once whether to **Re-identify** (re-run the identity step) or **Keep current**. Re-adding the printer or re-running the wizard via Factory Reset (which wipes settings) is only needed for edge cases — see [Wrong printer model identified](../TROUBLESHOOTING.md#wrong-printer-model-identified).
+**Wrong model picked? It's a one-tap fix in Printer Manager.** The model row on the printer's Printer Manager card (tap the printer image on the Home panel) opens the same model picker the wizard's identity step uses — pick your model and it applies on the spot, no re-setup needed. HelixScreen also watches for this itself: if the saved type stops matching what detection finds on the printer, you're asked once whether to **Choose Model** (opens the same picker) or **Keep current**. Re-adding the printer or re-running the wizard via Factory Reset (which wipes settings) is only needed for edge cases — see [Wrong printer model identified](../TROUBLESHOOTING.md#wrong-printer-model-identified).
 
 ![Printer Manager identity card — the printer model row with its pencil](../../images/screenshot-model-row.png)
 ![The model picker the row opens](../../images/screenshot-type-picker.png)
@@ -137,7 +137,7 @@ A true 4-toolhead changer, running on the U1's built-in 3.5" screen. Each of the
 
 **Requirements:** SSH access — either stock firmware 1.2+ (via its **Root access** option) or PAXX Extended Firmware (SSH on by default). Reinstall after any firmware update. See [Installation → Snapmaker U1](../INSTALL.md#snapmaker-u1).
 
-**Status:** Tested (on PAXX 1.2.x–1.4.x; stock-firmware support is newly added — testers wanted).
+**Status:** Tested on PAXX 1.2.x–1.4.x. The stock-firmware path is unverified on a real stock device — testers wanted.
 
 > **Good to know:** The U1's 480×320 display is the smallest resolution HelixScreen supports; a few panels have known layout tightness there. Physical cameras work normally. Writing filament data back to RFID tags works only on PAXX firmware.
 

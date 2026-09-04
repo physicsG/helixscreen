@@ -21,7 +21,6 @@
 #include "panel_widget_manager.h"
 #include "runtime_config.h"
 #include "safety_settings_manager.h"
-#include "src/ui/panel_widgets/print_status_widget.h"
 #include "system_settings_manager.h"
 #include "test_helpers/config_test_access.h"
 #include "test_helpers/emergency_stop_test_access.h"
@@ -53,6 +52,20 @@ struct ForceDummyAudioDriver {
     }
 };
 const ForceDummyAudioDriver g_force_dummy_audio_driver;
+
+// Force SDL's dummy VIDEO driver too. No test initializes SDL video today (the
+// only SDL_Init in the test link is AUDIO, in SDLSoundBackend), so this changes
+// no current behavior. It enforces that invariant: the first test that does
+// reach display creation (DisplayBackendSDL -> lv_sdl_window_create) would
+// otherwise open a real "HelixScreen" window on whatever desktop the run lands
+// on, a behavior CI can never catch because its runners have no display
+// server. Same placement and escape hatch as the audio twin above.
+struct ForceDummyVideoDriver {
+    ForceDummyVideoDriver() {
+        ::setenv("SDL_VIDEODRIVER", "dummy", /*overwrite=*/0);
+    }
+};
+const ForceDummyVideoDriver g_force_dummy_video_driver;
 
 namespace fs = std::filesystem;
 
@@ -275,23 +288,13 @@ void HelixTestFixture::reset_all() {
     // Delete any tracked modal widgets and clear the modal stack.
     ModalStack::instance().clear();
 
-    // Destroy any lingering PrintStatusWidget::DetailedFormatter singleton.
-    // PrintStatusWidget's ctor eagerly creates s_formatter_ (needed before XML
-    // parse), and its dtor only decrements the refcount — by design, the
-    // formatter survives widget destruction so helix-xml's global scope keeps
-    // valid subject pointers in production. In tests that's a UAF trap:
-    // subsequent tests calling PrinterStateTestAccess::reset(ps) deinit the
-    // PrinterState subjects the formatter observes; lv_subject_deinit frees
-    // the observer nodes, leaving the formatter's ObserverGuards with
-    // dangling lv_observer_t* pointers. The next destructor that walks those
-    // guards crashes on macOS (libc++/libmalloc is stricter than glibc).
-    // Tearing the formatter down here — while the subjects it observes are
-    // still alive — closes the window. No-op when no formatter exists, which
-    // is the common case.
-    helix::PrintStatusWidget::destroy_formatter_for_test();
+    // PrintStatusWidget's DetailedFormatter used to be torn down here for the
+    // reason described below, and no longer needs to be: its PrinterState
+    // observers now carry that state's SubjectLifetime, so their guards learn the
+    // subjects were deinited rather than walking freed observer nodes.
 
-    // Tear down the PrintControlButtons singleton for the same reason as the
-    // formatter above. The controller persists across tests (it's a process
+    // Tear down the PrintControlButtons singleton, which still does need it.
+    // The controller persists across tests (it's a process
     // singleton) and observes the GLOBAL print_state_enum subject. A later test
     // calling PrinterStateTestAccess::reset(ps) — or process exit — deinits that
     // subject; lv_subject_deinit frees the observer node, leaving the

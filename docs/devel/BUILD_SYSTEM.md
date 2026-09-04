@@ -1809,7 +1809,7 @@ from `helix_version.h`; the macro is not visible anywhere else.
 #### FONT_TIERS
 
 Font faces are the largest single chunk of `.rodata`, so each target links only the
-tiers it can actually display. Legal values are `all` (the default, `mk/fonts.mk:107`)
+tiers it can actually display. Legal values are `all` (the default, `mk/fonts.mk`)
 or any subset of `micro tiny small medium large xlarge xxlarge`. Assignments live per
 target in `mk/cross.mk`:
 
@@ -1823,7 +1823,7 @@ target in `mk/cross.mk`:
 | `snapmaker-u1` | `tiny small` |
 | `cc1`, `yocto` | `micro tiny` |
 
-`HELIX_MAX_FONT_TIER` is derived from this (`mk/cross.mk:728-750`; `micro=0` …
+`HELIX_MAX_FONT_TIER` is derived from this (`mk/cross.mk`; `micro=0` …
 `xxlarge=6`). Two consumers read it: `theme_manager` uses it to distinguish an
 expected-missing font (pruned by tier) from an unexpected-missing one (a build bug),
 and `cjk_font_manager` uses it to pick its CJK face.
@@ -1832,6 +1832,13 @@ The consequence for layout work: a `<string>` token naming a face outside the
 target's tiers silently fails to register on that target, and the token falls back
 down the ladder. If you add a font token for a large tier, check it against the
 tier list of the smallest device that will run it.
+
+`FONTS_XXLARGE` additionally carries six faces above the authored ladder —
+`noto_sans_48/64`, `noto_sans_bold_48/64`, `noto_sans_light_32/40` — which exist only
+for the high-DPI UI scale factor to step into on phone-class panels. No printer target
+declares the `xxlarge` tier, so none of them links these (~11MB of `.rodata`). Android
+does not build through this Makefile at all: `android/app/jni/CMakeLists.txt` globs
+`assets/fonts/*.c` wholesale, so it picks them up without a tier declaration.
 
 ### Feature gates
 
@@ -1846,6 +1853,9 @@ tier list of the smallest device that will run it.
 | `HELIX_HAS_LABEL_PRINTER` | 1 | Label printer feature |
 | `HELIX_HAS_CFS` | 1 | CFS feature |
 | `HELIX_HAS_IFS` | 1 | IFS feature |
+| `HELIX_HAS_ACE` | 1 | ACE vendor backend (0 on non-Anker cross targets) |
+| `HELIX_HAS_QIDI` | 1 | QIDI Box vendor backend (0 on non-QIDI cross targets) |
+| `HELIX_HAS_SNAPMAKER` | 1 | SnapSwap vendor backend (0 except `snapmaker-u1`) |
 
 ### Linker flags by platform
 

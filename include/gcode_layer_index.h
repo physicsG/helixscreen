@@ -98,7 +98,7 @@ struct LayerIndexStats {
     float min_z{std::numeric_limits<float>::max()};
     float max_z{std::numeric_limits<float>::lowest()};
     /// Model XY extents, accumulated over extruding moves during the index scan
-    /// and filtered by is_excluded_from_bounds() exactly like the full-file
+    /// and filtered by is_auxiliary_geometry() exactly like the full-file
     /// parser's global_bounding_box. Empty (min > max) if no extrusion was seen.
     ///
     /// Before this existed, GCodeLayerRenderer::auto_fit() estimated XY bounds by
@@ -128,7 +128,7 @@ struct LayerIndexStats {
     double build_time_ms{0.0};  ///< Time to build index
     std::string filament_color; ///< First filament color hex from metadata (palette[0]; legacy)
     std::vector<std::string>
-        filament_palette;       ///< All filament colors from semicolon-separated metadata
+        filament_palette; ///< All filament colors from separator-delimited metadata (';' or ',')
     int initial_tool_index{-1}; ///< First T-command seen in the file (-1 = none)
     /// Every distinct tool the file changes to, accumulated in the same single
     /// pass that finds the layer boundaries. The scan already visits every line,
@@ -196,7 +196,12 @@ class GCodeLayerIndex {
      * @brief Get entry for a specific layer
      *
      * @param layer_index Zero-based layer index
-     * @return Layer entry, or invalid entry if out of range
+     * @return Layer entry, or an entry with byte_length == 0 if out of range.
+     *
+     * Callers MUST test is_valid() before reading any field. The out-of-range
+     * entry is zeroed throughout, and its zeroed start_x/y/z would seed a
+     * streaming parse at the origin — the stray-lines-from-(0,0) bug those
+     * fields exist to prevent.
      */
     StreamingLayerEntry get_entry(size_t layer_index) const;
 

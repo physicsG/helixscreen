@@ -36,7 +36,7 @@
         <lv_obj name="container_camera" width="100%" style_pad_all="0" scrollable="false">
           <bind_flag_if_eq subject="printer_has_webcam" flag="hidden" ref_value="0"/>
           <setting_action_row name="row_camera"
-                              label="Camera" label_tag="Camera" icon="video" description="View live camera feed"
+                              label="Camera" label_tag="Camera" icon="webcam" description="View live camera feed"
                               description_tag="View live camera feed" callback="on_camera_view_clicked">
             <!-- Hidden on the v1 (ESP32/K-Touch) cut — camera streaming is
                  compiled out (HELIX_HAS_CAMERA=0); printer_has_webcam alone

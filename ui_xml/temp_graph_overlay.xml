@@ -62,8 +62,12 @@
       <bind_state_if_not_eq subject="nav_buttons_enabled" state="disabled" ref_value="1"/>
 
       <!-- Left column: Chip row + Temperature Graph -->
+      <!-- scrollable="true" is a safety valve, not the design: in every
+           orientation/mode the column sizes to fit (the chart flexes, and the
+           portrait diagnostics card has a compact variant), so the scroll
+           range is 0 — the portrait chamber gate asserts exactly that. -->
       <lv_obj name="graph_outer_container"
-              style_pad_all="0" scrollable="false" style_border_opa="0" flex_flow="column" style_pad_gap="0">
+              style_pad_all="0" scrollable="true" style_border_opa="0" flex_flow="column" style_pad_gap="0">
         <!-- Width axis: inline cond= (not subject_expr) so this evaluates at
              view creation, after temp_graph_mode is registered. -->
         <bind_style_if name="tg_graph_full" cond="ui_is_portrait or temp_graph_mode eq 0"/>
@@ -76,11 +80,25 @@
                 scrollable="false" flex_flow="row_wrap" style_pad_gap="#space_xs" style_flex_cross_place="center">
           <!-- Chips populated programmatically in C++ -->
         </lv_obj>
-        <!-- Graph fills remaining space -->
+        <!-- Graph fills remaining space. No min_height floor: flex_grow gives
+             the chart whatever the chip row and (portrait chamber mode) the
+             compact diagnostics card leave behind, and the card is compact
+             precisely so that remainder stays a usable chart on the tightest
+             target (272x480). A floor large enough to matter would push the
+             card below a scroll — the failure this layout removed. -->
         <lv_obj name="graph_container"
                 width="100%" flex_grow="1" style_pad_all="0" scrollable="false" style_border_opa="0">
           <!-- Temperature graph created programmatically in C++ -->
         </lv_obj>
+        <!-- Chamber-heater diagnostics card — only when the matched backend
+             provides a diagnostics surface (external appliances, #1290) AND
+             the overlay is in chamber mode. Structural <if>: the whole card
+             is never built on printers without one, and the reactive cond
+             rebuilds it when the cached overlay is reopened in a different
+             mode (TempGraphOverlay::open re-seeds temp_graph_mode). -->
+        <if cond="printer_has_chamber_heater_diagnostics and temp_graph_mode eq 3">
+          <chamber_diagnostics_card/>
+        </if>
       </lv_obj>
 
       <!-- ════════════════════════════════════════════════════════════════ -->
@@ -411,22 +429,23 @@
                     style_flex_main_place="space_between" style_pad_gap="#space_xs">
               <bind_flag_if_eq subject="printer_has_chamber_heater" flag="hidden" ref_value="0"/>
               <ui_button name="chamber_preset_off"
-                         width="48%" text="Off" translation_tag="Off" variant="ghost" style_border_width="#border_width"
-                         style_border_color="#border" style_border_opa="255">
+                         width="48%" height="#button_height_tiny" text="Off" translation_tag="Off" variant="ghost"
+                         style_border_width="#border_width" style_border_color="#border" style_border_opa="255">
                 <event_cb trigger="clicked" callback="on_temp_graph_preset_clicked"/>
               </ui_button>
-              <ui_button name="chamber_preset_1" width="48%" text="40°C">
+              <ui_button name="chamber_preset_1" width="48%" height="#button_height_tiny" text="40°C">
                 <event_cb trigger="clicked" callback="on_temp_graph_preset_clicked"/>
               </ui_button>
-              <ui_button name="chamber_preset_2" width="48%" text="50°C">
+              <ui_button name="chamber_preset_2" width="48%" height="#button_height_tiny" text="50°C">
                 <event_cb trigger="clicked" callback="on_temp_graph_preset_clicked"/>
               </ui_button>
-              <ui_button name="chamber_preset_3" width="48%" text="60°C">
+              <ui_button name="chamber_preset_3" width="48%" height="#button_height_tiny" text="60°C">
                 <event_cb trigger="clicked" callback="on_temp_graph_preset_clicked"/>
               </ui_button>
             </lv_obj>
             <ui_button name="chamber_btn_custom"
-                       width="100%" text="Custom..." translation_tag="Custom..." variant="secondary">
+                       width="100%" height="#button_height_tiny" text="Custom..." translation_tag="Custom..."
+                       variant="secondary">
               <bind_flag_if_eq subject="printer_has_chamber_heater" flag="hidden" ref_value="0"/>
               <event_cb trigger="clicked" callback="on_temp_graph_custom_clicked"/>
             </ui_button>

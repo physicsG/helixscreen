@@ -201,6 +201,22 @@ for the flags). It is the single place subjects are written.
   then hands off to `AbortManager::start_abort()` on confirm. AbortManager owns
   its own progress UI.
 
+**Every cancel affordance confirms.** The Stop button is not the only way to end a
+print: the runout guidance dialog and the home "Filament Sensor" tile both offer
+**Cancel Print** while paused. Both route through the shared
+`dispatch_cancel_print()` (`src/ui/ui_resume_dispatch.cpp`), which raises its own
+confirmation before running the `Cancel` standard macro. This was not always true -
+the runout dialog cancelled unconfirmed while the Stop button asked, so one printer
+had a confirmed cancel and an unconfirmed one side by side. Keep any new cancel
+entry point on `dispatch_cancel_print()` rather than calling the macro directly, and
+the confirmation comes with it.
+
+Note the modal ordering that implies: the confirmation stacks *above* the runout
+guidance dialog, which is itself a modal. `RunoutGuidanceModal::on_tertiary()`
+deliberately does **not** hide on press - declining must return the user to the
+guidance dialog with Load/Unload/Purge intact, so closing it is the confirmed
+branch's job.
+
 ---
 
 ## Optimistic Pending-Action State Machine

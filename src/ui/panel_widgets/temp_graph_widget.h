@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "ui_breakpoint.h"
 #include "ui_modal.h"
 
 #include "panel_widget.h"
@@ -49,8 +50,14 @@ class TempGraphWidget : public PanelWidget {
         return true;
     }
 
-    /// Map physical widget size (gutter-correct pixels) to feature flags
+    /// Map physical widget size (gutter-correct pixels) to feature flags,
+    /// judged against the size bands of the tier now on screen.
     static uint32_t features_for_size(int width_px, int height_px);
+
+    /// Same mapping against an explicit tier's bands. A measured extent only
+    /// means something next to the bands of the panel it was measured on, so a
+    /// caller reasoning about a panel other than the live one names its tier.
+    static uint32_t features_for_size(int width_px, int height_px, UiBreakpoint bp);
 
     /// Static click callback (XML-registered)
     static void on_temp_graph_widget_clicked(lv_event_t* e);

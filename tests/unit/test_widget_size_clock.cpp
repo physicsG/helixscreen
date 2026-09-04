@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -17,8 +18,8 @@
  * Four cases isolate the 4-way, 2-axis predicate. Each pairs the pixels for
  * one mode with a span that would produce a *different* mode under the old
  * colspan/rowspan predicate, so an implementation that still reads spans
- * fails here instead of passing by coincidence. The width>=W_WIDE,
- * height<H_TALL case is the one that actually separates mode 1 from mode 3:
+ * fails here instead of passing by coincidence. The width>=w_wide(),
+ * height<h_tall() case is the one that actually separates mode 1 from mode 3:
  * a predicate that checks width before height would wrongly land "large" on
  * a wide-but-short cell.
  */
@@ -63,7 +64,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "clock mode follows pixels on both axes, not
 
     // Mode 0 (compact, time only): both axes below threshold. Contradicting
     // span: 4x4 (old predicate: colspan>=3 && rowspan>=2 -> mode 3).
-    h.resize(4, 4, W_NORMAL - 1, H_TALL - 1);
+    h.resize(4, 4, w_normal() - 1, h_tall() - 1);
     CHECK(clock_size_mode() == 0);
     CHECK(lv_obj_get_style_text_font(time_label, LV_PART_MAIN) ==
           theme_manager_get_font("font_body"));
@@ -72,11 +73,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "clock mode follows pixels on both axes, not
     CHECK(lv_obj_has_flag(uptime_label, LV_OBJ_FLAG_HIDDEN));
 
     // Mode 1 (normal, time+date): height below threshold, width AT/OVER
-    // W_WIDE. Isolates "height below threshold" from the width axis --
+    // w_wide(). Isolates "height below threshold" from the width axis --
     // proves width alone cannot promote a short cell to mode 3.
     // Contradicting span: 1x1 (old predicate: colspan<=1 && rowspan<=1 ->
     // mode 0).
-    h.resize(1, 1, W_WIDE, H_TALL - 1);
+    h.resize(1, 1, w_wide(), h_tall() - 1);
     CHECK(clock_size_mode() == 1);
     CHECK(lv_obj_get_style_text_font(time_label, LV_PART_MAIN) ==
           theme_manager_get_font("font_heading"));
@@ -84,9 +85,9 @@ TEST_CASE_METHOD(LVGLUITestFixture, "clock mode follows pixels on both axes, not
           theme_manager_get_font("font_body"));
     CHECK(lv_obj_has_flag(uptime_label, LV_OBJ_FLAG_HIDDEN));
 
-    // Mode 2 (expanded): height at/over threshold, width below W_WIDE.
+    // Mode 2 (expanded): height at/over threshold, width below w_wide().
     // Contradicting span: 1x1 (old predicate -> mode 0).
-    h.resize(1, 1, W_NORMAL, H_TALL);
+    h.resize(1, 1, w_normal(), h_tall());
     CHECK(clock_size_mode() == 2);
     CHECK(lv_obj_get_style_text_font(time_label, LV_PART_MAIN) ==
           theme_manager_get_font("font_heading"));
@@ -96,7 +97,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "clock mode follows pixels on both axes, not
 
     // Mode 3 (large): both axes at/over threshold. Contradicting span: 1x1
     // (old predicate -> mode 0).
-    h.resize(1, 1, W_WIDE, H_TALL);
+    h.resize(1, 1, w_wide(), h_tall());
     CHECK(clock_size_mode() == 3);
     CHECK(lv_obj_get_style_text_font(time_label, LV_PART_MAIN) ==
           theme_manager_get_font("font_xl"));

@@ -214,6 +214,11 @@ class TipsManager {
      * @return Pointer to TipsManager instance
      */
     static TipsManager* get_instance();
+
+    /// Lets the content-fit sweep pin rotation to one known tip. The widget
+    /// shows a randomly chosen title, so a layout measurement taken against
+    /// whatever tip came up is a different measurement every run.
+    friend struct TipsManagerTestAccess;
 };
 
 } // namespace helix

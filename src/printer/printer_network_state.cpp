@@ -56,6 +56,11 @@ void PrinterNetworkState::init_subjects(bool register_xml) {
     // Used by power widgets that only need Moonraker, not Klipper
     INIT_SUBJECT_INT(moonraker_connection_state, 0, subjects_, register_xml);
 
+    // Remote-screen verdict: 1 when the connected Moonraker endpoint does not
+    // resolve to this host. Set on CONNECTED edges by MoonrakerManager; the
+    // UI-facing mirror of helix::is_moonraker_on_same_host().
+    INIT_SUBJECT_INT(moonraker_is_remote, 0, subjects_, register_xml);
+
     subjects_initialized_ = true;
     spdlog::trace("[PrinterNetworkState] Subjects initialized successfully");
 }
@@ -97,6 +102,15 @@ void PrinterNetworkState::set_printer_connection_state_internal(int state, const
     update_nav_buttons_enabled();
     spdlog::trace("[PrinterNetworkState] Printer connection state update complete, observers "
                   "should be notified");
+}
+
+void PrinterNetworkState::set_moonraker_is_remote_internal(bool remote) {
+    const int value = remote ? 1 : 0;
+    if (lv_subject_get_int(&moonraker_is_remote_) == value)
+        return;
+    spdlog::info("[PrinterNetworkState] moonraker_is_remote: {} ({} Moonraker)", value,
+                 remote ? "remote" : "same-host");
+    lv_subject_set_int(&moonraker_is_remote_, value);
 }
 
 void PrinterNetworkState::set_network_status(int status) {

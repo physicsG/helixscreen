@@ -3,49 +3,26 @@
 
 #include "ui_filament_runout_handler.h"
 
-#include "ui_error_reporting.h"
 #include "ui_nav_manager.h"
+#include "ui_resume_dispatch.h"
 #include "ui_update_queue.h"
 
 #include "ams_backend.h"
 #include "ams_state.h"
 #include "filament_op_dispatch.h"
-#include "filament_op_router.h"
+#include "filament_op_execute.h"
 #include "filament_sensor_manager.h"
 #include "i_moonraker_api.h"
-#include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "print_control_buttons.h"
 #include "print_lifecycle_state.h" // For PrintState enum
 #include "runtime_config.h"
-#include "standard_macros.h"
 
-#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <lvgl.h>
-#include <string>
 
 namespace helix::ui {
-
-namespace {
-
-/**
- * @brief Tier-3 purge fallback: extrude a fixed 50mm at 10mm/s. M83 = relative.
- *
- * TODO: this belongs beside filament_load_fallback_gcode() /
- * filament_unload_fallback_gcode() in filament_op_router.h — it is the same kind
- * of constant and FilamentPanel::execute_purge() open-codes its own copy of
- * exactly these two numbers. Left local only because that header was off-limits
- * for this change; move all three together and delete both copies.
- */
-std::string purge_fallback_gcode() {
-    constexpr int PURGE_FALLBACK_MM = 50;
-    constexpr int PURGE_FALLBACK_SPEED_MM_MIN = 10 * 60; // 10 mm/s → 600 mm/min
-    return fmt::format("M83\nG1 E{} F{}", PURGE_FALLBACK_MM, PURGE_FALLBACK_SPEED_MM_MIN);
-}
-
-} // namespace
 
 // ============================================================================
 // FilamentRunoutHandler Implementation
@@ -139,6 +116,11 @@ void FilamentRunoutHandler::show_runout_guidance_modal() {
 
     spdlog::info("[FilamentRunoutHandler] Showing runout guidance modal");
 
+    // This one IS a warning — say so rather than inheriting whatever the last
+    // surface to show this dialog left behind (the home tile's advisory tap
+    // otherwise latches the neutral icon on for the rest of the session).
+    runout_modal_.set_advisory(false);
+
     // Capability-aware layout: backends that feed filament to the nozzle as part
     // of resume (e.g. Snapmaker U1's AUTO_FEEDING) present Resume as the primary
     // action and demote manual Load/Unload/Purge. Set on the main thread (show
@@ -229,28 +211,20 @@ void FilamentRunoutHandler::show_runout_guidance_modal() {
             return;
 
         spdlog::info("[FilamentRunoutHandler] User chose to cancel print after runout");
-
-        // Check if cancel slot is available
-        const auto& cancel_info = StandardMacros::instance().get(StandardMacroSlot::Cancel);
-        if (cancel_info.is_empty()) {
-            spdlog::warn("[FilamentRunoutHandler] Cancel macro slot is empty");
-            NOTIFY_WARNING(lv_tr("Cancel macro not configured"));
-            return;
-        }
-
-        // Cancel the print via StandardMacros
-        if (api_) {
-            spdlog::info("[FilamentRunoutHandler] Using StandardMacros cancel: {}",
-                         cancel_info.get_macro());
-            StandardMacros::instance().execute(
-                StandardMacroSlot::Cancel, api_,
-                []() { spdlog::info("[FilamentRunoutHandler] Print cancelled after runout"); },
-                [](const MoonrakerError& err) {
-                    spdlog::error("[FilamentRunoutHandler] Failed to cancel print: {}",
-                                  err.message);
-                    NOTIFY_ERROR(lv_tr("Failed to cancel: {}"), err.user_message());
-                });
-        }
+        // Shared with the home Filament tile's paused modal, which offers the
+        // same button. Raises the same confirmation the Stop button does and
+        // sends nothing until the user accepts — this dialog used to cancel on
+        // the first tap, alone among the printer's three cancel affordances.
+        //
+        // This dialog stays up behind the confirmation so declining returns to
+        // it; closing it is the confirmed path's job. Without that the decline
+        // stranded the user: check_and_show_runout_guidance() will not re-show
+        // until runout_modal_shown_for_pause_ clears on a print-state change.
+        helix::ui::dispatch_cancel_print(api_, "[FilamentRunoutHandler]", [this, token]() {
+            if (token.expired())
+                return;
+            hide_runout_guidance_modal();
+        });
     });
 
     runout_modal_.set_on_unload_filament([this, token]() {
@@ -321,111 +295,21 @@ void FilamentRunoutHandler::show_runout_guidance_modal() {
 // ============================================================================
 
 void FilamentRunoutHandler::dispatch_load() {
-    // Same three-tier ladder as FilamentPanel and AmsOperationSidebar, via the
-    // shared plan_load(). Before this the runout dialog only ever reached the
-    // backend, and with no backend it navigated the user to the Filament panel —
-    // out from under the very dialog they were working in.
+    spdlog::info("[FilamentRunoutHandler] User chose to load filament after runout");
+
+    // Shared three-tier ladder (AMS backend, then the configured LOAD_FILAMENT
+    // macro, then raw gcode) via execute_filament_load() — the same execution
+    // this dialog and PrintStatusWidget now share. FilamentPanel and
+    // AmsOperationSidebar still answer the same plan_load() decision but each
+    // carry their own independent execution ladder — unconverted follow-up.
+    // Before this the runout dialog only ever reached the backend, and with no
+    // backend it navigated the user to the Filament panel — out from under the
+    // very dialog they were working in.
     AmsBackend* backend = AmsState::instance().get_backend();
     // The runout is on whatever lane is currently feeding, so that lane is the
-    // target — there is no slot picker under a runout dialog. Resolved before the
-    // caps because needs_unload_before_load() is answered per lane.
+    // target — there is no slot picker under a runout dialog.
     const int slot = backend ? backend->get_current_slot() : -1;
-
-    AmsSystemInfo sys;
-    helix::ui::BackendCaps caps;
-    if (backend) {
-        sys = backend->get_system_info();
-        caps.present = true;
-        caps.requires_slot_selection_for_load = backend->requires_slot_selection_for_load();
-        caps.needs_unload_before_load = backend->needs_unload_before_load(sys, slot);
-        caps.change_tool_completes_load = backend->change_tool_completes_load(slot);
-        caps.is_tool_changer = backend->get_type() == AmsType::TOOL_CHANGER;
-        // Distinct from !requires_slot_selection_for_load(): plan_load() needs to
-        // tell "bypass is suppressing the lane tier" apart from "this backend
-        // never wanted a slot", because a named lane wants opposite treatment.
-        caps.bypass_active = backend->is_bypass_active();
-    }
-
-    const auto& load_info = StandardMacros::instance().get(StandardMacroSlot::LoadFilament);
-    const helix::ui::FilamentOpPlan plan = helix::ui::plan_load(
-        sys, caps, slot, !load_info.is_empty(), load_info.get_source() == MacroSource::CONFIGURED);
-
-    switch (plan.tier) {
-    case helix::ui::FilamentTier::AmsBackend: {
-        spdlog::info("[FilamentRunoutHandler] User chose to load filament after runout (tool {})",
-                     slot);
-        AmsError err;
-        switch (plan.ams_call) {
-        case helix::ui::AmsCall::ChangeTool:
-            err = backend->change_tool(plan.ams_arg);
-            break;
-        case helix::ui::AmsCall::Load:
-        default:
-            err = backend->load_filament(plan.ams_arg);
-            break;
-        }
-        if (!err.success()) {
-            spdlog::error("[FilamentRunoutHandler] Load filament failed: {}", err.technical_msg);
-            helix::ui::notify_ams_error(err);
-        }
-        return;
-    }
-
-    case helix::ui::FilamentTier::Refused:
-        // AlreadyMounted: SELECT_TOOL on the carriage tool is a firmware no-op
-        // that would leave the dialog looking like it did something (9KRXZ62P).
-        // SelectSlot: no lane resolved, and the runout dialog has no picker.
-        // Either way say so and stay put — navigating away would tear down the
-        // dialog the user is standing in.
-        if (plan.refusal == helix::ui::FilamentRefusal::AlreadyMounted) {
-            spdlog::info("[FilamentRunoutHandler] Load refused — tool {} already mounted", slot);
-            NOTIFY_INFO(lv_tr("That tool is already loaded"));
-        } else {
-            spdlog::info("[FilamentRunoutHandler] Load refused — no slot resolved");
-            NOTIFY_WARNING(lv_tr("Select a filament slot to load"));
-        }
-        return;
-
-    case helix::ui::FilamentTier::Macro: {
-        if (!api_) {
-            return;
-        }
-        // ParamPolicy::Suppress: MacroParamModal would stack on top of the live
-        // runout dialog, whose own observers keep firing underneath it. Run with
-        // no parameters — the same shape the Unload/Purge buttons beside this one
-        // have always used.
-        const std::string macro_name = load_info.get_macro();
-        spdlog::info("[FilamentRunoutHandler] Using StandardMacros load: {}", macro_name);
-        helix::ui::dispatch_filament_macro(
-            macro_name, helix::ui::ParamPolicy::Suppress,
-            [this](const helix::MacroParamResult& result) {
-                StandardMacros::instance().execute(
-                    StandardMacroSlot::LoadFilament, api_, result.params,
-                    []() { spdlog::info("[FilamentRunoutHandler] Load filament started"); },
-                    [](const MoonrakerError& err) {
-                        spdlog::error("[FilamentRunoutHandler] Failed to load filament: {}",
-                                      err.message);
-                        NOTIFY_ERROR(lv_tr("Failed to load filament: {}"), err.user_message());
-                    });
-            });
-        return;
-    }
-
-    case helix::ui::FilamentTier::RawGcode:
-        if (!api_) {
-            return;
-        }
-        spdlog::info("[FilamentRunoutHandler] No backend and no load macro — raw gcode fallback");
-        api_->execute_gcode(
-            helix::ui::filament_load_fallback_gcode(),
-            []() { spdlog::info("[FilamentRunoutHandler] Load fallback gcode sent"); },
-            [](const MoonrakerError& err) {
-                spdlog::error("[FilamentRunoutHandler] Load fallback failed: {}", err.message);
-                NOTIFY_ERROR(lv_tr("Failed to load filament: {}"), err.user_message());
-            },
-            IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
-        return;
-    }
+    helix::ui::execute_filament_load(backend, slot, "[FilamentRunoutHandler]");
 }
 
 // ============================================================================
@@ -436,13 +320,6 @@ void FilamentRunoutHandler::dispatch_unload() {
     spdlog::info("[FilamentRunoutHandler] User chose to unload filament after runout");
 
     AmsBackend* backend = AmsState::instance().get_backend();
-
-    AmsSystemInfo sys;
-    helix::ui::BackendCaps caps;
-    if (backend) {
-        sys = backend->get_system_info();
-        caps.present = true;
-    }
 
     // The runout is on whatever lane is currently feeding, so that lane is the
     // target — there is no slot picker under a runout dialog.
@@ -460,71 +337,7 @@ void FilamentRunoutHandler::dispatch_unload() {
                                                     backend->get_system_info().filament_loaded);
     }
 
-    const auto& unload_info = StandardMacros::instance().get(StandardMacroSlot::UnloadFilament);
-    const helix::ui::FilamentOpPlan plan =
-        helix::ui::plan_unload(caps, slot, loaded, !unload_info.is_empty(),
-                               unload_info.get_source() == MacroSource::CONFIGURED);
-
-    switch (plan.tier) {
-    case helix::ui::FilamentTier::AmsBackend: {
-        // Pass plan.ams_arg, not -1: this dialog knows which lane ran out and
-        // says so, rather than letting the backend re-resolve current_slot (the
-        // U1 wrong-tool unload bug). Same choice FilamentPanel makes.
-        AmsError err = backend->unload_filament(plan.ams_arg);
-        if (!err.success()) {
-            spdlog::error("[FilamentRunoutHandler] Unload filament failed: {}", err.technical_msg);
-            helix::ui::notify_ams_error(err);
-        }
-        return;
-    }
-
-    case helix::ui::FilamentTier::Refused:
-        // NothingLoaded is plan_unload's only refusal. Say so and stay put —
-        // navigating away would tear down the dialog the user is standing in.
-        spdlog::info("[FilamentRunoutHandler] Unload refused — nothing loaded (slot={})", slot);
-        NOTIFY_WARNING(lv_tr("No filament loaded to unload"));
-        return;
-
-    case helix::ui::FilamentTier::Macro: {
-        if (!api_) {
-            return;
-        }
-        // ParamPolicy::Suppress: a MacroParamModal would stack on top of the
-        // live runout dialog. `run` therefore fires synchronously inside
-        // dispatch_filament_macro() and is never retained, so the bare `this`
-        // capture is safe (the outer button callback already checked the token).
-        const std::string macro_name = unload_info.get_macro();
-        spdlog::info("[FilamentRunoutHandler] Using StandardMacros unload: {}", macro_name);
-        helix::ui::dispatch_filament_macro(
-            macro_name, helix::ui::ParamPolicy::Suppress,
-            [this](const helix::MacroParamResult& result) {
-                StandardMacros::instance().execute(
-                    StandardMacroSlot::UnloadFilament, api_, result.params,
-                    []() { spdlog::info("[FilamentRunoutHandler] Unload filament started"); },
-                    [](const MoonrakerError& err) {
-                        spdlog::error("[FilamentRunoutHandler] Failed to unload filament: {}",
-                                      err.message);
-                        NOTIFY_ERROR(lv_tr("Failed to unload: {}"), err.user_message());
-                    });
-            });
-        return;
-    }
-
-    case helix::ui::FilamentTier::RawGcode:
-        if (!api_) {
-            return;
-        }
-        spdlog::info("[FilamentRunoutHandler] No backend and no unload macro — raw gcode fallback");
-        api_->execute_gcode(
-            helix::ui::filament_unload_fallback_gcode(),
-            []() { spdlog::info("[FilamentRunoutHandler] Unload fallback gcode sent"); },
-            [](const MoonrakerError& err) {
-                spdlog::error("[FilamentRunoutHandler] Unload fallback failed: {}", err.message);
-                NOTIFY_ERROR(lv_tr("Failed to unload: {}"), err.user_message());
-            },
-            IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
-        return;
-    }
+    helix::ui::execute_filament_unload(backend, slot, loaded, "[FilamentRunoutHandler]");
 }
 
 // ============================================================================
@@ -533,41 +346,10 @@ void FilamentRunoutHandler::dispatch_unload() {
 
 void FilamentRunoutHandler::dispatch_purge() {
     spdlog::info("[FilamentRunoutHandler] User chose to purge after runout");
-
-    if (!api_) {
-        return;
-    }
-
-    // Two tiers, not three: no AmsBackend exposes a purge entry point, so there
-    // is no plan_purge() to route through. The macro tier and the fallback are
-    // the whole ladder here.
-    const auto& purge_info = StandardMacros::instance().get(StandardMacroSlot::Purge);
-    if (!purge_info.is_empty()) {
-        const std::string macro_name = purge_info.get_macro();
-        spdlog::info("[FilamentRunoutHandler] Using StandardMacros purge: {}", macro_name);
-        helix::ui::dispatch_filament_macro(
-            macro_name, helix::ui::ParamPolicy::Suppress,
-            [this](const helix::MacroParamResult& result) {
-                StandardMacros::instance().execute(
-                    StandardMacroSlot::Purge, api_, result.params,
-                    []() { spdlog::info("[FilamentRunoutHandler] Purge started"); },
-                    [](const MoonrakerError& err) {
-                        spdlog::error("[FilamentRunoutHandler] Failed to purge: {}", err.message);
-                        NOTIFY_ERROR(lv_tr("Failed to purge: {}"), err.user_message());
-                    });
-            });
-        return;
-    }
-
-    spdlog::info("[FilamentRunoutHandler] No purge macro configured — raw gcode fallback");
-    api_->execute_gcode(
-        purge_fallback_gcode(),
-        []() { spdlog::info("[FilamentRunoutHandler] Purge fallback gcode sent"); },
-        [](const MoonrakerError& err) {
-            spdlog::error("[FilamentRunoutHandler] Purge fallback failed: {}", err.message);
-            NOTIFY_ERROR(lv_tr("Failed to purge: {}"), err.user_message());
-        },
-        IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
+    // Same shared two-tier ladder (configured PURGE macro, then raw gcode) the
+    // home Filament tile uses — execute_filament_purge() was extracted from the
+    // body that used to live here.
+    helix::ui::execute_filament_purge("[FilamentRunoutHandler]");
 }
 
 void FilamentRunoutHandler::hide_modal() {

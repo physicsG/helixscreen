@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -8,8 +9,8 @@
  * reading colspan/rowspan fails rather than passing by coincidence. Every
  * widget touches three objects on resize — the value label, the indicator's
  * icon, and the bottom label — and all three are asserted here, including
- * the narrow+tall case that isolates H_TALL's contribution to the icon font
- * from W_NORMAL's contribution to the text fonts.
+ * the narrow+tall case that isolates h_tall()'s contribution to the icon font
+ * from w_normal()'s contribution to the text fonts.
  */
 
 #include "ui_fonts.h"
@@ -43,22 +44,22 @@ TEST_CASE_METHOD(LVGLUITestFixture, "humidity value font follows width, not cols
     // Narrow pixels with a large colspan: everything must stay compact.
     // icon_font = (tall || wide) ? 32 : 24, so this also proves neither half
     // of the OR is stuck true.
-    h.resize(4, 4, W_NORMAL - 1, H_TALL - 1);
+    h.resize(4, 4, w_normal() - 1, h_tall() - 1);
     REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
     REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_24);
     REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
 
     // Narrow width, tall height, colspan/rowspan both 1: isolates `tall`.
     // A rowspan-reading implementation sees rowspan=1 and stays compact; only
-    // height_px >= H_TALL can flip the icon here. Text stays compact too —
+    // height_px >= h_tall() can flip the icon here. Text stays compact too —
     // label_token/value_token key off `wide` alone, not `tall`.
-    h.resize(1, 1, W_NORMAL - 1, H_TALL);
+    h.resize(1, 1, w_normal() - 1, h_tall());
     REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
     REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_32);
     REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
 
     // Wide pixels with colspan 1: everything must go wide.
-    h.resize(1, 1, W_NORMAL, H_TALL);
+    h.resize(1, 1, w_normal(), h_tall());
     REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_body"));
     REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_32);
     REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_body"));
@@ -79,19 +80,19 @@ TEST_CASE_METHOD(LVGLUITestFixture, "width_sensor value font follows width, not 
     lv_obj_t* label = lv_obj_get_child(h.root(), 1);
     REQUIRE(label != nullptr);
 
-    h.resize(4, 4, W_NORMAL - 1, H_TALL - 1);
+    h.resize(4, 4, w_normal() - 1, h_tall() - 1);
     REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
     REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_24);
     REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
 
     // Narrow width, tall height, colspan/rowspan both 1: isolates `tall` the
     // same way as the humidity case above.
-    h.resize(1, 1, W_NORMAL - 1, H_TALL);
+    h.resize(1, 1, w_normal() - 1, h_tall());
     REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
     REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_32);
     REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
 
-    h.resize(1, 1, W_NORMAL, H_TALL);
+    h.resize(1, 1, w_normal(), h_tall());
     REQUIRE(lv_obj_get_style_text_font(value, LV_PART_MAIN) == theme_manager_get_font("font_body"));
     REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_32);
     REQUIRE(lv_obj_get_style_text_font(label, LV_PART_MAIN) == theme_manager_get_font("font_body"));

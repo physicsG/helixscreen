@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Sweep: components whose ROOT receives a click handler in C++ must not have
 // decorative children that swallow the press. Plain <lv_obj> is CLICKABLE by

@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  Edit-mode gear on the Filament Sensor tile: picks which sensor role the tile
+  mirrors (Auto/Runout/Toolhead/Entry). Four fixed rows, so they are declared
+  here instead of built in C++ - see FilamentSensorWidget::SourcePicker.
+-->
+<component>
+  <!-- Full-screen backdrop overlay - tap to dismiss. ContextMenu finds the card
+       by the default menu_card_name() "context_menu", which is the root view name
+       inside context_menu_card.xml:45 - so do NOT set name= on the instance below,
+       the engine warns that it displaces the component's own name. -->
+  <view name="context_backdrop" extends="context_menu_backdrop">
+    <context_menu_card title="Sensor Source" title_tag="Sensor Source">
+      <filament_source_row label="Auto" value="0"/>
+      <filament_source_row label="Runout Sensor" value="1"/>
+      <filament_source_row label="Toolhead Sensor" value="2"/>
+      <filament_source_row label="Entry Sensor" value="3"/>
+    </context_menu_card>
+  </view>
+</component>

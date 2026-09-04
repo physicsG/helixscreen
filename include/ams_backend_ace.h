@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
+#if HELIX_HAS_ACE
 
 #include "ams_subscription_backend.h"
 #include "async_lifetime_guard.h"
@@ -146,9 +147,8 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     void clear_slot_override(int slot_index) override;
     AmsError set_tool_mapping(int tool_number, int slot_index) override;
 
-    // ACE has fixed 1:1 mapping (tools ARE slots), not configurable
-    [[nodiscard]] helix::printer::ToolMappingCapabilities
-    get_tool_mapping_capabilities() const override;
+    // ACE has fixed 1:1 mapping (tools ARE slots), not configurable — it
+    // declares RemapStrategy::None and owns no tool->slot table.
     [[nodiscard]] std::vector<int> get_tool_mapping() const override;
 
     // ========================================================================
@@ -416,3 +416,5 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     // writer/reader).
     std::unordered_map<int, SlotStatus> prev_slot_status_;
 };
+
+#endif // HELIX_HAS_ACE

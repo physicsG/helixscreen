@@ -64,6 +64,41 @@ load helpers
     }
 }
 
+@test "ad5m: sound enabled, tracker disabled (note fallback is not print-safe)" {
+    run make -n PLATFORM_TARGET=ad5m CROSS_COMPILE= CC=gcc CXX=g++ print-cxxflags
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q 'DHELIX_HAS_SOUND' || {
+        echo "Expected -DHELIX_HAS_SOUND in ad5m CXXFLAGS:"
+        echo "$output"
+        return 1
+    }
+    ! echo "$output" | grep -q 'DHELIX_HAS_TRACKER' || {
+        echo "Unexpected -DHELIX_HAS_TRACKER: supports_render_source() is false on the PWM backend, so tracker would run the set_voice note fallback on the un-demoted sequencer thread:"
+        echo "$output"
+        return 1
+    }
+    echo "$output" | grep -q 'DHELIX_PWM_AUTO_EXPORT' || {
+        echo "Expected -DHELIX_PWM_AUTO_EXPORT in ad5m CXXFLAGS (stock kernel ships pwm6 unexported):"
+        echo "$output"
+        return 1
+    }
+}
+
+@test "ad5x: tracker enabled for the jz PC-speaker path" {
+    run make -n PLATFORM_TARGET=ad5x CROSS_COMPILE= CC=gcc CXX=g++ print-cxxflags
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q 'DHELIX_HAS_TRACKER' || {
+        echo "Expected -DHELIX_HAS_TRACKER in ad5x CXXFLAGS (tracker rides the jz PC-speaker path - per-note buffers through the fx-pwm daemon, no PCM render loop):"
+        echo "$output"
+        return 1
+    }
+    ! echo "$output" | grep -q 'DHELIX_PWM_AUTO_EXPORT' || {
+        echo "Unexpected -DHELIX_PWM_AUTO_EXPORT (pwm6 function unverified on ad5x):"
+        echo "$output"
+        return 1
+    }
+}
+
 @test "ad5m-br: no libusb" {
     # Pass CROSS_COMPILE so the cross-target LDFLAGS branch fires and libusb
     # filter is evaluated meaningfully.

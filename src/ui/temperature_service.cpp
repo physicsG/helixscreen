@@ -206,6 +206,8 @@ TemperatureService::TemperatureService(PrinterState& printer_state, IMoonrakerAP
         {"on_heater_preset_clicked", on_heater_preset_clicked},
         {"on_heater_confirm_clicked", on_heater_confirm_clicked},
         {"on_heater_custom_clicked", on_heater_custom_clicked},
+        {"on_chamber_fault_reset_clicked", on_chamber_fault_reset_clicked},
+        {"on_chamber_filter_fan_clicked", on_chamber_filter_fan_clicked},
     });
 
     // Legacy callbacks (still needed for existing nozzle/bed XML until they're updated)
@@ -906,6 +908,34 @@ void TemperatureService::keypad_value_cb(float value, void* user_data) {
 
 // Static storage for keypad callback data (needed because LVGL holds raw pointers)
 static KeypadCallbackData s_keypad_data[helix::HEATER_TYPE_COUNT];
+
+// ============================================================================
+// XML event callbacks — chamber-heater diagnostics card (issue #1290)
+// ============================================================================
+// Both fire from the chamber-diagnostics card (components/
+// chamber_diagnostics_card.xml, instantiated by temp_graph_overlay) with no
+// instance user data, so they reach the controller through the same
+// app_globals registration production wires in SubjectInitializer.
+
+void TemperatureService::on_chamber_fault_reset_clicked(lv_event_t* /*e*/) {
+    if (auto* tc = get_temperature_controller()) {
+        tc->reset_chamber_fault();
+    } else {
+        spdlog::warn("[TempPanel] chamber fault reset clicked with no controller registered");
+    }
+}
+
+void TemperatureService::on_chamber_filter_fan_clicked(lv_event_t* /*e*/) {
+    auto* tc = get_temperature_controller();
+    if (!tc) {
+        spdlog::warn("[TempPanel] chamber filter-fan clicked with no controller registered");
+        return;
+    }
+    // Toggle: read the same subject the button's label reflects. A missing
+    // subject (state torn down mid-click) fails safe to "turn on".
+    lv_subject_t* on_subj = lv_xml_get_subject(nullptr, "chamber_filter_fan_on");
+    tc->set_chamber_filter_fan(!on_subj || lv_subject_get_int(on_subj) != 1);
+}
 
 void TemperatureService::on_heater_custom_clicked(lv_event_t* e) {
     auto* self = static_cast<TemperatureService*>(lv_event_get_user_data(e));

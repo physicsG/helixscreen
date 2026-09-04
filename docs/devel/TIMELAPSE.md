@@ -205,8 +205,11 @@ The timelapse settings overlay (Phase 1) was extended with video management capa
 | `companion_filename(video)` | Converts `video.mp4` → `video.thumb.jpg` |
 | `ffmpeg_extract_args(input, output)` | Builds ffmpeg command to extract first frame as JPEG |
 | `is_video_file(filename)` | Checks for `.mp4`, `.mkv`, `.avi` extensions |
-| `is_local_host(host)` | Detects localhost for local playback capability |
 | `build_player_args(player, path)` | Builds player-specific argument list |
+
+Local vs remote playback is decided by the `moonraker_is_remote` subject
+(`PrinterState::is_moonraker_remote()`) — the live websocket endpoint's verdict —
+not by a hostname check in the thumbnailer.
 
 ---
 
@@ -240,7 +243,7 @@ The timelapse settings overlay (Phase 1) was extended with video management capa
 | `ui_xml/timelapse_video_card.xml` | Individual video card component (thumbnail, gradient, labels) |
 | `include/timelapse_thumbnailer.h` | Thumbnail extraction and playback utilities |
 | `src/print/timelapse_thumbnailer.cpp` | Utility function implementations |
-| `tests/unit/test_timelapse_videos.cpp` | Playback argument and localhost detection tests |
+| `tests/unit/test_timelapse_videos.cpp` | Playback argument construction tests |
 | `include/ui_format_utils.h` | `format_short_date()` for smart date display |
 | `src/ui/locale_formats.cpp` | `format_localized_short_date()` with 4 locale patterns |
 | Archived timelapse design doc (no longer in-tree) | Future phases |

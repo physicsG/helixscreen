@@ -7,6 +7,7 @@
 #include "config.h"
 #include "data_root_resolver.h"
 #include "i_moonraker_client.h"
+#include "jz_pwm_sound_backend.h"
 #include "m300_sound_backend.h"
 #include "pwm_sound_backend.h"
 #include "runtime_config.h"
@@ -41,14 +42,47 @@ using namespace helix;
 // SoundManager singleton
 // ============================================================================
 
+namespace {
+
+/// True when sound is off via --no-sound or the /disable_sound setting — the
+/// state in which no backend may be installed or swapped in.
+bool sound_disabled() {
+    if (get_runtime_config()->disable_sound) {
+        return true;
+    }
+    Config* cfg = Config::get_instance();
+    return cfg && cfg->get<bool>("/disable_sound", false);
+}
+
+} // namespace
+
 SoundManager& SoundManager::instance() {
     static SoundManager instance;
     return instance;
 }
 
-void SoundManager::set_moonraker_client(IMoonrakerClient* client) {
+void SoundManager::tear_down_active_backend() {
+    if (sequencer_) {
+        sequencer_->shutdown();
+        sequencer_.reset();
+    }
+    backend_.reset();
+}
+
+void SoundManager::probe_and_install_host_backend() {
+    backend_ = create_backend();
+    if (backend_) {
+        finalize_backend_setup();
+        return;
+    }
+    spdlog::info("[SoundManager] No host audio backend; awaiting hardware discovery for M300 gate");
+    initialized_ = true;
+}
+
+void SoundManager::set_moonraker_client(IMoonrakerClient* client, bool host_recovery) {
     client_ = client;
-    spdlog::debug("[SoundManager] Moonraker client set: {}", client ? "connected" : "nullptr");
+    spdlog::debug("[SoundManager] Moonraker client set: {} (host_recovery={})",
+                  client ? "connected" : "nullptr", host_recovery);
 
     // If the client is being cleared (printer switch / app shutdown) and the
     // active backend is M300, drop it. The next printer's hardware discovery
@@ -57,11 +91,19 @@ void SoundManager::set_moonraker_client(IMoonrakerClient* client) {
     // resurrecting the "!! Unknown command:M300" feedback loop.
     if (!client && backend_ && backend_->needs_moonraker_client()) {
         spdlog::info("[SoundManager] Dropping M300 backend (client cleared)");
-        if (sequencer_) {
-            sequencer_->shutdown();
-            sequencer_.reset();
+        tear_down_active_backend();
+
+        // The dropped backend may have displaced the host backend picked at
+        // initialize() (the PWM takeover in try_install_m300_backend()):
+        // leaving backend_ null here keeps a modded AD5M silent until
+        // reboot, because its PWM backend was destroyed by the swap. Re-run
+        // the eager probe under the same disable checks initialize() uses;
+        // if the next printer also has an M300 handler, discovery swaps the
+        // channel again. Skipped for full app shutdown (host_recovery=false),
+        // where the manager is torn down moments later.
+        if (host_recovery && !sound_disabled()) {
+            probe_and_install_host_backend();
         }
-        backend_.reset();
     }
 }
 
@@ -71,20 +113,13 @@ void SoundManager::initialize() {
         return;
     }
 
-    // Check if sounds are disabled via CLI flag or persistent setting
-    auto* rtconfig = get_runtime_config();
-    if (rtconfig->disable_sound) {
-        spdlog::info("[SoundManager] Sound disabled via --no-sound, skipping initialization");
+    // Sounds off via CLI flag or persistent setting: nothing to initialize.
+    // Latch the flag so the later gates (try_install, recovery) see it too.
+    if (sound_disabled()) {
+        spdlog::info("[SoundManager] Sound disabled (--no-sound or /disable_sound), skipping "
+                     "initialization");
+        get_runtime_config()->disable_sound = true;
         return;
-    }
-    {
-        Config* cfg = Config::get_instance();
-        if (cfg && cfg->get<bool>("/disable_sound", false)) {
-            spdlog::info(
-                "[SoundManager] Sound disabled via settings.json, skipping initialization");
-            rtconfig->disable_sound = true;
-            return;
-        }
     }
 
     // Create the best available host-side backend (SDL/ALSA/PWM). M300 is
@@ -93,35 +128,34 @@ void SoundManager::initialize() {
     // for any Moonraker-connected printer would let the
     // M300 → "!! Unknown command:M300" → error toast → error_tone → M300
     // feedback loop fire on any host where local audio fails.
-    backend_ = create_backend();
-    if (!backend_) {
-        // Mark initialized so try_install_m300_backend() can still install
-        // an M300 backend later when discovery confirms the printer has a
-        // beeper. Without this, has_backend() would gate on initialized_
-        // and miss the late install.
-        initialized_ = true;
-        spdlog::info(
-            "[SoundManager] No host audio backend; awaiting hardware discovery for M300 gate");
-        return;
-    }
-
-    finalize_backend_setup();
+    probe_and_install_host_backend();
 }
 
-void SoundManager::try_install_m300_backend() {
-    if (backend_) {
+void SoundManager::try_install_m300_backend(bool detected_m300_handler) {
+    // PWM is the one backend M300 may displace: on a modded AD5M both
+    // HelixScreen's PWM sysfs backend and klippy's tone_player write the
+    // same buzzer channel, so keeping PWM installed means the two fight
+    // forever. Real detection only — a forced speaker override says the
+    // user wants sound, not that klippy answers M300, and swapping on that
+    // signal alone would aim M300 at printers that reject it (the
+    // "!! Unknown command:M300" feedback loop). SDL/ALSA/JzPwm are real
+    // host audio and are never displaced.
+    const bool displace_pwm =
+        backend_ && detected_m300_handler && backend_->owns_sysfs_pwm_channel();
+    if (backend_ && !displace_pwm) {
         return; // Real audio already winning — don't displace it.
     }
     if (!client_) {
         spdlog::debug("[SoundManager] try_install_m300_backend: no Moonraker client");
+        return; // PWM (if installed) stays — nothing to send M300 through
+    }
+    if (sound_disabled()) {
         return;
     }
-    if (get_runtime_config()->disable_sound) {
-        return;
-    }
-    Config* cfg = Config::get_instance();
-    if (cfg && cfg->get<bool>("/disable_sound", false)) {
-        return;
+
+    if (displace_pwm) {
+        spdlog::info("[SoundManager] Klippy owns M300 — replacing PWM sysfs backend with M300");
+        tear_down_active_backend();
     }
 
     spdlog::info("[SoundManager] Installing M300 backend (Klipper beeper confirmed)");
@@ -174,11 +208,7 @@ bool SoundManager::set_output_device(const std::string& pcm) {
     }
 
     // Tear down sequencer (joins its thread) and the current backend.
-    if (sequencer_) {
-        sequencer_->shutdown();
-        sequencer_.reset();
-    }
-    backend_.reset();
+    tear_down_active_backend();
 
     // Open the requested device; fall back to "default" on failure.
     auto alsa = std::make_shared<ALSASoundBackend>();
@@ -214,12 +244,7 @@ void SoundManager::shutdown() {
     stop_tracker();
 #endif
 
-    if (sequencer_) {
-        sequencer_->shutdown();
-        sequencer_.reset();
-    }
-
-    backend_.reset();
+    tear_down_active_backend();
     initialized_ = false;
 
     spdlog::info("[SoundManager] Shutdown complete");
@@ -411,6 +436,21 @@ std::shared_ptr<SoundBackend> SoundManager::create_backend() {
     }
 #endif
 
+#ifdef HELIX_HAS_JZ_PWM
+    // AD5X piezo via the jz_pwm DMA engine, exec'd through fx-pwm. Probed
+    // at runtime, not just gated: /dev/jz_pwm and the fx-pwm binary are
+    // both present only on the AD5X rig install, so other machines fall
+    // through and remote-UI installs keep the M300 path below.
+    if (JzPwmSoundBackend::available()) {
+        auto jz_backend = std::make_shared<JzPwmSoundBackend>();
+        if (jz_backend->initialize()) {
+            spdlog::info("[SoundManager] Using JzPwm DMA backend (fx-pwm)");
+            return jz_backend;
+        }
+    }
+    spdlog::debug("[SoundManager] JzPwm DMA not available, falling back");
+#endif
+
 #ifdef HELIX_HAS_PWM_SOUND
     // PWM sysfs buzzer. Gated per-platform, NOT probed everywhere: the probe is
     // "does /sys/class/pwm/pwmchip0 exist", which is true on boards that have a
@@ -493,6 +533,13 @@ void SoundManager::play_file(const std::string& path, SoundPriority priority) {
 
     // IMPORTANT: Clear external tick FIRST to prevent use-after-free on old tracker
     sequencer_->set_external_tick(nullptr);
+    // Same treatment for the backend render source: it still captures the OLD
+    // tracker, which the assignment below destroys. A null source parks the
+    // PWM render thread in its no-source poll and makes the ALSA/SDL audio
+    // callbacks skip tracker PCM — both safe states for the swap.
+    if (backend_->supports_render_source()) {
+        backend_->clear_render_source();
+    }
     if (tracker_) {
         tracker_->stop();
     }

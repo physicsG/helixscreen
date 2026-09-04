@@ -17,7 +17,6 @@
 #include "display_manager.h"
 #include "display_settings_manager.h"
 #include "filament_sensor_manager.h"
-#include "helix_plugin_installer.h"
 #include "host_identity.h"
 #include "hv/requests.h"
 #include "i_moonraker_api.h"
@@ -28,6 +27,7 @@
 #include "panel_widget_manager.h"
 #include "platform_capabilities.h"
 #include "printer_state.h"
+#include "screen_locality.h"
 #include "system/crash_handler.h"
 #include "system/crash_history.h"
 #include "system/update_checker.h"
@@ -1494,6 +1494,15 @@ nlohmann::json TelemetryManager::build_session_event() const {
         if (caps.cpu_cores > 0) {
             host["cpu_cores"] = caps.cpu_cores;
         }
+    }
+
+    // Where the display runs relative to the printer. Derived from the same
+    // host-identity check that gates every klippy-UDS feature, so the metric
+    // and the gate can never disagree.
+    {
+        auto* cfg = Config::get_instance();
+        const std::string moonraker_host = cfg->get<std::string>(cfg->df() + "moonraker_host", "");
+        host["screen_locality"] = helix::screen_locality_for_host(moonraker_host);
     }
 
     // ---- printer & features sections (require discovery data) ----
@@ -3114,12 +3123,10 @@ void on_print_state_changed_for_telemetry(lv_observer_t* observer, lv_subject_t*
         }
     }
 
-    // RAW_PRINT_STATE_OK: terminal-outcome classification is about what the
-    // printer reported, and a preparing job that never confirms is retired by
-    // PrinterPrintState rather than ending here.
-    // Detect transitions from active (PRINTING/PAUSED) to terminal states
-    bool was_active = (s_telemetry_prev_state == PrintJobState::PRINTING ||
-                       s_telemetry_prev_state == PrintJobState::PAUSED);
+    // Terminal-outcome classification is about what the PRINTER reported, so the
+    // wire question is the right one: a preparing job that never confirms is
+    // retired by PrinterPrintState and must not emit an outcome event here.
+    bool was_active = printer_has_job(s_telemetry_prev_state);
     bool is_terminal = (current == PrintJobState::COMPLETE || current == PrintJobState::CANCELLED ||
                         current == PrintJobState::ERROR);
 

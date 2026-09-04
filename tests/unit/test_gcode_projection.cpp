@@ -1,8 +1,14 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "gcode_camera.h"
 #include "gcode_projection.h"
 
+#include <cmath>
+#include <fstream>
+#include <glm/gtc/matrix_transform.hpp>
+#include <limits>
+#include <string>
 #include <utility>
 
 #include "../catch_amalgamated.hpp"
@@ -451,4 +457,357 @@ TEST_CASE("compute_auto_fit - zero occlusion ignores shape entirely", "[gcode][p
         INFO("dz=" << dz);
         REQUIRE(fit.content_offset_y_percent == Approx(0.0f).margin(1e-6));
     }
+}
+
+// ============================================================================
+// THUMBNAIL-PARITY FRAMING — the print-file detail view
+//
+// The detail view shows the slicer's embedded thumbnail and swaps in the live
+// render once it has content. THUMBNAIL_PARITY frames that render the way the
+// thumbnail itself is framed — a square of the canvas's short side, lifted
+// 12% (the #preview_offset_y token), contain-fit — so the swap is not a jump
+// in size or position. The cases below pin that geometry on the real detail
+// card (368x390, the same numbers the occlusion cases above use).
+// ============================================================================
+
+namespace {
+
+/// The detail card's canvas, from the same measurement as the occlusion cases.
+constexpr int PARITY_CW = 368;
+constexpr int PARITY_CH = 390;
+
+/// A box whose FRONT projection has the aspect of the measured OrcaSlicer
+/// sample: 81.0% of the thumbnail frame tall, 70.3% wide. FRONT extents are
+/// range_x = (dx+dy)*COS_H and range_y = dz*COS_E + (dx+dy)*COS_H*SIN_E, so
+/// the height is solved from the target aspect.
+AABB orca_aspect_box() {
+    constexpr float target_aspect = 81.0f / 70.3f;
+    const float footprint = 50.0f + 50.0f; // dx + dy
+    const float dz = (target_aspect * footprint * projection::COS_H -
+                      footprint * projection::COS_H * projection::SIN_E) /
+                     projection::COS_E;
+    return solid(50.0f, 50.0f, dz);
+}
+
+/// Top of the parity frame in pixels: the square of the short side, centred,
+/// lifted by the thumbnail's -12% translate. Negative is expected — the
+/// thumbnail's own image top sits there.
+float parity_frame_top() {
+    const float side = std::min<float>(PARITY_CW, PARITY_CH);
+    return (PARITY_CH - side) * 0.5f - 0.12f * PARITY_CH;
+}
+
+/// Where the model's vertical centre lands: 55% of the frame height.
+float parity_model_center_y() {
+    const float side = std::min<float>(PARITY_CW, PARITY_CH);
+    return parity_frame_top() + 0.55f * side;
+}
+
+/// Pixel-space extent of a box rendered with a fit applied — project() over
+/// the eight corners, so the cases assert what actually lands on the canvas
+/// (scale + offsets + shift together) rather than re-deriving the fit's own
+/// arithmetic.
+struct PixelBox {
+    // mins start at +inf so the first projected corner always replaces them;
+    // zero would stick wherever every coordinate is positive.
+    float min_x = std::numeric_limits<float>::max();
+    float max_x = std::numeric_limits<float>::lowest();
+    float min_y = std::numeric_limits<float>::max();
+    float max_y = std::numeric_limits<float>::lowest();
+
+    float width() const {
+        return max_x - min_x;
+    }
+    float height() const {
+        return max_y - min_y;
+    }
+    float center_x() const {
+        return (min_x + max_x) * 0.5f;
+    }
+    float center_y() const {
+        return (min_y + max_y) * 0.5f;
+    }
+};
+
+PixelBox projected_box(const AABB& bb, const AutoFitResult& fit, ViewMode view, int cw, int ch) {
+    ProjectionParams p;
+    p.view_mode = view;
+    p.scale = fit.scale;
+    p.offset_x = fit.offset_x;
+    p.offset_y = fit.offset_y;
+    p.offset_z = fit.offset_z;
+    p.canvas_width = cw;
+    p.canvas_height = ch;
+    p.content_offset_y_percent = fit.content_offset_y_percent;
+
+    PixelBox box;
+    for (const glm::vec3& corner : bb.corners()) {
+        const glm::ivec2 px = project(p, corner.x, corner.y, corner.z);
+        box.min_x = std::min(box.min_x, static_cast<float>(px.x));
+        box.max_x = std::max(box.max_x, static_cast<float>(px.x));
+        box.min_y = std::min(box.min_y, static_cast<float>(px.y));
+        box.max_y = std::max(box.max_y, static_cast<float>(px.y));
+    }
+    return box;
+}
+
+/// The measured Orca thumbnail on this card: the model reads 297px tall.
+constexpr float MEASURED_THUMBNAIL_MODEL_PX = 297.0f;
+
+} // namespace
+
+TEST_CASE("compute_auto_fit - parity reproduces the measured thumbnail box",
+          "[gcode][projection][parity]") {
+    auto fit = compute_auto_fit(orca_aspect_box(), ViewMode::FRONT, PARITY_CW, PARITY_CH, 0.05f,
+                                119.0f / PARITY_CH, FitFraming::THUMBNAIL_PARITY);
+
+    // The padded box fills the limiting axis of the square exactly, so the
+    // model itself covers 1 / (1 + 2*0.14) = 78.1% of the 368px side.
+    REQUIRE(fit.content_height == Approx(368.0f).margin(0.5f));
+    REQUIRE(fit.content_width < 368.0f);
+
+    const PixelBox box =
+        projected_box(orca_aspect_box(), fit, ViewMode::FRONT, PARITY_CW, PARITY_CH);
+
+    // The whole point: within 5% of what the slicer thumbnail showed.
+    REQUIRE(box.height() == Approx(MEASURED_THUMBNAIL_MODEL_PX).epsilon(0.05f));
+    // ...which is the square's side at the parity fill, exactly.
+    REQUIRE(box.height() == Approx(368.0f / 1.28f).margin(2.5f));
+
+    // Horizontal: centred on the canvas.
+    REQUIRE(box.center_x() == Approx(PARITY_CW * 0.5f).margin(1.0f));
+    // Vertical: model centre at 55% of the lifted frame — above canvas centre,
+    // tracking the thumbnail's -12% lift.
+    REQUIRE(box.center_y() == Approx(parity_model_center_y()).margin(2.0f));
+}
+
+TEST_CASE("compute_auto_fit - parity ignores the metadata strip", "[gcode][projection][parity]") {
+    const AABB bb = orca_aspect_box();
+    auto with_strip = compute_auto_fit(bb, ViewMode::FRONT, PARITY_CW, PARITY_CH, 0.05f,
+                                       119.0f / PARITY_CH, FitFraming::THUMBNAIL_PARITY);
+    auto bare = compute_auto_fit(bb, ViewMode::FRONT, PARITY_CW, PARITY_CH, 0.05f, 0.0f,
+                                 FitFraming::THUMBNAIL_PARITY);
+
+    // The strip still exists in parity mode (the thumbnail is drawn over it
+    // too), but it must not shrink or shift the model: matching the thumbnail
+    // is the rule, and the thumbnail ignores it.
+    REQUIRE(with_strip.scale == Approx(bare.scale));
+    REQUIRE(with_strip.content_offset_y_percent == Approx(bare.content_offset_y_percent));
+    REQUIRE(with_strip.content_height == Approx(bare.content_height));
+}
+
+TEST_CASE("compute_auto_fit - parity has no elongation escape", "[gcode][projection][parity]") {
+    // A tower is exactly the model STANDARD framing lets run under the strip.
+    // Parity frames it like the thumbnail would: inside the square, same
+    // placement as everything else.
+    auto fit = compute_auto_fit(solid(10, 10, 50), ViewMode::FRONT, PARITY_CW, PARITY_CH, 0.05f,
+                                119.0f / PARITY_CH, FitFraming::THUMBNAIL_PARITY);
+    REQUIRE_FALSE(fit.elongated);
+    REQUIRE(fit.content_height == Approx(368.0f).margin(0.5f));
+
+    const PixelBox box =
+        projected_box(solid(10, 10, 50), fit, ViewMode::FRONT, PARITY_CW, PARITY_CH);
+    REQUIRE(box.height() == Approx(368.0f / 1.28f).margin(2.5f));
+    REQUIRE(box.center_y() == Approx(parity_model_center_y()).margin(2.0f));
+}
+
+TEST_CASE("compute_auto_fit - a wide plate fills the square's width under parity",
+          "[gcode][projection][parity]") {
+    // Width-limited (the third measured sample): the limiting axis is still
+    // the square's side, and the placement rules do not change.
+    const AABB plate = solid(100, 100, 5);
+    auto fit = compute_auto_fit(plate, ViewMode::FRONT, PARITY_CW, PARITY_CH, 0.05f,
+                                119.0f / PARITY_CH, FitFraming::THUMBNAIL_PARITY);
+    REQUIRE(fit.content_width == Approx(368.0f).margin(0.5f));
+    REQUIRE(fit.content_height < 368.0f);
+
+    const PixelBox box = projected_box(plate, fit, ViewMode::FRONT, PARITY_CW, PARITY_CH);
+    REQUIRE(box.width() == Approx(368.0f / 1.28f).margin(2.5f));
+    REQUIRE(box.center_x() == Approx(PARITY_CW * 0.5f).margin(1.0f));
+    REQUIRE(box.center_y() == Approx(parity_model_center_y()).margin(2.0f));
+}
+
+TEST_CASE("parity_content_offset_y - pins the model centre, not its edges",
+          "[gcode][projection][parity]") {
+    // The parity shift is a function of the canvas alone: the measured
+    // thumbnails put the model centre at ~55% of the frame whatever the model
+    // fills, so there is no content height to feed it.
+    const float shift = parity_content_offset_y(PARITY_CW, PARITY_CH);
+    REQUIRE(std::isfinite(shift));
+    REQUIRE(shift < 0.0f); // the lift moves the centre above canvas centre
+
+    // And it puts the centre where the thumbnail puts it.
+    const float center_y = PARITY_CH * 0.5f + shift * PARITY_CH;
+    REQUIRE(center_y == Approx(parity_model_center_y()).margin(0.5f));
+
+    // Degenerate canvases are inert, not NaN.
+    REQUIRE(parity_content_offset_y(0, PARITY_CH) == Approx(0.0f));
+    REQUIRE(parity_content_offset_y(PARITY_CW, 0) == Approx(0.0f));
+}
+
+// ===========================================================================
+// Clip-space projection helpers (DRY-4)
+//
+// These replaced three hand-written copies of the same eight-corner /
+// point-to-segment math in gcode_gles_renderer.cpp, gcode_renderer.cpp and
+// gcode_layer_renderer.cpp. The copies had drifted on the one predicate that
+// matters, which is what these cases pin.
+// ===========================================================================
+
+namespace {
+
+/// A perspective camera at +Z looking back toward the origin. With this MVP,
+/// clip.w is the view-space depth: positive in front, negative behind.
+glm::mat4 test_mvp() {
+    const glm::mat4 proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 1000.0f);
+    const glm::mat4 view =
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 100.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    return proj * view;
+}
+
+} // namespace
+
+TEST_CASE("project_clip_to_screen places a point in front of the camera", "[projection][clip]") {
+    const auto s = helix::gcode::project_clip_to_screen(test_mvp(), glm::vec3(0.0f), 200, 100);
+    REQUIRE(s.has_value());
+    // Dead centre of the world maps to dead centre of the viewport.
+    CHECK(s->x == Catch::Approx(100.0f));
+    CHECK(s->y == Catch::Approx(50.0f));
+}
+
+// THE REGRESSION. The candidate-bbox loop and the per-segment loop both used
+// `std::abs(clip.w) < EPSILON`, which only rejects points near the w == 0 plane.
+// A point behind the camera has a large NEGATIVE w, sails through that test, and
+// divides to a mirrored NDC — reported at a confident, wrong screen position.
+TEST_CASE("project_clip_to_screen rejects a point behind the camera", "[projection][clip]") {
+    // The camera sits at z = +100 looking toward the origin, so z = +500 is
+    // well behind it.
+    const glm::vec3 behind(0.0f, 0.0f, 500.0f);
+
+    const glm::vec4 clip = test_mvp() * glm::vec4(behind, 1.0f);
+    REQUIRE(clip.w < 0.0f);              // precondition: it IS behind
+    REQUIRE(std::abs(clip.w) > 0.0001f); // and the OLD abs() test would pass it
+
+    CHECK_FALSE(helix::gcode::project_clip_to_screen(test_mvp(), behind, 200, 100).has_value());
+}
+
+TEST_CASE("project_aabb_to_screen reports invalid when the whole box is behind",
+          "[projection][clip]") {
+    helix::gcode::AABB box;
+    box.min = glm::vec3(-10.0f, -10.0f, 400.0f);
+    box.max = glm::vec3(10.0f, 10.0f, 600.0f);
+    const auto sb = helix::gcode::project_aabb_to_screen(test_mvp(), box, 200, 100);
+    CHECK_FALSE(sb.valid);
+}
+
+TEST_CASE("project_aabb_to_screen bounds a box in front of the camera", "[projection][clip]") {
+    helix::gcode::AABB box;
+    box.min = glm::vec3(-10.0f, -10.0f, -10.0f);
+    box.max = glm::vec3(10.0f, 10.0f, 10.0f);
+    const auto sb = helix::gcode::project_aabb_to_screen(test_mvp(), box, 200, 100);
+    REQUIRE(sb.valid);
+    CHECK(sb.min_x < sb.max_x);
+    CHECK(sb.min_y < sb.max_y);
+    // The box straddles the origin, so its screen box straddles the centre.
+    CHECK(sb.contains(100.0f, 50.0f));
+    // ...and a point far outside is only inside once given enough slack.
+    CHECK_FALSE(sb.contains(sb.max_x + 20.0f, 50.0f));
+    CHECK(sb.contains(sb.max_x + 20.0f, 50.0f, /*slack=*/25.0f));
+}
+
+TEST_CASE("point_segment_distance measures to the segment, not the infinite line",
+          "[projection][pick]") {
+    const glm::vec2 a(0.0f, 0.0f);
+    const glm::vec2 b(10.0f, 0.0f);
+
+    // Perpendicular, over the middle of the span.
+    CHECK(helix::gcode::point_segment_distance({5.0f, 3.0f}, a, b) == Catch::Approx(3.0f));
+
+    // Past the far end: clamped to b, so 5 out and 3 up is a 3-4-5 triangle.
+    // The infinite-line answer would be 3.0, which is the bug this guards.
+    CHECK(helix::gcode::point_segment_distance({14.0f, 3.0f}, a, b) == Catch::Approx(5.0f));
+
+    // Past the near end, symmetrically.
+    CHECK(helix::gcode::point_segment_distance({-4.0f, 3.0f}, a, b) == Catch::Approx(5.0f));
+}
+
+TEST_CASE("point_segment_distance handles a zero-length segment", "[projection][pick]") {
+    // Two identical endpoints: the old copies divided by segment_length_sq and
+    // leaned on a 0.0001f guard to avoid a NaN. Distance to the point is the
+    // only sensible answer.
+    const glm::vec2 p(3.0f, 4.0f);
+    CHECK(helix::gcode::point_segment_distance(p, glm::vec2(0.0f), glm::vec2(0.0f)) ==
+          Catch::Approx(5.0f));
+}
+
+TEST_CASE("GCodeCamera - parity zoom frames the model into the same square as the 2D path",
+          "[gcode][projection][parity]") {
+    // The 3D path must honour parity too: same square, same fill, so switching
+    // render modes does not move the model. get_content_height_fraction() is
+    // the model's height as a fraction of the viewport — the same quantity the
+    // 2D path reports in AutoFitResult::content_height.
+    GCodeCamera parity;
+    parity.set_viewport_size(PARITY_CW, PARITY_CH);
+    parity.set_framing(FitFraming::THUMBNAIL_PARITY);
+    parity.fit_to_bounds(orca_aspect_box());
+    REQUIRE(parity.get_content_height_fraction() * PARITY_CH ==
+            Approx(368.0f / 1.28f).margin(2.0f));
+
+    // And it is genuinely a different framing from STANDARD-on-this-card,
+    // where the metadata strip shrinks a squat model by (1 - occlusion).
+    GCodeCamera standard;
+    standard.set_viewport_size(PARITY_CW, PARITY_CH);
+    standard.set_bottom_occlusion(119.0f / PARITY_CH);
+    standard.fit_to_bounds(orca_aspect_box());
+    REQUIRE(parity.get_content_height_fraction() > standard.get_content_height_fraction());
+}
+
+TEST_CASE("2D and GLES parity framings agree on the model's on-screen height",
+          "[gcode][projection][parity]") {
+    // The parity rule is hand-derived twice - compute_auto_fit() in scale form
+    // and GCodeCamera::fit_to_bounds() in zoom form - so the two can drift
+    // apart when someone tunes one. This pins them to each other on the real
+    // detail card: whatever the square, fill and lift resolve to, both paths
+    // must put the same box on screen.
+    const AABB bb = orca_aspect_box();
+    auto fit = compute_auto_fit(bb, ViewMode::FRONT, PARITY_CW, PARITY_CH, 0.05f, 0.0f,
+                                FitFraming::THUMBNAIL_PARITY);
+    const PixelBox box = projected_box(bb, fit, ViewMode::FRONT, PARITY_CW, PARITY_CH);
+
+    GCodeCamera camera;
+    camera.set_viewport_size(PARITY_CW, PARITY_CH);
+    camera.set_framing(FitFraming::THUMBNAIL_PARITY);
+    camera.fit_to_bounds(bb);
+
+    REQUIRE(camera.get_content_height_fraction() * PARITY_CH == Approx(box.height()).margin(2.0f));
+}
+
+TEST_CASE("thumbnail_parity::LIFT matches the #preview_offset_y design token",
+          "[gcode][projection][parity]") {
+    // The lift must equal what the XML applies to the thumbnail itself
+    // (ui_xml/globals.xml), or the render lands displaced from where the
+    // thumbnail sat at the swap. The token is hot-reloadable XML with no
+    // rebuild, so only a test reading the file catches someone tuning it
+    // without the C++ constant.
+    std::ifstream in("ui_xml/globals.xml");
+    REQUIRE(in.is_open());
+
+    std::string line;
+    bool found = false;
+    float token = 0.0f;
+    while (std::getline(in, line)) {
+        const auto name_at = line.find("name=\"preview_offset_y\"");
+        if (name_at == std::string::npos) {
+            continue;
+        }
+        const auto value_at = line.find("value=\"", name_at);
+        if (value_at == std::string::npos) {
+            continue;
+        }
+        token = std::stof(line.substr(value_at + 7));
+        found = true;
+        break;
+    }
+    REQUIRE(found);
+    REQUIRE(token == Approx(-100.0f * projection::thumbnail_parity::LIFT).margin(0.05f));
 }

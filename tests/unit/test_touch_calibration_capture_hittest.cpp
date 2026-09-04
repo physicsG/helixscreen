@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Full-screen touch-capture hit-testing for the Settings recalibrate overlay
 // (TouchCalibrationOverlay). During active point capture the affine transform is

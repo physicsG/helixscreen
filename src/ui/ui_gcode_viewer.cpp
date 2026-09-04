@@ -11,8 +11,10 @@
 
 #include "ams_state.h"
 #include "app_constants.h"
+#include "color_utils.h"
 #include "config.h"
 #include "gcode_camera.h"
+#include "gcode_color_metadata.h"
 #include "gcode_layer_renderer.h"
 #include "gcode_parser.h"
 #include "gcode_render_mode_policy.h"
@@ -129,13 +131,16 @@ class GCodeViewerState {
 
         // Enhanced shading tiering lives in decide_ssao_enabled() (pure, unit
         // tested); this only applies the result and logs why.
-        const auto ssao = helix::gcode_viewer::decide_ssao_enabled(
-            helix::get_system_memory_info().is_constrained_device(), std::getenv("HELIX_SSAO"));
+        const bool constrained = helix::get_system_memory_info().is_constrained_device();
+        const char* ssao_env = std::getenv("HELIX_SSAO");
+        const auto ssao = helix::gcode_viewer::decide_ssao_enabled(constrained, ssao_env);
         ssao_enabled_at_init_ = ssao.enabled;
+        antialias_enabled_at_init_ =
+            helix::gcode_viewer::decide_antialias_enabled(constrained, ssao_env);
         switch (ssao.reason) {
-        case helix::gcode_viewer::SsaoReason::ConstrainedOff:
-            spdlog::info("[GCode Viewer] Constrained device - enhanced shading off by default "
-                         "(HELIX_SSAO=1 to force on)");
+        case helix::gcode_viewer::SsaoReason::ConstrainedReduced:
+            spdlog::info("[GCode Viewer] Constrained device - outline shading on, antialiasing off "
+                         "(HELIX_SSAO=0 to disable both, =1 to force both on)");
             break;
         case helix::gcode_viewer::SsaoReason::EnvForcedOff:
             spdlog::info("[GCode Viewer] HELIX_SSAO=0: enhanced shading disabled");
@@ -274,6 +279,8 @@ class GCodeViewerState {
     gcode_viewer_load_callback_t first_frame_callback{nullptr};
     void* first_frame_callback_user_data{nullptr};
     bool first_frame_fired_{false};
+    helix::gcode::FitFraming framing_{
+        helix::gcode::FitFraming::STANDARD}; ///< Fit shape every renderer of this viewer uses
     ui_gcode_viewer_clear_cb_t clear_callback{nullptr};
     void* clear_callback_user_data{nullptr};
 
@@ -369,6 +376,7 @@ class GCodeViewerState {
 
     /// SSAO enabled at init (from HELIX_SSAO env var, applied when 2D renderer is created)
     bool ssao_enabled_at_init_{false};
+    bool antialias_enabled_at_init_{false};
 
     /// Render mode setting - set by constructor based on HELIX_GCODE_MODE env var
     /// Render mode setting - configurable via HELIX_GCODE_MODE env var
@@ -398,8 +406,16 @@ class GCodeViewerState {
         return render_mode_ == GcodeViewerRenderMode::Layer2D || budget_forced_2d_ ||
                gpu_3d_blocked_;
 #else
-        // Without 3D renderer: only explicit Render3D would use 3D (but it's not available)
-        return render_mode_ != GcodeViewerRenderMode::Render3D;
+        // Without a 3D renderer there is no 3D mode, full stop.
+        //
+        // This used to read `render_mode_ != Render3D`, which left a hole: the
+        // settings UI removes the "3D View" option on these builds, but
+        // ui_gcode_viewer_set_render_mode() has no availability guard, so a
+        // stored display/gcode_render_mode of 1 - migrated, hand-edited, or
+        // copied from a device that does have GLES - still selected it. The
+        // fallback it reached was the legacy CPU wireframe, which no user has
+        // deliberately chosen in a long time.
+        return true;
 #endif
     }
 
@@ -454,7 +470,7 @@ static gcode_viewer_state_t* get_state(lv_obj_t* obj) {
 }
 
 static void gcode_viewer_refresh_content_offset(gcode_viewer_state_t* st, lv_obj_t* obj,
-                                                int canvas_height);
+                                                int canvas_width, int canvas_height);
 
 /// Registered on the occluder, keyed to the viewer. Declared here so the
 /// viewer's own delete handler can detach it before this object is freed.
@@ -475,11 +491,17 @@ build_3d_geometry_in_budget(const helix::gcode::ParsedGCodeFile& file, const cha
     helix::gcode::GeometryBudgetManager budget_mgr;
     size_t available_kb = budget_mgr.read_system_available_kb();
     size_t budget = budget_mgr.calculate_budget(available_kb);
-    auto budget_config = budget_mgr.select_tier(file.total_segments, budget);
+    // Size the tier on what the builder will actually build. GeometryBuilder
+    // drops auxiliary (purge / prime tower) segments, so estimating from
+    // total_segments charged the budget for mass that never becomes geometry
+    // and could downgrade tubes - or refuse 3D outright - on a tower-heavy
+    // multi-color file.
+    auto budget_config = budget_mgr.select_tier(file.drawable_segments, budget);
 
-    spdlog::info("[GCode Viewer] {}: {}MB available, {}MB budget, {} segments -> tier {}",
-                 context_tag, available_kb / 1024, budget / (1024 * 1024), file.total_segments,
-                 budget_config.tier);
+    spdlog::info(
+        "[GCode Viewer] {}: {}MB available, {}MB budget, {} drawable of {} segments -> tier {}",
+        context_tag, available_kb / 1024, budget / (1024 * 1024), file.drawable_segments,
+        file.total_segments, budget_config.tier);
 
     if (budget_config.tier > 3) {
         spdlog::info("[GCode Viewer] {}: tier {} — skipping 3D geometry build", context_tag,
@@ -545,9 +567,20 @@ static void apply_2d_renderer_colors(gcode_viewer_state_t* st) {
         return;
     }
 
-    if (!st->gcode_file->tool_color_palette.empty()) {
-        st->layer_renderer_2d_->set_tool_color_palette(st->gcode_file->tool_color_palette);
-    }
+    // The file's color answer, classified once: a palette of any size layers
+    // per-tool, and the single color acts as the per-segment fallback for tools
+    // the palette does not cover.
+    const auto file_colors = helix::gcode::classify_file_colors(st->gcode_file->tool_color_palette,
+                                                                st->gcode_file->filament_color_hex);
+
+    // Unconditional, including an EMPTY palette. This function is the one place
+    // that rebuilds the 2D renderer's colors from the file, so it is also the
+    // retraction path (ui_gcode_viewer_clear_tool_colors) and the re-load path.
+    // Skipping the call when the file names no palette left whatever was there
+    // before - a previous file's palette, or AMS overrides applied over it -
+    // still resolving per tool. set_tool_color_palette() no-ops cheaply when
+    // there is genuinely nothing to install and nothing to clear.
+    st->layer_renderer_2d_->set_tool_color_palette(file_colors.palette);
 
     if (!st->tool_color_overrides.empty()) {
         st->layer_renderer_2d_->set_tool_color_overrides(st->tool_color_overrides);
@@ -556,12 +589,17 @@ static void apply_2d_renderer_colors(gcode_viewer_state_t* st) {
     } else if (st->has_external_color_override) {
         st->layer_renderer_2d_->set_extrusion_color(st->external_color_override);
         spdlog::debug("[GCode Viewer] 2D renderer using external color override");
-    } else if (st->use_filament_color && st->gcode_file->filament_color_hex.length() >= 2) {
-        lv_color_t color = lv_color_hex(static_cast<uint32_t>(
-            std::strtol(st->gcode_file->filament_color_hex.c_str() + 1, nullptr, 16)));
-        st->layer_renderer_2d_->set_extrusion_color(color);
-        spdlog::debug("[GCode Viewer] 2D renderer using filament color: {}",
-                      st->gcode_file->filament_color_hex);
+    } else if (st->use_filament_color && file_colors.has_single_color()) {
+        uint32_t rgb = 0;
+        if (helix::parse_hex_color(file_colors.single_color.c_str(), rgb)) {
+            st->layer_renderer_2d_->set_extrusion_color(lv_color_hex(rgb));
+            spdlog::debug("[GCode Viewer] 2D renderer using filament color: {}",
+                          file_colors.single_color);
+        } else {
+            spdlog::warn("[GCode Viewer] 2D renderer: unusable filament color '{}' - "
+                         "keeping current extrusion color",
+                         file_colors.single_color);
+        }
     }
 }
 
@@ -619,14 +657,21 @@ static void gcode_viewer_draw_cb(lv_event_t* e) {
             int width = lv_area_get_width(&widget_coords);
             int height = lv_area_get_height(&widget_coords);
             st->layer_renderer_2d_->set_canvas_size(width, height);
+            st->layer_renderer_2d_->set_framing(st->framing_);
             st->layer_renderer_2d_->auto_fit();
 
             apply_2d_renderer_colors(st);
 
-            // Apply SSAO setting from env var or prior API call
-            if (st->ssao_enabled_at_init_) {
-                st->layer_renderer_2d_->set_ssao_enabled(true);
-            }
+            // Push the decision either way. The renderer's own default is TRUE,
+            // so only ever calling set_ssao_enabled(true) meant "off" was never
+            // applied to it: decide_ssao_enabled() would log "enhanced shading
+            // off", the viewer would skip the call, and the renderer would carry
+            // on with its default. HELIX_SSAO=0 and the constrained-device tier
+            // were both inert, and the constrained devices paid for the SSAO
+            // pass, the full-canvas buffer, and antialiased rasterization (about
+            // 6x the aliased cost) that the tier exists to spare them.
+            st->layer_renderer_2d_->set_ssao_enabled(st->ssao_enabled_at_init_);
+            st->layer_renderer_2d_->set_antialias_enabled(st->antialias_enabled_at_init_);
 
             spdlog::debug("[GCode Viewer] Initialized 2D layer renderer ({}x{})", width, height);
         }
@@ -646,7 +691,8 @@ static void gcode_viewer_draw_cb(lv_event_t* e) {
         // Re-derive the vertical shift from the live metadata-strip overlap and
         // the fit this renderer settled on. Cheap, and doing it here is what
         // keeps the framing right across relayout without the panel repushing.
-        gcode_viewer_refresh_content_offset(st, obj, lv_area_get_height(&widget_coords));
+        gcode_viewer_refresh_content_offset(st, obj, lv_area_get_width(&widget_coords),
+                                            lv_area_get_height(&widget_coords));
 
         // Render 2D layer view
         st->layer_renderer_2d_->render(layer, &widget_coords);
@@ -717,7 +763,8 @@ static void gcode_viewer_draw_cb(lv_event_t* e) {
         if (!st->gcode_file) {
             return; // No ParsedGCodeFile (streaming mode) — 3D renderer needs full geometry
         }
-        gcode_viewer_refresh_content_offset(st, obj, lv_area_get_height(&widget_coords));
+        gcode_viewer_refresh_content_offset(st, obj, lv_area_get_width(&widget_coords),
+                                            lv_area_get_height(&widget_coords));
         st->renderer_->render(layer, *st->gcode_file, *st->camera_, &widget_coords);
 
 #ifdef ENABLE_3D_RENDERER
@@ -734,14 +781,16 @@ static void gcode_viewer_draw_cb(lv_event_t* e) {
             st->budget_forced_2d_ = true;
             // Seed the 2D renderer now so the next frame renders immediately.
             // (Lazy init in the 2D branch also covers this, but doing it here
-            // keeps colors/palette consistent with the loaded file.)
+            // keeps colors/palette consistent with the loaded file — the full
+            // chain, not just the palette: because this renderer now exists,
+            // the lazy-init path and its apply_2d_renderer_colors never run.)
             if (!st->layer_renderer_2d_ && st->gcode_file) {
                 st->layer_renderer_2d_ = std::make_unique<helix::gcode::GCodeLayerRenderer>();
                 st->layer_renderer_2d_->set_gcode(st->gcode_file.get());
-                if (!st->gcode_file->tool_color_palette.empty()) {
-                    st->layer_renderer_2d_->set_tool_color_palette(
-                        st->gcode_file->tool_color_palette);
-                }
+                apply_2d_renderer_colors(st);
+                st->layer_renderer_2d_->set_canvas_size(lv_area_get_width(&widget_coords),
+                                                        lv_area_get_height(&widget_coords));
+                st->layer_renderer_2d_->set_framing(st->framing_);
                 st->layer_renderer_2d_->auto_fit();
             }
             // Repaint on the next tick now that the mode has flipped. Cannot
@@ -764,21 +813,26 @@ static void gcode_viewer_draw_cb(lv_event_t* e) {
 #endif
     }
 
-    // Fire the one-shot first-frame callback once the viewer has produced real
-    // pixels (not during VBO upload, not on a skipped/failed frame). Callers
-    // (e.g. PrintSelectDetailView) use this to defer hiding the thumbnail until
-    // the viewer actually has something to show, avoiding a gray flash.
+    // Fire the one-shot first-frame callback once the viewer has real content
+    // on its canvas (not during VBO upload, not on a skipped/failed frame).
+    // Callers (e.g. PrintSelectDetailView) use this to hide the thumbnail they
+    // stack on top of the viewer.
     if (!st->first_frame_fired_ && st->first_frame_callback) {
         bool frame_complete = true;
         if (st->is_using_2d_mode()) {
-            // The 2D renderer paints progressively — the ghost and solid caches
-            // finish over several frames, which is exactly when the "Building
-            // preview: N%" label is up. Reporting completion here drops the
-            // thumbnail onto a half-drawn view, the gray gap this callback
-            // exists to prevent. This is every non-GLES device, plus GLES once
-            // budget_forced_2d_ flips.
-            if (st->layer_renderer_2d_ && (st->layer_renderer_2d_->needs_more_frames() ||
-                                           st->layer_renderer_2d_->is_ghost_build_running())) {
+            // The 2D renderer paints progressively, and the ghost copy is the
+            // first frame with real content: the solid cache keeps building
+            // visibly on top of it afterwards. has_first_output() fires there
+            // rather than at full build completion — waiting for the complete
+            // build kept the render drawing behind the thumbnail for the whole
+            // build window, and slicer thumbnails (Orca's especially) are
+            // largely transparent, so the half-built render and its
+            // "Building preview: N%" label showed through them at a mismatched
+            // scale. Revealing at the ghost copy is also safe for opaque
+            // thumbnails: real content is already on the canvas by then. This
+            // is every non-GLES device, plus GLES once budget_forced_2d_
+            // flips.
+            if (st->layer_renderer_2d_ && !st->layer_renderer_2d_->has_first_output()) {
                 frame_complete = false;
             }
         } else {
@@ -1623,38 +1677,31 @@ static void ui_gcode_viewer_load_file_async(lv_obj_t* obj, const char* file_path
                         st->layer_renderer_2d_->set_extrusion_color(st->external_color_override);
                         spdlog::info("[GCode Viewer] Streaming 2D using external color override");
                     } else {
+                        // The file's color answer, classified once. A per-tool palette goes to
+                        // the renderer whole so each tool's segments render in its own color;
+                        // collapsing it to a single set_extrusion_color() would paint
+                        // everything in palette[initial_tool], which on a dark filament (e.g.
+                        // #080A0D, a near-black PLA) looks like a uniformly black model.
                         const auto& stats = st->streaming_controller_->get_index_stats();
-                        // Multi-color metadata: hand the full per-tool palette to the renderer so
-                        // each tool's segments render in its own color. Collapsing to a single
-                        // color via set_extrusion_color() would paint everything in palette
-                        // [initial_tool], which on a dark filament (e.g. #080A0D, a near-black
-                        // PLA) looks like a uniformly black model.
-                        if (stats.filament_palette.size() > 1) {
-                            st->layer_renderer_2d_->set_tool_color_palette(stats.filament_palette);
+                        const auto file_colors = helix::gcode::classify_file_colors(
+                            stats.filament_palette, stats.filament_color, stats.initial_tool_index);
+                        if (file_colors.has_palette()) {
+                            st->layer_renderer_2d_->set_tool_color_palette(file_colors.palette);
                             spdlog::info("[GCode Viewer] Streaming 2D using tool palette "
                                          "(size={}, initial_tool={})",
-                                         stats.filament_palette.size(), stats.initial_tool_index);
-                        } else {
-                            // Single-color print: prefer palette[initial_tool_index] when the
-                            // slicer emitted a multi-color metadata line and the gcode actually
-                            // starts on a non-T0 tool. Falls back to filament_color (palette[0])
-                            // for single-color prints or when the palette doesn't cover the
-                            // active tool.
-                            std::string chosen = stats.filament_color;
-                            if (stats.initial_tool_index >= 0 &&
-                                stats.initial_tool_index <
-                                    static_cast<int>(stats.filament_palette.size()) &&
-                                !stats.filament_palette[stats.initial_tool_index].empty()) {
-                                chosen = stats.filament_palette[stats.initial_tool_index];
-                            }
-                            if (!chosen.empty()) {
-                                lv_color_t color =
-                                    lv_color_hex(std::strtol(chosen.c_str() + 1, nullptr, 16));
-                                st->layer_renderer_2d_->set_extrusion_color(color);
+                                         file_colors.palette.size(), file_colors.initial_tool);
+                        } else if (file_colors.has_single_color()) {
+                            uint32_t rgb = 0;
+                            if (helix::parse_hex_color(file_colors.single_color.c_str(), rgb)) {
+                                st->layer_renderer_2d_->set_extrusion_color(lv_color_hex(rgb));
                                 spdlog::info("[GCode Viewer] Using filament color from metadata: "
                                              "{} (tool={}, palette={})",
-                                             chosen, stats.initial_tool_index,
+                                             file_colors.single_color, file_colors.initial_tool,
                                              stats.filament_palette.size());
+                            } else {
+                                spdlog::warn("[GCode Viewer] Unusable filament color '{}' in "
+                                             "metadata - keeping current extrusion color",
+                                             file_colors.single_color);
                             }
                         }
                     }
@@ -1676,10 +1723,10 @@ static void ui_gcode_viewer_load_file_async(lv_obj_t* obj, const char* file_path
                     st->layer_renderer_2d_->set_canvas_size(width, height);
                     st->layer_renderer_2d_->auto_fit();
 
-                    // Apply SSAO setting
-                    if (st->ssao_enabled_at_init_) {
-                        st->layer_renderer_2d_->set_ssao_enabled(true);
-                    }
+                    // Apply the SSAO setting, both ways. See the note at the
+                    // renderer-init site: a one-way call leaves "off" unapplied.
+                    st->layer_renderer_2d_->set_ssao_enabled(st->ssao_enabled_at_init_);
+                    st->layer_renderer_2d_->set_antialias_enabled(st->antialias_enabled_at_init_);
 
                     st->viewer_state = GcodeViewerState::Loaded;
                     st->first_render = false;
@@ -1874,13 +1921,14 @@ static void ui_gcode_viewer_load_file_async(lv_obj_t* obj, const char* file_path
                     // Store G-code data
                     st->gcode_file = std::move(r->gcode_file);
 
-                    // Update 2D renderer if it exists (prevents dangling pointer)
+                    // Update 2D renderer if it exists (prevents dangling pointer).
+                    // The whole colour chain runs here, not just the palette:
+                    // set_gcode() does not reset colours, so a renderer that
+                    // survived a mode flip would otherwise keep the PREVIOUS
+                    // file's single color.
                     if (st->layer_renderer_2d_) {
                         st->layer_renderer_2d_->set_gcode(st->gcode_file.get());
-                        if (!st->gcode_file->tool_color_palette.empty()) {
-                            st->layer_renderer_2d_->set_tool_color_palette(
-                                st->gcode_file->tool_color_palette);
-                        }
+                        apply_2d_renderer_colors(st);
                         st->layer_renderer_2d_->auto_fit();
                     }
 
@@ -1893,19 +1941,24 @@ static void ui_gcode_viewer_load_file_async(lv_obj_t* obj, const char* file_path
                                 std::make_unique<helix::gcode::GCodeLayerRenderer>();
                         }
                         st->layer_renderer_2d_->set_gcode(st->gcode_file.get());
-                        if (!st->gcode_file->tool_color_palette.empty()) {
-                            st->layer_renderer_2d_->set_tool_color_palette(
-                                st->gcode_file->tool_color_palette);
+                        const auto file_colors = helix::gcode::classify_file_colors(
+                            st->gcode_file->tool_color_palette, st->gcode_file->filament_color_hex);
+                        if (file_colors.has_palette()) {
+                            st->layer_renderer_2d_->set_tool_color_palette(file_colors.palette);
                         }
 
                         // Apply color: external override takes priority
                         if (st->has_external_color_override) {
                             st->layer_renderer_2d_->set_extrusion_color(
                                 st->external_color_override);
-                        } else if (!st->gcode_file->filament_color_hex.empty()) {
-                            lv_color_t color = lv_color_hex(static_cast<uint32_t>(std::strtol(
-                                st->gcode_file->filament_color_hex.c_str() + 1, nullptr, 16)));
-                            st->layer_renderer_2d_->set_extrusion_color(color);
+                        } else if (file_colors.has_single_color()) {
+                            // has_single_color() only proves non-empty. The digit
+                            // count is checked by the parser, which is why a bare
+                            // '#' no longer reaches lv_color_hex and paints black.
+                            uint32_t rgb = 0;
+                            if (helix::parse_hex_color(file_colors.single_color.c_str(), rgb)) {
+                                st->layer_renderer_2d_->set_extrusion_color(lv_color_hex(rgb));
+                            }
                         }
 
                         st->layer_renderer_2d_->auto_fit();
@@ -1928,17 +1981,36 @@ static void ui_gcode_viewer_load_file_async(lv_obj_t* obj, const char* file_path
 
                     // Auto-apply filament color from gcode metadata (unless
                     // AMS/Spoolman has already set an external override)
+                    // Both renderers, not just the 3D one. The 2D renderer draws on
+                    // every build without GLES and on any device the user has put in
+                    // 2D mode, and until this it kept the theme default for
+                    // color_extrusion_ - the single-color fallback a file without a
+                    // parsed tool palette lands on.
+                    const auto file_colors = helix::gcode::classify_file_colors(
+                        st->gcode_file->tool_color_palette, st->gcode_file->filament_color_hex);
                     if (st->has_external_color_override) {
                         st->renderer_->set_extrusion_color(st->external_color_override);
+                        if (st->layer_renderer_2d_) {
+                            st->layer_renderer_2d_->set_extrusion_color(
+                                st->external_color_override);
+                        }
                         spdlog::debug(
                             "[GCode Viewer] Applied external color override (AMS/Spoolman)");
-                    } else if (st->use_filament_color &&
-                               st->gcode_file->filament_color_hex.length() >= 2) {
-                        lv_color_t color = lv_color_hex(static_cast<uint32_t>(std::strtol(
-                            st->gcode_file->filament_color_hex.c_str() + 1, nullptr, 16)));
-                        st->renderer_->set_extrusion_color(color);
-                        spdlog::debug("[GCode Viewer] Applied filament color: {}",
-                                      st->gcode_file->filament_color_hex);
+                    } else if (st->use_filament_color && file_colors.has_single_color()) {
+                        uint32_t rgb = 0;
+                        if (helix::parse_hex_color(file_colors.single_color.c_str(), rgb)) {
+                            const lv_color_t color = lv_color_hex(rgb);
+                            st->renderer_->set_extrusion_color(color);
+                            if (st->layer_renderer_2d_) {
+                                st->layer_renderer_2d_->set_extrusion_color(color);
+                            }
+                            spdlog::debug("[GCode Viewer] Applied filament color: {}",
+                                          file_colors.single_color);
+                        } else {
+                            spdlog::warn("[GCode Viewer] Unusable filament color '{}' - "
+                                         "keeping current extrusion color",
+                                         file_colors.single_color);
+                        }
                     }
 
                     // Clear first_render flag to allow actual rendering on next draw
@@ -2002,6 +2074,20 @@ void ui_gcode_viewer_set_first_frame_callback(lv_obj_t* obj, gcode_viewer_load_c
     st->first_frame_callback = callback;
     st->first_frame_callback_user_data = user_data;
     st->first_frame_fired_ = false;
+}
+
+void ui_gcode_viewer_set_thumbnail_parity(lv_obj_t* obj, bool enabled) {
+    gcode_viewer_state_t* st = get_state(obj);
+    if (!st) {
+        return;
+    }
+
+    // Renderers pick the mode up from gcode_viewer_refresh_content_offset()
+    // (every draw, before render()) and from set_framing() at each creation
+    // site, so storing it here is all this setter does.
+    st->framing_ =
+        enabled ? helix::gcode::FitFraming::THUMBNAIL_PARITY : helix::gcode::FitFraming::STANDARD;
+    spdlog::debug("[GCode Viewer] Thumbnail parity {}", enabled ? "on" : "off");
 }
 
 void ui_gcode_viewer_clear(lv_obj_t* obj) {
@@ -2159,11 +2245,11 @@ void ui_gcode_viewer_set_render_mode(lv_obj_t* obj, GcodeViewerRenderMode mode) 
         int width = lv_area_get_width(&coords);
         int height = lv_area_get_height(&coords);
         st->layer_renderer_2d_->set_canvas_size(width, height);
+        st->layer_renderer_2d_->set_framing(st->framing_);
         st->layer_renderer_2d_->auto_fit();
 
-        if (st->ssao_enabled_at_init_) {
-            st->layer_renderer_2d_->set_ssao_enabled(true);
-        }
+        st->layer_renderer_2d_->set_ssao_enabled(st->ssao_enabled_at_init_);
+        st->layer_renderer_2d_->set_antialias_enabled(st->antialias_enabled_at_init_);
     }
 
 #ifdef ENABLE_3D_RENDERER
@@ -2428,6 +2514,48 @@ void ui_gcode_viewer_set_tool_colors(lv_obj_t* obj, const std::vector<uint32_t>&
     spdlog::debug("[GCode Viewer] Applied {} per-tool AMS color overrides", colors.size());
 }
 
+void ui_gcode_viewer_clear_tool_colors(lv_obj_t* obj) {
+    if (!obj) {
+        return;
+    }
+    gcode_viewer_state_t* st = get_state(obj);
+    if (!st || st->tool_color_overrides.empty()) {
+        return;
+    }
+
+    // Retraction needs its own entry point rather than set_tool_colors(obj, {}):
+    // an empty vector already means "no information" everywhere below, and every
+    // layer correctly refuses to act on it so that a FIRST apply with no AMS data
+    // leaves the slicer palette alone. The two meanings cannot share a call.
+    st->tool_color_overrides.clear();
+
+#ifdef ENABLE_3D_RENDERER
+    // 3D: the overrides were written into the baked palette in place, so only
+    // the renderer's own snapshot can put the slicer colors back.
+    st->renderer_->clear_tool_color_overrides();
+#endif
+
+    // 2D: rebuild palette-then-override from the file. With tool_color_overrides
+    // now empty this lands on the slicer palette, or the single filament color -
+    // the same fallback order a fresh load takes, which is why it reuses the
+    // loader's helper instead of restating it.
+    apply_2d_renderer_colors(st);
+
+    lv_obj_invalidate(obj);
+    spdlog::debug("[GCode Viewer] Retracted per-tool AMS color overrides");
+}
+
+std::vector<uint32_t> ui_gcode_viewer_get_tool_colors(lv_obj_t* obj) {
+    if (!obj) {
+        return {};
+    }
+    gcode_viewer_state_t* st = get_state(obj);
+    if (!st) {
+        return {};
+    }
+    return st->tool_color_overrides;
+}
+
 bool ui_gcode_viewer_apply_ams_tool_colors(lv_obj_t* obj) {
     if (!obj) {
         return false;
@@ -2440,6 +2568,11 @@ bool ui_gcode_viewer_apply_ams_tool_colors(lv_obj_t* obj) {
     // renderer's slicer palette alone rather than painting over it.
     const auto colors = AmsState::instance().routed_tool_colors();
     if (colors.empty()) {
+        // "Nothing knowable" must also RETRACT: a previous non-degenerate
+        // answer may still be applied as overrides, and returning false alone
+        // would leave those lane colors frozen on the renderer for the rest
+        // of the file instead of falling back to the slicer palette.
+        ui_gcode_viewer_clear_tool_colors(obj);
         return false;
     }
     ui_gcode_viewer_set_tool_colors(obj, colors);
@@ -2570,31 +2703,39 @@ static float measure_bottom_occlusion(gcode_viewer_state_t* st, lv_obj_t* obj) {
     return std::min(1.0f, static_cast<float>(overlap) / static_cast<float>(viewer_h));
 }
 
-/// Push the live occlusion down to whichever renderer is active. Both the fit
-/// and the vertical shift derive from it, so the renderer owns that computation
-/// and re-fits when the number moves; this only has to keep it current. Cheap
-/// enough to run per draw, which is what keeps the framing right across
-/// relayout without the panel having to repush anything.
+/// Push the live occlusion and framing mode down to whichever renderer is
+/// active. Both the fit and the vertical shift derive from them, so the
+/// renderer owns that computation and re-fits when a number moves; this only
+/// has to keep them current. Cheap enough to run per draw, which is what
+/// keeps the framing right across relayout and lazy renderer creation without
+/// the panel having to repush anything.
 static void gcode_viewer_refresh_content_offset(gcode_viewer_state_t* st, lv_obj_t* obj,
-                                                int canvas_height) {
-    (void)canvas_height;
+                                                int canvas_width, int canvas_height) {
     const float occlusion = measure_bottom_occlusion(st, obj);
+    const auto framing = st->framing_;
 
     if (st->layer_renderer_2d_) {
+        st->layer_renderer_2d_->set_framing(framing);
         st->layer_renderer_2d_->set_bottom_occlusion(occlusion);
     }
 #ifdef ENABLE_3D_RENDERER
     if (st->camera_) {
+        st->camera_->set_framing(framing);
         st->camera_->set_bottom_occlusion(occlusion);
     }
     if (st->renderer_) {
         // The GLES path applies the shift in build_mvp(); the camera has already
-        // absorbed the occlusion into its zoom.
-        const float content_height = st->camera_ ? st->camera_->get_content_height_fraction() *
-                                                       static_cast<float>(canvas_height)
-                                                 : 0.0f;
-        st->renderer_->set_content_offset_y(
-            helix::gcode::compute_content_offset_y(content_height, canvas_height, occlusion));
+        // absorbed the occlusion (or, under parity, the square) into its zoom.
+        // Parity pins the model centre in the lifted square and ignores both
+        // the content height and the occlusion.
+        const float shift = framing == helix::gcode::FitFraming::THUMBNAIL_PARITY
+                                ? helix::gcode::parity_content_offset_y(canvas_width, canvas_height)
+                                : helix::gcode::compute_content_offset_y(
+                                      st->camera_ ? st->camera_->get_content_height_fraction() *
+                                                        static_cast<float>(canvas_height)
+                                                  : 0.0f,
+                                      canvas_height, occlusion);
+        st->renderer_->set_content_offset_y(shift);
     }
 #endif
 }
@@ -2901,6 +3042,8 @@ void ui_gcode_viewer_load_file(lv_obj_t*, const char*) {}
 void ui_gcode_viewer_set_load_callback(lv_obj_t*, gcode_viewer_load_callback_t, void*) {}
 
 void ui_gcode_viewer_set_first_frame_callback(lv_obj_t*, gcode_viewer_load_callback_t, void*) {}
+
+void ui_gcode_viewer_set_thumbnail_parity(lv_obj_t*, bool) {}
 
 void ui_gcode_viewer_set_gcode_data(lv_obj_t*, void*) {}
 

@@ -8,18 +8,19 @@ Upload Channels" and § "Switching Channels (and moving backward)".
 
 ---
 
-## 1. The atomic branch cut
+## 1. The atomic branch cut — DONE 2026-09-03
 
-**These two edits must land in the same change.** They are the only ordering
-constraint in this document that can strand a fleet.
+- [x] Cut `release/1.0`, which keeps `RELEASE_CHANNEL=stable`.
+- [x] Flip `RELEASE_CHANNEL` on `main` to `beta`, committed before `main` moved.
 
-- [ ] Cut `release/1.0` from the 1.0 commit. It keeps `RELEASE_CHANNEL=stable`.
-- [ ] Flip `RELEASE_CHANNEL` on `main` to `beta` **in that same change**.
+`main` is now the 1.1 trunk and `release/1.0` is the maintenance line; the
+`devel/1.1` branch it replaced is deleted. `BRANCHING.md` carries the resulting
+workflow. The ordering that made it safe is kept below because the same
+constraint governs every future cut.
 
-Why atomic: `main` currently says `stable` because it is still the only release
-line. Flip it early and the stable fleet gets no further updates. Flip it late —
-i.e. tag anything from `main` after 1.1 work starts — and that tag publishes to
-`stable`, overwriting the 1.0 manifest for every user.
+Why atomic: a `main` that still said `stable` while carrying the next line's
+content would publish over the 1.0 manifest for every user on its next tag. Flip
+it early instead and the stable fleet gets no further updates.
 
 The pre-upload downgrade guard in `release.yml` catches the *second* half of that
 mistake (it refuses to move a channel manifest backward), but not the first. It
@@ -97,7 +98,7 @@ live. See `ANDROID_PLAY_STORE.md`.
 
       The pre-v0.99.31 count this item was written around is still tiny (3–5 of
       549, ~0.5–0.9%, none meaningfully self-updating) — but it was never the
-      real gate. `scripts/generate-manifest.sh:36` sets
+      real gate. `scripts/generate-manifest.sh` sets
       `ZIP_EXCLUDE_PLATFORMS="ad5m ad5x cc1 k1 k2 snapmaker-u1"`, six platforms
       deliberately served tar.gz as their **only** manifest asset because
       pre-v0.99.102 updaters verify with `unzip -tqq` and BusyBox lacks `unzip -t`
@@ -203,13 +204,15 @@ while running 0.99.111):
       depth. Mutation-verified.
 
       **Four migrations are NOT idempotent**, and are pinned as current behavior
-      rather than fixed: `config.cpp:463` and `:505` (brightness 50→80, below
-      v7/v9), `:474` (toolhead_style 2→5/3→2, a rotation — below v8), `:841`
+      rather than fixed: `src/system/config.cpp#migrate_v6_to_v7` and
+      `src/system/config.cpp#migrate_v8_to_v9` (brightness 50→80, below
+      v7/v9), `src/system/config.cpp#migrate_v7_to_v8` (toolhead_style 2→5/3→2, a rotation — below v8),
+      `src/system/config.cpp#migrate_v17_to_v18`
       (writes `recheck_pending` unconditionally, below v18; the flag can
       invalidate a captured touch calibration at boot via
       `should_invalidate_legacy_calibration`). The jitter 15→5 retune that used to
       make a fifth is gone: `migrate_v2_to_v3` is an empty step now
-      (`src/system/config.cpp:366`), kept only so a v2 config still walks the
+      (`src/system/config.cpp#migrate_v2_to_v3`), kept only so a v2 config still walks the
       version chain, because `/input/jitter_threshold` never reached the input
       pipeline and was removed (#1358).
 
@@ -221,7 +224,8 @@ while running 0.99.111):
       forward-compat guard (v0.99.112, `7e3d6f05d`) additionally stops a newer
       config being stamped down at all, and both 1.0 and 1.1 carry it.
 
-      If a migration below v18 ever becomes reachable again, `:812` and `:457` are
-      the two to fix first — `:457` is a rotation and cannot be made idempotent
-      without a marker.
+      If a migration below v18 ever becomes reachable again,
+      `src/system/config.cpp#migrate_v17_to_v18` and `src/system/config.cpp#migrate_v7_to_v8`
+      are the two to fix first — `migrate_v7_to_v8` is a rotation and cannot be made
+      idempotent without a marker.
 

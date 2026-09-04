@@ -10,6 +10,7 @@
 #include "overlay_base.h"
 #include "save_config_restart.h"
 #include "subject_managed_panel.h"
+#include "z_offset_utils.h"
 
 // Forward declarations
 class IMoonrakerAPI;
@@ -74,6 +75,16 @@ class PrintTuneOverlay : public OverlayBase {
      */
     void handle_z_step_select(int idx);
 
+    /// Pick which z-offset the direction buttons drive: 0 machine-wide, 1 the
+    /// active tool's own.
+    void handle_z_target_select(int target);
+
+    /// Apply @p delta mm to the ACTIVE TOOL's own z-offset. Separate from
+    /// handle_z_offset_changed(): a different store, a different command, and
+    /// no session travel guard — that guard bounds baby-stepping away from the
+    /// value a print started with, which is a machine-wide notion.
+    void handle_tool_z_offset_changed(double delta);
+
     /**
      * @brief Handle Z-offset adjust in direction by selected step amount
      * @param direction -1 for closer (more squish), +1 for farther (less squish)
@@ -122,6 +133,10 @@ class PrintTuneOverlay : public OverlayBase {
      * @param microns Z-offset in microns from helix::PrinterState
      */
     void update_z_offset_display(int microns);
+
+    /// Refresh the tool button's label and the muted "other target" value from
+    /// ToolState. Cheap, and driven by observers rather than polled.
+    void update_tool_z_displays();
 
     /**
      * @brief Get the tune panel widget
@@ -208,9 +223,23 @@ class PrintTuneOverlay : public OverlayBase {
     lv_subject_t tune_speed_subject_;
     lv_subject_t tune_flow_subject_;
     lv_subject_t tune_z_offset_subject_;
-    lv_subject_t z_step_active_subjects_[4]; ///< Boolean subjects for step button radio styling
-    lv_subject_t z_closer_icon_subject_;     ///< Icon name for closer button (kinematic-aware)
-    lv_subject_t z_farther_icon_subject_;    ///< Icon name for farther button (kinematic-aware)
+    /// Which z-step amount is selected, as an index. ONE int, not four
+    /// booleans: the buttons are mutually exclusive by construction, so four
+    /// parallel flags were four chances for the UI to disagree with itself,
+    /// and every selection wrote all four. The XML compares against it with
+    /// bind_style_if (CLAUDE.md rule 7).
+    lv_subject_t z_step_selected_subject_;
+
+    /// Which z-offset the direction buttons drive: 0 machine-wide, 1 the active
+    /// tool's own. Only meaningful on a tool changer — see helix::tool_offsets.
+    lv_subject_t z_tune_target_subject_;
+    /// The target the user is NOT on, formatted for the muted context label.
+    lv_subject_t tune_z_other_subject_;
+    /// Label for the tool button ("T1"). Not tool_badge_text: that one is
+    /// deliberately index-only, sized for a disc overlaid on the nozzle glyph.
+    lv_subject_t tune_z_tool_label_subject_;
+    lv_subject_t z_closer_icon_subject_;  ///< Icon name for closer button (kinematic-aware)
+    lv_subject_t z_farther_icon_subject_; ///< Icon name for farther button (kinematic-aware)
 
     // Actual speed/flow display subjects
     lv_subject_t tune_actual_speed_subject_;
@@ -224,25 +253,21 @@ class PrintTuneOverlay : public OverlayBase {
     char z_farther_icon_buf_[24] = "arrow_up";
     char tune_actual_speed_buf_[32] = "";
     char tune_actual_flow_buf_[32] = "";
+    char tune_z_other_buf_[32] = "";
+    char tune_z_tool_label_buf_[8] = "T0";
 
     //
     // === State ===
     //
 
-    static constexpr double Z_STEP_AMOUNTS[] = {0.05, 0.025, 0.01, 0.005};
-    static constexpr int Z_STEP_DEFAULT = 2; ///< Default step: 0.01mm
-
-    /// How far one tuning session may travel from the offset it opened on, in
-    /// either direction. The guard bounds the *travel*, not the absolute
-    /// offset: printers with several toolheads or nozzles legitimately run
-    /// offsets past this, and clamping the absolute value snapped them toward
-    /// zero on the first tap and drove the nozzle into the print.
-    static constexpr double Z_OFFSET_MAX_SESSION_TRAVEL = 2.0;
+    // Z-offset step table and travel guard live in helix::zoffset
+    // (z_offset_utils.h): kZStepAmountsMm/kZStepDefaultIndex and
+    // kZOffsetMaxSessionTravelMm.
 
     double current_z_offset_ = 0.0;
     /// Offset the overlay opened on; session travel is measured from here.
     double session_base_z_offset_ = 0.0;
-    int selected_z_step_idx_ = Z_STEP_DEFAULT;
+    int selected_z_step_idx_ = helix::zoffset::kZStepDefaultIndex;
     int speed_percent_ = 100;
     int flow_percent_ = 100;
 
@@ -251,6 +276,9 @@ class PrintTuneOverlay : public OverlayBase {
     //
 
     ObserverGuard speed_observer_;
+    ObserverGuard tool_z_offset_observer_;
+    ObserverGuard tool_z_valid_observer_;
+    ObserverGuard active_tool_observer_;
     ObserverGuard gcode_speed_observer_;
     ObserverGuard max_velocity_observer_;
     ObserverGuard extruder_vel_observer_;

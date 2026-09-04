@@ -111,7 +111,7 @@ The right sidebar shows the status of the currently loaded filament and provides
 - **Color swatch** — Large color indicator matching the loaded filament
 - **Material name** — e.g., "Red PLA", "Prusament PETG"
 - **Remaining weight** — Estimated filament remaining (e.g., "750g"), if available
-- **Clog detection meter** — When your system has flow monitoring (encoder, FlowGuard, or AFC buffer), an arc meter shows the current flow rate percentage
+- **Clog detection meter** — When your system has flow monitoring (encoder, FlowGuard, or AFC buffer), an arc meter shows the current reading, with the sensor named underneath. It is the same reading the [Clog Detection widget](home-panel.md#clog-detection-widget) draws as a bar on the dashboard. When the sensor is armed but has nothing to report, the arc is replaced by a check mark
 
 **During load/unload operations**, the sidebar switches to a **step progress display** showing each stage of the operation. The exact steps come from your filament system, so they match what it actually does rather than a generic list.
 
@@ -323,7 +323,7 @@ When multiple backends are detected:
 
 Each system displays its own logo in the AMS panel header. Happy Hare and AFC show their firmware logos; specific hardware variants (ERCF, Box Turtle, ViViD, etc.) show hardware-specific logos when detected.
 
-Single-backend setups are unaffected — the panel works exactly as before with no selector shown.
+With a single backend there is no selector — the panel just shows that system.
 
 ---
 

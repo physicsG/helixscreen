@@ -5,6 +5,7 @@
 #include "../../include/ui_temp_graph.h"
 #include "../../src/ui/panel_widgets/temp_graph_widget.h"
 #include "../ui_test_utils.h"
+#include "grid_layout.h"
 #include "lvgl/lvgl.h"
 #include "panel_widget_registry.h"
 #include "panel_widget_size.h"
@@ -202,12 +203,15 @@ TEST_CASE("TempGraphWidget: registered in widget registry", "[temp_graph][panel_
     REQUIRE(std::string(def->display_name) == "Temperature Graph");
     REQUIRE(std::string(def->icon) == "chart_line");
     REQUIRE(def->multi_instance == true);
-    REQUIRE(def->colspan == 2);
-    REQUIRE(def->rowspan == 2);
-    REQUIRE(def->min_colspan == 1);
-    REQUIRE(def->min_rowspan == 1);
-    REQUIRE(def->max_colspan == 6);
-    REQUIRE(def->max_rowspan == 4);
+    // Tracks, not cells — a track is half a cell (GridLayout::TRACKS_PER_CELL).
+    REQUIRE(def->colspan == 4);
+    REQUIRE(def->rowspan == 4);
+    REQUIRE(def->min_colspan == 2);
+    REQUIRE(def->min_rowspan == 2);
+    // A band widget: capped only by the widest grid the engine builds, so a
+    // default layout can run it the full width of an ultrawide or 4K panel.
+    REQUIRE(def->max_colspan == GridLayout::MAX_TRACKS);
+    REQUIRE(def->max_rowspan == 8);
     REQUIRE(def->hardware_gate_subject == nullptr);
 }
 
@@ -225,14 +229,14 @@ TEST_CASE("TempGraphWidget: registered in widget registry", "[temp_graph][panel_
 //                                   both turns it on.
 // ============================================================================
 
-using helix::widget_size::H_TALL;
-using helix::widget_size::W_NORMAL;
-using helix::widget_size::W_WIDE;
+using helix::widget_size::h_tall;
+using helix::widget_size::w_normal;
+using helix::widget_size::w_wide;
 
 TEST_CASE("TempGraphWidget::features_for_size maps pixel size to feature flags",
           "[temp_graph][panel_widget][features]") {
     SECTION("below both thresholds: lines + gradients only") {
-        uint32_t f = TempGraphWidget::features_for_size(W_NORMAL - 1, H_TALL - 1);
+        uint32_t f = TempGraphWidget::features_for_size(w_normal() - 1, h_tall() - 1);
         REQUIRE((f & TEMP_GRAPH_FEATURE_LINES) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_TARGET_LINES) == 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_TARGET_HISTORY) == 0);
@@ -244,8 +248,8 @@ TEST_CASE("TempGraphWidget::features_for_size maps pixel size to feature flags",
         REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) == 0);
     }
 
-    SECTION("width alone at W_NORMAL, short: target lines/history via width, no legend/axes") {
-        uint32_t f = TempGraphWidget::features_for_size(W_NORMAL, H_TALL - 1);
+    SECTION("width alone at w_normal(), short: target lines/history via width, no legend/axes") {
+        uint32_t f = TempGraphWidget::features_for_size(w_normal(), h_tall() - 1);
         REQUIRE((f & TEMP_GRAPH_FEATURE_LINES) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_TARGET_LINES) != 0);   // OR satisfied by width
         REQUIRE((f & TEMP_GRAPH_FEATURE_TARGET_HISTORY) != 0); // OR satisfied by width
@@ -253,11 +257,11 @@ TEST_CASE("TempGraphWidget::features_for_size maps pixel size to feature flags",
         REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) == 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_Y_AXIS) == 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_GRADIENTS) != 0);
-        REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) == 0); // AND: width < W_WIDE
+        REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) == 0); // AND: width < w_wide()
     }
 
-    SECTION("height alone at H_TALL, narrow: target lines/history + legend/axes via height") {
-        uint32_t f = TempGraphWidget::features_for_size(W_NORMAL - 1, H_TALL);
+    SECTION("height alone at h_tall(), narrow: target lines/history + legend/axes via height") {
+        uint32_t f = TempGraphWidget::features_for_size(w_normal() - 1, h_tall());
         REQUIRE((f & TEMP_GRAPH_FEATURE_LINES) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_TARGET_LINES) != 0);   // OR satisfied by height
         REQUIRE((f & TEMP_GRAPH_FEATURE_TARGET_HISTORY) != 0); // OR satisfied by height
@@ -265,11 +269,11 @@ TEST_CASE("TempGraphWidget::features_for_size maps pixel size to feature flags",
         REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_Y_AXIS) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_GRADIENTS) != 0);
-        REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) == 0); // AND: width < W_WIDE
+        REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) == 0); // AND: width < w_wide()
     }
 
-    SECTION("tall but below W_WIDE: readouts stay off (AND — width term false)") {
-        uint32_t f = TempGraphWidget::features_for_size(W_WIDE - 1, H_TALL);
+    SECTION("tall but below w_wide(): readouts stay off (AND — width term false)") {
+        uint32_t f = TempGraphWidget::features_for_size(w_wide() - 1, h_tall());
         REQUIRE((f & TEMP_GRAPH_FEATURE_TARGET_LINES) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_LEGEND) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) != 0);
@@ -277,8 +281,8 @@ TEST_CASE("TempGraphWidget::features_for_size maps pixel size to feature flags",
         REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) == 0);
     }
 
-    SECTION("wide at W_WIDE but short: readouts stay off (AND — height term false)") {
-        uint32_t f = TempGraphWidget::features_for_size(W_WIDE, H_TALL - 1);
+    SECTION("wide at w_wide() but short: readouts stay off (AND — height term false)") {
+        uint32_t f = TempGraphWidget::features_for_size(w_wide(), h_tall() - 1);
         REQUIRE((f & TEMP_GRAPH_FEATURE_TARGET_LINES) != 0); // width alone satisfies the OR
         REQUIRE((f & TEMP_GRAPH_FEATURE_LEGEND) == 0);       // height short
         REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) == 0);
@@ -286,8 +290,8 @@ TEST_CASE("TempGraphWidget::features_for_size maps pixel size to feature flags",
         REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) == 0);
     }
 
-    SECTION("wide + tall at W_WIDE/H_TALL: all features including readouts") {
-        uint32_t f = TempGraphWidget::features_for_size(W_WIDE, H_TALL);
+    SECTION("wide + tall at w_wide()/h_tall(): all features including readouts") {
+        uint32_t f = TempGraphWidget::features_for_size(w_wide(), h_tall());
         REQUIRE((f & TEMP_GRAPH_FEATURE_LINES) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_TARGET_LINES) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_TARGET_HISTORY) != 0);
@@ -299,51 +303,62 @@ TEST_CASE("TempGraphWidget::features_for_size maps pixel size to feature flags",
     }
 
     SECTION("larger than any measured tier: all features") {
-        uint32_t f = TempGraphWidget::features_for_size(W_WIDE + 200, H_TALL + 200);
+        uint32_t f = TempGraphWidget::features_for_size(w_wide() + 200, h_tall() + 200);
         REQUIRE((f & TEMP_GRAPH_FEATURE_LINES) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_GRADIENTS) != 0);
     }
 }
 
-// Real measured tier extents, not symbolic offsets from the constants — see
-// span-pixel-table.md. temp_graph's LEGEND/Y_AXIS/X_AXIS gate is
-// deliberately height-only (features_for_size() near :199-206): unlike
-// fan_stack's resolved names or camera's live stream, the chart draws these
-// with graceful width degradation (draw_legend_cb's "+N" overflow pill,
-// ui_temp_graph.cpp:647-665; a configurable Y-axis label column, 30-50px).
-// A plain 1x1 widget genuinely reaches Large's 107px / XLarge's 134px width
-// there, but temp_graph is also resizable down to a genuinely-2-row 1-column
-// cell as narrow as 65px (Small tier) — narrower than either "false
-// positive" width — so these features already render at widths tighter than
-// what Large/XLarge's height-driven promotion produces. Nothing new breaks.
-TEST_CASE("TempGraphWidget::features_for_size at real Large/XLarge 1x1 and Small 1x2 extents",
+// Real measured tier extents, not symbolic offsets from the bands — see
+// span-pixel-table.md. Each case names the tier its extents were measured on,
+// because a band is a per-tier number: judging Micro's 131px row against
+// Medium's 168px band answers a question no panel ever asks.
+//
+// temp_graph's LEGEND/Y_AXIS/X_AXIS gate is deliberately height-only
+// (features_for_size()): unlike fan_stack's resolved names or camera's live
+// stream, the chart draws these with graceful width degradation
+// (draw_legend_cb's "+N" overflow pill, ui_temp_graph.cpp; a configurable
+// Y-axis label column, 30-50px).
+//
+// Large's 141px and XLarge's 169px single-row heights used to exceed a flat
+// 131px band, so a plain 1x1 there was promoted as though it had a second row
+// it never has. Against their own tiers' bands (187px, 225px) they no longer
+// are, while Micro's genuinely-2-row 131px still clears Micro's 112px band —
+// the promotion now tracks rows, not tiers.
+TEST_CASE("TempGraphWidget::features_for_size at real per-tier 1x1 and 1x2 extents",
           "[temp_graph][panel_widget][features]") {
-    SECTION("Large 1x1 (107x141): legend/axes fire on height, narrower widths already handled") {
-        uint32_t f = TempGraphWidget::features_for_size(107, 141);
-        REQUIRE((f & TEMP_GRAPH_FEATURE_LEGEND) != 0);
-        REQUIRE((f & TEMP_GRAPH_FEATURE_Y_AXIS) != 0);
-        REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) != 0);
-        REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) == 0); // width < W_WIDE
+    SECTION("Large 1x1 (107x141): one row stays one row against Large's own band") {
+        uint32_t f = TempGraphWidget::features_for_size(107, 141, UiBreakpoint::Large);
+        REQUIRE((f & TEMP_GRAPH_FEATURE_LEGEND) == 0);
+        REQUIRE((f & TEMP_GRAPH_FEATURE_Y_AXIS) == 0);
+        REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) == 0);
+        REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) == 0); // width < w_wide(Large)
     }
 
     SECTION("XLarge 1x1 (134x169): same story, taller and slightly wider still") {
-        uint32_t f = TempGraphWidget::features_for_size(134, 169);
-        REQUIRE((f & TEMP_GRAPH_FEATURE_LEGEND) != 0);
-        REQUIRE((f & TEMP_GRAPH_FEATURE_Y_AXIS) != 0);
-        REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) != 0);
-    }
-
-    SECTION("Medium 1x1 (114x112): below both thresholds, no promotion") {
-        uint32_t f = TempGraphWidget::features_for_size(114, 112);
+        uint32_t f = TempGraphWidget::features_for_size(134, 169, UiBreakpoint::XLarge);
         REQUIRE((f & TEMP_GRAPH_FEATURE_LEGEND) == 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_Y_AXIS) == 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) == 0);
     }
 
-    SECTION("Micro 1x2 (70x131): the legitimate tall case, narrower than either false "
-            "positive above — proves Large/XLarge introduce nothing new") {
-        uint32_t f = TempGraphWidget::features_for_size(70, 131);
+    SECTION("Medium 1x1 (114x112): below both thresholds, no promotion") {
+        uint32_t f = TempGraphWidget::features_for_size(114, 112, UiBreakpoint::Medium);
+        REQUIRE((f & TEMP_GRAPH_FEATURE_LEGEND) == 0);
+        REQUIRE((f & TEMP_GRAPH_FEATURE_Y_AXIS) == 0);
+        REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) == 0);
+    }
+
+    SECTION("Micro 1x2 (70x131): the legitimate tall case still promotes") {
+        uint32_t f = TempGraphWidget::features_for_size(70, 131, UiBreakpoint::Micro);
+        REQUIRE((f & TEMP_GRAPH_FEATURE_LEGEND) != 0);
+        REQUIRE((f & TEMP_GRAPH_FEATURE_Y_AXIS) != 0);
+        REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) != 0);
+    }
+
+    SECTION("Large 1x2 (107x288): two real rows promote on Large too") {
+        uint32_t f = TempGraphWidget::features_for_size(107, 288, UiBreakpoint::Large);
         REQUIRE((f & TEMP_GRAPH_FEATURE_LEGEND) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_Y_AXIS) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) != 0);
@@ -522,7 +537,7 @@ TEST_CASE("TempGraphWidget: generation counter increments on config save path",
 
 TEST_CASE("TempGraphWidget::features_for_size edge cases", "[temp_graph][panel_widget][features]") {
     SECTION("far larger than any defined tier: includes READOUTS") {
-        uint32_t f = TempGraphWidget::features_for_size(W_WIDE * 3, H_TALL * 3);
+        uint32_t f = TempGraphWidget::features_for_size(w_wide() * 3, h_tall() * 3);
         REQUIRE((f & TEMP_GRAPH_FEATURE_LINES) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_GRADIENTS) != 0);
@@ -531,7 +546,7 @@ TEST_CASE("TempGraphWidget::features_for_size edge cases", "[temp_graph][panel_w
     }
 
     SECTION("tall, narrow: both axes via height, no READOUTS (width term false)") {
-        uint32_t f = TempGraphWidget::features_for_size(W_NORMAL - 1, H_TALL * 2);
+        uint32_t f = TempGraphWidget::features_for_size(w_normal() - 1, h_tall() * 2);
         REQUIRE((f & TEMP_GRAPH_FEATURE_LINES) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_Y_AXIS) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) != 0);
@@ -539,10 +554,10 @@ TEST_CASE("TempGraphWidget::features_for_size edge cases", "[temp_graph][panel_w
     }
 
     SECTION("wide, short: no axes (height-only), no READOUTS (height term false)") {
-        // LEGEND/Y_AXIS/X_AXIS are gated on height_px >= H_TALL alone, so a
+        // LEGEND/Y_AXIS/X_AXIS are gated on height_px >= h_tall() alone, so a
         // wide-but-short card gets neither axis even though it is very wide.
         // READOUTS still needs both terms.
-        uint32_t f = TempGraphWidget::features_for_size(W_WIDE * 2, H_TALL - 1);
+        uint32_t f = TempGraphWidget::features_for_size(w_wide() * 2, h_tall() - 1);
         REQUIRE((f & TEMP_GRAPH_FEATURE_LINES) != 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_X_AXIS) == 0);
         REQUIRE((f & TEMP_GRAPH_FEATURE_Y_AXIS) == 0);
@@ -556,28 +571,31 @@ TEST_CASE("TempGraphWidget::features_for_size edge cases", "[temp_graph][panel_w
 // on_size_changed() call arrives.
 // ============================================================================
 
-TEST_CASE("TempGraphWidget::attach() seed extents yield the full feature mask",
+TEST_CASE("TempGraphWidget::attach() seed extents yield everything but readouts",
           "[temp_graph][panel_widget][features]") {
     // Mirrors the constexpr SEED_WIDTH_PX/SEED_HEIGHT_PX in
     // TempGraphWidget::attach() (temp_graph_widget.cpp) — the measured
     // 800x480 two-span (colspan=2/rowspan=2) extents used to seed
-    // initial_features. Both dimensions clear every threshold in
-    // features_for_size(), so the seed yields TEMP_GRAPH_ALL_FEATURES —
-    // unlike the old colspan=2/rowspan=2 default, which withheld READOUTS
-    // (needed colspan>=3). A change to features_for_size() or to these seed
-    // values that narrows the mask should fail this test rather than
-    // silently changing the widget's pre-resize state.
+    // initial_features, so the tier is Medium by construction.
+    //
+    // 233px of width carries 18px type at Medium: past w_normal (174) but
+    // short of w_wide (264), so the seed gets the target lines, the legend and
+    // both axes, and withholds the readouts that need the widest band. A
+    // change to features_for_size() or to these seed values should fail this
+    // test rather than silently changing the widget's pre-resize state.
     constexpr int SEED_WIDTH_PX = 233;
     constexpr int SEED_HEIGHT_PX = 230;
 
-    uint32_t f = TempGraphWidget::features_for_size(SEED_WIDTH_PX, SEED_HEIGHT_PX);
+    uint32_t f =
+        TempGraphWidget::features_for_size(SEED_WIDTH_PX, SEED_HEIGHT_PX, UiBreakpoint::Medium);
 
     uint32_t expected = TEMP_GRAPH_FEATURE_LINES | TEMP_GRAPH_FEATURE_TARGET_LINES |
                         TEMP_GRAPH_FEATURE_LEGEND | TEMP_GRAPH_FEATURE_Y_AXIS |
                         TEMP_GRAPH_FEATURE_X_AXIS | TEMP_GRAPH_FEATURE_GRADIENTS |
-                        TEMP_GRAPH_FEATURE_READOUTS | TEMP_GRAPH_FEATURE_TARGET_HISTORY;
+                        TEMP_GRAPH_FEATURE_TARGET_HISTORY;
     REQUIRE(f == expected);
-    REQUIRE(f == TEMP_GRAPH_ALL_FEATURES); // sanity: equals the module's own "everything" mask
+    REQUIRE((f & TEMP_GRAPH_FEATURE_READOUTS) == 0);
+    REQUIRE(f == (TEMP_GRAPH_ALL_FEATURES & ~TEMP_GRAPH_FEATURE_READOUTS));
 }
 
 // ============================================================================

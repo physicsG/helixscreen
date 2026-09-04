@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../lvgl_test_fixture.h"
@@ -25,9 +26,8 @@ static std::unique_ptr<AmsBackendQidi> make_two_box_qidi_one_drying() {
         json{{"heater_generic heater_box1", json{{"temperature", 48.0}, {"target", 55.0}}},
              {"heater_generic heater_box2", json{{"temperature", 24.0}, {"target", 0.0}}}});
     QidiBoxTestAccess::apply_box_extras(
-        *backend, json{{"box_drying_state",
-                        json{{"box1", json{{"end_time", 1'000'000 + 30 * 60}}},
-                             {"box2", json{{"end_time", 0}}}}}});
+        *backend, json{{"box_drying_state", json{{"box1", json{{"end_time", 1'000'000 + 30 * 60}}},
+                                                 {"box2", json{{"end_time", 0}}}}}});
     return backend;
 }
 
@@ -70,7 +70,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "Dryer scalar subjects mirror the selected uni
 TEST_CASE_METHOD(LVGLTestFixture, "Detail env subjects mirror the selected detail unit",
                  "[ams][dryer][multi-unit][detail]") {
     auto& ams = AmsState::instance();
-    ams.init_subjects(false); // MANDATORY (see Task 4/5): else set_int is a silent no-op → false RED
+    ams.init_subjects(
+        false); // MANDATORY (see Task 4/5): else set_int is a silent no-op → false RED
     ams.set_backend(make_two_box_qidi_one_drying());
 
     ams.sync_from_backend();    // populate per-unit env_ind_* subjects

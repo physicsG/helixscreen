@@ -12,7 +12,7 @@
  * - [ui][home_panel] - Home panel bindings
  * - [ui][controls_panel] - Controls panel bindings
  * - [ui][print_status_panel] - Print status panel bindings
- * - [ui][temp_panel] - Temperature panel bindings (nozzle + bed)
+ * - [ui][temp_display] - temp_display widget bindings (nozzle + bed subjects)
  * - [bind_text] - Text binding tests
  * - [bind_value] - Value binding tests (bars, sliders)
  * - [bind_flag] - Flag binding tests (visibility)
@@ -215,27 +215,6 @@ TEST_CASE_METHOD(XMLTestFixture, "temp_display: target shows -- when heater off 
     REQUIRE(ui_temp_display_get_target(temp) == 0);
 }
 
-TEST_CASE_METHOD(XMLTestFixture, "nozzle_temp_panel: nozzle_temp_display shows current temperature",
-                 "[ui][temp_panel][bind_current][.xml_required]") {
-    // Nozzle and bed panels are mirror images of each other, so the failure that
-    // matters is a crossed pair: nozzle_temp_display reading bed_temp renders a
-    // perfectly plausible number and nothing warns. Seed the two heaters apart
-    // and assert the nozzle shows its own.
-    set_xml_subject("extruder_temp", 2150);
-    set_xml_subject("extruder_target", 2400);
-    set_xml_subject("bed_temp", 550);
-
-    REQUIRE(register_component("nozzle_temp_panel"));
-    lv_obj_t* panel = create_component("nozzle_temp_panel");
-    lv_obj_t* disp = require_named(panel, "nozzle_temp_display");
-    REQUIRE(ui_temp_display_is_valid(disp));
-    CHECK(ui_temp_display_get_current(disp) == 215);
-    CHECK(ui_temp_display_get_target(disp) == 240);
-
-    set_xml_subject("extruder_temp", 1800);
-    CHECK(ui_temp_display_get_current(disp) == 180);
-}
-
 TEST_CASE_METHOD(XMLTestFixture, "temp_display: binds to bed temperature subjects",
                  "[ui][temp_display][bind_current][bind_target]") {
     // Test verifies the temp_display widget works with bed temperature subjects
@@ -383,6 +362,26 @@ TEST_CASE_METHOD(XMLTestFixture,
 }
 
 TEST_CASE_METHOD(XMLTestFixture,
+                 "print_status_preview_card: progress bar goes invisible while preparing",
+                 "[ui][print_status_panel][bind_style][.xml_required]") {
+    // The card dims its progress bar through a shared "invisible" style
+    // (transparent, keeps layout space) pulled in via bind_style. A style
+    // declared in the embedding panel's <styles> block is invisible to a
+    // component parsed in its own scope, so the style has to live in the
+    // cross-file styles.xml namespace - living in the panel, the bar never
+    // dims during pre-print and nothing logs (bundle CSLYH92R).
+    PrintStatusSubjects owner(state());
+    REQUIRE(register_component("components/print_status_preview_card"));
+    set_xml_subject("preparing_visible", 0);
+    lv_obj_t* card = create_component("print_status_preview_card");
+    lv_obj_t* progress = require_named(card, "print_progress");
+    REQUIRE(lv_obj_get_style_opa(progress, LV_PART_MAIN) == LV_OPA_COVER);
+
+    set_xml_subject("preparing_visible", 1);
+    CHECK(lv_obj_get_style_opa(progress, LV_PART_MAIN) == 0);
+}
+
+TEST_CASE_METHOD(XMLTestFixture,
                  "print_status_preview_card: print_complete_overlay tracks show_complete_overlay",
                  "[ui][print_status_panel][bind_flag][.xml_required]") {
     // The overlay is authored hidden="true" and revealed by the binding, so an
@@ -399,56 +398,10 @@ TEST_CASE_METHOD(XMLTestFixture,
     CHECK_FALSE(is_hidden(overlay));
 }
 
-// =============================================================================
-// NOZZLE/BED TEMP PANEL STATUS BINDING TESTS (SKIP - needs nozzle_status subject)
-// =============================================================================
-
-TEST_CASE_METHOD(XMLTestFixture, "nozzle_temp_panel: status_message binds nozzle_status",
-                 "[ui][temp_panel][bind_text][.xml_required]") {
-    // Both panels name the label "status_message"; only the subject behind it
-    // differs, which is exactly the pair a copy-paste edit crosses.
-    TemperatureSubjects temps(state());
-    set_xml_subject_str("nozzle_status", "Heating");
-
-    REQUIRE(register_component("nozzle_temp_panel"));
-    lv_obj_t* panel = create_component("nozzle_temp_panel");
-    CHECK(label_text_of(require_named(panel, "status_message")) == "Heating");
-
-    set_xml_subject_str("nozzle_status", "At target");
-    CHECK(label_text_of(require_named(panel, "status_message")) == "At target");
-}
-
-TEST_CASE_METHOD(XMLTestFixture, "bed_temp_panel: bed_temp_display shows target temperature",
-                 "[ui][temp_panel][bind_target][.xml_required]") {
-    set_xml_subject("bed_temp", 550);
-    set_xml_subject("bed_target", 600);
-    set_xml_subject("extruder_temp", 2150);
-
-    REQUIRE(register_component("bed_temp_panel"));
-    lv_obj_t* panel = create_component("bed_temp_panel");
-    lv_obj_t* disp = require_named(panel, "bed_temp_display");
-    REQUIRE(ui_temp_display_is_valid(disp));
-    CHECK(ui_temp_display_get_target(disp) == 60);
-    CHECK(ui_temp_display_get_current(disp) == 55);
-
-    set_xml_subject("bed_target", 700);
-    CHECK(ui_temp_display_get_target(disp) == 70);
-}
-
-TEST_CASE_METHOD(XMLTestFixture, "bed_temp_panel: status_message binds bed_status",
-                 "[ui][temp_panel][bind_text][.xml_required]") {
-    // Both panels name the label "status_message"; only the subject behind it
-    // differs, which is exactly the pair a copy-paste edit crosses.
-    TemperatureSubjects temps(state());
-    set_xml_subject_str("bed_status", "Heating");
-
-    REQUIRE(register_component("bed_temp_panel"));
-    lv_obj_t* panel = create_component("bed_temp_panel");
-    CHECK(label_text_of(require_named(panel, "status_message")) == "Heating");
-
-    set_xml_subject_str("bed_status", "At target");
-    CHECK(label_text_of(require_named(panel, "status_message")) == "At target");
-}
+// There are no nozzle_temp_panel / bed_temp_panel cases here: those panels do not
+// exist, and TempGraphOverlay is the single temperature overlay. Per-heater binding
+// coverage lives in the temp_display cases above and in
+// test_chamber_panel_diagnostics.cpp (temp_graph_overlay).
 
 // =============================================================================
 // ADDITIONAL BINDING TESTS (MIXED PANELS - SKIP)

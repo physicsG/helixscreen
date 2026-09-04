@@ -181,13 +181,10 @@ void ControlsPanel::init_subjects() {
     UI_MANAGED_SUBJECT_STRING(controls_pos_z_subject_, controls_pos_z_buf_, "   —   mm",
                               "controls_pos_z", subjects_);
 
-    // Speed/Flow override display subjects
+    // Speed override display subject
     std::strcpy(speed_override_buf_, "100%");
-    std::strcpy(flow_override_buf_, "100%");
     UI_MANAGED_SUBJECT_STRING(speed_override_subject_, speed_override_buf_, "100%",
                               "controls_speed_pct", subjects_);
-    UI_MANAGED_SUBJECT_STRING(flow_override_subject_, flow_override_buf_, "100%",
-                              "controls_flow_pct", subjects_);
 
     // Macro buttons 3 & 4 visibility and names
     UI_MANAGED_SUBJECT_INT(macro_3_visible_, 0, "macro_3_visible", subjects_);
@@ -271,12 +268,6 @@ void ControlsPanel::init_subjects() {
 
         // Quick Actions: Macro buttons (unified callback with user_data index)
         {"on_controls_macro", on_macro},
-
-        // Speed/Flow override buttons
-        {"on_controls_speed_up", on_speed_up},
-        {"on_controls_speed_down", on_speed_down},
-        {"on_controls_flow_up", on_flow_up},
-        {"on_controls_flow_down", on_flow_down},
 
         // Cooling: Fan slider
         {"on_controls_fan_slider", on_fan_slider_changed},
@@ -1097,7 +1088,12 @@ void ControlsPanel::handle_save_z_offset() {
         offset_microns = lv_subject_get_int(subj);
     }
 
-    if (offset_microns == 0) {
+    // Nothing dirty at all — machine-wide OR any tool. Checking only the
+    // machine-wide offset here would refuse the save on exactly the case the
+    // button is now shown for: a tool adjusted while the global stayed 0.
+    const bool tools_dirty =
+        lv_subject_get_int(helix::ToolState::instance().get_any_tool_z_dirty_subject()) == 1;
+    if (offset_microns == 0 && !tools_dirty) {
         spdlog::debug("[{}] No Z-offset adjustment to save", get_name());
         return;
     }
@@ -1112,9 +1108,14 @@ void ControlsPanel::handle_save_z_offset() {
             : lv_tr("This will apply the Z-offset to your endstop and restart Klipper to save the "
                     "configuration. The printer will briefly disconnect.");
 
-    save_z_offset_confirmation_dialog_ = helix::ui::modal_show_confirmation(
+    helix::ui::ConfirmOptions opts;
+    opts.on_cancel = [this] { handle_save_z_offset_cancel(); };
+    opts.on_dismiss = [this] { save_z_offset_confirmation_dialog_.release(); }; // drop the handle
+    opts.owner_token = lifetime_.token();
+
+    save_z_offset_confirmation_dialog_ = helix::ui::modal_confirm(
         lv_tr("Save Z-Offset?"), confirm_msg, ModalSeverity::Warning, lv_tr("Save"),
-        on_save_z_offset_confirm, on_save_z_offset_cancel, this);
+        [this] { handle_save_z_offset_confirm(); }, opts);
 
     if (!save_z_offset_confirmation_dialog_) {
         LOG_ERROR_INTERNAL("Failed to create save Z-offset confirmation dialog");
@@ -1140,7 +1141,8 @@ void ControlsPanel::handle_save_z_offset_confirm() {
         spdlog::warn("[{}] Save Z-offset guard timed out — re-enabling save", get_name());
     });
 
-    save_z_offset_confirmation_dialog_.hide();
+    // The dialog closes itself on the button press; just drop the stored handle
+    save_z_offset_confirmation_dialog_.release();
 
     if (!api_) {
         NOTIFY_ERROR(lv_tr("No printer connection"));
@@ -1159,8 +1161,13 @@ void ControlsPanel::handle_save_z_offset_confirm() {
     NOTIFY_INFO(lv_tr("Saving Z-offset..."));
 
     auto tok = lifetime_.token();
-    helix::zoffset::apply_and_save(
-        api_, save_config_watch_, strategy,
+    // save_dirty_offsets(), not apply_and_save(): on a tool changer the button
+    // is shown when EITHER the machine-wide offset or any tool's is dirty (the
+    // same condition the header button carries), so saving only the machine-wide
+    // one would silently drop the tool the user actually adjusted.
+    helix::zoffset::save_dirty_offsets(
+        api_, save_config_watch_, strategy, printer_state_.get_discovery(),
+        lv_subject_get_int(printer_state_.get_gcode_z_offset_subject()) != 0,
         [this, tok, offset_mm]() {
             tok.defer("ControlsPanel::save_z_offset_done", [this, offset_mm]() {
                 NOTIFY_SUCCESS(lv_tr("Z-offset saved ({:+.3f}mm). Klipper restarting..."),
@@ -1173,14 +1180,14 @@ void ControlsPanel::handle_save_z_offset_confirm() {
                 NOTIFY_ERROR("{}", error);
                 save_z_offset_guard_.end();
             });
-        });
+        },
+        &printer_state_);
 }
 
 void ControlsPanel::handle_save_z_offset_cancel() {
     spdlog::debug("[{}] Save Z-offset cancelled", get_name());
 
-    // ModalGuard handles cleanup
-    save_z_offset_confirmation_dialog_.hide();
+    save_z_offset_confirmation_dialog_.release();
 }
 
 // ============================================================================
@@ -1559,25 +1566,17 @@ void ControlsPanel::execute_macro(size_t index) {
     }
 
     const auto& info = StandardMacros::instance().get(*slot);
-    pending_macro_run_index_ = index;
     std::string msg = fmt::format(lv_tr("Run {}?"), info.translated_name());
-    macro_run_confirmation_dialog_ = helix::ui::modal_show_confirmation(
+    helix::ui::ConfirmOptions opts;
+    opts.on_dismiss = [this] { macro_run_confirmation_dialog_.release(); };
+    opts.owner_token = lifetime_.token();
+    macro_run_confirmation_dialog_ = helix::ui::modal_confirm(
         lv_tr("Run Macro?"), msg.c_str(), ModalSeverity::Info, lv_tr("Run"),
-        [](lv_event_t* e) {
-            LVGL_SAFE_EVENT_CB_BEGIN("[ControlsPanel] macro_run_confirm_cb");
-            auto* self = static_cast<ControlsPanel*>(lv_event_get_user_data(e));
-            size_t idx = self->pending_macro_run_index_;
-            self->macro_run_confirmation_dialog_.hide();
-            self->do_execute_macro(idx);
-            LVGL_SAFE_EVENT_CB_END();
+        [this, index] {
+            macro_run_confirmation_dialog_.release(); // the dialog closes itself
+            do_execute_macro(index);
         },
-        [](lv_event_t* e) {
-            LVGL_SAFE_EVENT_CB_BEGIN("[ControlsPanel] macro_run_cancel_cb");
-            auto* self = static_cast<ControlsPanel*>(lv_event_get_user_data(e));
-            self->macro_run_confirmation_dialog_.hide();
-            LVGL_SAFE_EVENT_CB_END();
-        },
-        this);
+        opts);
 }
 
 void ControlsPanel::do_execute_macro(size_t index) {
@@ -1622,119 +1621,6 @@ void ControlsPanel::update_speed_display() {
     lv_subject_copy_string(&speed_override_subject_, speed_override_buf_);
 }
 
-void ControlsPanel::update_flow_display() {
-    // Flow factor is stored as percentage (100 = 100%)
-    int flow_pct = 100;
-    // Note: PrinterState may need a get_extrude_factor_subject() method
-    // For now, we'll initialize to 100% and update when that's available
-    helix::format::format_percent(flow_pct, flow_override_buf_, sizeof(flow_override_buf_));
-    lv_subject_copy_string(&flow_override_subject_, flow_override_buf_);
-}
-
-void ControlsPanel::handle_speed_up() {
-    if (!api_) {
-        NOTIFY_ERROR(lv_tr("No printer connection"));
-        return;
-    }
-
-    int current = 100;
-    if (auto* speed_subj = printer_state_.get_speed_factor_subject()) {
-        current = lv_subject_get_int(speed_subj);
-    }
-
-    int new_speed = std::min(current + 10, 200); // Cap at 200%
-    spdlog::debug("[{}] Speed up: {} → {}", get_name(), current, new_speed);
-
-    char gcode[32];
-    std::snprintf(gcode, sizeof(gcode), "M220 S%d", new_speed);
-    api_->execute_gcode(
-        gcode, []() { /* Silent success */ },
-        [](const MoonrakerError& err) {
-            NOTIFY_ERROR(lv_tr("Speed change failed: {}"), err.user_message());
-        });
-}
-
-void ControlsPanel::handle_speed_down() {
-    if (!api_) {
-        NOTIFY_ERROR(lv_tr("No printer connection"));
-        return;
-    }
-
-    int current = 100;
-    if (auto* speed_subj = printer_state_.get_speed_factor_subject()) {
-        current = lv_subject_get_int(speed_subj);
-    }
-
-    int new_speed = std::max(current - 10, 10); // Floor at 10%
-    spdlog::debug("[{}] Speed down: {} → {}", get_name(), current, new_speed);
-
-    char gcode[32];
-    std::snprintf(gcode, sizeof(gcode), "M220 S%d", new_speed);
-    api_->execute_gcode(
-        gcode, []() { /* Silent success */ },
-        [](const MoonrakerError& err) {
-            NOTIFY_ERROR(lv_tr("Speed change failed: {}"), err.user_message());
-        });
-}
-
-void ControlsPanel::handle_flow_up() {
-    if (!api_) {
-        NOTIFY_ERROR(lv_tr("No printer connection"));
-        return;
-    }
-
-    // For now, track locally; ideally this would come from PrinterState
-    static int current_flow = 100;
-    int new_flow = std::min(current_flow + 5, 150); // Cap at 150%
-    spdlog::debug("[{}] Flow up: {} → {}", get_name(), current_flow, new_flow);
-    current_flow = new_flow;
-
-    char gcode[32];
-    std::snprintf(gcode, sizeof(gcode), "M221 S%d", new_flow);
-    auto tok = lifetime_.token();
-    api_->execute_gcode(
-        gcode,
-        [this, tok, new_flow]() {
-            tok.defer("ControlsPanel::flow_display_update", [this, new_flow]() {
-                helix::format::format_percent(new_flow, flow_override_buf_,
-                                              sizeof(flow_override_buf_));
-                lv_subject_copy_string(&flow_override_subject_, flow_override_buf_);
-            });
-        },
-        [](const MoonrakerError& err) {
-            NOTIFY_ERROR(lv_tr("Flow change failed: {}"), err.user_message());
-        });
-}
-
-void ControlsPanel::handle_flow_down() {
-    if (!api_) {
-        NOTIFY_ERROR(lv_tr("No printer connection"));
-        return;
-    }
-
-    // For now, track locally; ideally this would come from PrinterState
-    static int current_flow = 100;
-    int new_flow = std::max(current_flow - 5, 50); // Floor at 50%
-    spdlog::debug("[{}] Flow down: {} → {}", get_name(), current_flow, new_flow);
-    current_flow = new_flow;
-
-    char gcode[32];
-    std::snprintf(gcode, sizeof(gcode), "M221 S%d", new_flow);
-    auto tok = lifetime_.token();
-    api_->execute_gcode(
-        gcode,
-        [this, tok, new_flow]() {
-            tok.defer("ControlsPanel::flow_display_update", [this, new_flow]() {
-                helix::format::format_percent(new_flow, flow_override_buf_,
-                                              sizeof(flow_override_buf_));
-                lv_subject_copy_string(&flow_override_subject_, flow_override_buf_);
-            });
-        },
-        [](const MoonrakerError& err) {
-            NOTIFY_ERROR(lv_tr("Flow change failed: {}"), err.user_message());
-        });
-}
-
 // ============================================================================
 // FAN SLIDER HANDLER
 // ============================================================================
@@ -1770,10 +1656,15 @@ void ControlsPanel::handle_fan_slider_changed(int value) {
 void ControlsPanel::handle_motors_clicked() {
     spdlog::debug("[{}] Motors Disable card clicked - showing confirmation", get_name());
 
+    helix::ui::ConfirmOptions opts;
+    opts.on_cancel = [this] { handle_motors_cancel(); };
+    opts.on_dismiss = [this] { motors_confirmation_dialog_.release(); }; // drop the handle
+    opts.owner_token = lifetime_.token();
+
     // ModalGuard's operator= hides any previous dialog before assigning new one
-    motors_confirmation_dialog_ = helix::ui::modal_show_confirmation(
+    motors_confirmation_dialog_ = helix::ui::modal_confirm(
         lv_tr("Disable Motors?"), lv_tr("Release all stepper motors. Position will be lost."),
-        ModalSeverity::Warning, lv_tr("Disable"), on_motors_confirm, on_motors_cancel, this);
+        ModalSeverity::Warning, lv_tr("Disable"), [this] { handle_motors_confirm(); }, opts);
 
     if (!motors_confirmation_dialog_) {
         LOG_ERROR_INTERNAL("Failed to create motors confirmation dialog");
@@ -1787,8 +1678,8 @@ void ControlsPanel::handle_motors_clicked() {
 void ControlsPanel::handle_motors_confirm() {
     spdlog::debug("[{}] Motors disable confirmed", get_name());
 
-    // Hide dialog first - ModalGuard handles cleanup
-    motors_confirmation_dialog_.hide();
+    // The dialog closes itself on the button press; just drop the stored handle
+    motors_confirmation_dialog_.release();
 
     // Send M84 command to disable motors
     if (api_) {
@@ -1805,8 +1696,7 @@ void ControlsPanel::handle_motors_confirm() {
 void ControlsPanel::handle_motors_cancel() {
     spdlog::debug("[{}] Motors disable cancelled", get_name());
 
-    // ModalGuard handles cleanup
-    motors_confirmation_dialog_.hide();
+    motors_confirmation_dialog_.release();
 }
 
 void ControlsPanel::handle_calibration_bed_mesh() {
@@ -1862,11 +1752,6 @@ PANEL_TRAMPOLINE(ControlsPanel, get_global_controls_panel, nozzle_target_edit)
 PANEL_TRAMPOLINE(ControlsPanel, get_global_controls_panel, bed_target_edit)
 PANEL_TRAMPOLINE(ControlsPanel, get_global_controls_panel, chamber_target_edit)
 
-PANEL_TRAMPOLINE_USERDATA(ControlsPanel, motors_confirm)
-PANEL_TRAMPOLINE_USERDATA(ControlsPanel, motors_cancel)
-PANEL_TRAMPOLINE_USERDATA(ControlsPanel, save_z_offset_confirm)
-PANEL_TRAMPOLINE_USERDATA(ControlsPanel, save_z_offset_cancel)
-
 // ============================================================================
 // CALIBRATION BUTTON TRAMPOLINES (XML event_cb - use global accessor)
 // ============================================================================
@@ -1898,10 +1783,6 @@ void ControlsPanel::on_macro(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_END();
 }
 
-PANEL_TRAMPOLINE(ControlsPanel, get_global_controls_panel, speed_up)
-PANEL_TRAMPOLINE(ControlsPanel, get_global_controls_panel, speed_down)
-PANEL_TRAMPOLINE(ControlsPanel, get_global_controls_panel, flow_up)
-PANEL_TRAMPOLINE(ControlsPanel, get_global_controls_panel, flow_down)
 PANEL_TRAMPOLINE(ControlsPanel, get_global_controls_panel, zoffset_tune)
 
 // Cannot use macro - has extra logic to extract slider value

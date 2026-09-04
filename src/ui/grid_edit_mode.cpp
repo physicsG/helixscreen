@@ -41,8 +41,7 @@ static void safe_deferred_delete(lv_obj_t* obj) {
 // Drag visual constants
 static constexpr int PREVIEW_BORDER_WIDTH = 3;
 
-// Resize edge detection. The grab band extends this far both inward and outward
-// from a widget edge, and is derived from the grid's cell size in
+// Resize edge detection. The grab band is derived from the grid's cell size in
 // edge_hit_band_for_cell() so the target scales with the panel. The fallback
 // applies before a grid exists, when no cell size is known.
 static constexpr int EDGE_HIT_FALLBACK = 18;
@@ -169,6 +168,13 @@ void GridEditMode::select_widget(lv_obj_t* widget) {
     }
     destroy_selection_chrome();
     selected_ = widget;
+    // The lattice shows the boundaries this selection can snap to, so it is
+    // rebuilt for every selection change. Refresh before create_selection_chrome()
+    // — dots_overlay_ is a full-grid clickable event shield, so it must be the
+    // older sibling for the chrome buttons created below to receive clicks at
+    // all (lv_indev_search_obj walks a parent's children newest-first and
+    // returns the first clickable hit, per create_dots_overlay()'s ordering note).
+    refresh_dots_overlay();
     if (widget && container_) {
         create_selection_chrome(widget);
     }
@@ -586,6 +592,14 @@ int GridEditMode::find_config_index_for_widget(lv_obj_t* widget) const {
     return -1;
 }
 
+std::string GridEditMode::selected_widget_id() const {
+    const int idx = find_config_index_for_widget(selected_);
+    if (idx < 0 || !config_) {
+        return {};
+    }
+    return config_->page_entries(static_cast<size_t>(page_index_))[static_cast<size_t>(idx)].id;
+}
+
 helix::CellMetrics GridEditMode::current_metrics(lv_area_t* out_content) const {
     lv_area_t content{};
     if (!container_) {
@@ -603,11 +617,11 @@ helix::CellMetrics GridEditMode::current_metrics(lv_area_t* out_content) const {
     UiBreakpoint breakpoint =
         bp_subj ? as_breakpoint(lv_subject_get_int(bp_subj)) : UiBreakpoint::Medium;
 
-    // Prefer the descriptor the container is actually laid out with. The manager
-    // sizes the row axis from the rows in use (max_row_used, floored by a cached
-    // count), not from the breakpoint table, so asking GridLayout for rows can
-    // yield a track count this grid does not have — a whole-track error on any
-    // page that does not fill the grid.
+    // Prefer the descriptor the container is actually laid out with, and fall back
+    // to the breakpoint table only when it is absent. The two agree today, but the
+    // descriptor is what the widgets were placed against, so reading it keeps the
+    // hit-testing correct even if a panel is ever laid out on a grid it did not
+    // get from GridLayout.
     //
     // Safe here because GridEditMode is only ever entered from a user long-press,
     // long after populate_widgets() installed the descriptor. During a rebuild the
@@ -616,10 +630,12 @@ helix::CellMetrics GridEditMode::current_metrics(lv_area_t* out_content) const {
     int cols = grid_count_tracks(lv_obj_get_style_grid_column_dsc_array(container_, LV_PART_MAIN));
     int rows = grid_count_tracks(lv_obj_get_style_grid_row_dsc_array(container_, LV_PART_MAIN));
     if (cols <= 0) {
-        cols = GridLayout::get_cols(breakpoint);
+        cols = GridLayout::get_cols(breakpoint, lv_area_get_width(&content),
+                                    lv_area_get_height(&content));
     }
     if (rows <= 0) {
-        rows = GridLayout::get_rows(breakpoint);
+        rows = GridLayout::get_rows(breakpoint, lv_area_get_width(&content),
+                                    lv_area_get_height(&content));
     }
     return grid_cell_metrics(lv_area_get_width(&content), lv_area_get_height(&content), cols, rows,
                              GridLayout::gutter_px());
@@ -768,10 +784,10 @@ void GridEditMode::remove_selected_widget() {
     if (widget_id.find(':') != std::string::npos) {
         config_->delete_entry(widget_id);
     } else {
-        // Use page-scoped entry access instead of set_enabled() which only operates on page 0
+        // Use page-scoped entry access instead of set_enabled() which only operates on page 0.
         config_
             ->page_entries_mut(static_cast<size_t>(page_index_))[static_cast<size_t>(config_index)]
-            .enabled = false;
+            .disable_and_unplace();
     }
 
     // Deselect before rebuild. Null out overlay pointers since
@@ -912,11 +928,22 @@ GridEditMode::ResizeEdge GridEditMode::detect_resize_edge(int px, int py,
                                                           const lv_area_t& widget_area) const {
     const int band = edge_hit_band();
 
-    // Check proximity to each edge (band reaches equally inside and outside)
-    bool near_right = (px >= widget_area.x2 - band && px <= widget_area.x2 + band);
-    bool near_left = (px >= widget_area.x1 - band && px <= widget_area.x1 + band);
-    bool near_bottom = (py >= widget_area.y2 - band && py <= widget_area.y2 + band);
-    bool near_top = (py >= widget_area.y1 - band && py <= widget_area.y1 + band);
+    // The outward reach is always the full band — it lands outside the widget,
+    // where there is nothing to run out of. The inward reach is a ceiling: on a
+    // widget narrower than three bands it shrinks with the widget, so an interior
+    // big enough to grab and drag always survives. A half-cell widget is ~30px
+    // across, where two flat bands would overlap and every pixel would report an
+    // edge.
+    // Explicit template argument: lv_area_get_*() yields int32_t, which is long on
+    // the xtensa toolchain, so deduction against the int band fails there while
+    // succeeding on desktop.
+    const int inward_x = std::min<int32_t>(band, lv_area_get_width(&widget_area) / 3);
+    const int inward_y = std::min<int32_t>(band, lv_area_get_height(&widget_area) / 3);
+
+    bool near_right = (px >= widget_area.x2 - inward_x && px <= widget_area.x2 + band);
+    bool near_left = (px >= widget_area.x1 - band && px <= widget_area.x1 + inward_x);
+    bool near_bottom = (py >= widget_area.y2 - inward_y && py <= widget_area.y2 + band);
+    bool near_top = (py >= widget_area.y1 - band && py <= widget_area.y1 + inward_y);
 
     // Must be within widget bounds on the perpendicular axis (with outward tolerance)
     bool within_x = (px >= widget_area.x1 - band && px <= widget_area.x2 + band);
@@ -958,20 +985,45 @@ GridEditMode::ResizeEdge GridEditMode::detect_resize_edge(int px, int py,
 }
 
 int GridEditMode::round_to_grid_cell(int px, int content_origin, int content_size, int ncells,
-                                     int gutter) {
-    CellMetrics m = grid_cell_metrics(content_size, content_size, ncells, ncells, gutter);
-    float pitch = m.cell_w + static_cast<float>(m.gutter);
+                                     int gutter, int step) {
+    if (ncells <= 0 || step <= 0) {
+        return 0;
+    }
+    // LVGL distributes LV_GRID_FR(1) tracks as (content - (n-1)*gutter)/n, so
+    // the track-to-track pitch reduces exactly to (content + gutter)/n. Working
+    // from the pitch keeps the arithmetic exact for any track count; dividing
+    // the count instead only doubles the pitch when the count is even, and is
+    // 8% wrong on the 13- and 17-column grids.
+    const float pitch = (static_cast<float>(content_size) + static_cast<float>(gutter)) /
+                        static_cast<float>(ncells);
     if (pitch <= 0.0f) {
         return 0;
     }
-    float fractional = static_cast<float>(px - content_origin) / pitch;
-    return std::clamp(static_cast<int>(std::round(fractional)), 0, ncells);
+    const float tracks = static_cast<float>(px - content_origin) / pitch;
+    const int snapped = static_cast<int>(std::round(tracks / static_cast<float>(step))) * step;
+    return std::clamp(snapped, 0, (ncells / step) * step);
+}
+
+int GridEditMode::dot_count(int ncols, int nrows, int col_step, int row_step) {
+    if (ncols <= 0 || nrows <= 0 || col_step <= 0 || row_step <= 0) {
+        return 0;
+    }
+    return (ncols / col_step + 1) * (nrows / row_step + 1);
+}
+
+std::pair<int, int> GridEditMode::snap_step_for(const std::string& widget_id) {
+    const auto* def = find_widget_def(widget_id);
+    if (!def) {
+        return {GridLayout::TRACKS_PER_CELL, GridLayout::TRACKS_PER_CELL};
+    }
+    return {def->supports_half_col ? 1 : GridLayout::TRACKS_PER_CELL,
+            def->supports_half_row ? 1 : GridLayout::TRACKS_PER_CELL};
 }
 
 GridEditMode::ResizeResult GridEditMode::compute_resize_result(ResizeEdge edge, int orig_col,
                                                                int orig_row, int orig_colspan,
                                                                int orig_rowspan, int new_edge_cell,
-                                                               int ncells) {
+                                                               int ncells, int step) {
     ResizeResult r;
     r.col = orig_col;
     r.row = orig_row;
@@ -984,13 +1036,13 @@ GridEditMode::ResizeResult GridEditMode::compute_resize_result(ResizeEdge edge, 
     switch (edge) {
     case ResizeEdge::Right: {
         int new_colspan = new_edge_cell - orig_col;
-        r.colspan = std::max(new_colspan, 1);
+        r.colspan = std::max((new_colspan / step) * step, step);
         r.rowspan = orig_rowspan;
         break;
     }
     case ResizeEdge::Left: {
         int right_edge = orig_col + orig_colspan;
-        int new_col = std::min(new_edge_cell, right_edge - 1);
+        int new_col = std::min(new_edge_cell, right_edge - step);
         new_col = std::max(new_col, 0);
         r.col = new_col;
         r.colspan = right_edge - new_col;
@@ -999,13 +1051,13 @@ GridEditMode::ResizeResult GridEditMode::compute_resize_result(ResizeEdge edge, 
     }
     case ResizeEdge::Bottom: {
         int new_rowspan = new_edge_cell - orig_row;
-        r.rowspan = std::max(new_rowspan, 1);
+        r.rowspan = std::max((new_rowspan / step) * step, step);
         r.colspan = orig_colspan;
         break;
     }
     case ResizeEdge::Top: {
         int bottom_edge = orig_row + orig_rowspan;
-        int new_row = std::min(new_edge_cell, bottom_edge - 1);
+        int new_row = std::min(new_edge_cell, bottom_edge - step);
         new_row = std::max(new_row, 0);
         r.row = new_row;
         r.rowspan = bottom_edge - new_row;
@@ -1321,8 +1373,16 @@ void GridEditMode::handle_drag_move(lv_event_t* /*e*/) {
     int widget_top = point.y - drag_offset_.y;
 
     // Round the top-left to the nearest grid cell for snap target
-    int target_col = round_to_grid_cell(widget_left, content_area.x1, cw, ncols, m.gutter);
-    int target_row = round_to_grid_cell(widget_top, content_area.y1, ch, nrows, m.gutter);
+    const int drag_cfg = find_config_index_for_widget(selected_);
+    const std::string drag_id =
+        drag_cfg >= 0
+            ? config_->page_entries(static_cast<size_t>(page_index_))[static_cast<size_t>(drag_cfg)]
+                  .id
+            : std::string{};
+    const auto [col_step, row_step] = snap_step_for(drag_id);
+    int target_col =
+        round_to_grid_cell(widget_left, content_area.x1, cw, ncols, m.gutter, col_step);
+    int target_row = round_to_grid_cell(widget_top, content_area.y1, ch, nrows, m.gutter, row_step);
 
     // Clamp so the widget span doesn't extend past the grid
     target_col = std::min(target_col, ncols - drag_orig_colspan_);
@@ -1342,8 +1402,10 @@ void GridEditMode::handle_drag_move(lv_event_t* /*e*/) {
     }
 
     // Check placement validity: build a temporary grid with only VISIBLE widgets
-    // (hardware-gated widgets may be enabled in config but not placed on screen)
-    GridLayout temp_grid(breakpoint);
+    // (hardware-gated widgets may be enabled in config but not placed on screen).
+    // Sized from the metrics above so the bounds check runs against the grid the
+    // container is actually laid out on.
+    GridLayout temp_grid(breakpoint, {m.cols, m.rows});
     const auto& entries = config_->page_entries(static_cast<size_t>(page_index_));
     std::string dragged_id;
     if (drag_cfg_idx_ >= 0 && static_cast<size_t>(drag_cfg_idx_) < entries.size()) {
@@ -1479,8 +1541,10 @@ void GridEditMode::handle_drag_end(lv_event_t* /*e*/) {
                 spdlog::debug("[GridEditMode] Drag end: target occupied by '{}', rejecting drop",
                               entries[static_cast<size_t>(occupant_cfg_idx)].id);
             } else {
-                // Empty cell — check bounds and collision (only visible widgets)
-                GridLayout temp_grid(breakpoint);
+                // Empty cell — check bounds and collision (only visible widgets),
+                // against the grid the container is actually laid out on.
+                const helix::CellMetrics m = current_metrics();
+                GridLayout temp_grid(breakpoint, {m.cols, m.rows});
 
                 for (const auto& entry : entries) {
                     if (!entry.enabled || !entry.has_grid_position()) {
@@ -1613,6 +1677,16 @@ void GridEditMode::handle_resize_move(lv_event_t* /*e*/) {
     UiBreakpoint breakpoint =
         bp_subj ? as_breakpoint(lv_subject_get_int(bp_subj)) : UiBreakpoint::Medium;
 
+    // Registry entry for the widget being resized — needed up front for its
+    // per-axis snap step.
+    int cfg_idx = find_config_index_for_widget(selected_);
+    if (cfg_idx < 0) {
+        return;
+    }
+    const auto& entry =
+        config_->page_entries(static_cast<size_t>(page_index_))[static_cast<size_t>(cfg_idx)];
+    const auto [col_step, row_step] = snap_step_for(entry.id);
+
     // Original widget pixel bounds (from grid config)
     int orig_x1 =
         content_area.x1 + static_cast<int>(grid_track_origin(m.cell_w, m.gutter, drag_orig_col_));
@@ -1630,9 +1704,10 @@ void GridEditMode::handle_resize_move(lv_event_t* /*e*/) {
     int preview_x2 = orig_x2;
     int preview_y2 = orig_y2;
 
-    // Minimum size in pixels (1 cell)
-    int min_w = static_cast<int>(m.cell_w);
-    int min_h = static_cast<int>(m.cell_h);
+    // Minimum size in pixels: one snap step, so a whole-cell widget can never
+    // be dragged down to a half cell.
+    int min_w = static_cast<int>(grid_track_extent(m.cell_w, m.gutter, col_step));
+    int min_h = static_cast<int>(grid_track_extent(m.cell_h, m.gutter, row_step));
 
     switch (resize_edge_) {
     case ResizeEdge::Right:
@@ -1656,26 +1731,23 @@ void GridEditMode::handle_resize_move(lv_event_t* /*e*/) {
         (resize_edge_ == ResizeEdge::Left || resize_edge_ == ResizeEdge::Right) ? ncols : nrows;
     int edge_cell;
     if (resize_edge_ == ResizeEdge::Right) {
-        edge_cell = round_to_grid_cell(preview_x2, content_area.x1, cw, ncols, m.gutter);
+        edge_cell = round_to_grid_cell(preview_x2, content_area.x1, cw, ncols, m.gutter, col_step);
     } else if (resize_edge_ == ResizeEdge::Left) {
-        edge_cell = round_to_grid_cell(preview_x1, content_area.x1, cw, ncols, m.gutter);
+        edge_cell = round_to_grid_cell(preview_x1, content_area.x1, cw, ncols, m.gutter, col_step);
     } else if (resize_edge_ == ResizeEdge::Bottom) {
-        edge_cell = round_to_grid_cell(preview_y2, content_area.y1, ch, nrows, m.gutter);
+        edge_cell = round_to_grid_cell(preview_y2, content_area.y1, ch, nrows, m.gutter, row_step);
     } else {
-        edge_cell = round_to_grid_cell(preview_y1, content_area.y1, ch, nrows, m.gutter);
+        edge_cell = round_to_grid_cell(preview_y1, content_area.y1, ch, nrows, m.gutter, row_step);
     }
 
+    const int resize_step = (resize_edge_ == ResizeEdge::Left || resize_edge_ == ResizeEdge::Right)
+                                ? col_step
+                                : row_step;
     auto result =
         compute_resize_result(resize_edge_, drag_orig_col_, drag_orig_row_, drag_orig_colspan_,
-                              drag_orig_rowspan_, edge_cell, ncells_axis);
+                              drag_orig_rowspan_, edge_cell, ncells_axis, resize_step);
 
     // Apply registry min/max clamping and detect if at limit
-    int cfg_idx = find_config_index_for_widget(selected_);
-    if (cfg_idx < 0) {
-        return;
-    }
-    const auto& entry =
-        config_->page_entries(static_cast<size_t>(page_index_))[static_cast<size_t>(cfg_idx)];
     int pre_clamp_c = result.colspan;
     int pre_clamp_r = result.rowspan;
     auto [clamped_c, clamped_r] = clamp_span(entry.id, result.colspan, result.rowspan);
@@ -1698,7 +1770,7 @@ void GridEditMode::handle_resize_move(lv_event_t* /*e*/) {
     }
 
     // Check collision with other widgets
-    GridLayout temp_grid(breakpoint);
+    GridLayout temp_grid(breakpoint, {m.cols, m.rows});
     const auto& entries = config_->page_entries(static_cast<size_t>(page_index_));
     for (const auto& e : entries) {
         if (!e.enabled || !e.has_grid_position()) {
@@ -1756,29 +1828,43 @@ void GridEditMode::handle_resize_end(lv_event_t* /*e*/) {
     UiBreakpoint breakpoint =
         bp_subj ? as_breakpoint(lv_subject_get_int(bp_subj)) : UiBreakpoint::Medium;
 
+    // Registry entry for the widget being resized — needed up front for its
+    // per-axis snap step.
+    int cfg_idx = find_config_index_for_widget(selected_);
+    const std::string resize_id =
+        cfg_idx >= 0
+            ? config_->page_entries(static_cast<size_t>(page_index_))[static_cast<size_t>(cfg_idx)]
+                  .id
+            : std::string{};
+    const auto [col_step, row_step] = snap_step_for(resize_id);
+
     // Round the dragged edge to the nearest grid cell boundary
     int edge_cell;
     int ncells_axis;
+    int resize_step;
     if (resize_edge_ == ResizeEdge::Right) {
-        edge_cell = round_to_grid_cell(point.x, content_area.x1, cw, ncols, m.gutter);
+        edge_cell = round_to_grid_cell(point.x, content_area.x1, cw, ncols, m.gutter, col_step);
         ncells_axis = ncols;
+        resize_step = col_step;
     } else if (resize_edge_ == ResizeEdge::Left) {
-        edge_cell = round_to_grid_cell(point.x, content_area.x1, cw, ncols, m.gutter);
+        edge_cell = round_to_grid_cell(point.x, content_area.x1, cw, ncols, m.gutter, col_step);
         ncells_axis = ncols;
+        resize_step = col_step;
     } else if (resize_edge_ == ResizeEdge::Bottom) {
-        edge_cell = round_to_grid_cell(point.y, content_area.y1, ch, nrows, m.gutter);
+        edge_cell = round_to_grid_cell(point.y, content_area.y1, ch, nrows, m.gutter, row_step);
         ncells_axis = nrows;
+        resize_step = row_step;
     } else {
-        edge_cell = round_to_grid_cell(point.y, content_area.y1, ch, nrows, m.gutter);
+        edge_cell = round_to_grid_cell(point.y, content_area.y1, ch, nrows, m.gutter, row_step);
         ncells_axis = nrows;
+        resize_step = row_step;
     }
 
     auto result =
         compute_resize_result(resize_edge_, drag_orig_col_, drag_orig_row_, drag_orig_colspan_,
-                              drag_orig_rowspan_, edge_cell, ncells_axis);
+                              drag_orig_rowspan_, edge_cell, ncells_axis, resize_step);
 
     // Apply registry clamping
-    int cfg_idx = find_config_index_for_widget(selected_);
     bool did_resize = false;
 
     if (cfg_idx >= 0) {
@@ -1805,7 +1891,7 @@ void GridEditMode::handle_resize_end(lv_event_t* /*e*/) {
 
         if (changed && span_changed) {
             // Validate against other widgets
-            GridLayout temp_grid(breakpoint);
+            GridLayout temp_grid(breakpoint, {m.cols, m.rows});
             const auto& entries = config_->page_entries(static_cast<size_t>(page_index_));
             for (const auto& e : entries) {
                 if (!e.enabled || !e.has_grid_position()) {
@@ -2196,39 +2282,49 @@ void GridEditMode::create_dots_overlay() {
         return;
     }
 
-    constexpr int DOT_SIZE = 4;
-    constexpr int DOT_HALF = DOT_SIZE / 2;
+    constexpr int DOT_SIZE_MAJOR = 4;
+    constexpr int DOT_SIZE_MINOR = 3;
     // Use contrast text color so dots are visible on both light and dark backgrounds
     lv_color_t screen_bg = ThemeManager::instance().current_palette().screen_bg;
     lv_color_t dot_color = theme_manager_get_contrast_color(screen_bg);
 
-    // Place a dot at each grid intersection (ncols+1 x nrows+1 points)
-    for (int r = 0; r <= nrows; ++r) {
-        for (int c = 0; c <= ncols; ++c) {
+    const int cell = GridLayout::TRACKS_PER_CELL;
+    auto [col_step, row_step] =
+        selected_ ? snap_step_for(selected_widget_id()) : std::pair<int, int>{cell, cell};
+
+    // c/r run 0..ncols/0..nrows inclusive to draw both edges of the lattice.
+    // grid_track_origin() only knows track starts (0..n-1); the final boundary
+    // is the right/bottom edge of the last track, not a further track start
+    // (which would land one gutter past the content edge).
+    auto track_x = [&](int c) {
+        return static_cast<int>(
+            c < ncols ? grid_track_origin(m.cell_w, m.gutter, c)
+                      : grid_track_origin(m.cell_w, m.gutter, std::max(ncols - 1, 0)) + m.cell_w);
+    };
+    auto track_y = [&](int r) {
+        return static_cast<int>(
+            r < nrows ? grid_track_origin(m.cell_h, m.gutter, r)
+                      : grid_track_origin(m.cell_h, m.gutter, std::max(nrows - 1, 0)) + m.cell_h);
+    };
+
+    // Whole-cell intersections are always legal drop targets; the half-cell
+    // intersections between them are legal only for a widget selected on an
+    // axis it supports, so they are drawn smaller and fainter to read as a
+    // finer, secondary lattice rather than a change to the base grid.
+    for (int r = 0; r <= nrows; r += row_step) {
+        for (int c = 0; c <= ncols; c += col_step) {
+            const bool major = (c % cell == 0) && (r % cell == 0);
+            const int size = major ? DOT_SIZE_MAJOR : DOT_SIZE_MINOR;
+
             lv_obj_t* dot = lv_obj_create(dots_overlay_);
-            lv_obj_set_size(dot, DOT_SIZE, DOT_SIZE);
+            lv_obj_set_size(dot, size, size);
             lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
             lv_obj_set_style_bg_color(dot, dot_color, 0);
-            lv_obj_set_style_bg_opa(dot, LV_OPA_30, 0);
+            lv_obj_set_style_bg_opa(dot, major ? LV_OPA_30 : LV_OPA_10, 0);
             lv_obj_set_style_border_width(dot, 0, 0);
             lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_remove_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
-
-            // c/r run 0..ncols/0..nrows inclusive to draw both edges of the lattice.
-            // grid_track_origin() only knows track starts (0..n-1); the final
-            // boundary is the right/bottom edge of the last track, not a further
-            // track start (which would land one gutter past the content edge).
-            int x = static_cast<int>(
-                        c < ncols ? grid_track_origin(m.cell_w, m.gutter, c)
-                                  : grid_track_origin(m.cell_w, m.gutter, std::max(ncols - 1, 0)) +
-                                        m.cell_w) -
-                    DOT_HALF;
-            int y = static_cast<int>(
-                        r < nrows ? grid_track_origin(m.cell_h, m.gutter, r)
-                                  : grid_track_origin(m.cell_h, m.gutter, std::max(nrows - 1, 0)) +
-                                        m.cell_h) -
-                    DOT_HALF;
-            lv_obj_set_pos(dot, x, y);
+            lv_obj_set_pos(dot, track_x(c) - size / 2, track_y(r) - size / 2);
         }
     }
 
@@ -2283,6 +2379,11 @@ void GridEditMode::destroy_dots_overlay() {
         safe_deferred_delete(dots_overlay_);
         dots_overlay_ = nullptr;
     }
+}
+
+void GridEditMode::refresh_dots_overlay() {
+    destroy_dots_overlay();
+    create_dots_overlay();
 }
 
 // ---------------------------------------------------------------------------
@@ -2371,7 +2472,8 @@ void GridEditMode::place_widget_from_catalog(const std::string& widget_id) {
     UiBreakpoint breakpoint =
         bp_subj ? as_breakpoint(lv_subject_get_int(bp_subj)) : UiBreakpoint::Medium;
 
-    GridLayout temp_grid(breakpoint);
+    const helix::CellMetrics m = current_metrics();
+    GridLayout temp_grid(breakpoint, {m.cols, m.rows});
     const auto& entries = config_->page_entries(static_cast<size_t>(page_index_));
 
     // Only include widgets actually visible on screen (not hardware-gated invisible ones)
@@ -2401,14 +2503,22 @@ void GridEditMode::place_widget_from_catalog(const std::string& widget_id) {
     int place_col = -1;
     int place_row = -1;
 
+    // Boundaries this widget may occupy. The search, the shrink steps below and
+    // the origin the catalog remembered all have to agree with it, or a
+    // whole-cell widget added from the catalog lands straddling a cell (#1126).
+    const auto [col_step, row_step] = snap_step_for(widget_id);
+    const bool origin_on_step = catalog_origin_col_ >= 0 && catalog_origin_row_ >= 0 &&
+                                catalog_origin_col_ % col_step == 0 &&
+                                catalog_origin_row_ % row_step == 0;
+
     // Try the catalog origin cell first
-    if (catalog_origin_col_ >= 0 && catalog_origin_row_ >= 0 &&
+    if (origin_on_step &&
         temp_grid.can_place(catalog_origin_col_, catalog_origin_row_, colspan, rowspan)) {
         place_col = catalog_origin_col_;
         place_row = catalog_origin_row_;
     } else {
         // Fall back to first available position
-        auto pos = temp_grid.find_available(colspan, rowspan);
+        auto pos = temp_grid.find_available(colspan, rowspan, col_step, row_step);
         if (pos) {
             place_col = pos->first;
             place_row = pos->second;
@@ -2421,21 +2531,23 @@ void GridEditMode::place_widget_from_catalog(const std::string& widget_id) {
         int min_r = def->effective_min_rowspan();
 
         if (min_c < colspan || min_r < rowspan) {
-            // Try shrinking rowspan first (wider but shorter), then colspan
-            for (int try_r = rowspan; try_r >= min_r && place_col < 0; --try_r) {
-                for (int try_c = colspan; try_c >= min_c && place_col < 0; --try_c) {
+            // Try shrinking rowspan first (wider but shorter), then colspan.
+            // One step at a time, not one track: shrinking a whole-cell widget
+            // by a single track produces a size edit mode would refuse to give
+            // it back.
+            for (int try_r = rowspan; try_r >= min_r && place_col < 0; try_r -= row_step) {
+                for (int try_c = colspan; try_c >= min_c && place_col < 0; try_c -= col_step) {
                     if (try_c == colspan && try_r == rowspan)
                         continue; // Already tried
 
-                    if (catalog_origin_col_ >= 0 && catalog_origin_row_ >= 0 &&
-                        temp_grid.can_place(catalog_origin_col_, catalog_origin_row_, try_c,
-                                            try_r)) {
+                    if (origin_on_step && temp_grid.can_place(catalog_origin_col_,
+                                                              catalog_origin_row_, try_c, try_r)) {
                         place_col = catalog_origin_col_;
                         place_row = catalog_origin_row_;
                         colspan = try_c;
                         rowspan = try_r;
                     } else {
-                        auto pos = temp_grid.find_available(try_c, try_r);
+                        auto pos = temp_grid.find_available(try_c, try_r, col_step, row_step);
                         if (pos) {
                             place_col = pos->first;
                             place_row = pos->second;

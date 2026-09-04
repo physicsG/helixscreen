@@ -3,28 +3,20 @@
 
 #include "ui_clog_meter.h"
 
-#include "ui_fonts.h"
 #include "ui_progress_arc.h"
 #include "ui_update_queue.h"
 
-#include "ams_state.h"
+#include "clog_meter_geometry.h"
 #include "lvgl/lvgl.h"
-#include "observer_factory.h"
-#include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
-#include <cmath>
-#include <cstdlib>
-
 namespace helix::ui {
 
-// Arc size = percentage of card width; stroke scales with arc size
+// Arc size = percentage of card width. The stroke comes from the shared
+// helix_progress_arc helper's diameter tier, not from here.
 constexpr int32_t ARC_WIDTH_PCT = 18; // arc is 18% of card width
-constexpr int32_t ARC_TO_STROKE_RATIO = 12;
 constexpr int32_t MIN_ARC_SIZE = 24;
-constexpr int32_t MIN_STROKE_WIDTH = 2;
 
 UiClogMeter::UiClogMeter(lv_obj_t* parent) {
     if (!parent) {
@@ -46,7 +38,7 @@ UiClogMeter::UiClogMeter(lv_obj_t* parent) {
     }
 
     // Hook the shared helix_progress_arc helper. We still own arc_container_
-    // sizing (fill-mode logic etc.) — the helper sizes the arc *inside* the
+    // sizing — the helper sizes the arc *inside* the
     // container, computes the diameter tier, and the helix_progress_arc.xml
     // bind_styles apply the matching stroke. Use the *_owned variant so the
     // helper allocates + manages the tier subject's lifetime, tied to the
@@ -64,10 +56,12 @@ UiClogMeter::UiClogMeter(lv_obj_t* parent) {
         resize_arc();
     }
 
-    // Cache the XML-bound value text for hiding in fill mode
+    // Cached so the safe state can swap the reading for the check icon
     value_text_ = lv_obj_find_by_name(root_, "clog_value_text");
+    safe_icon_ = lv_obj_find_by_name(root_, "clog_safe_icon");
 
-    setup_observers();
+    model_.emplace([this](const ClogMeterSample& s) { apply(s); });
+    apply(model_->sample());
     spdlog::debug("[ClogMeter] Initialized");
 }
 
@@ -83,21 +77,12 @@ UiClogMeter::~UiClogMeter() {
         lv_obj_remove_event_cb_with_user_data(card, on_card_size_changed, this);
     }
 
-    mode_obs_.reset();
-    value_obs_.reset();
-    warning_obs_.reset();
-    danger_obs_.reset();
-    peak_obs_.reset();
-    center_text_obs_.reset();
-    label_left_obs_.reset();
-    label_right_obs_.reset();
+    // Before the widget pointers below are cleared: its callback calls apply(),
+    // which reads them.
+    model_.reset();
+
     root_ = nullptr;
     arc_ = nullptr;
-    danger_arc_ = nullptr;
-    peak_arc_ = nullptr;
-    label_left_ = nullptr;
-    label_right_ = nullptr;
-    center_label_ = nullptr;
     safe_icon_ = nullptr;
     value_text_ = nullptr;
     // The progress arc's tier subject (allocated via attach_progress_arc_owned)
@@ -106,110 +91,44 @@ UiClogMeter::~UiClogMeter() {
     spdlog::debug("[ClogMeter] Destroyed");
 }
 
-void UiClogMeter::setup_observers() {
-    auto& ams = AmsState::instance();
-
-    // Use immediate observers — these callbacks only update local state and
-    // arc properties, they don't modify observer lifecycle (safe per issue #82)
-    mode_obs_ = observe_int_immediate<UiClogMeter>(
-        ams.get_clog_meter_mode_subject(), this,
-        [](UiClogMeter* self, int mode) { self->on_mode_changed(mode); });
-
-    value_obs_ = observe_int_immediate<UiClogMeter>(
-        ams.get_clog_meter_value_subject(), this,
-        [](UiClogMeter* self, int value) { self->on_value_changed(value); });
-
-    warning_obs_ = observe_int_immediate<UiClogMeter>(
-        ams.get_clog_meter_warning_subject(), this,
-        [](UiClogMeter* self, int warning) { self->on_warning_changed(warning); });
-}
-
-void UiClogMeter::on_mode_changed(int mode) {
-    current_mode_ = mode;
-
+void UiClogMeter::apply(const ClogMeterSample& s) {
     if (!arc_)
         return;
 
-    if (mode == 2) {
-        // Flowguard: symmetrical mode, range -100..+100 mapped to 0..200
+    if (s.is_symmetrical()) {
+        // Flowguard: -100..+100 mapped onto LVGL's 0..200 symmetrical range,
+        // which draws out from the middle. The bar spells the same decision as
+        // centre-out geometry; ClogMeterSample is where the two agree.
         lv_arc_set_range(arc_, 0, 200);
         lv_arc_set_mode(arc_, LV_ARC_MODE_SYMMETRICAL);
-        lv_arc_set_value(arc_, 100); // Center
+        lv_arc_set_value(arc_, s.value + 100);
     } else {
-        // Encoder/AFC/none: normal 0-100
         lv_arc_set_range(arc_, 0, 100);
         lv_arc_set_mode(arc_, LV_ARC_MODE_NORMAL);
-        lv_arc_set_value(arc_, 0);
+        lv_arc_set_value(arc_, s.value);
     }
 
-    update_arc_color();
-    update_safe_state();
-    spdlog::debug("[ClogMeter] Mode changed to {}", mode);
+    update_arc_color(s);
+    update_safe_state(s);
 }
 
-void UiClogMeter::on_value_changed(int value) {
-    current_value_ = value;
-
+void UiClogMeter::update_arc_color(const ClogMeterSample& s) {
     if (!arc_)
         return;
 
-    if (current_mode_ == 2) {
-        // Flowguard: -100..+100 → 0..200
-        lv_arc_set_value(arc_, value + 100);
-    } else {
-        lv_arc_set_value(arc_, value);
-    }
-
-    update_arc_color();
-    update_safe_state();
+    // Dynamic indicator colour is an intentional exception to the "no C++
+    // styling" rule. The rule itself lives in clog_meter_geometry.h so the
+    // horizontal bar (#1017) draws the same ramp from the same tokens.
+    lv_obj_set_style_arc_color(arc_, resolve_clog_tint(s.mode, s.value, s.warning),
+                               LV_PART_INDICATOR);
 }
 
-void UiClogMeter::on_warning_changed(int warning) {
-    current_warning_ = warning;
-    update_arc_color();
+void UiClogMeter::update_safe_state(const ClogMeterSample& s) {
+    // "Nothing to report" rather than "zero danger": the arc goes away
+    // entirely and the check icon stands in for it. The bar reads the same
+    // predicate so the two presentations cannot drift.
+    const bool safe = s.is_safe();
 
-    // Update peak marker color when warning state changes
-    if (peak_arc_) {
-        lv_color_t color =
-            warning ? theme_manager_get_color("danger") : theme_manager_get_color("primary");
-        lv_obj_set_style_arc_color(peak_arc_, color, LV_PART_INDICATOR);
-    }
-}
-
-void UiClogMeter::update_arc_color() {
-    if (!arc_)
-        return;
-
-    lv_color_t color;
-    int val = std::clamp(std::abs(current_value_), 0, 100);
-
-    if (current_warning_) {
-        // Warning/triggered state
-        color = theme_manager_get_color("danger");
-    } else if (current_mode_ == 1 || current_mode_ == 3) {
-        // Encoder/AFC: gradient primary (safe) → warning (risky) → danger (clogged)
-        // Dynamic arc color is an intentional exception to the "no C++ styling" rule
-        if (val < 50) {
-            color =
-                lv_color_mix(theme_manager_get_color("warning"), theme_manager_get_color("primary"),
-                             static_cast<uint8_t>(val * 255 / 50));
-        } else {
-            color =
-                lv_color_mix(theme_manager_get_color("danger"), theme_manager_get_color("warning"),
-                             static_cast<uint8_t>((val - 50) * 255 / 50));
-        }
-    } else {
-        // Flowguard or default
-        color = theme_manager_get_color("primary");
-    }
-
-    lv_obj_set_style_arc_color(arc_, color, LV_PART_INDICATOR);
-}
-
-void UiClogMeter::update_safe_state() {
-    bool safe = (current_mode_ == 3 && current_value_ == 0);
-
-    // Hide the arc entirely when safe — no info means no arc
     if (arc_) {
         if (safe) {
             lv_obj_add_flag(arc_, LV_OBJ_FLAG_HIDDEN);
@@ -218,49 +137,7 @@ void UiClogMeter::update_safe_state() {
         }
     }
 
-    // Hide enhanced arcs when safe
-    if (danger_arc_) {
-        if (safe) {
-            lv_obj_add_flag(danger_arc_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(danger_arc_, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-    if (peak_arc_) {
-        if (safe) {
-            lv_obj_add_flag(peak_arc_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(peak_arc_, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-
-    // Hide endpoint labels when safe
-    if (label_left_) {
-        if (safe) {
-            lv_obj_add_flag(label_left_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(label_left_, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-    if (label_right_) {
-        if (safe) {
-            lv_obj_add_flag(label_right_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(label_right_, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-
-    // Hide center label (fill-mode) when safe
-    if (center_label_) {
-        if (safe) {
-            lv_obj_add_flag(center_label_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(center_label_, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-
-    // Mini-meter: hide XML-bound value text when safe
-    if (!fill_mode_ && value_text_) {
+    if (value_text_) {
         if (safe) {
             lv_obj_add_flag(value_text_, LV_OBJ_FLAG_HIDDEN);
         } else {
@@ -268,16 +145,6 @@ void UiClogMeter::update_safe_state() {
         }
     }
 
-    // Create safe icon lazily on first need
-    if (safe && !safe_icon_ && arc_container_) {
-        safe_icon_ = lv_label_create(arc_container_);
-        lv_label_set_text(safe_icon_, ICON_CHECK_CIRCLE);
-        lv_obj_set_style_text_font(safe_icon_, &mdi_icons_24, 0);
-        lv_obj_set_style_text_color(safe_icon_, theme_manager_get_color("primary"), 0);
-        lv_obj_align(safe_icon_, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_remove_flag(safe_icon_, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_flag(safe_icon_, LV_OBJ_FLAG_EVENT_BUBBLE);
-    }
     if (safe_icon_) {
         if (safe) {
             lv_obj_remove_flag(safe_icon_, LV_OBJ_FLAG_HIDDEN);
@@ -285,15 +152,6 @@ void UiClogMeter::update_safe_state() {
             lv_obj_add_flag(safe_icon_, LV_OBJ_FLAG_HIDDEN);
         }
     }
-}
-
-void UiClogMeter::set_fill_mode(bool fill) {
-    fill_mode_ = fill;
-    if (fill && !danger_arc_) {
-        create_enhanced_widgets();
-    }
-    resize_arc();
-    update_safe_state();
 }
 
 void UiClogMeter::on_card_size_changed(lv_event_t* e) {
@@ -319,19 +177,9 @@ void UiClogMeter::resize_arc() {
 
     lv_obj_update_layout(card);
 
-    int32_t arc_size;
-    if (fill_mode_) {
-        // Fill mode: use widget container dimensions, reserving space for
-        // the mode text below and endpoint labels within the arc
-        int32_t w = lv_obj_get_content_width(root_);
-        int32_t h = lv_obj_get_content_height(root_);
-        // Reserve ~20% height for mode text label below the arc
-        arc_size = LV_MAX(LV_MIN(w, h * 80 / 100), MIN_ARC_SIZE);
-    } else {
-        // Arc size = percentage of card width (responsive to breakpoint)
-        int32_t card_w = lv_obj_get_content_width(card);
-        arc_size = LV_MAX(card_w * ARC_WIDTH_PCT / 100, MIN_ARC_SIZE);
-    }
+    // Arc size = percentage of card width (responsive to breakpoint)
+    const int32_t card_w = lv_obj_get_content_width(card);
+    const int32_t arc_size = LV_MAX(card_w * ARC_WIDTH_PCT / 100, MIN_ARC_SIZE);
 
     // Skip if already at target size
     if (lv_obj_get_width(arc_) == arc_size && lv_obj_get_height(arc_) == arc_size) {
@@ -344,202 +192,8 @@ void UiClogMeter::resize_arc() {
     lv_obj_set_size(arc_container_, arc_size, arc_size);
     helix::ui::refresh_progress_arc(arc_);
 
-    // Read the stroke the helper just applied (cascaded from the
-    // matching arc_w_* style in helix_progress_arc.xml) so overlays
-    // can size their own strokes to match.
-    int32_t stroke = lv_obj_get_style_arc_width(arc_, LV_PART_MAIN);
-    if (stroke <= 0)
-        stroke = LV_MAX(arc_size / ARC_TO_STROKE_RATIO, MIN_STROKE_WIDTH);
-
-    // Resize enhanced widgets to match main arc
-    if (fill_mode_ && danger_arc_) {
-        lv_obj_set_size(danger_arc_, arc_size, arc_size);
-        lv_obj_set_style_arc_width(danger_arc_, stroke, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_width(danger_arc_, 0, LV_PART_MAIN);
-
-        // Peak marker extends past the arc — slightly larger size + thicker stroke
-        int32_t peak_overhang = LV_MAX(stroke / 2, 2);
-        int32_t peak_size = arc_size + peak_overhang * 2;
-        lv_obj_set_size(peak_arc_, peak_size, peak_size);
-        lv_obj_set_style_arc_width(peak_arc_, stroke + peak_overhang, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_width(peak_arc_, 0, LV_PART_MAIN);
-        // Ensure peak marker renders on top of main arc
-        lv_obj_move_foreground(peak_arc_);
-
-        // Position endpoint labels at bottom corners of arc container
-        // The arc sweeps 270° from 135° (bottom-left) to 45° (bottom-right)
-        if (label_left_) {
-            lv_obj_align(label_left_, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-        }
-        if (label_right_) {
-            lv_obj_align(label_right_, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
-        }
-    }
-
-    spdlog::debug("[ClogMeter] arc={}x{} stroke={} fill={}", arc_size, arc_size, stroke,
-                  fill_mode_);
+    spdlog::debug("[ClogMeter] arc={}x{}", arc_size, arc_size);
     in_resize_ = false;
-}
-
-int UiClogMeter::value_to_angle(int value) const {
-    // Arc sweep: 270° from 135° (start/safe) clockwise to 45° (end/danger)
-    int angle;
-    if (current_mode_ == 2) {
-        // Flowguard: -100..+100 mapped to full 270° sweep
-        angle = 135 + ((value + 100) * 270 / 200);
-    } else {
-        // Normal: 0..100
-        angle = 135 + (std::clamp(value, 0, 100) * 270 / 100);
-    }
-    return angle % 360;
-}
-
-void UiClogMeter::create_enhanced_widgets() {
-    if (!arc_container_ || !arc_)
-        return;
-
-    // 1. Danger zone arc — behind main arc, semi-transparent danger color
-    danger_arc_ = lv_arc_create(arc_container_);
-    lv_obj_set_size(danger_arc_, lv_obj_get_width(arc_), lv_obj_get_height(arc_));
-    lv_obj_align(danger_arc_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_remove_flag(danger_arc_, LV_OBJ_FLAG_CLICKABLE);
-    lv_arc_set_bg_angles(danger_arc_, 135, 45);
-    lv_arc_set_range(danger_arc_, 0, 100);
-    lv_arc_set_mode(danger_arc_, LV_ARC_MODE_NORMAL);
-    lv_obj_set_style_arc_opa(danger_arc_, LV_OPA_0, LV_PART_MAIN); // Hide background track
-    lv_obj_set_style_arc_color(danger_arc_, theme_manager_get_color("danger"), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_opa(danger_arc_, LV_OPA_30, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_rounded(danger_arc_, true, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(danger_arc_, LV_OPA_0, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(danger_arc_, LV_OPA_0, LV_PART_KNOB);
-    lv_obj_set_style_shadow_width(danger_arc_, 0, LV_PART_KNOB);
-    lv_obj_set_style_outline_width(danger_arc_, 0, LV_PART_KNOB);
-    // Move behind main arc
-    lv_obj_move_to_index(danger_arc_, 0);
-
-    // 2. Peak-hold marker — thin arc at peak position
-    peak_arc_ = lv_arc_create(arc_container_);
-    lv_obj_set_size(peak_arc_, lv_obj_get_width(arc_), lv_obj_get_height(arc_));
-    lv_obj_align(peak_arc_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_remove_flag(peak_arc_, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_arc_opa(peak_arc_, LV_OPA_0, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(peak_arc_, theme_manager_get_color("primary"), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_rounded(peak_arc_, false, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(peak_arc_, LV_OPA_0, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(peak_arc_, LV_OPA_0, LV_PART_KNOB);
-    lv_obj_set_style_shadow_width(peak_arc_, 0, LV_PART_KNOB);
-    lv_obj_set_style_outline_width(peak_arc_, 0, LV_PART_KNOB);
-    // Default: hidden until we get a peak value
-    lv_arc_set_angles(peak_arc_, 135, 135);
-
-    // 3. Endpoint labels at bottom corners
-    label_left_ = lv_label_create(arc_container_);
-    lv_label_set_text(label_left_, "");
-    lv_obj_set_style_text_font(label_left_, theme_manager_get_font("font_xs"), 0);
-    lv_obj_set_style_text_color(label_left_, theme_manager_get_color("text_muted"), 0);
-    lv_obj_align(label_left_, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-
-    label_right_ = lv_label_create(arc_container_);
-    lv_label_set_text(label_right_, "");
-    lv_obj_set_style_text_font(label_right_, theme_manager_get_font("font_xs"), 0);
-    lv_obj_set_style_text_color(label_right_, theme_manager_get_color("text_muted"), 0);
-    lv_obj_align(label_right_, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
-
-    // 4. Enhanced center text — replaces XML-bound clog_value_text in fill mode
-    if (value_text_) {
-        lv_obj_add_flag(value_text_, LV_OBJ_FLAG_HIDDEN);
-    }
-    center_label_ = lv_label_create(arc_container_);
-    lv_label_set_text(center_label_, "");
-    lv_obj_set_style_text_font(center_label_, lv_theme_get_font_small(nullptr), 0);
-    lv_obj_set_style_text_align(center_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(center_label_, LV_ALIGN_CENTER, 0, 0);
-
-    // 5. Set up observers for new subjects
-    auto& ams = AmsState::instance();
-
-    danger_obs_ = observe_int_immediate<UiClogMeter>(
-        ams.get_clog_meter_danger_pct_subject(), this,
-        [](UiClogMeter* self, int val) { self->update_danger_zone(val); });
-
-    peak_obs_ = observe_int_immediate<UiClogMeter>(
-        ams.get_clog_meter_peak_pct_subject(), this,
-        [](UiClogMeter* self, int val) { self->update_peak_marker(val); });
-
-    center_text_obs_ = observe_string_immediate<UiClogMeter>(
-        ams.get_clog_meter_center_text_subject(), this, [](UiClogMeter* self, const char* text) {
-            if (self->center_label_) {
-                lv_label_set_text(self->center_label_, text ? text : "");
-            }
-        });
-
-    label_left_obs_ = observe_string_immediate<UiClogMeter>(
-        ams.get_clog_meter_label_left_subject(), this, [](UiClogMeter* self, const char* text) {
-            if (self->label_left_) {
-                lv_label_set_text(self->label_left_, text);
-            }
-        });
-
-    label_right_obs_ = observe_string_immediate<UiClogMeter>(
-        ams.get_clog_meter_label_right_subject(), this, [](UiClogMeter* self, const char* text) {
-            if (self->label_right_) {
-                lv_label_set_text(self->label_right_, text);
-            }
-        });
-
-    spdlog::debug(
-        "[ClogMeter] Enhanced widgets created — danger={} peak={} center='{}' left='{}' right='{}'",
-        lv_subject_get_int(ams.get_clog_meter_danger_pct_subject()),
-        lv_subject_get_int(ams.get_clog_meter_peak_pct_subject()),
-        lv_subject_get_string(ams.get_clog_meter_center_text_subject()),
-        lv_subject_get_string(ams.get_clog_meter_label_left_subject()),
-        lv_subject_get_string(ams.get_clog_meter_label_right_subject()));
-}
-
-void UiClogMeter::update_danger_zone(int threshold) {
-    if (!danger_arc_)
-        return;
-
-    threshold = std::clamp(threshold, 0, 100);
-    if (threshold == 0) {
-        // No danger zone — hide indicator
-        lv_arc_set_angles(danger_arc_, 135, 135);
-        return;
-    }
-
-    // Danger zone covers from threshold% to 100% of the arc sweep
-    int start_angle = value_to_angle(threshold);
-    // End angle is always 45° (100% end of arc)
-    lv_arc_set_angles(danger_arc_, static_cast<uint16_t>(start_angle), 45);
-}
-
-void UiClogMeter::update_peak_marker(int peak) {
-    if (!peak_arc_)
-        return;
-
-    peak = std::clamp(peak, 0, 100);
-    if (peak == 0) {
-        // No peak — hide marker
-        lv_arc_set_angles(peak_arc_, 135, 135);
-        return;
-    }
-
-    int angle = value_to_angle(peak);
-    // 5° wide marker centered on peak position
-    int start = (angle - 2 + 360) % 360;
-    int end = (angle + 2) % 360;
-
-    // Guard against zero-sweep arc (start == end) which can crash the SW renderer
-    if (start == end) {
-        end = (start + 1) % 360;
-    }
-
-    lv_arc_set_angles(peak_arc_, static_cast<uint16_t>(start), static_cast<uint16_t>(end));
-
-    // Color based on warning state
-    lv_color_t color =
-        current_warning_ ? theme_manager_get_color("danger") : theme_manager_get_color("primary");
-    lv_obj_set_style_arc_color(peak_arc_, color, LV_PART_INDICATOR);
 }
 
 } // namespace helix::ui

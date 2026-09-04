@@ -158,6 +158,44 @@ class PrintStatusPanel : public OverlayBase {
      */
     void on_ui_destroyed() override;
 
+    /**
+     * @brief LV_EVENT_DELETE hook on the panel root — the only notice this
+     *        panel gets when the tree is deleted by anything other than
+     *        destroy_overlay_ui()
+     *
+     * A raw lv_obj_delete() (screen teardown, tests) fires no panel call, but
+     * the queued observe_int_sync handlers still run on the next drain and
+     * dereference the cached child pointers. Drops them via
+     * forget_cached_widgets(). Same contract as PowerPanel's hook (#776
+     * family).
+     */
+    static void on_root_deleted(lv_event_t* e);
+
+    /**
+     * @brief Drop every cached raw widget pointer, including overlay_root_
+     *
+     * Idempotent. Called from on_ui_destroyed() (explicit teardown) and
+     * on_root_deleted() (the tree died some other way). Does NOT touch the
+     * owned sub-objects (side list, map view, exclude manager) — those need a
+     * live tree to tear down and must never run from inside LVGL's delete
+     * event. Also does not touch delete_hook_root_: that member tracks where
+     * the delete hook is installed and is cleared only by the hook firing, the
+     * explicit teardown, or the destructor.
+     */
+    void forget_cached_widgets();
+
+    /**
+     * @brief The widget on_ui_destroyed()/~PrintStatusPanel must uninstall the
+     *        delete hook from
+     *
+     * Not overlay_root_: destroy_overlay_ui() hands that to
+     * safe_delete_deferred(), which nulls it immediately — before the deferred
+     * deletion runs and while the hook is still installed on the detached
+     * tree. This copy stays set until the hook fires on it, the explicit
+     * teardown removes it, or the destructor does, whichever comes first.
+     */
+    lv_obj_t* delete_hook_root_ = nullptr;
+
   public:
     //
     // === Legacy Compatibility ===
@@ -277,6 +315,7 @@ class PrintStatusPanel : public OverlayBase {
     lv_subject_t flow_subject_;
     lv_subject_t
         view_toggle_icon_subject_; ///< MDI codepoint for btn_view_toggle_icon (cube/layers)
+    lv_subject_t camera_button_label_subject_; ///< "Cam"/"Camera" — short form at Medium and below
 
     // Preparing state subjects
     lv_subject_t preparing_visible_subject_;  // int: 1 if preparing, 0 otherwise
@@ -377,6 +416,7 @@ class PrintStatusPanel : public OverlayBase {
     char flow_buf_[32] = "100%";
     char objects_text_buf_[32] = "";        ///< "X of Y obj" buffer
     char view_toggle_icon_buf_[8] = "";     ///< View toggle icon codepoint (cube/layers)
+    char camera_button_label_buf_[16] = ""; ///< Short/long camera label per ui_breakpoint
     char print_pause_reason_buf_[256] = ""; ///< Reason line shown under "Print Paused"
 
     //
@@ -558,16 +598,17 @@ class PrintStatusPanel : public OverlayBase {
 #endif
     void
     load_gcode_for_viewing(const std::string& filename); ///< Download and load G-code into viewer
-    void update_button_states();
+    void update_button_states(); ///< Enable/disable buttons based on current print state
+
+    /// "Cam"/"Camera" per ui_breakpoint — full word only where Row 2 has room
+    void update_camera_button_label(int breakpoint_value);
 
     /// The two per-job resets, shared by the job-state edge and the
     /// exit-from-Preparing edge. A print started in-app only ever reaches the
     /// second one: the panel is Preparing before Moonraker reports printing, so
     /// the job-state handler derives no transition and returns early.
-    void apply_new_print_resets(
-        bool reset_progress_bar,
-        bool clear_excluded_objects); ///< Enable/disable buttons based on current print state
-    void update_objects_text();       ///< Update "X of Y obj" display from exclude state
+    void apply_new_print_resets(bool reset_progress_bar, bool clear_excluded_objects);
+    void update_objects_text(); ///< Update "X of Y obj" display from exclude state
     void
     update_view_toggle_position(bool objects_visible); ///< Shift view toggle when objects btn shown
     void animate_badge_pop_in(lv_obj_t* badge, const char* label); ///< Pop-in animation for badges
@@ -612,6 +653,7 @@ class PrintStatusPanel : public OverlayBase {
     static void on_temp_graph_clicked(lv_event_t* e);
     static void on_dismiss_overlay_clicked(lv_event_t* e);
     static void on_tune_clicked(lv_event_t* e);
+    static void on_print_status_camera(lv_event_t* e);
     static void on_reprint_clicked(lv_event_t* e);
     static void on_objects_clicked(lv_event_t* e);
     static void on_view_toggle_clicked(lv_event_t* e);
@@ -679,6 +721,7 @@ class PrintStatusPanel : public OverlayBase {
     ObserverGuard end_overlay_dismissed_observer_; ///< Ditto; second input to the same recompute
     ObserverGuard print_message_observer_;  ///< Drives pause reason text from print_stats.message
     ObserverGuard pending_action_observer_; ///< observes PrintControlButtons' print_pending_action
+    ObserverGuard camera_label_observer_;   ///< observes ui_breakpoint → camera label length
                                             ///< for the paused overlay
 
     // Per-fan speed observers — each watches a DYNAMIC subject, so a paired

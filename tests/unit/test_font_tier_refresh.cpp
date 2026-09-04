@@ -66,10 +66,13 @@ TEST_CASE_METHOD(XMLTestFixture, "A rising breakpoint registers the font tiers s
     CHECK(AssetManager::registered_font_tier() == to_int(UiBreakpoint::XXLarge));
 
     // Only the *additional* tiers, not the whole table again. The four gates
-    // above SMALL contribute 3 (medium) + 4 (large) + 5 (xlarge) + 7 (xxlarge)
+    // above SMALL contribute 3 (medium) + 4 (large) + 5 (xlarge) + 13 (xxlarge)
     // faces; update this number when a tier gains or loses a face.
+    //
+    // xxlarge went 7 -> 13 with the six high-DPI rungs (noto_sans_48/64,
+    // bold_48/64, light_32/40) that the UI scale factor steps up into.
 #if HELIX_MAX_FONT_TIER >= 6
-    CHECK(rise == 19);
+    CHECK(rise == 25);
 #else
     CHECK(rise > 0);
 #endif
@@ -82,6 +85,14 @@ TEST_CASE_METHOD(XMLTestFixture, "A rising breakpoint registers the font tiers s
 #endif
 #if HELIX_MAX_FONT_TIER >= 6
     CHECK(lv_xml_get_font_silent(nullptr, "noto_sans_40") != nullptr); // xxlarge gate
+    // The high-DPI rungs must resolve too. theme_manager only adopts a scaled
+    // face after lv_xml_get_font_silent() confirms it, so a face that is
+    // compiled and linked but never registered leaves the scale silently
+    // falling back to the unscaled tier font.
+    CHECK(lv_xml_get_font_silent(nullptr, "noto_sans_48") != nullptr);
+    CHECK(lv_xml_get_font_silent(nullptr, "noto_sans_64") != nullptr);
+    CHECK(lv_xml_get_font_silent(nullptr, "noto_sans_bold_64") != nullptr);
+    CHECK(lv_xml_get_font_silent(nullptr, "noto_sans_light_40") != nullptr);
 #endif
 }
 

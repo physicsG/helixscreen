@@ -164,9 +164,9 @@ void JobQueueWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int width
     // Determine size mode from the widget's real granted pixels, not its
     // unitless grid span — see panel_widget_size.h for why.
     int mode;
-    if (width_px < widget_size::W_NORMAL || height_px < widget_size::H_TALL) {
+    if (width_px < widget_size::w_normal() || height_px < widget_size::h_tall()) {
         mode = 0; // compact: header + summary only
-    } else if (width_px < widget_size::W_WIDE && height_px < widget_size::H_TALLER) {
+    } else if (width_px < widget_size::w_wide() && height_px < widget_size::h_taller()) {
         mode = 1; // normal: header + summary + compact job list
     } else {
         mode = 2; // expanded: full details with timestamps

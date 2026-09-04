@@ -21,6 +21,7 @@
 #include "app_globals.h"
 #include "data_root_resolver.h"
 #include "filament_op_dispatch.h"
+#include "filament_op_execute.h"
 #include "filament_op_router.h"
 #include "filament_sensor_manager.h"
 #include "format_utils.h"
@@ -196,16 +197,31 @@ PrintStatusWidget::PrintStatusWidget() : printer_state_(get_printer_state()) {
     // Constructing the formatter here (before the ctor returns, and well
     // before attach() runs lv_xml_create) ensures the subjects exist when the
     // XML tree is built.
-    if (s_formatter_refcount_++ == 0) {
-        s_formatter_ = std::make_unique<DetailedFormatter>();
+    acquire_formatter();
+}
+
+void PrintStatusWidget::acquire_formatter() {
+    if (s_formatter_refcount_++ != 0) {
+        return;
     }
+    // Release the parked predecessor BEFORE building the replacement. Both
+    // formatters publish the same thirteen names into helix-xml's process-wide
+    // scope, and ~DetailedFormatter withdraws them by name — so constructing
+    // first would have the outgoing formatter's teardown delete the scope
+    // records that now point at the incoming one's subjects, leaving every
+    // bind_text on the Detailed card resolving to nothing for the rest of the
+    // session. Reached whenever the last print-status widget leaves the
+    // dashboard and one is added back.
+    s_formatter_.reset();
+    s_formatter_ = std::make_unique<DetailedFormatter>();
 }
 
 PrintStatusWidget::~PrintStatusWidget() {
     detach();
-    // Pair the eager ctor refcount bump. We never reset s_formatter_ even at
-    // refcount==0 (see detach() — destroying the formatter would dangle the
-    // helix-xml scope's subject pointers).
+    // Pair the eager ctor refcount bump, but leave s_formatter_ standing at
+    // refcount==0: destroying it here would dangle the helix-xml scope's subject
+    // pointers for any XML still bound to them. It is released in
+    // acquire_formatter(), where a replacement is about to take over the names.
     if (s_formatter_refcount_ > 0)
         --s_formatter_refcount_;
 }
@@ -262,8 +278,9 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     // Nozzle reads the tool-pin-aware proxy subjects rather than the raw
     // active-extruder ones, so the icon tracks whichever tool the card is
     // showing. Bed and chamber use the PrinterState defaults. The proxy
-    // subjects live on s_formatter_, which production code never resets once
-    // created (see ~PrintStatusWidget), so they genuinely outlive this binder.
+    // subjects live on s_formatter_, which is only ever replaced from
+    // acquire_formatter() — i.e. while no widget is attached — so they genuinely
+    // outlive this binder.
     nozzle_icon_binder_.bind_subjects(widget_obj_, "nozzle_icon_glyph",
                                       lv_xml_get_subject(nullptr, "print_status_nozzle_current"),
                                       lv_xml_get_subject(nullptr, "print_status_nozzle_target"));
@@ -355,10 +372,12 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     };
     if (auto* hm = get_print_history_manager()) {
         hm->add_observer(&history_changed_cb_);
-        // Trigger history fetch so idle thumbnail shows last print (not benchy)
-        if (!hm->is_loaded()) {
-            hm->fetch();
-        }
+        // Populate history so the idle thumbnail shows the last print (not
+        // benchy). ensure_loaded(), not fetch(): the observer just registered
+        // is served by whatever response is already in flight, while fetch()
+        // would read this ask as an invalidation and queue a second identical
+        // request.
+        hm->ensure_loaded();
     }
 
     // Observe connection state to fetch history once connected (widget may
@@ -367,8 +386,8 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         printer_state_.get_printer_connection_state_subject(), this,
         [](PrintStatusWidget* /*self*/, int state) {
             if (state == static_cast<int>(ConnectionState::CONNECTED)) {
-                if (auto* hm = get_print_history_manager(); hm && !hm->is_loaded()) {
-                    hm->fetch();
+                if (auto* hm = get_print_history_manager()) {
+                    hm->ensure_loaded();
                 }
             }
         },
@@ -520,9 +539,9 @@ void PrintStatusWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int wi
     // this band, not the raw pixel count, which wouldn't mean anything to a ref_value
     // comparison.
     int width_band;
-    if (width_px < widget_size::W_NORMAL) {
+    if (width_px < widget_size::w_normal()) {
         width_band = 0; // compact
-    } else if (width_px < widget_size::W_WIDE) {
+    } else if (width_px < widget_size::w_wide()) {
         width_band = 1; // normal
     } else {
         width_band = 2; // wide
@@ -553,7 +572,7 @@ void PrintStatusWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int wi
 
     // Normal band + tall enough: column layout (thumbnail on top, info below)
     // Compact or wide band: row layout (thumbnail left, info right)
-    bool use_column = (width_band == 1 && height_px >= widget_size::H_TALL);
+    bool use_column = (width_band == 1 && height_px >= widget_size::h_tall());
     if (use_column == is_column_) {
         return;
     }
@@ -777,8 +796,7 @@ void PrintStatusWidget::on_print_thumbnail_path_changed(const char* path) {
     // No empty-path branch: ActivePrintMediaManager is the subject's sole writer
     // and publishes no_thumbnail_placeholder() — the very image this used to
     // substitute — when a file has no thumbnail, so the value is always an image.
-    lv_image_set_src(print_card_active_thumb_, path);
-    spdlog::info("[PrintStatusWidget] Active print thumbnail updated: {}", path);
+    defer_apply_active_thumbnail(path);
 }
 
 #if defined(HELIX_PLATFORM_ESP32)
@@ -871,6 +889,50 @@ void PrintStatusWidget::defer_reset_print_card_to_idle() {
             }
         },
         this);
+}
+
+void PrintStatusWidget::defer_apply_active_thumbnail(const char* path) {
+    // Heap-allocate the payload so lv_async_call can carry it as void*, and copy
+    // the path: the subject may publish again before the tick, and the pointer it
+    // handed us is its own buffer. The LifetimeToken (not a live_instances()
+    // lookup) is what keeps this safe — detach() invalidates it, so a pending
+    // write cannot land on a widget that has already let go of its objects.
+    struct PendingThumb {
+        helix::LifetimeToken token;
+        PrintStatusWidget* self;
+        std::string path;
+    };
+    auto* pending = new PendingThumb{lifetime_.token(), this, path ? path : ""};
+
+    // Raw lv_async_call escapes the UpdateQueue::process_pending() batch this
+    // observer body runs in, the same escape defer_reset_print_card_to_idle()
+    // makes for the idle sibling.
+    lv_async_call(
+        [](void* ud) {
+            std::unique_ptr<PendingThumb> p(static_cast<PendingThumb*>(ud));
+            if (p->token.expired())
+                return;
+            PrintStatusWidget* self = p->self;
+            if (!self->widget_obj_ || !self->print_card_active_thumb_)
+                return;
+
+            // Trigger hardening (#1001), matching reset_print_card_to_idle():
+            // by the time the tick fires, populate_page's safe_clean_children()
+            // may have reparented this subtree onto lv_layer_top() to await
+            // deletion. lv_image_set_src → update_align → lv_obj_update_layout
+            // would then walk the whole layer and recurse into sibling condemned
+            // grid subtrees whose children may already be freed → SIGSEGV in
+            // grid calc().
+            if (!helix::ui::is_on_active_screen(self->print_card_active_thumb_)) {
+                spdlog::debug("[PrintStatusWidget] Skip active thumbnail: off active screen "
+                              "(mid-teardown)");
+                return;
+            }
+
+            lv_image_set_src(self->print_card_active_thumb_, p->path.c_str());
+            spdlog::info("[PrintStatusWidget] Active print thumbnail updated: {}", p->path);
+        },
+        pending);
 }
 
 void PrintStatusWidget::reset_print_card_to_idle() {
@@ -1097,6 +1159,11 @@ void PrintStatusWidget::show_idle_runout_modal() {
     // retains this callback until it is overwritten. Guard with the same
     // AsyncLifetimeGuard token FilamentRunoutHandler uses; the press arrives on
     // the main thread, so a plain expired() check is correct here.
+    // A detected runout is a warning, not an advisory tap. State it here rather
+    // than inheriting: the subject is shared with the home tile's tap modal,
+    // which sets it the other way — see RunoutGuidanceModal::set_advisory().
+    runout_modal_.set_advisory(false);
+
     auto token = lifetime_.token();
     runout_modal_.set_on_load_filament([this, token]() {
         if (token.expired())
@@ -1122,91 +1189,7 @@ void PrintStatusWidget::dispatch_load() {
     // a print job — the backend's own active slot is the only target available,
     // and this dialog has no slot picker.
     const int slot = backend ? backend->get_current_slot() : -1;
-
-    AmsSystemInfo sys;
-    helix::ui::BackendCaps caps;
-    if (backend) {
-        sys = backend->get_system_info();
-        caps.present = true;
-        caps.requires_slot_selection_for_load = backend->requires_slot_selection_for_load();
-        caps.needs_unload_before_load = backend->needs_unload_before_load(sys, slot);
-        caps.is_tool_changer = backend->get_type() == AmsType::TOOL_CHANGER;
-        // Distinct from !requires_slot_selection_for_load(): plan_load() needs to
-        // tell "bypass is suppressing the lane tier" apart from "this backend
-        // never wanted a slot", because a named lane wants opposite treatment.
-        caps.bypass_active = backend->is_bypass_active();
-    }
-
-    const auto& load_info = StandardMacros::instance().get(StandardMacroSlot::LoadFilament);
-    const helix::ui::FilamentOpPlan plan = helix::ui::plan_load(
-        sys, caps, slot, !load_info.is_empty(), load_info.get_source() == MacroSource::CONFIGURED);
-
-    switch (plan.tier) {
-    case helix::ui::FilamentTier::AmsBackend: {
-        spdlog::info("[PrintStatusWidget] Idle runout load via AMS backend (slot {})", slot);
-        AmsError err = (plan.ams_call == helix::ui::AmsCall::ChangeTool)
-                           ? backend->change_tool(plan.ams_arg)
-                           : backend->load_filament(plan.ams_arg);
-        if (!err.success()) {
-            spdlog::error("[PrintStatusWidget] Load filament failed: {}", err.technical_msg);
-            helix::ui::notify_ams_error(err);
-        }
-        return;
-    }
-
-    case helix::ui::FilamentTier::Refused:
-        // Never navigate: PanelId::Filament was the old behaviour and it tore
-        // the dialog out from under the user. Say what happened and stay put.
-        if (plan.refusal == helix::ui::FilamentRefusal::AlreadyMounted) {
-            spdlog::info("[PrintStatusWidget] Load refused — tool {} already mounted", slot);
-            NOTIFY_INFO(lv_tr("That tool is already loaded"));
-        } else {
-            spdlog::info("[PrintStatusWidget] Load refused — no slot resolved");
-            NOTIFY_WARNING(lv_tr("Select a filament slot to load"));
-        }
-        return;
-
-    case helix::ui::FilamentTier::Macro: {
-        auto* api = get_moonraker_api();
-        if (!api) {
-            return;
-        }
-        const std::string macro_name = load_info.get_macro();
-        spdlog::info("[PrintStatusWidget] Idle runout load via StandardMacros: {}", macro_name);
-        // ParamPolicy::Suppress runs the callback synchronously, so nothing here
-        // outlives this call and no token capture is needed inside it.
-        helix::ui::dispatch_filament_macro(
-            macro_name, helix::ui::ParamPolicy::Suppress,
-            [api](const helix::MacroParamResult& result) {
-                StandardMacros::instance().execute(
-                    StandardMacroSlot::LoadFilament, api, result.params,
-                    []() { spdlog::info("[PrintStatusWidget] Load filament started"); },
-                    [](const MoonrakerError& err) {
-                        spdlog::error("[PrintStatusWidget] Failed to load filament: {}",
-                                      err.message);
-                        NOTIFY_ERROR(lv_tr("Failed to load filament: {}"), err.user_message());
-                    });
-            });
-        return;
-    }
-
-    case helix::ui::FilamentTier::RawGcode: {
-        auto* api = get_moonraker_api();
-        if (!api) {
-            return;
-        }
-        spdlog::info("[PrintStatusWidget] No backend and no load macro — raw gcode fallback");
-        api->execute_gcode(
-            helix::ui::filament_load_fallback_gcode(),
-            []() { spdlog::info("[PrintStatusWidget] Load fallback gcode sent"); },
-            [](const MoonrakerError& err) {
-                spdlog::error("[PrintStatusWidget] Load fallback failed: {}", err.message);
-                NOTIFY_ERROR(lv_tr("Failed to load filament: {}"), err.user_message());
-            },
-            IMoonrakerAPI::EXTRUSION_TIMEOUT_MS);
-        return;
-    }
-    }
+    helix::ui::execute_filament_load(backend, slot, "[PrintStatusWidget]");
 }
 
 // ============================================================================
@@ -1898,10 +1881,12 @@ bool PrintStatusWidget::DetailedFormatter::set_nozzle_tool_override(
         current_nozzle_override_ = "auto";
         nozzle_temp_observer_ = observe_int_sync<DetailedFormatter>(
             ps.get_active_extruder_temp_subject(), this,
-            [](DetailedFormatter* self, int) { self->update_nozzle_text(); });
+            [](DetailedFormatter* self, int) { self->update_nozzle_text(); },
+            ps.get_subjects_lifetime());
         nozzle_target_observer_ = observe_int_sync<DetailedFormatter>(
             ps.get_active_extruder_target_subject(), this,
-            [](DetailedFormatter* self, int) { self->update_nozzle_text(); });
+            [](DetailedFormatter* self, int) { self->update_nozzle_text(); },
+            ps.get_subjects_lifetime());
         update_nozzle_text();
         update_tool_label();
     };
@@ -2081,27 +2066,35 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
     auto& ps = get_printer_state();
     layer_current_observer_ = observe_int_sync<DetailedFormatter>(
         ps.get_print_layer_current_subject(), this,
-        [](DetailedFormatter* self, int) { self->update_layer_text(); });
+        [](DetailedFormatter* self, int) { self->update_layer_text(); },
+        ps.get_subjects_lifetime());
     layer_total_observer_ = observe_int_sync<DetailedFormatter>(
         ps.get_print_layer_total_subject(), this,
-        [](DetailedFormatter* self, int) { self->update_layer_text(); });
+        [](DetailedFormatter* self, int) { self->update_layer_text(); },
+        ps.get_subjects_lifetime());
     elapsed_observer_ = observe_int_sync<DetailedFormatter>(
         ps.get_print_elapsed_subject(), this,
-        [](DetailedFormatter* self, int) { self->update_time_text(); });
+        [](DetailedFormatter* self, int) { self->update_time_text(); }, ps.get_subjects_lifetime());
     time_left_observer_ = observe_int_sync<DetailedFormatter>(
         ps.get_print_time_left_subject(), this,
-        [](DetailedFormatter* self, int) { self->update_time_text(); });
+        [](DetailedFormatter* self, int) { self->update_time_text(); }, ps.get_subjects_lifetime());
     filament_used_observer_ = observe_int_sync<DetailedFormatter>(
         ps.get_print_filament_used_subject(), this,
-        [](DetailedFormatter* self, int) { self->update_filament_text(); });
+        [](DetailedFormatter* self, int) { self->update_filament_text(); },
+        ps.get_subjects_lifetime());
 
-    // Auto-tool nozzle: observe static active_extruder subjects (no lifetime needed)
+    // Auto-tool nozzle: the active_extruder subjects are static members of
+    // PrinterState, but its lifetime token still has to be handed over — the
+    // guard is what learns the subjects died when PrinterState deinits, instead
+    // of leaving that to StaticSubjectRegistry ordering.
     nozzle_temp_observer_ = observe_int_sync<DetailedFormatter>(
         ps.get_active_extruder_temp_subject(), this,
-        [](DetailedFormatter* self, int) { self->update_nozzle_text(); });
+        [](DetailedFormatter* self, int) { self->update_nozzle_text(); },
+        ps.get_subjects_lifetime());
     nozzle_target_observer_ = observe_int_sync<DetailedFormatter>(
         ps.get_active_extruder_target_subject(), this,
-        [](DetailedFormatter* self, int) { self->update_nozzle_text(); });
+        [](DetailedFormatter* self, int) { self->update_nozzle_text(); },
+        ps.get_subjects_lifetime());
     // Bed and chamber temp_display widgets bind directly to bed_temp / bed_target /
     // chamber_temp / chamber_target in the XML — no formatter mirroring needed
     // for those. The nozzle path still mirrors because pinning rebinds it.
@@ -2134,11 +2127,13 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
     // attach_arc(), so a non-null pointer here is always live (L075: no
     // lv_obj_is_valid in observer cbs).
     arc_value_observer_ = observe_int_sync<DetailedFormatter>(
-        ps.get_print_progress_subject(), this, [](DetailedFormatter* self, int pct) {
+        ps.get_print_progress_subject(), this,
+        [](DetailedFormatter* self, int pct) {
             if (self->arc_widget_) {
                 lv_arc_set_value(self->arc_widget_, pct);
             }
-        });
+        },
+        ps.get_subjects_lifetime());
 
     // Idle hero — populate from print history and refresh on history-changed notifications.
     // PrintHistoryManager fires observers on the main thread (defer-wrapped in on_history_fetched),
@@ -2146,9 +2141,10 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
     history_cb_ = [this]() { update_idle_fields(); };
     if (auto* hm = get_print_history_manager()) {
         hm->add_observer(&history_cb_);
-        if (!hm->is_loaded()) {
-            hm->fetch();
-        }
+        // ensure_loaded(), not fetch(): the response already in flight serves
+        // this caller through the observer above, and fetch() would read the
+        // ask as an invalidation and queue a second identical request.
+        hm->ensure_loaded();
     }
     update_idle_fields();
 

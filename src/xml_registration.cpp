@@ -8,6 +8,7 @@
 #include "ui_ams_device_operations_overlay.h"
 #include "ui_ams_device_section_detail_overlay.h"
 #include "ui_ams_edit_overlay.h"
+#include "ui_belt_trace.h"
 #include "ui_button.h"
 #include "ui_carousel.h"
 #include "ui_confetti.h"
@@ -25,6 +26,7 @@
 #include "ui_panel_home.h"
 #include "ui_panel_settings.h"
 #include "ui_pin_entry_modal.h"
+#include "ui_pluck_animation.h"
 #include "ui_printer_switch_menu.h"
 #include "ui_progress_bar.h"
 #include "ui_spinner.h"
@@ -40,6 +42,7 @@
 #include "page_scroll_auto_inject.h"
 #include "static_subject_registry.h"
 #include "theme_manager.h"
+#include "z_offset_utils.h"
 
 #include <spdlog/spdlog.h>
 
@@ -323,6 +326,12 @@ void register_xml_components() {
     ui_carousel_init();           // <ui_carousel> horizontal scroll-snap carousel
     register_xml("carousel.xml"); // <carousel> XML component wrapping ui_carousel
     ui_confetti_init();           // <ui_confetti> celebration animation canvas
+#if HELIX_HAS_BELT_TUNER
+    helix::ui::register_belt_trace_widget();      // <belt_trace> waveform/spectrum strip, must
+                                                  // precede register_xml("panel_belt_tension.xml")
+    helix::ui::register_pluck_animation_widget(); // <pluck_animation> isometric pluck
+                                                  // illustration, same precedence rule
+#endif
     register_xml(
         "components/page_scroll_gutter.xml"); // <page_scroll_gutter> page scroll chevron column
 
@@ -334,6 +343,10 @@ void register_xml_components() {
     lv_xml_register_event_cb(nullptr, "on_toggle_password_visibility",
                              on_toggle_password_visibility);
     lv_xml_register_event_cb(nullptr, "on_setting_info_clicked", on_setting_info_clicked);
+    // Header save button. Global because header_bar is instantiated by ~40
+    // panels and the button can surface on any of them.
+    lv_xml_register_event_cb(nullptr, "on_header_save_z_offset",
+                             [](lv_event_t*) { helix::zoffset::save_dirty_offsets_shared(); });
     lv_xml_register_event_cb(nullptr, "on_edit_done_clicked",
                              [](lv_event_t*) { get_global_home_panel().exit_grid_edit_mode(); });
     lv_xml_register_event_cb(nullptr, "on_edit_add_widget_clicked",
@@ -413,6 +426,10 @@ void register_xml_components() {
     register_xml("temp_display.xml");
     register_xml("components/nozzle_icon.xml");
     register_xml("components/heater_icon.xml");
+    // Chamber-heater diagnostics card — instantiated by temp_graph_overlay's
+    // graph column (must be registered before temp_graph_overlay.xml, which
+    // is loaded later in this function).
+    register_xml("components/chamber_diagnostics_card.xml");
     // Shared progress arc widget — diameter-driven stroke thickness, see
     // include/ui_progress_arc.h for the C++ companion (attach_progress_arc).
     register_xml("components/helix_progress_arc.xml");
@@ -427,6 +444,7 @@ void register_xml_components() {
     register_xml("overlay_backdrop.xml");
     register_xml("overlay_panel.xml");
     register_xml("widget_catalog_overlay.xml");
+    register_xml("widget_catalog_category_overlay.xml");
     register_xml("toast_notification.xml");
 
     // Utility components (dividers, button rows, headers - used by modals and other components)
@@ -493,11 +511,11 @@ void register_xml_components() {
     // Print file components
     register_xml("print_file_card.xml");
     register_xml("print_file_list_row.xml");
-    register_xml("components/filament_mapping_pill.xml");
     register_xml("components/filament_mapping_more_pill.xml");
     register_xml("components/filament_swatch.xml");
     register_xml("components/filament_slot_picker_row.xml");
     register_xml("components/filament_mapping_tool_row.xml");
+    register_xml("components/filament_source_row.xml");
     register_xml("components/compact_toggle_row.xml");
     // Endless-spool status line. Registered here, ahead of filament_panel.xml,
     // because the AMS panel registers itself lazily and would otherwise be the
@@ -552,6 +570,8 @@ void register_xml_components() {
     register_xml("components/panel_widget_nozzle_temps.xml");
     register_xml("components/panel_widget_job_queue.xml");
     register_xml("components/clog_meter_page.xml");
+    register_xml("components/clog_bar_body.xml");
+    register_xml("components/clog_bar_page.xml");
     register_xml("components/panel_widget_clog_detection.xml");
     register_xml("components/panel_widget_print_stats.xml");
     register_xml("components/panel_widget_gcode_console.xml");
@@ -567,6 +587,7 @@ void register_xml_components() {
     register_xml("tool_switcher_picker.xml");
     register_xml("thermistor_sensor_picker.xml");
     register_xml("thermistor_configure_picker.xml");
+    register_xml("filament_source_picker.xml");
     register_xml("print_status_configure_picker.xml");
     register_xml("print_status_nozzle_tool_picker.xml");
     register_xml("favorite_macro_config_modal.xml");
@@ -584,12 +605,11 @@ void register_xml_components() {
     // before motion_panel.xml, which uses it.
     register_xml("components/motion_position_card.xml");
     register_xml("motion_panel.xml");
-    // TODO: Remove these old per-heater overlays once application.cpp's
-    // --overlays command-line paths and TemperatureService::xml_component_name()
-    // are updated to use the unified TempGraphOverlay instead.
-    register_xml("nozzle_temp_panel.xml");
-    register_xml("bed_temp_panel.xml");
-    register_xml("chamber_temp_panel.xml");
+    // TempGraphOverlay is the only temperature overlay; there are no per-heater
+    // nozzle/bed/chamber_temp_panel.xml components. TemperatureService::setup_panel()
+    // and xml_component_name() are residual per-heater machinery — compiled, but with
+    // no callers and no XML behind the names they return, so
+    // lv_xml_component_get_scope() returns nullptr there (guarded).
     register_xml("temp_graph_overlay.xml");
     // Register TempGraphOverlay event callbacks at startup (before XML is parsed)
     lv_xml_register_event_cb(nullptr, "on_temp_graph_preset_clicked",
@@ -638,7 +658,9 @@ void register_xml_components() {
     register_xml("screws_tilt_share_modal.xml");
     register_xml("input_shaper_panel.xml");
     register_xml("components/belt_result_card.xml");
+#if HELIX_HAS_BELT_TUNER
     register_xml("panel_belt_tension.xml");
+#endif
 
     // Print history panels
     register_xml("history_list_row.xml");

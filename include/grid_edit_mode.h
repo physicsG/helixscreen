@@ -106,19 +106,32 @@ class GridEditMode {
         int rowspan;
     };
 
-    /// Round a pixel position to the nearest grid cell boundary.
-    /// Returns a cell boundary index (0 to ncells inclusive).
+    /// Round a pixel position to the nearest grid cell boundary, snapping to
+    /// multiples of @p step tracks.
+    /// Returns a cell boundary index (0 to ncells inclusive, floored to a step
+    /// multiple).
     static int round_to_grid_cell(int px, int content_origin, int content_size, int ncells,
-                                  int gutter);
+                                  int gutter, int step);
 
     /// Compute new widget position/span for a resize operation.
     /// @param edge Which edge is being dragged
     /// @param orig_col/row/colspan/rowspan Original widget placement
     /// @param new_edge_cell The grid cell boundary the edge was dragged to
     /// @param ncells Number of cells along the resize axis
+    /// @param step Track step the resulting span must land on (see snap_step_for)
     static ResizeResult compute_resize_result(ResizeEdge edge, int orig_col, int orig_row,
                                               int orig_colspan, int orig_rowspan, int new_edge_cell,
-                                              int ncells);
+                                              int ncells, int step);
+
+    /// Track step (in tracks) a widget snaps to on each axis, based on whether
+    /// its registry entry allows occupying half a cell. Widgets with no
+    /// registry entry get the conservative whole-cell answer.
+    /// @return {col_step, row_step}
+    static std::pair<int, int> snap_step_for(const std::string& widget_id);
+
+    /// Number of lattice intersections drawn for a selection with these snap
+    /// steps. Public so the object cost can be pinned without a live grid.
+    static int dot_count(int ncols, int nrows, int col_step, int row_step);
 
     /// Detect which resize edge the pointer is near, or None if not near any edge.
     ResizeEdge detect_resize_edge(int px, int py, const lv_area_t& widget_area) const;
@@ -164,6 +177,11 @@ class GridEditMode {
 
     void create_dots_overlay();
     void destroy_dots_overlay();
+    /// Redraw the lattice for the current selection. The visible dots are the
+    /// boundaries the selected widget can actually snap to, so they change when
+    /// the selection does.
+    void refresh_dots_overlay();
+    std::string selected_widget_id() const;
     void create_selection_chrome(lv_obj_t* widget);
     void destroy_selection_chrome();
     void remove_selected_widget();

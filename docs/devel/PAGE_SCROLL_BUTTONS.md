@@ -24,11 +24,11 @@ on top of somebody's content.
 | `include/page_scroll_controller.h` + `src/ui/page_scroll_controller.cpp` | One controller per managed container. Owns the gutter, the reserved padding, and the scroll wiring |
 | `include/page_scroll_auto_inject.h` + `src/ui/page_scroll_auto_inject.cpp` | The policy. Walks a shown root and decides what gets a controller |
 | `ui_xml/components/page_scroll_gutter.xml` | The chevron column itself. Created by the controller, never placed in screen XML |
-| `src/system/display_settings_manager.cpp:234-248` | The setting and its per-platform default |
+| `src/system/display_settings_manager.cpp#init_subjects` | The setting and its per-platform default |
 
-Registration is at `src/xml_registration.cpp:319` (the component) and `:782`
-(`PageScrollAutoInject::init()`). Teardown is
-`src/application/application.cpp:4744`.
+Both the component registration and the `PageScrollAutoInject::init()` call happen
+in `src/xml_registration.cpp#register_xml_components`. Teardown is
+`src/application/application.cpp#cancel_add_printer_wizard`.
 
 ---
 
@@ -64,12 +64,14 @@ re-init clears the observer list. An observer registered there would never fire.
 This is the part to read before you change anything.
 
 `on_root_shown(root)` is called from four places in `NavigationManager`, all of
-them "a root just became visible": `src/ui/ui_nav_manager.cpp:1431` (panel
-activate), `:1870` (initial panel), `:2105` and `:2211` (overlay push). It reads
+them "a root just became visible": `src/ui/ui_nav_manager.cpp#set_active` (panel
+activate), `src/ui/ui_nav_manager.cpp#activate_initial_panel` (initial panel),
+`src/ui/ui_nav_manager.cpp#push_overlay` and
+`src/ui/ui_nav_manager.cpp#push_overlay_zoom_from` (overlay push). It reads
 the setting live, prunes dead controllers, forces a layout pass so overflow is
 measurable, then walks.
 
-A container qualifies when all three hold (`page_scroll_auto_inject.cpp:47-55`):
+A container qualifies when all three hold (`src/ui/page_scroll_auto_inject.cpp#qualifies`):
 
 | Condition | Why |
 |---|---|
@@ -104,7 +106,7 @@ separated by a `#space_2xl` gap, in a `#button_height`-wide column:
 The cut is a **subtree** cut, not a "is this tile scrollable" test, and that
 distinction is load-bearing. 37 of the 40 `panel_widget_*.xml` roots already set
 `scrollable="false"`, and two more inherit the clear from `ui_card`
-(`src/ui/ui_card.cpp:60`). So testing the tile root would find almost nothing -
+(`src/ui/ui_card.cpp#ui_card_xml_create`). So testing the tile root would find almost nothing -
 the walk was sailing straight through those innocent-looking roots and
 attaching to whatever was scrollable inside. Marking the root and returning
 there is what actually stops it.
@@ -125,19 +127,23 @@ needs paging, add a narrow opt-back-in rather than removing the cut.
 ## How a gutter behaves once attached
 
 The controller (`src/ui/page_scroll_controller.cpp`) creates the gutter as a
-child of the container it manages (`:35`) and positions it with
+child of the container it manages (`src/ui/page_scroll_controller.cpp#attach`) and positions it with
 `floating="true" align="right_mid"`, so it neither participates in the parent's
 flex or grid layout nor scrolls with the content.
 
-To keep the chevrons off the content, `apply_reserved_padding()` (`:79-88`)
+To keep the chevrons off the content,
+`apply_reserved_padding()` (`src/ui/page_scroll_controller.cpp#apply_reserved_padding`)
 grows the container's `pad_right` by the gutter width and translates the gutter
 back out over the strip it just freed. The original `pad_right` and scrollbar
-mode are saved at attach (`:31`, `:61`) and restored on detach (`:94`).
+mode are saved at attach (`src/ui/page_scroll_controller.cpp#attach`) and
+restored on detach (`src/ui/page_scroll_controller.cpp#detach`).
 
-`refresh_reach_state()` (`:98-121`) runs on scroll and resize: it hides the
+`refresh_reach_state()` (`src/ui/page_scroll_controller.cpp#refresh_reach_state`)
+runs on scroll and resize: it hides the
 gutter and drops the padding when content fits, and otherwise disables the up or
 down chevron at each end. Paging is
-`lv_obj_scroll_by_bounded(container_, 0, -direction * step, anim)` (`:141`),
+`lv_obj_scroll_by_bounded(container_, 0, -direction * step, anim)`
+(`src/ui/page_scroll_controller.cpp#scroll_by_page`),
 where `step` is `page_scroll_step()` - 90% of the viewport, so a row overlaps
 between pages - and `anim` follows the Animations setting.
 

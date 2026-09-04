@@ -3,11 +3,15 @@
 
 #include "mock_scenarios.h"
 
+#include "ams_backend_mock.h"
+#include "ams_state.h"
 #include "http_executor.h"
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <chrono>
+#include <functional>
 #include <lvgl.h>
 #include <thread>
 
@@ -34,6 +38,156 @@ static void set_string(const char* name, const char* value) {
     } else {
         spdlog::warn("[Scenario] Subject not found: {}", name);
     }
+}
+
+/// Apply a clog/flow state to the mock AMS backend and push it through the
+/// real derivation, so the meter shows what a printer reporting this would.
+///
+/// `as_mock()` is AmsBackend's RTTI-free stand-in for a dynamic_cast; on a real
+/// backend it returns nullptr and the scenario is a no-op, which is correct —
+/// there is nothing to fake on hardware that is telling us the truth.
+static void apply_clog_state(const std::function<void(AmsBackendMock&)>& mutate) {
+    auto* backend = AmsState::instance().get_backend();
+    auto* mock = backend ? backend->as_mock() : nullptr;
+    if (!mock) {
+        spdlog::warn("[Scenario] No mock AMS backend — clog scenario skipped");
+        return;
+    }
+    mutate(*mock);
+    // The subjects are derived, not stored: re-read the backend so the whole
+    // chain (source precedence, thresholds, label text) runs exactly as it does
+    // when a printer pushes an update.
+    AmsState::instance().sync_from_backend();
+}
+
+/// Encoder state at a given headroom, in the shape Happy Hare reports it.
+///
+/// `detection_length` is the window the encoder measures over and `headroom` is
+/// what is left of it, so clog% is (length - headroom) / length. `min_headroom`
+/// is the worst point reached this print, which is both the peak marker and,
+/// when it drops under `desired_headroom`, the warning latch.
+static EncoderClogInfo encoder_at(float headroom, float min_headroom) {
+    EncoderClogInfo info;
+    info.enabled = true;
+    info.detection_mode = 2; // auto
+    info.detection_length = 12.4f;
+    info.desired_headroom = 5.0f;
+    info.headroom = headroom;
+    info.min_headroom = min_headroom;
+    // Flow falls off as the path blocks; not derived by Happy Hare, but the
+    // two move together on a real machine and a fixed 85% next to a red bar
+    // reads as a bug.
+    info.flow_rate = static_cast<int>(std::clamp(headroom / 12.4f, 0.0f, 1.0f) * 100.0f);
+    return info;
+}
+
+/// Clear every clog source, so a scenario can select exactly one.
+static void clear_clog_sources(AmsBackendMock& mock) {
+    mock.set_encoder_clog_info(EncoderClogInfo{}, /*detection_mode_flag=*/0);
+    mock.set_flowguard_info(FlowguardInfo{});
+    for (int u = 0; u < 4; ++u) {
+        mock.set_unit_buffer_health(u, std::nullopt);
+    }
+}
+
+static std::vector<MockScenario> clog_scenarios() {
+    std::vector<MockScenario> s;
+
+    s.push_back({"clog_healthy", "Encoder clog detection, full headroom", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         clear_clog_sources(m);
+                         m.set_encoder_clog_info(encoder_at(11.8f, 11.2f), 2);
+                     });
+                 }});
+
+    s.push_back({"clog_warning", "Encoder headroom dipped below the desired minimum", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         clear_clog_sources(m);
+                         // min_headroom under desired_headroom is what latches
+                         // EncoderClogInfo::is_warning().
+                         m.set_encoder_clog_info(encoder_at(7.5f, 4.2f), 2);
+                     });
+                 }});
+
+    s.push_back({"clog_blocked", "Encoder headroom nearly gone — clog imminent", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         clear_clog_sources(m);
+                         m.set_encoder_clog_info(encoder_at(0.8f, 0.6f), 2);
+                     });
+                 }});
+
+    s.push_back({"flowguard_neutral", "Flowguard armed and centred", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         clear_clog_sources(m);
+                         FlowguardInfo fg;
+                         fg.enabled = true;
+                         fg.active = true;
+                         fg.level = 0.02f;
+                         fg.max_clog = 0.18f;
+                         fg.max_tangle = -0.12f;
+                         m.set_flowguard_info(fg);
+                     });
+                 }});
+
+    s.push_back({"flowguard_tangle", "Flowguard leaning to the tangle end", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         clear_clog_sources(m);
+                         FlowguardInfo fg;
+                         fg.enabled = true;
+                         fg.active = true;
+                         fg.level = -0.55f; // over-feeding
+                         fg.max_clog = 0.20f;
+                         fg.max_tangle = -0.62f;
+                         m.set_flowguard_info(fg);
+                     });
+                 }});
+
+    s.push_back({"flowguard_clog", "Flowguard tripped at the clog end", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         clear_clog_sources(m);
+                         FlowguardInfo fg;
+                         fg.enabled = true;
+                         fg.active = true;
+                         fg.level = 0.82f;
+                         // A non-empty trigger is what sets warning=1, which is
+                         // what turns the indicator red whatever the mode.
+                         fg.trigger = "CLOG";
+                         fg.max_clog = 0.86f;
+                         fg.max_tangle = -0.10f;
+                         m.set_flowguard_info(fg);
+                     });
+                 }});
+
+    s.push_back({"buffer_safe", "AFC buffer fault detection armed, nothing to report", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         clear_clog_sources(m);
+                         BufferHealth h;
+                         h.fault_detection_enabled = true;
+                         h.error_sensitivity = 7.0f;
+                         h.state = "Neutral";
+                         // Negative means the fault timer is stopped, which
+                         // AmsState reads as "nothing to report" (value 0).
+                         h.distance_to_fault = -1.0f;
+                         m.set_unit_buffer_health(0, h);
+                     });
+                 }});
+
+    s.push_back({"buffer_fault", "AFC buffer counting down to a fault", []() {
+                     apply_clog_state([](AmsBackendMock& m) {
+                         clear_clog_sources(m);
+                         BufferHealth h;
+                         h.fault_detection_enabled = true;
+                         h.error_sensitivity = 7.0f;
+                         h.state = "Trailing";
+                         h.distance_to_fault = 1.5f; // close to the threshold
+                         m.set_unit_buffer_health(0, h);
+                     });
+                 }});
+
+    s.push_back({"clog_off", "No clog detection hardware — the meter hides itself",
+                 []() { apply_clog_state([](AmsBackendMock& m) { clear_clog_sources(m); }); }});
+
+    return s;
 }
 
 static std::vector<MockScenario> build_scenarios() {
@@ -213,6 +367,20 @@ static std::vector<MockScenario> build_scenarios() {
                                  std::this_thread::sleep_for(std::chrono::milliseconds(2000));
                              });
                          }});
+
+    // --- clog / flow detection -------------------------------------------
+    //
+    // These drive the MOCK BACKEND, not the clog_meter_* subjects. Those
+    // subjects are re-derived from the backend on every AMS refresh
+    // (AmsState::sync_from_backend -> sync_clog_meter_from_info), so a scenario
+    // that set them directly would be overwritten within a poll or two - which
+    // is why driving the meter by hand needs `ctl freeze` first.
+    //
+    // Source precedence in sync_clog_meter_from_info() is flowguard > encoder >
+    // AFC buffer, so each scenario disables the sources above the one it wants.
+    for (const auto& c : clog_scenarios()) {
+        scenarios.push_back(c);
+    }
 
     return scenarios;
 }

@@ -1,16 +1,63 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_breakpoint.h"
+
+#include "../lvgl_test_fixture.h"
+#include "../test_fixtures.h"
 #include "../test_helpers/grid_edit_mode_test_access.h"
+#include "config.h"
 #include "grid_edit_mode.h"
 #include "grid_layout.h"
 #include "panel_widget_config.h"
+#include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
+#include "theme_manager.h"
 
 #include <unordered_set>
 
 #include "../catch_amalgamated.hpp"
 
+// The grid the placement and snapping tests below are written against. Grid
+// size is now a property of the container being subdivided rather than of the
+// breakpoint, so these state it outright instead of installing a panel
+// geometry and inferring it. 6x4 is the shape their hardcoded coordinates and
+// "grid full" expectations were authored for.
+constexpr helix::GridDimensions kGrid6x4{6, 4};
+
 using namespace helix;
+
+TEST_CASE("PanelWidgetEntry::disable_and_unplace surrenders the cell with the flag",
+          "[grid_edit][panel_widget_config]") {
+    // #1414. save() persists col/row for every entry regardless of `enabled`,
+    // so switching a widget off without clearing its coordinates leaves a claim
+    // on a cell nothing draws in. The anchored pass looks entries up by id, so
+    // that stale claim could be handed to the synthesized firmware_restart tile
+    // and knock a user-anchored widget off its saved rectangle. Four call sites
+    // wrote this pairing by hand and one of them (the grid-edit removal path)
+    // dropped the coordinate half - hence one rule, one place.
+    PanelWidgetEntry e;
+    e.id = "print_status";
+    e.enabled = true;
+    e.col = 4;
+    e.row = 1;
+    e.colspan = 3;
+    e.rowspan = 3;
+    REQUIRE(e.has_grid_position());
+
+    e.disable_and_unplace();
+
+    CHECK_FALSE(e.enabled);
+    CHECK(e.col == -1);
+    CHECK(e.row == -1);
+    // has_grid_position() is what the anchored pass gates on, so this is the
+    // property that actually matters: the entry must no longer claim a cell.
+    CHECK_FALSE(e.has_grid_position());
+    // Spans are the widget's authored size, not a claim on the grid - an entry
+    // re-enabled later should come back at its own size, so they survive.
+    CHECK(e.colspan == 3);
+    CHECK(e.rowspan == 3);
+}
 
 TEST_CASE("GridEditMode: starts inactive", "[grid_edit][edit_mode]") {
     GridEditMode em;
@@ -168,13 +215,14 @@ TEST_CASE("screen_to_grid_cell: zero gutter matches the historical behavior",
 // =============================================================================
 
 TEST_CASE("GridEditMode: clamp_span respects min/max from registry", "[grid_edit][resize]") {
-    // printer_image: min 1x1, max 4x3 (from registry)
+    // printer_image: min 2x2, max 8x6 tracks (from registry)
     const auto* def = find_widget_def("printer_image");
     REQUIRE(def != nullptr);
     REQUIRE(def->is_scalable());
 
-    // Over max — clamp down
-    auto [c, r] = GridEditMode::clamp_span("printer_image", 5, 4);
+    // Over max — clamp down. The input has to clear 8x6 tracks, not the 4x3
+    // cells the same widget was authored at before spans became half-cells.
+    auto [c, r] = GridEditMode::clamp_span("printer_image", 9, 7);
     CHECK(c == def->effective_max_colspan());
     CHECK(r == def->effective_max_rowspan());
 
@@ -190,47 +238,63 @@ TEST_CASE("GridEditMode: clamp_span respects min/max from registry", "[grid_edit
 }
 
 TEST_CASE("GridEditMode: clamp_span non-scalable widget stays fixed", "[grid_edit][resize]") {
-    // "shutdown" has no min/max overrides, so effective min == max == default (1x1)
-    const auto* def = find_widget_def("shutdown");
+    // "macros" is pinned at one whole cell on both axes: min == max == default.
+    // ("shutdown" is no longer the example — it can shrink to a half column.)
+    const auto* def = find_widget_def("macros");
     REQUIRE(def != nullptr);
     REQUIRE_FALSE(def->is_scalable());
 
-    auto [c, r] = GridEditMode::clamp_span("shutdown", 3, 3);
+    auto [c, r] = GridEditMode::clamp_span("macros", 6, 6);
     CHECK(c == def->effective_min_colspan());
     CHECK(r == def->effective_min_rowspan());
-    // Both should equal the default colspan/rowspan (1x1)
-    CHECK(c == 1);
-    CHECK(r == 1);
+    // Both should equal the default colspan/rowspan — one cell, so two tracks.
+    CHECK(c == GridLayout::TRACKS_PER_CELL);
+    CHECK(r == GridLayout::TRACKS_PER_CELL);
 }
 
-TEST_CASE("GridEditMode: clamp_span unknown widget returns at least 1x1", "[grid_edit][resize]") {
+TEST_CASE("GridEditMode: clamp_span unknown widget returns at least one track",
+          "[grid_edit][resize]") {
     auto [c, r] = GridEditMode::clamp_span("nonexistent_widget_xyz", 0, 0);
     CHECK(c >= 1);
     CHECK(r >= 1);
 }
 
 TEST_CASE("GridEditMode: clamp_span tips widget respects range", "[grid_edit][resize]") {
-    // tips: colspan default=3, min=2, max=6, rowspan default=1, min=1, max=1
+    // tips: colspan default=8, min=4; rowspan default=4, min=2, max=4 tracks.
+    // It is a band widget, so max_colspan is MAX_TRACKS — the input has to clear
+    // the widest grid the engine will ever build for the clamp to bite.
     const auto* def = find_widget_def("tips");
     REQUIRE(def != nullptr);
     REQUIRE(def->is_scalable());
+    REQUIRE(def->effective_max_colspan() == GridLayout::MAX_TRACKS);
 
-    // Max colspan 6, only 1 row allowed
-    auto [c, r] = GridEditMode::clamp_span("tips", 10, 5);
+    auto [c, r] = GridEditMode::clamp_span("tips", GridLayout::MAX_TRACKS + 8, 10);
     CHECK(c == def->effective_max_colspan());
     CHECK(r == def->effective_max_rowspan());
 
-    // Min colspan 2
     auto [c2, r2] = GridEditMode::clamp_span("tips", 1, 1);
     CHECK(c2 == def->effective_min_colspan());
-    CHECK(r2 == 1);
+    CHECK(r2 == def->effective_min_rowspan());
 }
 
 // =============================================================================
 // build_default_grid — anchor positions and auto-place defaults
 // =============================================================================
 
-TEST_CASE("build_default_grid only sets positions for anchor widgets", "[grid]") {
+TEST_CASE_METHOD(XMLTestFixture, "build_default_grid only sets positions for anchor widgets",
+                 "[grid]") {
+    // build_default_grid() picks its anchor table from this subject, not from
+    // anything passed in, so the expectations below are only meaningful at a
+    // known breakpoint. Pin it rather than read it: an earlier test in the same
+    // binary may have left it elsewhere, and which tests those are depends on
+    // how the suite happens to be sharded. Same reasoning as GridFullFixture in
+    // test_panel_widget_grid_full.cpp.
+    lv_subject_t* bp_subj = theme_manager_get_breakpoint_subject();
+    REQUIRE(bp_subj != nullptr);
+    REQUIRE(bp_subj->type == LV_SUBJECT_TYPE_INT);
+    const int prev_bp = lv_subject_get_int(bp_subj);
+    lv_subject_set_int(bp_subj, to_int(UiBreakpoint::Medium));
+
     auto entries = PanelWidgetConfig::build_default_grid();
     REQUIRE(entries.size() > 3); // At least the 3 anchors + some auto-place widgets
 
@@ -262,18 +326,19 @@ TEST_CASE("build_default_grid only sets positions for anchor widgets", "[grid]")
     CHECK(printer_image->has_grid_position());
 
     REQUIRE(print_status != nullptr);
-    CHECK(print_status->col == 0);
-    CHECK(print_status->row >= 2);     // depends on breakpoint (2-3)
-    CHECK(print_status->colspan >= 2); // depends on breakpoint (2-3)
-    CHECK(print_status->rowspan == 2);
+    CHECK(print_status->col >= 0);
+    CHECK(print_status->row >= 0);
+    CHECK(print_status->colspan >= 2);
+    CHECK(print_status->rowspan >= 2);
     CHECK(print_status->has_grid_position());
 
+    // tips is switched off on the 480-class tiers this runs at (the breakpoint
+    // subject is zero-initialised to Micro here), and a disabled widget is
+    // unplaced. Naming it is the point: it used to be one of five hardcoded
+    // anchors, and this assertion is what noticed the shipped table changed.
     REQUIRE(tips != nullptr);
-    CHECK(tips->col >= 0);
-    CHECK(tips->row >= 0);
-    CHECK(tips->colspan >= 1);
-    CHECK(tips->rowspan >= 1);
-    CHECK(tips->has_grid_position());
+    CHECK_FALSE(tips->enabled);
+    CHECK_FALSE(tips->has_grid_position());
 
     REQUIRE(temperature != nullptr);
     CHECK(temperature->has_grid_position());
@@ -281,17 +346,27 @@ TEST_CASE("build_default_grid only sets positions for anchor widgets", "[grid]")
     REQUIRE(bed_temperature != nullptr);
     CHECK(bed_temperature->has_grid_position());
 
-    // All non-anchor entries must have col=-1, row=-1 (auto-place)
+    // Positions are all-or-nothing. Which widgets the shipped table anchors is
+    // the table's business and changes per tier, but no entry may come back
+    // half-placed: a col with no row (or either one set on a widget that
+    // reports no grid position) would be placed by one code path and
+    // auto-placed by another.
     for (const auto& e : entries) {
-        if (e.id == "printer_image" || e.id == "print_status" || e.id == "tips" ||
-            e.id == "temperature" || e.id == "bed_temperature") {
-            continue;
+        INFO("Widget '" << e.id << "' col=" << e.col << " row=" << e.row);
+        if (e.has_grid_position()) {
+            CHECK(e.col >= 0);
+            CHECK(e.row >= 0);
+            CHECK(e.colspan >= 1);
+            CHECK(e.rowspan >= 1);
+        } else {
+            CHECK(e.col == -1);
+            CHECK(e.row == -1);
         }
-        INFO("Widget '" << e.id << "' should be auto-place (col=-1, row=-1)");
-        CHECK(e.col == -1);
-        CHECK(e.row == -1);
-        CHECK_FALSE(e.has_grid_position());
     }
+
+    // Hand the subject back as it was found: pinning it and walking away would
+    // just move the ordering hazard onto whoever runs next.
+    lv_subject_set_int(bp_subj, prev_bp);
 }
 
 // =============================================================================
@@ -300,7 +375,7 @@ TEST_CASE("build_default_grid only sets positions for anchor widgets", "[grid]")
 
 TEST_CASE("GridLayout bottom-right packing fills cells correctly", "[grid]") {
     // Breakpoint 2 = MEDIUM = 6x4 grid
-    GridLayout grid(UiBreakpoint::Medium);
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
     REQUIRE(grid.cols() == 6);
     REQUIRE(grid.rows() == 4);
 
@@ -384,7 +459,7 @@ TEST_CASE("auto-place entries get positions written back after placement", "[gri
 
     // Replicate the two-pass placement from populate_widgets
     UiBreakpoint breakpoint = UiBreakpoint::Medium;
-    GridLayout grid(breakpoint);
+    GridLayout grid(breakpoint, kGrid6x4);
 
     struct PlacedSlot {
         size_t entry_index;
@@ -504,7 +579,7 @@ TEST_CASE("auto-place entries get positions written back after placement", "[gri
 // =============================================================================
 
 TEST_CASE("GridLayout: can_place rejects out-of-bounds column", "[grid]") {
-    GridLayout grid(UiBreakpoint::Medium); // MEDIUM = 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
     REQUIRE(grid.cols() == 6);
     REQUIRE(grid.rows() == 4);
 
@@ -522,7 +597,7 @@ TEST_CASE("GridLayout: can_place rejects out-of-bounds column", "[grid]") {
 }
 
 TEST_CASE("GridLayout: can_place rejects out-of-bounds row", "[grid]") {
-    GridLayout grid(UiBreakpoint::Medium); // MEDIUM = 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     // 1x1 widget at row=4 (one past the last row) is rejected
     CHECK_FALSE(grid.can_place(0, 4, 1, 1));
@@ -538,7 +613,7 @@ TEST_CASE("GridLayout: can_place rejects out-of-bounds row", "[grid]") {
 }
 
 TEST_CASE("GridLayout: can_place rejects negative coordinates and zero spans", "[grid]") {
-    GridLayout grid(UiBreakpoint::Medium); // MEDIUM = 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     CHECK_FALSE(grid.can_place(-1, 0, 1, 1));
     CHECK_FALSE(grid.can_place(0, -1, 1, 1));
@@ -553,7 +628,7 @@ TEST_CASE("GridLayout: can_place rejects negative coordinates and zero spans", "
 TEST_CASE("print_status bottom-left pin on 6x4 grid", "[grid]") {
     // On a 6x4 grid (MEDIUM breakpoint=3), print_status with rowspan=2
     // should be pinned to row = 4 - 2 = 2
-    GridLayout grid(UiBreakpoint::Medium);
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
     REQUIRE(grid.cols() == 6);
     REQUIRE(grid.rows() == 4);
 
@@ -567,9 +642,10 @@ TEST_CASE("print_status bottom-left pin on 6x4 grid", "[grid]") {
 }
 
 TEST_CASE("print_status bottom-left pin on 8x5 grid", "[grid]") {
-    // On an 8x5 grid (LARGE breakpoint=4), print_status with rowspan=2
-    // should be pinned to row = 5 - 2 = 3
-    GridLayout grid(UiBreakpoint::Large);
+    // On an 8x5 grid, print_status with rowspan=2 should be pinned to
+    // row = 5 - 2 = 3. An odd row count is not something the sizing model
+    // produces, but the pin formula must not depend on that.
+    GridLayout grid(UiBreakpoint::Large, {8, 5});
     REQUIRE(grid.cols() == 8);
     REQUIRE(grid.rows() == 5);
 
@@ -587,7 +663,7 @@ TEST_CASE("print_status pin formula consistent across all breakpoints", "[grid]"
     UiBreakpoint bps[] = {UiBreakpoint::Micro,  UiBreakpoint::Tiny,  UiBreakpoint::Small,
                           UiBreakpoint::Medium, UiBreakpoint::Large, UiBreakpoint::XLarge};
     for (auto bp : bps) {
-        GridLayout grid(bp);
+        GridLayout grid(bp, kGrid6x4);
         int rowspan = 2;
         int pinned_row = grid.rows() - rowspan;
 
@@ -605,7 +681,7 @@ TEST_CASE("print_status pin formula consistent across all breakpoints", "[grid]"
 TEST_CASE("Overflow clamping pushes col to fit within grid", "[grid]") {
     // Simulate the clamping logic from populate_widgets:
     //   if (col + colspan > grid.cols()) col = max(0, grid.cols() - colspan);
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
     REQUIRE(grid.cols() == 6);
 
     // Widget at col=5 with colspan=2 overflows (5+2=7 > 6)
@@ -622,7 +698,7 @@ TEST_CASE("Overflow clamping pushes col to fit within grid", "[grid]") {
 }
 
 TEST_CASE("Overflow clamping pushes row to fit within grid", "[grid]") {
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
     REQUIRE(grid.rows() == 4);
 
     // Widget at row=3 with rowspan=2 overflows (3+2=5 > 4)
@@ -638,7 +714,7 @@ TEST_CASE("Overflow clamping pushes row to fit within grid", "[grid]") {
 }
 
 TEST_CASE("Overflow clamping handles widget larger than grid dimension", "[grid]") {
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     // Widget with colspan=8 on a 6-column grid: max(0, 6-8) = max(0,-2) = 0
     // The widget still won't fit (0+8 > 6), but col is clamped to 0
@@ -660,7 +736,7 @@ TEST_CASE("Overflow clamping handles widget larger than grid dimension", "[grid]
 TEST_CASE("Widgets disabled when grid is full and auto-place fails", "[grid]") {
     // Simulate the disable-on-overflow logic from populate_widgets.
     // Fill a 6x4 grid completely, then try to auto-place another widget.
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
     REQUIRE(grid.cols() == 6);
     REQUIRE(grid.rows() == 4);
 
@@ -699,7 +775,7 @@ TEST_CASE("Widgets disabled when grid is full and auto-place fails", "[grid]") {
 
 TEST_CASE("Multiple overflow widgets all get disabled", "[grid]") {
     // Fill grid mostly, leave only 1 free cell, try to place 3 auto-place widgets
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     // Fill all cells except (5,3) -- the bottom-right corner
     for (int r = 0; r < grid.rows(); ++r) {
@@ -711,8 +787,10 @@ TEST_CASE("Multiple overflow widgets all get disabled", "[grid]") {
         }
     }
 
-    // Verify exactly 1 free cell remains
-    auto pos = grid.find_available(1, 1);
+    // Verify exactly 1 free cell remains. Step 1 because this fixture is built
+    // from single-track widgets, which only exist for a half-cell widget — the
+    // whole-cell step would refuse the odd corner at (5,3).
+    auto pos = grid.find_available(1, 1, 1, 1);
     REQUIRE(pos.has_value());
     CHECK(pos->first == 5);
     CHECK(pos->second == 3);
@@ -727,7 +805,9 @@ TEST_CASE("Multiple overflow widgets all get disabled", "[grid]") {
     int placed_count = 0;
     int disabled_count = 0;
     for (auto& entry : overflow_entries) {
-        auto avail = grid.find_available(entry.colspan, entry.rowspan);
+        // Step 1: these entries span a single track, which only a half-cell
+        // widget ever does — see the note on the free-cell check above.
+        auto avail = grid.find_available(entry.colspan, entry.rowspan, 1, 1);
         if (avail &&
             grid.place({entry.id, avail->first, avail->second, entry.colspan, entry.rowspan})) {
             entry.col = avail->first;
@@ -808,7 +888,7 @@ TEST_CASE("Drag to different position is detected when config matches screen",
 
 TEST_CASE("Drag collision detection: empty target cell allows placement", "[grid_edit][drag]") {
     // Build a 6x4 grid with some occupied cells, verify can_place on an empty cell
-    GridLayout grid(UiBreakpoint::Medium); // MEDIUM = 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
     REQUIRE(grid.place({"printer_image", 0, 0, 2, 2}));
     REQUIRE(grid.place({"tips", 2, 0, 4, 1}));
     REQUIRE(grid.place({"widget_a", 2, 1, 1, 1}));
@@ -968,7 +1048,7 @@ TEST_CASE("screen_to_grid_cell boundary: cell edges map correctly", "[grid_edit]
 }
 
 TEST_CASE("Drag: multi-cell widget bounds check at grid edges", "[grid_edit][drag]") {
-    GridLayout grid(UiBreakpoint::Medium); // MEDIUM = 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     // A 2x2 widget can be placed at (4,2) — fits exactly (4+2=6, 2+2=4)
     CHECK(grid.can_place(4, 2, 2, 2));
@@ -982,7 +1062,7 @@ TEST_CASE("Drag: multi-cell widget bounds check at grid edges", "[grid_edit][dra
 
 TEST_CASE("Multi-cell widget disabled when no contiguous space available", "[grid]") {
     // Fill grid leaving only scattered 1x1 holes -- a 2x2 widget can't fit
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     // Fill rows 0-2 completely
     for (int r = 0; r < 3; ++r) {
@@ -1019,7 +1099,7 @@ TEST_CASE("Drag: hardware-gated invisible widgets should not block placement",
     // Simulates the bug where humidity/probe/width_sensor are enabled in config
     // with grid positions, but not actually placed on screen due to hardware gates.
     // These invisible widgets should NOT occupy cells in the collision grid.
-    GridLayout grid(UiBreakpoint::Medium); // MEDIUM = 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     // Visible widgets
     grid.place({"printer_image", 0, 0, 2, 2});
@@ -1031,7 +1111,7 @@ TEST_CASE("Drag: hardware-gated invisible widgets should not block placement",
     CHECK(grid.can_place(2, 2, 2, 2));
 
     // Now simulate the OLD buggy behavior: place invisible widget
-    GridLayout grid_with_invisible(UiBreakpoint::Medium);
+    GridLayout grid_with_invisible(UiBreakpoint::Medium, kGrid6x4);
     grid_with_invisible.place({"printer_image", 0, 0, 2, 2});
     grid_with_invisible.place({"temperature", 4, 0, 1, 1});
     grid_with_invisible.place({"fan", 5, 0, 1, 1});
@@ -1341,41 +1421,47 @@ TEST_CASE("PanelWidgetDef: partially scalable (one axis)", "[grid_edit][sizing]"
 }
 
 TEST_CASE("clamp_span: clamps to widget min/max", "[grid_edit][sizing]") {
-    // Register a test widget definition with known constraints
-    // Use an existing scalable widget: "temperature" (min 1x1, max 2x2)
+    // Spans are in tracks — a track is half a cell (GridLayout::TRACKS_PER_CELL).
+    // Use an existing scalable widget: "temperature" (min 2x2, max 4x4 tracks).
     auto [c1, r1] = GridEditMode::clamp_span("temperature", 0, 0);
-    CHECK(c1 == 1); // Clamped to min
-    CHECK(r1 == 1);
+    CHECK(c1 == 2); // Clamped to min
+    CHECK(r1 == 2);
 
-    auto [c2, r2] = GridEditMode::clamp_span("temperature", 5, 5);
-    CHECK(c2 == 2); // Clamped to max
-    CHECK(r2 == 2);
+    auto [c2, r2] = GridEditMode::clamp_span("temperature", 9, 9);
+    CHECK(c2 == 4); // Clamped to max
+    CHECK(r2 == 4);
 
-    auto [c3, r3] = GridEditMode::clamp_span("temperature", 1, 1);
-    CHECK(c3 == 1); // Within range
-    CHECK(r3 == 1);
+    auto [c3, r3] = GridEditMode::clamp_span("temperature", 3, 3);
+    CHECK(c3 == 3); // Within range
+    CHECK(r3 == 3);
 
-    auto [c4, r4] = GridEditMode::clamp_span("temperature", 2, 2);
-    CHECK(c4 == 2); // At max
-    CHECK(r4 == 2);
+    auto [c4, r4] = GridEditMode::clamp_span("temperature", 4, 4);
+    CHECK(c4 == 4); // At max
+    CHECK(r4 == 4);
 }
 
 TEST_CASE("clamp_span: non-scalable widget stays fixed", "[grid_edit][sizing]") {
-    // "shutdown" is 1x1, min 1x1, max 1x1
-    auto [c1, r1] = GridEditMode::clamp_span("shutdown", 3, 3);
-    CHECK(c1 == 1);
-    CHECK(r1 == 1);
+    // "macros" is one whole cell on both axes and cannot scale on either.
+    auto [c1, r1] = GridEditMode::clamp_span("macros", 6, 6);
+    CHECK(c1 == 2);
+    CHECK(r1 == 2);
 }
 
 TEST_CASE("clamp_span: asymmetric constraints", "[grid_edit][sizing]") {
-    // "tips" is 4x2, min 2x1, max 6x2 — wide and moderately tall
+    // "tips" is 8x4 tracks, min 4x2. The asymmetry is the point: it is a band
+    // widget, so the colspan is capped only by the widest grid the engine
+    // builds, while the rowspan stays pinned at 4 tracks.
     auto [c1, r1] = GridEditMode::clamp_span("tips", 1, 1);
-    CHECK(c1 == 2); // Clamped to min_colspan
-    CHECK(r1 == 1); // rowspan stays at 1 (within [1,2])
+    CHECK(c1 == 4); // Clamped to min_colspan
+    CHECK(r1 == 2); // Clamped to min_rowspan
 
-    auto [c2, r2] = GridEditMode::clamp_span("tips", 6, 3);
-    CHECK(c2 == 6); // At max_colspan
-    CHECK(r2 == 2); // Clamped to max_rowspan
+    auto [c2, r2] = GridEditMode::clamp_span("tips", 12, 6);
+    CHECK(c2 == 12); // Well inside max_colspan, passed through
+    CHECK(r2 == 4);  // Clamped to max_rowspan
+
+    auto [c3, r3] = GridEditMode::clamp_span("tips", GridLayout::MAX_TRACKS + 8, 6);
+    CHECK(c3 == GridLayout::MAX_TRACKS); // Clamped to max_colspan
+    CHECK(r3 == 4);
 }
 
 TEST_CASE("All registered widgets have valid sizing constraints", "[grid_edit][sizing]") {
@@ -1521,6 +1607,36 @@ TEST_CASE("detect_resize_edge: 18+18 hit zone boundaries", "[grid_edit][resize]"
     CHECK(em.detect_resize_edge(200, 81, area) == GridEditMode::ResizeEdge::None);
 }
 
+TEST_CASE("detect_resize_edge: the inward band is a fraction of a narrow widget",
+          "[grid_edit][resize][1126]") {
+    GridEditMode em;
+    // 30px wide, 90px tall — a half-cell-wide widget on a micro panel. Two flat
+    // 18px inward bands would overlap and leave no interior at all, so every
+    // pixel would report an edge and the widget could never be dragged.
+    lv_area_t narrow = {100, 100, 130, 190};
+
+    // Horizontal centre is 10px from each vertical edge: inward_x = 30/3 = 10,
+    // so x=115 is outside both the left and the right inward band.
+    CHECK(em.detect_resize_edge(115, 145, narrow) == GridEditMode::ResizeEdge::None);
+
+    // The edges themselves still resize.
+    CHECK(em.detect_resize_edge(101, 145, narrow) == GridEditMode::ResizeEdge::Left);
+    CHECK(em.detect_resize_edge(129, 145, narrow) == GridEditMode::ResizeEdge::Right);
+}
+
+TEST_CASE("detect_resize_edge: the two axes clamp independently", "[grid_edit][resize][1126]") {
+    GridEditMode em;
+    // 30 wide x 200 tall. inward_x = 10, inward_y = min(18, 66) = 18.
+    lv_area_t tall = {100, 100, 130, 300};
+
+    // 12px below the top edge: inside the 18px vertical band, so Top wins even
+    // though the horizontal centre is outside the (narrower) horizontal bands.
+    CHECK(em.detect_resize_edge(115, 112, tall) == GridEditMode::ResizeEdge::Top);
+
+    // 40px below the top edge: outside both bands on both axes.
+    CHECK(em.detect_resize_edge(115, 140, tall) == GridEditMode::ResizeEdge::None);
+}
+
 // ============================================================================
 // round_to_grid_cell helper
 // ============================================================================
@@ -1528,52 +1644,52 @@ TEST_CASE("detect_resize_edge: 18+18 hit zone boundaries", "[grid_edit][resize]"
 TEST_CASE("round_to_grid_cell: exact cell boundary", "[grid_edit][resize]") {
     // 6 cells in 600px container starting at x=0
     // Cell boundaries: 0, 100, 200, 300, 400, 500, 600
-    CHECK(GridEditMode::round_to_grid_cell(0, 0, 600, 6, 0) == 0);
-    CHECK(GridEditMode::round_to_grid_cell(100, 0, 600, 6, 0) == 1);
-    CHECK(GridEditMode::round_to_grid_cell(300, 0, 600, 6, 0) == 3);
-    CHECK(GridEditMode::round_to_grid_cell(600, 0, 600, 6, 0) == 6);
+    CHECK(GridEditMode::round_to_grid_cell(0, 0, 600, 6, 0, 1) == 0);
+    CHECK(GridEditMode::round_to_grid_cell(100, 0, 600, 6, 0, 1) == 1);
+    CHECK(GridEditMode::round_to_grid_cell(300, 0, 600, 6, 0, 1) == 3);
+    CHECK(GridEditMode::round_to_grid_cell(600, 0, 600, 6, 0, 1) == 6);
 }
 
 TEST_CASE("round_to_grid_cell: midpoint rounding", "[grid_edit][resize]") {
     // Cell size = 100px. Midpoint of cell 0 = 50px.
     // 49px → rounds to boundary 0 (cell 0)
-    CHECK(GridEditMode::round_to_grid_cell(49, 0, 600, 6, 0) == 0);
+    CHECK(GridEditMode::round_to_grid_cell(49, 0, 600, 6, 0, 1) == 0);
     // 50px → rounds to boundary 1 (std::round rounds 0.5 up)
-    CHECK(GridEditMode::round_to_grid_cell(50, 0, 600, 6, 0) == 1);
+    CHECK(GridEditMode::round_to_grid_cell(50, 0, 600, 6, 0, 1) == 1);
     // 51px → rounds to boundary 1
-    CHECK(GridEditMode::round_to_grid_cell(51, 0, 600, 6, 0) == 1);
+    CHECK(GridEditMode::round_to_grid_cell(51, 0, 600, 6, 0, 1) == 1);
 
     // Just past midpoint of cell 2 (250px)
-    CHECK(GridEditMode::round_to_grid_cell(249, 0, 600, 6, 0) == 2);
-    CHECK(GridEditMode::round_to_grid_cell(251, 0, 600, 6, 0) == 3);
+    CHECK(GridEditMode::round_to_grid_cell(249, 0, 600, 6, 0, 1) == 2);
+    CHECK(GridEditMode::round_to_grid_cell(251, 0, 600, 6, 0, 1) == 3);
 }
 
 TEST_CASE("round_to_grid_cell: with content origin offset", "[grid_edit][resize]") {
     // Container starts at x=100, 600px wide, 6 cells
-    CHECK(GridEditMode::round_to_grid_cell(100, 100, 600, 6, 0) == 0);
-    CHECK(GridEditMode::round_to_grid_cell(200, 100, 600, 6, 0) == 1);
-    CHECK(GridEditMode::round_to_grid_cell(700, 100, 600, 6, 0) == 6);
+    CHECK(GridEditMode::round_to_grid_cell(100, 100, 600, 6, 0, 1) == 0);
+    CHECK(GridEditMode::round_to_grid_cell(200, 100, 600, 6, 0, 1) == 1);
+    CHECK(GridEditMode::round_to_grid_cell(700, 100, 600, 6, 0, 1) == 6);
 
     // Midpoint: 100 + 50 = 150 → rounds to 1
-    CHECK(GridEditMode::round_to_grid_cell(150, 100, 600, 6, 0) == 1);
-    CHECK(GridEditMode::round_to_grid_cell(149, 100, 600, 6, 0) == 0);
+    CHECK(GridEditMode::round_to_grid_cell(150, 100, 600, 6, 0, 1) == 1);
+    CHECK(GridEditMode::round_to_grid_cell(149, 100, 600, 6, 0, 1) == 0);
 }
 
 TEST_CASE("round_to_grid_cell: clamps to valid range", "[grid_edit][resize]") {
     // Below origin → clamps to 0
-    CHECK(GridEditMode::round_to_grid_cell(-50, 0, 600, 6, 0) == 0);
+    CHECK(GridEditMode::round_to_grid_cell(-50, 0, 600, 6, 0, 1) == 0);
     // Above maximum → clamps to ncells
-    CHECK(GridEditMode::round_to_grid_cell(800, 0, 600, 6, 0) == 6);
+    CHECK(GridEditMode::round_to_grid_cell(800, 0, 600, 6, 0, 1) == 6);
 }
 
 TEST_CASE("round_to_grid_cell: rounds against the gutter-aware pitch",
           "[grid_edit][resize][grid_metrics]") {
     // pitch = 80.67. Boundary 3 sits at 242; the midpoint before it is ~201.7.
-    REQUIRE(helix::GridEditMode::round_to_grid_cell(202, 0, 480, 6, 4) == 3);
-    REQUIRE(helix::GridEditMode::round_to_grid_cell(201, 0, 480, 6, 4) == 2);
+    REQUIRE(helix::GridEditMode::round_to_grid_cell(202, 0, 480, 6, 4, 1) == 3);
+    REQUIRE(helix::GridEditMode::round_to_grid_cell(201, 0, 480, 6, 4, 1) == 2);
     // Clamps still hold at both ends.
-    REQUIRE(helix::GridEditMode::round_to_grid_cell(-500, 0, 480, 6, 4) == 0);
-    REQUIRE(helix::GridEditMode::round_to_grid_cell(9999, 0, 480, 6, 4) == 6);
+    REQUIRE(helix::GridEditMode::round_to_grid_cell(-500, 0, 480, 6, 4, 1) == 0);
+    REQUIRE(helix::GridEditMode::round_to_grid_cell(9999, 0, 480, 6, 4, 1) == 6);
 }
 
 // ============================================================================
@@ -1582,8 +1698,9 @@ TEST_CASE("round_to_grid_cell: rounds against the gutter-aware pitch",
 
 TEST_CASE("compute_resize_result: right edge grow", "[grid_edit][resize]") {
     // Widget at (1,0) span 2x2, drag right edge to cell boundary 4
-    auto result = GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Right, 1, 0, 2, 2,
-                                                      /*new_edge_cell=*/4, /*ncells=*/6);
+    auto result =
+        GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Right, 1, 0, 2, 2,
+                                            /*new_edge_cell=*/4, /*ncells=*/6, /*step=*/1);
     CHECK(result.col == 1);
     CHECK(result.row == 0);
     CHECK(result.colspan == 3); // was 2, now extends to col 4 → 4-1=3
@@ -1593,8 +1710,9 @@ TEST_CASE("compute_resize_result: right edge grow", "[grid_edit][resize]") {
 
 TEST_CASE("compute_resize_result: right edge shrink", "[grid_edit][resize]") {
     // Widget at (1,0) span 3x2, drag right edge to cell boundary 3
-    auto result = GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Right, 1, 0, 3, 2,
-                                                      /*new_edge_cell=*/3, /*ncells=*/6);
+    auto result =
+        GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Right, 1, 0, 3, 2,
+                                            /*new_edge_cell=*/3, /*ncells=*/6, /*step=*/1);
     CHECK(result.col == 1);
     CHECK(result.colspan == 2); // 3-1=2
     CHECK(result.rowspan == 2);
@@ -1602,8 +1720,9 @@ TEST_CASE("compute_resize_result: right edge shrink", "[grid_edit][resize]") {
 
 TEST_CASE("compute_resize_result: left edge grow", "[grid_edit][resize]") {
     // Widget at (2,0) span 2x2, drag left edge to cell boundary 1
-    auto result = GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Left, 2, 0, 2, 2,
-                                                      /*new_edge_cell=*/1, /*ncells=*/6);
+    auto result =
+        GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Left, 2, 0, 2, 2,
+                                            /*new_edge_cell=*/1, /*ncells=*/6, /*step=*/1);
     CHECK(result.col == 1); // origin shifts left
     CHECK(result.row == 0);
     CHECK(result.colspan == 3); // was 2, grew by 1
@@ -1613,8 +1732,9 @@ TEST_CASE("compute_resize_result: left edge grow", "[grid_edit][resize]") {
 
 TEST_CASE("compute_resize_result: left edge shrink", "[grid_edit][resize]") {
     // Widget at (1,0) span 3x2, drag left edge to cell boundary 2
-    auto result = GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Left, 1, 0, 3, 2,
-                                                      /*new_edge_cell=*/2, /*ncells=*/6);
+    auto result =
+        GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Left, 1, 0, 3, 2,
+                                            /*new_edge_cell=*/2, /*ncells=*/6, /*step=*/1);
     CHECK(result.col == 2);     // origin shifts right
     CHECK(result.colspan == 2); // was 3, shrank by 1 (right edge stays at 4)
     CHECK(result.rowspan == 2);
@@ -1622,8 +1742,9 @@ TEST_CASE("compute_resize_result: left edge shrink", "[grid_edit][resize]") {
 
 TEST_CASE("compute_resize_result: top edge grow", "[grid_edit][resize]") {
     // Widget at (0,2) span 2x2, drag top edge to cell boundary 1
-    auto result = GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Top, 0, 2, 2, 2,
-                                                      /*new_edge_cell=*/1, /*ncells=*/4);
+    auto result =
+        GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Top, 0, 2, 2, 2,
+                                            /*new_edge_cell=*/1, /*ncells=*/4, /*step=*/1);
     CHECK(result.col == 0);
     CHECK(result.row == 1); // origin shifts up
     CHECK(result.colspan == 2);
@@ -1633,8 +1754,9 @@ TEST_CASE("compute_resize_result: top edge grow", "[grid_edit][resize]") {
 
 TEST_CASE("compute_resize_result: bottom edge grow", "[grid_edit][resize]") {
     // Widget at (0,0) span 2x2, drag bottom edge to cell boundary 3
-    auto result = GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Bottom, 0, 0, 2, 2,
-                                                      /*new_edge_cell=*/3, /*ncells=*/4);
+    auto result =
+        GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Bottom, 0, 0, 2, 2,
+                                            /*new_edge_cell=*/3, /*ncells=*/4, /*step=*/1);
     CHECK(result.col == 0);
     CHECK(result.row == 0);
     CHECK(result.colspan == 2);
@@ -1644,8 +1766,9 @@ TEST_CASE("compute_resize_result: bottom edge grow", "[grid_edit][resize]") {
 
 TEST_CASE("compute_resize_result: clamp to min span 1", "[grid_edit][resize]") {
     // Widget at (2,0) span 2x2, drag left edge past right edge → clamps to min 1
-    auto result = GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Left, 2, 0, 2, 2,
-                                                      /*new_edge_cell=*/5, /*ncells=*/6);
+    auto result =
+        GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Left, 2, 0, 2, 2,
+                                            /*new_edge_cell=*/5, /*ncells=*/6, /*step=*/1);
     CHECK(result.colspan >= 1);
     // Origin should be clamped so widget stays within right edge
     CHECK(result.col + result.colspan <= 6);
@@ -1653,15 +1776,211 @@ TEST_CASE("compute_resize_result: clamp to min span 1", "[grid_edit][resize]") {
 
 TEST_CASE("compute_resize_result: clamp to grid bounds", "[grid_edit][resize]") {
     // Widget at (4,0) span 2x2, drag right edge past grid boundary
-    auto result = GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Right, 4, 0, 2, 2,
-                                                      /*new_edge_cell=*/7, /*ncells=*/6);
+    auto result =
+        GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Right, 4, 0, 2, 2,
+                                            /*new_edge_cell=*/7, /*ncells=*/6, /*step=*/1);
     CHECK(result.col == 4);
     CHECK(result.col + result.colspan <= 6);
 
     // Drag top edge past grid top
-    auto result2 = GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Top, 0, 1, 2, 2,
-                                                       /*new_edge_cell=*/-1, /*ncells=*/4);
+    auto result2 =
+        GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Top, 0, 1, 2, 2,
+                                            /*new_edge_cell=*/-1, /*ncells=*/4, /*step=*/1);
     CHECK(result2.row >= 0);
+}
+
+// ============================================================================
+// Step-aware snapping
+// ============================================================================
+
+TEST_CASE("round_to_grid_cell: step 2 snaps to even boundaries on an even grid",
+          "[grid_edit][resize][half_cell]") {
+    // 12 tracks in 600px, no gutter: pitch = 50. Boundaries at 0,50,...,600.
+    CHECK(GridEditMode::round_to_grid_cell(100, 0, 600, 12, 0, 2) == 2);
+    CHECK(GridEditMode::round_to_grid_cell(140, 0, 600, 12, 0, 2) == 2); // 2.8 -> 2
+    CHECK(GridEditMode::round_to_grid_cell(160, 0, 600, 12, 0, 2) == 4); // 3.2 -> 4
+    CHECK(GridEditMode::round_to_grid_cell(600, 0, 600, 12, 0, 2) == 12);
+    // Step 1 still reaches odd boundaries.
+    CHECK(GridEditMode::round_to_grid_cell(150, 0, 600, 12, 0, 1) == 3);
+}
+
+TEST_CASE("round_to_grid_cell: step 2 stays exact on an odd track count",
+          "[grid_edit][resize][half_cell]") {
+    // 13 tracks in 650px, no gutter: pitch = 50 exactly. Halving the track
+    // count would give a pitch of 650/6 = 108.3 instead of 100, an 8% error
+    // that compounds to a whole cell by the right edge.
+    CHECK(GridEditMode::round_to_grid_cell(300, 0, 650, 13, 0, 2) == 6); // 6.0
+    // 7.0 / step(2) = 3.5, an exact tie. std::round ties away from zero (same
+    // convention the step-1 "midpoint rounding" cases above rely on), so this
+    // rounds up to 4 tracks-of-2 -> 8, not down.
+    CHECK(GridEditMode::round_to_grid_cell(350, 0, 650, 13, 0, 2) == 8); // 7.0 -> 8 (ties up)
+    CHECK(GridEditMode::round_to_grid_cell(400, 0, 650, 13, 0, 2) == 8); // 8.0
+    // The final odd track is unreachable at step 2 — the clamp is the last
+    // even boundary, not the track count.
+    CHECK(GridEditMode::round_to_grid_cell(650, 0, 650, 13, 0, 2) == 12);
+}
+
+TEST_CASE("round_to_grid_cell: gutters do not shift the stepped boundary",
+          "[grid_edit][resize][half_cell]") {
+    // pitch = (content_size + gutter) / ncells = (404 + 2) / 14 = 29.0
+    CHECK(GridEditMode::round_to_grid_cell(116, 0, 404, 14, 2, 2) == 4); // 4.0
+    CHECK(GridEditMode::round_to_grid_cell(174, 0, 404, 14, 2, 2) == 6); // 6.0
+}
+
+TEST_CASE("snap_step_for: whole-cell widgets step by a full cell",
+          "[grid_edit][resize][half_cell]") {
+    auto [wc, wr] = GridEditMode::snap_step_for("temperature");
+    CHECK(wc == helix::GridLayout::TRACKS_PER_CELL);
+    CHECK(wr == helix::GridLayout::TRACKS_PER_CELL);
+
+    auto [hc, hr] = GridEditMode::snap_step_for("shutdown");
+    CHECK(hc == 1);
+    CHECK(hr == helix::GridLayout::TRACKS_PER_CELL);
+
+    auto [cc, cr] = GridEditMode::snap_step_for("clock");
+    CHECK(cc == 1);
+    CHECK(cr == 1);
+
+    // An id with no registry entry gets the conservative whole-cell answer.
+    auto [uc, ur] = GridEditMode::snap_step_for("not_a_widget");
+    CHECK(uc == helix::GridLayout::TRACKS_PER_CELL);
+    CHECK(ur == helix::GridLayout::TRACKS_PER_CELL);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "dots overlay: minor dots appear only for a half-capable selection",
+                 "[grid_edit][half_cell][dots]") {
+    // The lattice is (cols/step + 1) x (rows/step + 1) intersections. With
+    // TRACKS_PER_CELL == 2 on a 12x8 track grid a whole-cell selection draws
+    // 7x5 = 35 dots and a half-col selection draws 13x5 = 65.
+    const int cols = 12;
+    const int rows = 8;
+    const int cell = helix::GridLayout::TRACKS_PER_CELL;
+
+    CHECK(GridEditMode::dot_count(cols, rows, cell, cell) == (cols / cell + 1) * (rows / cell + 1));
+    CHECK(GridEditMode::dot_count(cols, rows, 1, cell) == (cols + 1) * (rows / cell + 1));
+    CHECK(GridEditMode::dot_count(cols, rows, 1, 1) == (cols + 1) * (rows + 1));
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "dots overlay: rebuilds to match the selected widget's snap step",
+                 "[grid_edit][half_cell][dots]") {
+    // dot_count() above proves the counting formula; this proves GridEditMode
+    // actually calls it on every selection change. "temperature" has no
+    // half-cell support (snap_step_for returns {cell, cell}) - it is a centred
+    // icon over a readout, so an intermediate size buys only whitespace;
+    // "shutdown" supports half columns (snap_step_for returns {1, cell}) - see
+    // the registry entries this reads from (panel_widget_registry.cpp) and the
+    // equivalent snap_step_for() assertions above.
+    lv_subject_t* bp_subj = theme_manager_get_breakpoint_subject();
+    REQUIRE(bp_subj != nullptr);
+    REQUIRE(as_breakpoint(lv_subject_get_int(bp_subj)) == UiBreakpoint::Medium);
+    // The container below is 640x400 with no padding or border, so that is its
+    // content box and the grid has to be derived from it — the same measurement
+    // PanelWidgetManager makes before installing a descriptor.
+    const auto dims = GridLayout::get_dimensions(UiBreakpoint::Medium, 640, 400);
+    const int ncols = dims.cols;
+    const int nrows = dims.rows;
+    REQUIRE(ncols > 0);
+    REQUIRE(nrows > 0);
+    const int cell = GridLayout::TRACKS_PER_CELL;
+
+    lv_obj_t* container = lv_obj_create(test_screen());
+    lv_obj_remove_flag(container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(container, 0, 0);
+    lv_obj_set_style_border_width(container, 0, 0);
+    lv_obj_set_size(container, 640, 400);
+
+    auto col_dsc = GridLayout::make_col_dsc(ncols);
+    auto row_dsc = GridLayout::make_row_dsc(nrows);
+    lv_obj_set_grid_dsc_array(container, col_dsc.data(), row_dsc.data());
+
+    lv_obj_t* temperature_widget = lv_obj_create(container);
+    lv_obj_set_name(temperature_widget, "temperature");
+    lv_obj_remove_flag(temperature_widget, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_grid_cell(temperature_widget, LV_GRID_ALIGN_STRETCH, 0, 2, LV_GRID_ALIGN_STRETCH, 0,
+                         2);
+
+    lv_obj_t* shutdown_widget = lv_obj_create(container);
+    lv_obj_set_name(shutdown_widget, "shutdown");
+    lv_obj_remove_flag(shutdown_widget, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_grid_cell(shutdown_widget, LV_GRID_ALIGN_STRETCH, 2, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
+    lv_obj_update_layout(container);
+
+    // PanelWidgetConfig::load() appends registry defaults onto the FIRST page
+    // parsed (parse_widget_array's append_registry_defaults, gated on
+    // pages_.empty() in src/system/panel_widget_config.cpp), so the test's
+    // two widgets live on a second page — same trick test_grid_edit_drag_path
+    // uses. main_page_index points AT that second page so create_dots_overlay()
+    // does not also add a delete_page_btn_ child, which would throw off the
+    // exact child-count checks below.
+    const std::string panel_id = "test_grid_edit_mode_dots";
+    constexpr int kPageIndex = 1;
+    auto* cfg = Config::get_instance();
+    cfg->set<nlohmann::json>(
+        cfg->df() + "panel_widgets/" + panel_id,
+        nlohmann::json{{"main_page_index", kPageIndex},
+                       {"next_page_id", 2},
+                       {"pages",
+                        {{{"id", "main"}, {"widgets", nlohmann::json::array()}},
+                         {{"id", "test"},
+                          {"widgets",
+                           {{{"id", "temperature"},
+                             {"enabled", true},
+                             {"col", 0},
+                             {"row", 0},
+                             {"colspan", 2},
+                             {"rowspan", 2}},
+                            {{"id", "shutdown"},
+                             {"enabled", true},
+                             {"col", 2},
+                             {"row", 0},
+                             {"colspan", 1},
+                             {"rowspan", 1}}}}}}}});
+
+    auto& mgr = PanelWidgetManager::instance();
+    mgr.get_widget_config(panel_id).mark_dirty();
+    mgr.clear_panel_config(panel_id);
+    auto& config = mgr.get_widget_config(panel_id);
+    REQUIRE(config.page_entries(static_cast<size_t>(kPageIndex)).size() == 2);
+
+    GridEditMode em;
+    em.enter(container, &config, kPageIndex);
+    lv_obj_t* dots_at_enter = GridEditModeTestAccess::dots_overlay(em);
+    REQUIRE(dots_at_enter != nullptr);
+
+    em.select_widget(temperature_widget);
+    lv_obj_t* dots_for_temperature = GridEditModeTestAccess::dots_overlay(em);
+    REQUIRE(dots_for_temperature != nullptr);
+    // A new lattice object, not the one enter() built — the selection changed
+    // what is a legal drop target, so the overlay must be rebuilt, not reused.
+    CHECK(dots_for_temperature != dots_at_enter);
+    CHECK(lv_obj_get_child_count(dots_for_temperature) ==
+          static_cast<uint32_t>(GridEditMode::dot_count(ncols, nrows, cell, cell)));
+
+    em.select_widget(shutdown_widget);
+    lv_obj_t* dots_for_shutdown = GridEditModeTestAccess::dots_overlay(em);
+    REQUIRE(dots_for_shutdown != nullptr);
+    CHECK(dots_for_shutdown != dots_for_temperature);
+    CHECK(lv_obj_get_child_count(dots_for_shutdown) ==
+          static_cast<uint32_t>(GridEditMode::dot_count(ncols, nrows, 1, cell)));
+
+    em.exit();
+    mgr.clear_panel_config(panel_id);
+}
+
+TEST_CASE("compute_resize_result: a stepped span never lands on an odd count",
+          "[grid_edit][resize][half_cell]") {
+    // Right edge dragged to track 7 on a widget at col 2, step 2: the span must
+    // round to an even number rather than leaving the widget straddling a cell.
+    auto r =
+        GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Right, 2, 0, 2, 2, 7, 12, 2);
+    CHECK(r.colspan % 2 == 0);
+    CHECK(r.colspan >= 2);
+
+    // The floor is one whole cell, not one track.
+    auto tiny =
+        GridEditMode::compute_resize_result(GridEditMode::ResizeEdge::Right, 2, 0, 4, 2, 2, 12, 2);
+    CHECK(tiny.colspan == 2);
 }
 
 // ============================================================================
@@ -1670,20 +1989,28 @@ TEST_CASE("compute_resize_result: clamp to grid bounds", "[grid_edit][resize]") 
 
 // Helper that replicates the shrink-to-fit algorithm from place_widget_from_catalog
 // Returns {col, row, colspan, rowspan} or {-1,-1,-1,-1} if no fit
+//
+// `step` is the track boundary the placement must land on, the same argument
+// place_widget_from_catalog takes from snap_step_for(). These cases are about
+// the shrink search, not about snapping, and their fixtures are built from
+// single-track widgets — a span of one track only exists for a widget that
+// declares half-cell support, whose step is 1 — so they pass 1 and exercise
+// every origin. The whole-cell step has its own coverage in
+// test_grid_half_cell_placement.cpp.
 static std::tuple<int, int, int, int> try_place_with_shrink(GridLayout& grid, int colspan,
                                                             int rowspan, int min_colspan,
-                                                            int min_rowspan) {
+                                                            int min_rowspan, int step = 1) {
     // Try default size first
-    auto pos = grid.find_available(colspan, rowspan);
+    auto pos = grid.find_available(colspan, rowspan, step, step);
     if (pos)
         return {pos->first, pos->second, colspan, rowspan};
 
     // Try progressively smaller sizes
-    for (int try_r = rowspan; try_r >= min_rowspan; --try_r) {
-        for (int try_c = colspan; try_c >= min_colspan; --try_c) {
+    for (int try_r = rowspan; try_r >= min_rowspan; try_r -= step) {
+        for (int try_c = colspan; try_c >= min_colspan; try_c -= step) {
             if (try_c == colspan && try_r == rowspan)
                 continue;
-            auto p = grid.find_available(try_c, try_r);
+            auto p = grid.find_available(try_c, try_r, step, step);
             if (p)
                 return {p->first, p->second, try_c, try_r};
         }
@@ -1692,7 +2019,7 @@ static std::tuple<int, int, int, int> try_place_with_shrink(GridLayout& grid, in
 }
 
 TEST_CASE("Shrink-to-fit: default size fits, no shrink needed", "[grid_edit][shrink_to_fit]") {
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
     // Empty grid — 2x2 should fit at (0,0)
     auto [col, row, cs, rs] = try_place_with_shrink(grid, 2, 2, 1, 1);
     CHECK(col == 0);
@@ -1702,7 +2029,7 @@ TEST_CASE("Shrink-to-fit: default size fits, no shrink needed", "[grid_edit][shr
 }
 
 TEST_CASE("Shrink-to-fit: 2x2 doesn't fit, 2x1 does", "[grid_edit][shrink_to_fit]") {
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     // Fill 3 of 4 rows completely, leaving only row 3 free
     int n = 0;
@@ -1723,7 +2050,7 @@ TEST_CASE("Shrink-to-fit: 2x2 doesn't fit, 2x1 does", "[grid_edit][shrink_to_fit
 
 TEST_CASE("Shrink-to-fit: shrinks colspan when rowspan can't shrink",
           "[grid_edit][shrink_to_fit]") {
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     // Fill everything except a single 1x2 slot at column 5, rows 2-3
     int n = 0;
@@ -1744,7 +2071,7 @@ TEST_CASE("Shrink-to-fit: shrinks colspan when rowspan can't shrink",
 }
 
 TEST_CASE("Shrink-to-fit: no fit even at minimum size", "[grid_edit][shrink_to_fit]") {
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     // Fill entire grid
     int n = 0;
@@ -1762,7 +2089,7 @@ TEST_CASE("Shrink-to-fit: no fit even at minimum size", "[grid_edit][shrink_to_f
 
 TEST_CASE("Shrink-to-fit: non-scalable widget doesn't try smaller sizes",
           "[grid_edit][shrink_to_fit]") {
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     // Fill 3 rows, leaving only 1 row free
     int n = 0;
@@ -1781,7 +2108,7 @@ TEST_CASE("Shrink-to-fit: non-scalable widget doesn't try smaller sizes",
 
 TEST_CASE("Shrink-to-fit: tries rowspan reduction before colspan reduction",
           "[grid_edit][shrink_to_fit]") {
-    GridLayout grid(UiBreakpoint::Medium); // 6x4
+    GridLayout grid(UiBreakpoint::Medium, kGrid6x4);
 
     // Fill rows 0-2 fully, leave row 3 completely empty (6 cells free)
     // This means both 2x1 and 1x2 could fit, but the algorithm tries

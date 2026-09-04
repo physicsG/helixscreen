@@ -5,7 +5,10 @@
 
 #include "gcode_parser.h"
 
+#include <algorithm>
 #include <glm/glm.hpp>
+#include <limits>
+#include <optional>
 
 namespace helix::gcode {
 
@@ -55,7 +58,46 @@ constexpr float ISO_Y_SCALE = 0.5f;  // Y compression factor
 /// accepts the overlap.
 constexpr float ELONGATION_LIMIT = 2.0f;
 
+/// Thumbnail-parity framing constants: how a render is placed so it lands
+/// where the slicer thumbnail it replaces was sitting.
+///
+/// Measured on three real slicer 300x300 thumbnails: OrcaSlicer fills 81.0% of
+/// the frame (top margin 16%, bottom 3.3%), PrusaSlicer 76.3% (21% / 3%), and
+/// a width-limited PrusaSlicer 72.3% (26% / 23%). Horizontal is always
+/// centred; the model's vertical centre lands at 51.5-59.0% of the frame.
+/// The constants sit in the middle of those ranges.
+namespace thumbnail_parity {
+
+/// Vertical lift of the frame, as a fraction of canvas height. Matches the
+/// #preview_offset_y design token in ui_xml/globals.xml (-12%) that shifts the
+/// thumbnail up over the metadata strip — keep the two in sync.
+constexpr float LIFT = 0.12f;
+
+/// Padding around the model inside the frame: limiting-axis fill
+/// 1 / (1 + 2*PADDING) = 78.1%, against the measured 72-81%.
+constexpr float PADDING = 0.14f;
+
+/// Where the model's vertical centre sits in the frame (0 = frame top).
+constexpr float CENTER_Y = 0.55f;
+
+} // namespace thumbnail_parity
+
 } // namespace projection
+
+/// How compute_auto_fit() frames a model on its canvas.
+enum class FitFraming {
+    /// Fit the whole canvas. `bottom_occlusion` shrinks squat models to clear
+    /// a bottom UI strip; ones taller than ELONGATION_LIMIT x their width keep
+    /// the full height and run underneath it instead.
+    STANDARD,
+    /// Frame the model the way the slicer thumbnail beside it is framed: the
+    /// square of the canvas's short side, centred, lifted by
+    /// projection::thumbnail_parity::LIFT, model centre at CENTER_Y of the
+    /// frame. `padding` and `bottom_occlusion` are ignored — matching the
+    /// thumbnail's size and placement is the whole point, and the thumbnail
+    /// draws over the strip rather than clearing it.
+    THUMBNAIL_PARITY,
+};
 
 // ============================================================================
 // PROJECTION PARAMETERS
@@ -137,6 +179,20 @@ struct AutoFitResult {
 float compute_content_offset_y(float content_height_px, int canvas_height_px,
                                float bottom_occlusion);
 
+/// Vertical shift, as a fraction of canvas height, for THUMBNAIL_PARITY
+/// framing: the model's centre pinned to thumbnail_parity::CENTER_Y of the
+/// lifted square, whatever the model fills — the measured thumbnails place the
+/// model centre there regardless of its height, so neither the content height
+/// nor the occlusion is an input. The 2D path applies this through
+/// compute_auto_fit(); the GLES path through the viewer, which is why it is a
+/// function of its own rather than a branch of compute_content_offset_y().
+///
+/// @param canvas_width_px  Full canvas width in pixels (the square's side is
+///                         min(width, height))
+/// @param canvas_height_px Full canvas height in pixels
+/// @return Offset as a fraction of canvas height; negative shifts content up.
+float parity_content_offset_y(int canvas_width_px, int canvas_height_px);
+
 /// Compute projection scale and offsets to fit a bounding box within a canvas.
 ///
 /// @param raw_bb        Bounding box to fit (world coordinates, mm). Normalized
@@ -145,15 +201,20 @@ float compute_content_offset_y(float content_height_px, int canvas_height_px,
 /// @param view_mode     Projection mode
 /// @param canvas_width  Canvas width in pixels
 /// @param canvas_height Canvas height in pixels
-/// @param padding       Fractional padding around content (e.g. 0.05 = 5% each side)
+/// @param padding       Fractional padding around content (e.g. 0.05 = 5% each side);
+///                      ignored in THUMBNAIL_PARITY, which uses its own measured
+///                      padding
 /// @param bottom_occlusion Fraction of canvas height covered by UI at the bottom
 ///                      (0..1). A squat model is scaled to sit entirely above it;
 ///                      one taller than ELONGATION_LIMIT x its width keeps the
 ///                      full canvas and runs underneath instead. 0 disables both.
+///                      Ignored in THUMBNAIL_PARITY.
+/// @param framing       STANDARD (default) or THUMBNAIL_PARITY
 /// @return Scale and offset parameters for use with project()
 AutoFitResult compute_auto_fit(const AABB& raw_bb, ViewMode view_mode, int canvas_width,
                                int canvas_height, float padding = 0.05f,
-                               float bottom_occlusion = 0.0f);
+                               float bottom_occlusion = 0.0f,
+                               FitFraming framing = FitFraming::STANDARD);
 
 // ============================================================================
 // DEPTH SHADING
@@ -184,6 +245,72 @@ constexpr float FULL_GRADIENT_HEIGHT = 50.0f; ///< Objects shorter than this get
 /// @param y_min  Minimum Y of the model/object bounding box
 /// @param y_max  Maximum Y of the bounding box
 /// @return Brightness multiplier in [~0.34, 1.0]
+/// How much headroom-proportional light apply_shading() adds on top of the
+/// multiply. Chosen so a black filament gains real form without a light one
+/// changing perceptibly.
+namespace depth_shading {
+constexpr float LIFT_STRENGTH = 0.40f;
+/// Bottom of compute_depth_brightness()'s range: MIN_BRIGHTNESS * BACK_FADE_MIN.
+constexpr float BRIGHTNESS_FLOOR = MIN_BRIGHTNESS * BACK_FADE_MIN;
+} // namespace depth_shading
+
+/**
+ * @brief Apply a depth-shading factor to one colour channel.
+ *
+ * compute_depth_brightness() returns roughly [0.34, 1.0], and applying that as
+ * a plain multiply means shading can only ever DARKEN. At the brightest point
+ * on the model the factor is 1.0, which returns the filament colour unchanged,
+ * so the lightest any pixel can be IS the filament colour.
+ *
+ * For a black filament that is 0 * anything = 0 and the whole object renders as
+ * a single tone. Measured on a stepped cone:
+ *
+ *     filament      spread  distinct
+ *     black              0         1     <- one value across 8820 pixels
+ *     near-black        13         9
+ *     mid grey          79        45
+ *     white            148        75
+ *
+ * A slicer thumbnail of the same object reads properly because its lighting
+ * ADDS light as well as subtracting it.
+ *
+ * So: keep the multiply exactly as it was, and add a second term proportional
+ * to the channel's remaining HEADROOM (255 - c). That term is what makes this
+ * adaptive rather than a trade:
+ *
+ *   - black has all the headroom, so it gains the entire highlight range and
+ *     goes from one flat tone to real form
+ *   - white has almost none, so the term is worth a few levels and its existing
+ *     tonal range is preserved intact
+ *
+ * A previous attempt re-centred the factor and split it evenly between darken
+ * and lighten. That fixed black and quietly wrecked white, whose 75 distinct
+ * luminances collapsed to 17 as the highlight half compressed into the 15
+ * levels it had left. Proportional-to-headroom has no such trade.
+ */
+inline uint8_t apply_shading(uint8_t c, float brightness) {
+    constexpr float floor_b = depth_shading::BRIGHTNESS_FLOOR;
+    float norm = (brightness - floor_b) / (1.0f - floor_b);
+    if (norm < 0.0f) {
+        norm = 0.0f;
+    }
+    if (norm > 1.0f) {
+        norm = 1.0f;
+    }
+
+    const float base = static_cast<float>(c);
+    const float lift = (255.0f - base) * norm * depth_shading::LIFT_STRENGTH;
+    float out = base * brightness + lift;
+
+    if (out < 0.0f) {
+        out = 0.0f;
+    }
+    if (out > 255.0f) {
+        out = 255.0f;
+    }
+    return static_cast<uint8_t>(out + 0.5f);
+}
+
 inline float compute_depth_brightness(float avg_z, float z_min, float z_max, float avg_y,
                                       float y_min, float y_max) {
     constexpr float EPSILON = 0.001f;
@@ -220,6 +347,109 @@ inline float compute_depth_brightness(float avg_z, float z_min, float z_max, flo
     }
 
     return brightness;
+}
+
+// ============================================================================
+// CLIP-SPACE PROJECTION (shared by the pickers and the bracket/bbox passes)
+// ============================================================================
+
+/**
+ * @brief Below this |w|, a clip-space point is degenerate and cannot be divided.
+ *
+ * Lived in gcode_gles_renderer.h, which is wrapped in `#ifdef ENABLE_GLES_3D`
+ * and so was unreachable from anything else. Three copies of the guard existed
+ * with three different predicates.
+ */
+inline constexpr float CLIP_SPACE_W_EPSILON = 0.0001f;
+
+/**
+ * @brief Project a world point through an MVP to screen pixels.
+ *
+ * @return nullopt when the point is degenerate OR behind the camera.
+ *
+ * WHY `w <= EPSILON` AND NOT `std::abs(w) < EPSILON`. Both spellings were in the
+ * tree, in two copies of the same eight-corner loop in gcode_gles_renderer.cpp,
+ * and they are not equivalent. Under a perspective transform w is the view-space
+ * depth: it is positive in front of the camera and NEGATIVE behind it. The
+ * abs() form only rejects points near the plane w == 0, so a corner at w = -5
+ * sails through and divides to a mirrored NDC - a point behind your head is
+ * reported at a confident, wrong position on screen, dragging the object's
+ * screen bounds with it. Rejecting `w <= EPSILON` drops the degenerate case and
+ * the behind-camera case together, which is what both call sites wanted.
+ */
+inline std::optional<glm::vec2> project_clip_to_screen(const glm::mat4& mvp, const glm::vec3& world,
+                                                       int viewport_width, int viewport_height) {
+    const glm::vec4 clip = mvp * glm::vec4(world, 1.0f);
+    if (clip.w <= CLIP_SPACE_W_EPSILON) {
+        return std::nullopt;
+    }
+    const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+    return glm::vec2((ndc.x + 1.0f) * 0.5f * static_cast<float>(viewport_width),
+                     (1.0f - ndc.y) * 0.5f * static_cast<float>(viewport_height));
+}
+
+/// Screen-space extent of a projected box. `valid` is false when no corner was
+/// in front of the camera, in which case the bounds are meaningless.
+struct ScreenBounds {
+    float min_x = 0.0f;
+    float min_y = 0.0f;
+    float max_x = 0.0f;
+    float max_y = 0.0f;
+    bool valid = false;
+
+    /// True when (x, y) lies inside the box, grown by `slack` pixels per side.
+    bool contains(float x, float y, float slack = 0.0f) const {
+        return x >= min_x - slack && x <= max_x + slack && y >= min_y - slack && y <= max_y + slack;
+    }
+
+    float area() const {
+        return (max_x - min_x) * (max_y - min_y);
+    }
+};
+
+/**
+ * @brief Screen-space bounding box of a world AABB's eight corners.
+ *
+ * Corners behind the camera are skipped, not clamped: a box that straddles the
+ * camera plane reports the extent of the part that is actually visible.
+ */
+inline ScreenBounds project_aabb_to_screen(const glm::mat4& mvp, const AABB& box,
+                                           int viewport_width, int viewport_height) {
+    ScreenBounds b;
+    b.min_x = std::numeric_limits<float>::max();
+    b.min_y = std::numeric_limits<float>::max();
+    b.max_x = std::numeric_limits<float>::lowest();
+    b.max_y = std::numeric_limits<float>::lowest();
+
+    for (const glm::vec3& corner : box.corners()) {
+        const auto s = project_clip_to_screen(mvp, corner, viewport_width, viewport_height);
+        if (!s) {
+            continue;
+        }
+        b.min_x = std::min(b.min_x, s->x);
+        b.max_x = std::max(b.max_x, s->x);
+        b.min_y = std::min(b.min_y, s->y);
+        b.max_y = std::max(b.max_y, s->y);
+        b.valid = true;
+    }
+    return b;
+}
+
+/**
+ * @brief Distance from point `p` to the segment `a`-`b`, all in screen pixels.
+ *
+ * Existed three times over: in the 2D picker, the CPU wireframe picker and the
+ * GLES picker, each rewriting the same clamped projection. A degenerate segment
+ * (a == b) returns the distance to that point rather than dividing by zero.
+ */
+inline float point_segment_distance(const glm::vec2& p, const glm::vec2& a, const glm::vec2& b) {
+    const glm::vec2 v = b - a;
+    const float len_sq = glm::dot(v, v);
+    if (len_sq <= 0.0f) {
+        return glm::length(p - a);
+    }
+    const float t = glm::clamp(glm::dot(p - a, v) / len_sq, 0.0f, 1.0f);
+    return glm::length(p - (a + t * v));
 }
 
 } // namespace helix::gcode

@@ -15,6 +15,7 @@
 #include "border_radius_sizes.h"
 #include "config.h"
 #include "data_root_resolver.h"
+#include "display_metrics.h"
 #include "helix-xml/src/libs/expat/expat.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "layout_manager.h"
@@ -845,6 +846,37 @@ static void theme_manager_register_color_pairs(lv_xml_component_scope_t* scope, 
  * any that do NOT have dynamic suffixes (_light, _dark, _small, _medium, _large).
  * These static constants are registered first so dynamic variants can override them.
  */
+/// Apply the high-DPI UI scale to one authored px token.
+///
+/// Shared by the responsive resolver and the static registration path. Both
+/// must scale: a non-suffixed token is a fixed-size box (icon badges, chips,
+/// swatches, column widths) whose contents are scaled fonts, so scaling only
+/// the responsive half leaves the glyph overflowing its container.
+///
+/// Opacities are declared as <px> too and must be left alone — an 0-255 alpha
+/// multiplied by 1.578 sails past opaque. `modal_backdrop_opacity` is the only
+/// one today; the suffix test keeps a future one safe without another audit.
+static std::string theme_manager_scale_px_token(const std::string& name, const std::string& value,
+                                                double scale) {
+    if (scale <= 1.0) {
+        return value;
+    }
+    static constexpr const char* kOpacitySuffix = "_opacity";
+    const size_t suffix_len = std::strlen(kOpacitySuffix);
+    if (name.size() >= suffix_len &&
+        name.compare(name.size() - suffix_len, suffix_len, kOpacitySuffix) == 0) {
+        return value;
+    }
+    // Leave anything that is not a bare positive integer alone: percentages and
+    // sizing keywords are not lengths to multiply.
+    char* end = nullptr;
+    const long authored = std::strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0' || authored <= 0) {
+        return value;
+    }
+    return std::to_string(helix::DisplayMetrics::scaled_px(static_cast<int32_t>(authored), scale));
+}
+
 static void theme_manager_register_static_constants(lv_xml_component_scope_t* scope) {
     const std::vector<std::string> skip_suffixes = {
         "_light", "_dark", "_micro", "_tiny", "_small", "_medium", "_large", "_xlarge", "_xxlarge"};
@@ -870,10 +902,15 @@ static void theme_manager_register_static_constants(lv_xml_component_scope_t* sc
         }
     }
 
+    const double px_scale = helix::DisplayMetrics::active_scale();
     for (const auto& [name, value] :
          theme_manager_parse_all_xml_for_element(tm_ui_xml_dir(), "px")) {
         if (!has_dynamic_suffix(name)) {
-            lv_xml_register_const(scope, name.c_str(), value.c_str());
+            // Static tokens scale too. They are fixed-size boxes (icon badges,
+            // chips, swatches, column widths) whose contents are scaled fonts,
+            // so leaving them authored-size is what makes the glyph overflow.
+            const std::string scaled = theme_manager_scale_px_token(name, value, px_scale);
+            lv_xml_register_const(scope, name.c_str(), scaled.c_str());
             px_count++;
         }
     }
@@ -886,8 +923,9 @@ static void theme_manager_register_static_constants(lv_xml_component_scope_t* sc
         }
     }
 
-    spdlog::trace("[Theme] Registered {} static colors, {} static px, {} static strings",
-                  color_count, px_count, string_count);
+    spdlog::debug(
+        "[Theme] Registered {} static colors, {} static px, {} static strings (ui_scale={:.3f})",
+        color_count, px_count, string_count, px_scale);
 }
 
 /**
@@ -951,7 +989,15 @@ const char* nav_width_suffix(int32_t hor_res, int32_t ver_res) {
         return "_small";
     if (hor_res <= 1100)
         return "_medium";
-    return "_large";
+    if (hor_res <= 1400)
+        return "_large";
+    // Above 1400 the ladder used to stop, so a 1080p or 4K panel got the same
+    // 132px strip as a 1280x720 one while its icon rung scaled up — a 128px
+    // glyph in a 132px strip. The nav strip has to keep climbing with the tier
+    // that sizes the glyphs inside it.
+    if (hor_res <= 1600)
+        return "_xlarge";
+    return "_xxlarge";
 }
 
 OverlayWidths compute_overlay_widths(int32_t hor_res, int32_t ver_res, int32_t nav_width,
@@ -1125,6 +1171,23 @@ theme_manager_resolve_px_tokens(lv_display_t* display) {
                                  : cramped_suffix;
 
         resolved[base_name] = pick_tier(t, base_name, suffix);
+    }
+
+    // Apply the high-DPI UI scale to every px token — spacing, padding, and
+    // sizes alike. This is the one place both the init and the resize path go
+    // through, so the two can never disagree.
+    //
+    // No double-count with LVGL's own LV_DPX padding: these tokens are plain
+    // pixel constants that reach widgets via style attributes, while LV_DPX
+    // scales LVGL's internal theme chrome off the display DPI. The two paths
+    // are disjoint, and the display DPI is set from the same scale factor (see
+    // Application), so the two halves grow in step rather than compounding.
+    //
+    // active_scale() is 1.0 on every shipping printer, making this loop an
+    // exact identity there.
+    const double scale = helix::DisplayMetrics::active_scale();
+    for (auto& [base_name, value] : resolved) {
+        value = theme_manager_scale_px_token(base_name, value, scale);
     }
     return resolved;
 }
@@ -1418,6 +1481,25 @@ void theme_manager_register_responsive_fonts(lv_display_t* display) {
             // font names and must be registered as-is.
             bool is_font_constant =
                 (base_name.rfind("font_", 0) == 0) || (base_name.rfind("icon_font_", 0) == 0);
+
+            // High-DPI UI scale: the tier picks the face, then the scale steps
+            // it up to the nearest larger one so type grows with the layout
+            // rather than being left behind in an oversized box. The scaled
+            // name is adopted only when it is actually linked, so a build that
+            // pruned the larger faces simply keeps its tier font. Storage must
+            // outlive the registration below, since `value` is a borrowed
+            // pointer into the token maps.
+            std::string scaled_font_storage;
+            if (is_font_constant) {
+                const double ui_scale = helix::DisplayMetrics::active_scale();
+                if (ui_scale > 1.0) {
+                    scaled_font_storage = helix::DisplayMetrics::scaled_font_name(value, ui_scale);
+                    if (scaled_font_storage != value &&
+                        lv_xml_get_font_silent(scope, scaled_font_storage.c_str()) != nullptr) {
+                        value = scaled_font_storage.c_str();
+                    }
+                }
+            }
 
             // Verify the selected font is actually linked. If not, fall back to
             // _large (guaranteed present by the triplet check above) and emit
@@ -2921,20 +3003,40 @@ static void XMLCALL suffix_value_element_start(void* user_data, const XML_Char* 
     }
 }
 
+/// Read a top-level XML file whole, for the token-discovery passes.
+///
+/// Discovery makes roughly 25 passes and each one re-reads every file. That is
+/// free on a desktop filesystem; on SPI-flash LittleFS it costs minutes of boot
+/// and trips the watchdog, so the bytes are cached there. Making discovery
+/// single-pass would retire the cache.
+static std::string tm_read_xml_file(const char* filepath) {
+#if defined(HELIX_PLATFORM_ESP32)
+    static std::unordered_map<std::string, std::string> cache;
+    auto cached = cache.find(filepath);
+    if (cached != cache.end()) {
+        return cached->second;
+    }
+#endif
+    std::string content;
+    std::ifstream file(filepath);
+    if (file.is_open()) {
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        content = buffer.str();
+    }
+#if defined(HELIX_PLATFORM_ESP32)
+    cache.emplace(filepath, content);
+#endif
+    return content;
+}
+
 void theme_manager_parse_xml_file_for_all(
     const char* filepath, const char* element_type,
     std::unordered_map<std::string, std::string>& token_values) {
     if (!filepath)
         return;
 
-    std::ifstream file(filepath);
-    if (!file.is_open())
-        return;
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    std::string xml_content = buffer.str();
-    file.close();
+    const std::string xml_content = tm_read_xml_file(filepath);
     if (xml_content.empty())
         return;
 
@@ -2958,16 +3060,11 @@ void theme_manager_parse_xml_file_for_suffix(
         return;
     }
 
-    std::ifstream file(filepath);
-    if (!file.is_open()) {
+    const std::string xml_content = tm_read_xml_file(filepath);
+    if (xml_content.empty()) {
         spdlog::trace("[Theme] Could not open {} for suffix parsing", filepath);
         return;
     }
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    std::string xml_content = buffer.str();
-    file.close();
 
     // Handle empty file
     if (xml_content.empty()) {
@@ -3130,14 +3227,7 @@ static void theme_manager_parse_xml_file_for_refs(
     if (!filepath)
         return;
 
-    std::ifstream file(filepath);
-    if (!file.is_open())
-        return;
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    std::string xml_content = buffer.str();
-    file.close();
+    const std::string xml_content = tm_read_xml_file(filepath);
 
     if (xml_content.empty())
         return;

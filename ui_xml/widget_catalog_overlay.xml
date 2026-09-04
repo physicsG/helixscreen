@@ -11,7 +11,9 @@
             width="100%" flex_grow="1" scrollable="true" flex_flow="column" style_pad_gap="#space_xs"
             style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="#space_sm"
             style_pad_bottom="#space_md">
-      <!-- Rows populated dynamically by C++ -->
+      <!-- Category rows populated dynamically by C++. The group supplies the
+           card shell and the hairline dividers between rows. -->
+      <setting_group name="category_group"/>
     </lv_obj>
   </view>
 </component>

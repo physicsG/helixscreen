@@ -9,6 +9,7 @@
 #include "helix-xml/src/xml/lv_xml.h"
 #include "json_utils.h"
 #include "layout_manager.h"
+#include "layout_port.h"
 #include "panel_widget_registry.h"
 #include "theme_manager.h"
 
@@ -92,11 +93,15 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::parse_widget_array(const nlohma
             widget_config = item["config"];
         }
 
-        // Load grid placement coordinates (default to -1 = auto-place)
+        // Load grid placement coordinates (default to -1 = auto-place).
+        // A missing span takes the registry default, not 1: an entry written
+        // before the grid moved to half-cell tracks carries no spans at all,
+        // and one track is a quarter of the area the widget expects.
+        const auto* span_def = find_widget_def(id);
         int col = -1;
         int row_val = -1;
-        int colspan = 1;
-        int rowspan = 1;
+        int colspan = span_def ? span_def->colspan : 1;
+        int rowspan = span_def ? span_def->rowspan : 1;
         if (item.contains("col") && item["col"].is_number_integer()) {
             col = item["col"].get<int>();
         }
@@ -137,6 +142,11 @@ void PanelWidgetConfig::load() {
     pages_.clear();
     main_page_index_ = 0;
     next_page_id_ = 1;
+    pending_anchors_ = false;
+    grid_signature_.clear();
+    parked_grids_ = json::object();
+    legacy_units_ = false;
+    legacy_rows_ = 0;
 
     // Per-panel path: /printers/{active}/panel_widgets/<panel_id>
     std::string panel_path = config_.df() + "panel_widgets/" + panel_id_;
@@ -166,6 +176,32 @@ void PanelWidgetConfig::load() {
         main_page_index_ =
             static_cast<size_t>(helix::json_util::safe_int(saved, "main_page_index"));
         next_page_id_ = helix::json_util::safe_int(saved, "next_page_id");
+
+        // Two independent tags, each naming work that config load cannot do
+        // because no grid has been measured yet. They never coexist on one
+        // layout — a pre-v22 layout is not a freshly-defaulted one — but both
+        // are read here so whichever is present survives to populate.
+        //
+        // Defaults written before any grid was measured. Compared against the
+        // one value build_defaults() writes, so anything else — including the
+        // key being absent, which is every layout that predates this — reads as
+        // "already placed" and is left alone.
+        pending_anchors_ = helix::json_util::safe_string(saved, "anchors") == "pending";
+
+        // Which grid `pages` counts against, and the arrangements parked for
+        // other grids. Absent on every layout written before per-grid storage,
+        // which reads as "not stamped yet" and is handled by switch_to_grid().
+        grid_signature_ = helix::json_util::safe_string(saved, "grid");
+        if (auto p = saved.find("parked_grids"); p != saved.end() && p->is_object()) {
+            parked_grids_ = *p;
+        }
+
+        // Pre-v22 coordinates, tagged by the migration for PanelWidgetManager to
+        // port once a measured grid exists. Compared against the one value the
+        // migration writes, so a hand-edit of anything else reads as "already
+        // ported" and leaves the layout alone rather than porting it twice.
+        legacy_units_ = helix::json_util::safe_string(saved, "layout_units") == "cells_v21";
+        legacy_rows_ = helix::json_util::safe_int(saved, "legacy_rows");
 
         size_t page_idx = 0;
         for (const auto& page_json : saved["pages"]) {
@@ -206,6 +242,7 @@ void PanelWidgetConfig::load() {
             PageConfig page;
             page.id = "main";
             page.widgets = build_defaults();
+            pending_anchors_ = true;
             pages_.push_back(std::move(page));
             save();
         }
@@ -224,6 +261,7 @@ void PanelWidgetConfig::load() {
 
         if (entries.empty()) {
             entries = build_defaults();
+            pending_anchors_ = true;
         } else {
             // If no entries have grid positions, this is a pre-grid config — reset to defaults.
             bool has_any_grid =
@@ -234,6 +272,7 @@ void PanelWidgetConfig::load() {
                              "grid for '{}'",
                              panel_id_);
                 entries = build_defaults();
+                pending_anchors_ = true;
             }
         }
 
@@ -265,6 +304,7 @@ void PanelWidgetConfig::load() {
     PageConfig page;
     page.id = "main";
     page.widgets = build_defaults();
+    pending_anchors_ = true;
     pages_.push_back(std::move(page));
     next_page_id_ = 1;
     save(); // Persist default grid positions for future launches
@@ -339,7 +379,7 @@ bool PanelWidgetConfig::try_populate_from_preset_seed() {
     return true;
 }
 
-void PanelWidgetConfig::save() {
+nlohmann::json PanelWidgetConfig::serialize_pages() const {
     json pages_json = json::array();
     for (const auto& page : pages_) {
         json page_obj;
@@ -362,13 +402,49 @@ void PanelWidgetConfig::save() {
         pages_json.push_back(std::move(page_obj));
     }
 
-    json root;
-    root["pages"] = std::move(pages_json);
-    root["main_page_index"] = main_page_index_;
-    root["next_page_id"] = next_page_id_;
+    json out;
+    out["pages"] = std::move(pages_json);
+    out["main_page_index"] = main_page_index_;
+    out["next_page_id"] = next_page_id_;
+    return out;
+}
+
+void PanelWidgetConfig::save() {
+    json root = serialize_pages();
+    // Has to survive a save that lands before the anchors are applied: the
+    // placement engine writes auto-placed positions back on every populate, so
+    // dropping the tag here would make an unanchored default look arranged.
+    if (pending_anchors_) {
+        root["anchors"] = "pending";
+    }
+    // Survives a save that happens before the port has run — the placement
+    // engine writes back auto-placed positions on every populate, so dropping
+    // the tag here would silently re-read cell coordinates as tracks.
+    if (legacy_units_) {
+        root["layout_units"] = "cells_v21";
+        root["legacy_rows"] = legacy_rows_;
+    }
+    // The grid these coordinates count against, and the arrangements belonging
+    // to grids that are not active. Both omitted while empty so a single-grid
+    // config — every printer — is byte-identical to what it wrote before.
+    if (!grid_signature_.empty()) {
+        root["grid"] = grid_signature_;
+    }
+    if (!parked_grids_.empty()) {
+        root["parked_grids"] = parked_grids_;
+    }
 
     config_.set<json>(config_.df() + "panel_widgets/" + panel_id_, root);
     config_.save();
+}
+
+void PanelWidgetConfig::clear_legacy_units() {
+    if (!legacy_units_) {
+        return;
+    }
+    legacy_units_ = false;
+    legacy_rows_ = 0;
+    save();
 }
 
 void PanelWidgetConfig::reorder(size_t from_index, size_t to_index) {
@@ -411,6 +487,7 @@ void PanelWidgetConfig::reset_to_defaults() {
     pages_.resize(1);
     pages_[0].id = "main";
     pages_[0].widgets = build_defaults();
+    pending_anchors_ = true;
     main_page_index_ = 0;
     next_page_id_ = 1;
 }
@@ -533,7 +610,133 @@ std::string PanelWidgetConfig::generate_page_id() {
     return "page_" + std::to_string(next_page_id_++);
 }
 
-std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid() {
+/// Declared in panel_widget_config.h so the shipped-table tests resolve keys
+/// through this function rather than reimplementing the fallback chain.
+const char* choose_breakpoint_key(const nlohmann::json& by_bp, UiBreakpoint breakpoint) {
+    // Fallback chain: micro→tiny→small, xlarge→large (matches theme_manager)
+    static const char* fallback_order[][3] = {
+        {"micro", "tiny", "small"},     // bp=0 Micro
+        {"tiny", "small", nullptr},     // bp=1 Tiny
+        {"small", nullptr},             // bp=2 Small
+        {"medium", nullptr},            // bp=3 Medium
+        {"large", nullptr},             // bp=4 Large
+        {"xlarge", "large", nullptr},   // bp=5 XLarge
+        {"xxlarge", "xlarge", "large"}, // bp=6 XXLarge
+    };
+    static_assert(std::size(fallback_order) == to_int(UiBreakpoint::XXLarge) + 1,
+                  "fallback_order must cover every UiBreakpoint tier");
+
+    const int bp_idx = to_int(breakpoint);
+    if (bp_idx < 0 || bp_idx >= static_cast<int>(std::size(fallback_order))) {
+        return nullptr;
+    }
+    for (int i = 0; i < 3 && fallback_order[bp_idx][i]; ++i) {
+        if (by_bp.contains(fallback_order[bp_idx][i])) {
+            return fallback_order[bp_idx][i];
+        }
+    }
+    return nullptr;
+}
+
+namespace {
+
+/// Placement key for a tier on a measured grid, or "" when nothing matches.
+///
+/// Walks the same tier fallback chain, but tries the grid-qualified form
+/// ("<tier>@<cols>x<rows>") before the bare tier name at each rung. Tier
+/// specificity still dominates: a table entry for this tier on some other grid
+/// beats one for a coarser tier on this exact grid, because the tier is what
+/// decides how much text has to fit. The grid breaks ties within a tier, which
+/// is the case the UI scale creates - one panel, one tier, a different track
+/// count per scale.
+///
+/// With @p grid_cols / @p grid_rows at 0 this is exactly choose_breakpoint_key,
+/// so a caller that cannot measure a grid resolves as it always did.
+std::string choose_placement_key(const nlohmann::json& by_bp, UiBreakpoint breakpoint,
+                                 int grid_cols, int grid_rows) {
+    static const char* fallback_order[][3] = {
+        {"micro", "tiny", "small"},     // bp=0 Micro
+        {"tiny", "small", nullptr},     // bp=1 Tiny
+        {"small", nullptr},             // bp=2 Small
+        {"medium", nullptr},            // bp=3 Medium
+        {"large", nullptr},             // bp=4 Large
+        {"xlarge", "large", nullptr},   // bp=5 XLarge
+        {"xxlarge", "xlarge", "large"}, // bp=6 XXLarge
+    };
+    static_assert(std::size(fallback_order) == to_int(UiBreakpoint::XXLarge) + 1,
+                  "fallback_order must cover every UiBreakpoint tier");
+
+    const int bp_idx = to_int(breakpoint);
+    if (bp_idx < 0 || bp_idx >= static_cast<int>(std::size(fallback_order))) {
+        return {};
+    }
+
+    const bool have_grid = grid_cols > 0 && grid_rows > 0;
+    const std::string suffix =
+        have_grid ? "@" + std::to_string(grid_cols) + "x" + std::to_string(grid_rows)
+                  : std::string{};
+
+    for (int i = 0; i < 3 && fallback_order[bp_idx][i]; ++i) {
+        const std::string tier = fallback_order[bp_idx][i];
+        if (have_grid && by_bp.contains(tier + suffix)) {
+            return tier + suffix;
+        }
+        if (by_bp.contains(tier)) {
+            return tier;
+        }
+    }
+    return {};
+}
+
+/// One axis of a "<cols>x<rows>" signature, or 0 when it does not parse.
+int parse_grid_axis(const std::string& signature, bool want_cols) {
+    const auto x = signature.find('x');
+    if (x == std::string::npos) {
+        return 0;
+    }
+    const std::string part = want_cols ? signature.substr(0, x) : signature.substr(x + 1);
+    if (part.empty() || part.find_first_not_of("0123456789") != std::string::npos) {
+        return 0;
+    }
+    return std::atoi(part.c_str());
+}
+
+/// Whether an anchor's rectangle lies wholly inside a track grid.
+bool anchor_fits_grid(int col, int row, int colspan, int rowspan, int cols, int rows) {
+    return col >= 0 && row >= 0 && colspan >= 1 && rowspan >= 1 && col + colspan <= cols &&
+           row + rowspan <= rows;
+}
+
+/// Read a table's `disabled` map — `{ "<breakpoint>": ["id", ...] }` — into `out`.
+///
+/// The base table and every variant carry the same optional key, so both go
+/// through this rather than the variant branch owning a private copy. `table` is
+/// the object holding `anchors`: the top-level document for the base table, the
+/// variant object otherwise.
+void collect_disabled(const nlohmann::json& table, UiBreakpoint breakpoint,
+                      std::set<std::string>& out) {
+    auto d = table.find("disabled");
+    if (d == table.end() || !d->is_object()) {
+        return;
+    }
+    const char* key = choose_breakpoint_key(*d, breakpoint);
+    if (!key) {
+        return;
+    }
+    const auto& ids = (*d)[key];
+    if (!ids.is_array()) {
+        return;
+    }
+    for (const auto& id : ids) {
+        if (id.is_string()) {
+            out.insert(id.get<std::string>());
+        }
+    }
+}
+
+} // namespace
+
+std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid(int grid_cols, int grid_rows) {
     const auto& defs = get_all_widget_defs();
 
     // Determine current breakpoint for per-breakpoint anchor sizing
@@ -566,8 +769,15 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid() {
     struct AnchorPlacement {
         std::string id;
         int col, row, colspan, rowspan;
+        nlohmann::json config; // per-widget config carried by the anchor, may be null
     };
     std::vector<AnchorPlacement> anchors;
+
+    // Widgets the chosen variant switches off at this breakpoint. Leaving a
+    // widget out of the anchor list does NOT disable it — parse_widget_array()
+    // appends every registry widget that is missing, at its default_enabled — so
+    // "not on this tier" needs saying explicitly.
+    std::set<std::string> disabled_ids;
 
     std::ifstream layout_file(helix::find_readable("default_layout.json"));
     if (layout_file.is_open()) {
@@ -586,23 +796,54 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid() {
 
             // Most-specific variant table wins; the base "anchors" array is the
             // final fallback, exactly as ui_xml/ resolves an override.
+            //
+            // A variant is either a bare anchor array (the original shape) or an
+            // object carrying "anchors" plus optional "disabled". Both are
+            // accepted: the file is runtime-editable and shipped copies predate
+            // the object form.
             std::string variant_used = "base";
             auto variants_it = layout.is_object() ? layout.find("variants") : layout.end();
             if (variants_it != layout.end() && variants_it->is_object()) {
                 for (const auto& dir : LayoutManager::instance().variant_chain()) {
                     auto v = variants_it->find(dir);
-                    if (v != variants_it->end() && v->is_array() && !v->empty()) {
+                    if (v == variants_it->end()) {
+                        continue;
+                    }
+                    if (v->is_array() && !v->empty()) {
                         anchor_list = &*v;
                         variant_used = dir;
                         break;
                     }
+                    if (!v->is_object()) {
+                        continue;
+                    }
+                    auto va = v->find("anchors");
+                    if (va == v->end() || !va->is_array() || va->empty()) {
+                        continue;
+                    }
+                    anchor_list = &*va;
+                    variant_used = dir;
+
+                    collect_disabled(*v, breakpoint, disabled_ids);
+                    break;
                 }
             }
+            // Whichever table won owns the disable list. Without the base case a
+            // landscape tier could never switch a widget off: LayoutType
+            // STANDARD has an empty variant chain, so no variant object is ever
+            // consulted, and leaving a widget out of the anchors does not
+            // disable it — parse_widget_array() appends it at its registry
+            // default_enabled.
+            if (variant_used == "base") {
+                collect_disabled(layout, breakpoint, disabled_ids);
+            }
+
             for (const auto& anchor : *anchor_list) {
                 if (!anchor.is_object())
                     continue;
                 std::string id = helix::json_util::safe_string(anchor, "id");
-                if (id.empty() || !find_widget_def(id))
+                const auto* def = id.empty() ? nullptr : find_widget_def(id);
+                if (!def)
                     continue;
 
                 auto placements_it = anchor.find("placements");
@@ -610,29 +851,9 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid() {
                     continue;
                 const nlohmann::json& placements = *placements_it;
 
-                // Fallback chain: micro→tiny→small, xlarge→large (matches theme_manager)
-                static const char* fallback_order[][3] = {
-                    {"micro", "tiny", "small"},     // bp=0 Micro
-                    {"tiny", "small", nullptr},     // bp=1 Tiny
-                    {"small", nullptr},             // bp=2 Small
-                    {"medium", nullptr},            // bp=3 Medium
-                    {"large", nullptr},             // bp=4 Large
-                    {"xlarge", "large", nullptr},   // bp=5 XLarge
-                    {"xxlarge", "xlarge", "large"}, // bp=6 XXLarge
-                };
-                static_assert(std::size(fallback_order) == to_int(UiBreakpoint::XXLarge) + 1,
-                              "fallback_order must cover every UiBreakpoint tier");
-                const char* chosen_name = nullptr;
-                int bp_idx = to_int(breakpoint);
-                if (bp_idx >= 0 && bp_idx < static_cast<int>(std::size(fallback_order))) {
-                    for (int i = 0; i < 3 && fallback_order[bp_idx][i]; ++i) {
-                        if (placements.contains(fallback_order[bp_idx][i])) {
-                            chosen_name = fallback_order[bp_idx][i];
-                            break;
-                        }
-                    }
-                }
-                if (chosen_name) {
+                const std::string chosen_name =
+                    choose_placement_key(placements, breakpoint, grid_cols, grid_rows);
+                if (!chosen_name.empty()) {
                     // find, not operator[]: `placements` is a const reference
                     // now, and const operator[] on a missing key is only
                     // JSON_ASSERT-guarded — under NDEBUG it dereferences end().
@@ -640,10 +861,30 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid() {
                     if (p_it == placements.end() || !p_it->is_object())
                         continue;
                     const nlohmann::json& p = *p_it;
+                    // A placement that omits a span takes the registry span, not
+                    // one track: one track is a quarter of the area every
+                    // widget now declares as its minimum, and this file is
+                    // runtime-editable, so a hand-authored placement can leave
+                    // the spans out. Matches parse_widget_array().
+                    //
+                    // "config" rides on the anchor so a default layout can pick a
+                    // widget's variant — portrait print_status ships Detailed —
+                    // without a C++ branch per widget. Anchor-level first, then
+                    // placement-level so a single tier can override.
+                    nlohmann::json cfg;
+                    if (auto ac = anchor.find("config"); ac != anchor.end() && ac->is_object()) {
+                        cfg = *ac;
+                    }
+                    if (auto pc = p.find("config"); pc != p.end() && pc->is_object()) {
+                        for (auto it2 = pc->begin(); it2 != pc->end(); ++it2) {
+                            cfg[it2.key()] = it2.value();
+                        }
+                    }
                     anchors.push_back({id, helix::json_util::safe_int(p, "col", 0),
                                        helix::json_util::safe_int(p, "row", 0),
-                                       helix::json_util::safe_int(p, "colspan", 1),
-                                       helix::json_util::safe_int(p, "rowspan", 1)});
+                                       helix::json_util::safe_int(p, "colspan", def->colspan),
+                                       helix::json_util::safe_int(p, "rowspan", def->rowspan),
+                                       std::move(cfg)});
                 }
             }
             spdlog::debug(
@@ -661,19 +902,58 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid() {
         spdlog::debug("[PanelWidgetConfig] Using hardcoded anchor fallback (bp={}, {})", bp_name,
                       portrait ? "portrait" : "landscape");
         if (portrait) {
-            // No `tips`: it is authored 4 columns wide and a portrait grid is
-            // 2-3 wide, so anchoring it can only ever place a shrunken widget
-            // across a third of the screen.
             anchors = {
-                {"printer_image", 0, 0, 2, 2},
-                {"print_status", 0, 2, 2, 2},
+                {"printer_image", 0, 0, 8, 4},
+                {"print_status", 0, 4, 8, 4},
             };
         } else {
             anchors = {
-                {"printer_image", 0, 0, 2, 2},
-                {"print_status", 0, 2, 2, 2},
-                {"tips", 2, 0, 4, 2},
+                {"printer_image", 0, 0, 4, 4},
+                {"print_status", 0, 4, 4, 4},
+                {"tips", 4, 0, 4, 4},
             };
+        }
+    }
+
+    // Drop anchors the measured grid cannot hold. Keeping one would hand it to
+    // clamp_to_grid(), which shrinks the span and walks the origin back until it
+    // fits — on a grid narrower than the table assumed that lands several
+    // widgets on the same track, each looking like a chosen position. An
+    // unseated widget goes through the auto-placement pass below instead, which
+    // is the honest answer: this anchor does not describe this grid.
+    if (grid_cols > 0 && grid_rows > 0) {
+        // Manual join — fmt::join needs fmt/ranges.h, which spdlog's bundled
+        // copy does not carry.
+        std::string rejected;
+        int rejected_count = 0;
+        anchors.erase(std::remove_if(anchors.begin(), anchors.end(),
+                                     [&](const AnchorPlacement& a) {
+                                         // A widget this tier switches off is never placed, so
+                                         // whether its anchor fits is not a fact about anything.
+                                         // `tips` on micro reaches here only because it has no
+                                         // micro placement and inherits small's, which is authored
+                                         // for a taller grid — warning about it would put a false
+                                         // alarm in every CC1 log.
+                                         if (disabled_ids.count(a.id) > 0) {
+                                             return false;
+                                         }
+                                         if (anchor_fits_grid(a.col, a.row, a.colspan, a.rowspan,
+                                                              grid_cols, grid_rows)) {
+                                             return false;
+                                         }
+                                         if (!rejected.empty()) {
+                                             rejected += ", ";
+                                         }
+                                         rejected += a.id;
+                                         ++rejected_count;
+                                         return true;
+                                     }),
+                      anchors.end());
+        if (rejected_count > 0) {
+            spdlog::warn("[PanelWidgetConfig] {} of {} default anchors do not fit the {}x{} track "
+                         "grid and will be auto-placed: {}",
+                         rejected_count, rejected_count + static_cast<int>(anchors.size()),
+                         grid_cols, grid_rows, rejected);
         }
     }
 
@@ -685,7 +965,8 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid() {
     for (const auto& a : anchors) {
         if (!find_widget_def(a.id))
             continue;
-        result.push_back({a.id, true, {}, a.col, a.row, a.colspan, a.rowspan});
+        result.push_back({a.id, true, a.config.is_object() ? a.config : nlohmann::json{}, a.col,
+                          a.row, a.colspan, a.rowspan});
         fixed_ids.insert(a.id);
     }
 
@@ -697,6 +978,23 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid() {
         if (fixed_ids.count(def.id) > 0)
             continue;
         result.push_back({def.id, def.default_enabled, {}, -1, -1, def.colspan, def.rowspan});
+    }
+
+    // Variant-scoped disable: a widget the layout switches off at this
+    // breakpoint. Applied after the registry pass so it reaches widgets that
+    // were appended by default rather than anchored, and before the AMS swap so
+    // that swap still has the final say on filament vs ams.
+    if (!disabled_ids.empty()) {
+        for (auto& entry : result) {
+            if (disabled_ids.count(entry.id) == 0) {
+                continue;
+            }
+            entry.enabled = false;
+            entry.col = -1;
+            entry.row = -1;
+            spdlog::debug("[PanelWidgetConfig] '{}' disabled by layout variant at bp={}", entry.id,
+                          bp_name);
+        }
     }
 
     bool ams_present = false;
@@ -725,42 +1023,11 @@ std::vector<PanelWidgetEntry> PanelWidgetConfig::build_default_grid() {
             ams_it->enabled = true;
     }
 
-    // Tips is a landscape-only default. It is authored 4 columns wide against a
-    // 6-column grid and cannot go below 2; a portrait grid is 2-3 columns, so
-    // even at its minimum it eats a third to a half of a row for rotating hints,
-    // and the widgets behind it are the ones that get dropped when the grid runs
-    // out (#1216). Portrait ships without it; the user can still add it back.
-    if (portrait) {
-        auto it = std::find_if(result.begin(), result.end(),
-                               [](const PanelWidgetEntry& e) { return e.id == "tips"; });
-        if (it != result.end() && it->enabled) {
-            it->enabled = false;
-            it->col = -1;
-            it->row = -1;
-            spdlog::debug("[PanelWidgetConfig] Portrait layout — 'tips' off by default");
-        }
-    }
-
-    // Bed temperature: always last, enabled conditionally.
-    // Large/xlarge: always enabled. Small/medium: only when no AMS present, on the
-    // assumption that an AMS widget leaves no room for it.
-    //
-    // An anchor overrides that assumption. The anchor table states where the
-    // shipped layout puts the widget on THIS tier, so it already answers the
-    // question the AMS heuristic is guessing at: a tier that anchors
-    // bed_temperature has reserved a cell for it, and disabling it there both
-    // loses the readout and leaves that cell empty. The medium table has
-    // anchored it since the grid layout landed, so every AMS printer at or
-    // below 800x480 was shipping with no bed temperature AND a hole where it
-    // should have been.
+    // Bed temperature: move to end so it is the last widget placed.
     {
         auto it = std::find_if(result.begin(), result.end(),
                                [](const PanelWidgetEntry& e) { return e.id == "bed_temperature"; });
         if (it != result.end()) {
-            bool is_large = (to_int(breakpoint) >= to_int(UiBreakpoint::Large));
-            bool anchored = fixed_ids.count("bed_temperature") > 0;
-            it->enabled = anchored || is_large || !ams_present;
-            // Move to end so it's the last widget placed
             auto entry = std::move(*it);
             result.erase(it);
             result.push_back(std::move(entry));
@@ -806,9 +1073,7 @@ bool PanelWidgetConfig::migrate_stuck_ams_filament_swap() {
                      page.id, fil->col, fil->row, fil->col, fil->row);
         ams->col = fil->col;
         ams->row = fil->row;
-        fil->enabled = false;
-        fil->col = -1;
-        fil->row = -1;
+        fil->disable_and_unplace();
         mutated = true;
     }
     return mutated;
@@ -826,6 +1091,142 @@ bool PanelWidgetConfig::is_grid_format() const {
 
 std::vector<PanelWidgetEntry> PanelWidgetConfig::build_defaults() {
     return build_default_grid();
+}
+
+void PanelWidgetConfig::restore_pages(const nlohmann::json& payload) {
+    pages_.clear();
+    main_page_index_ = static_cast<size_t>(helix::json_util::safe_int(payload, "main_page_index"));
+    next_page_id_ = helix::json_util::safe_int(payload, "next_page_id");
+    if (payload.contains("pages") && payload["pages"].is_array()) {
+        for (const auto& page_json : payload["pages"]) {
+            if (!page_json.is_object()) {
+                continue;
+            }
+            PageConfig page;
+            page.id = helix::json_util::safe_string(page_json, "id");
+            if (page_json.contains("widgets") && page_json["widgets"].is_array()) {
+                page.widgets = parse_widget_array(page_json["widgets"], pages_.empty());
+            }
+            pages_.push_back(std::move(page));
+        }
+    }
+    if (pages_.empty()) {
+        PageConfig page;
+        page.id = "main";
+        page.widgets = build_defaults();
+        pending_anchors_ = true;
+        pages_.push_back(std::move(page));
+    }
+    if (main_page_index_ >= pages_.size()) {
+        main_page_index_ = 0;
+    }
+    if (next_page_id_ <= 0) {
+        next_page_id_ = static_cast<int>(pages_.size());
+    }
+}
+
+void PanelWidgetConfig::switch_to_grid(int cols, int rows) {
+    if (cols <= 0 || rows <= 0 || pages_.empty()) {
+        return;
+    }
+    const std::string target = std::to_string(cols) + "x" + std::to_string(rows);
+    if (grid_signature_ == target) {
+        return;
+    }
+
+    // Never stamped. Which grid these coordinates were arranged on is not
+    // recoverable, so the honest move is to claim the grid we are on now and
+    // change nothing else — reseating a real arrangement on a guess is the
+    // failure this whole change exists to stop.
+    if (grid_signature_.empty()) {
+        grid_signature_ = target;
+        spdlog::info("[PanelWidgetConfig] '{}': layout adopted by the {} grid", panel_id_, target);
+        save();
+        return;
+    }
+
+    const std::string outgoing = grid_signature_;
+    const int old_cols = parse_grid_axis(outgoing, /*want_cols=*/true);
+    const int old_rows = parse_grid_axis(outgoing, /*want_cols=*/false);
+
+    // Park the outgoing arrangement before touching anything.
+    parked_grids_[outgoing] = serialize_pages();
+
+    if (auto it = parked_grids_.find(target); it != parked_grids_.end() && it->is_object()) {
+        restore_pages(*it);
+        parked_grids_.erase(target);
+        grid_signature_ = target;
+        spdlog::info("[PanelWidgetConfig] '{}': restored the saved {} arrangement (was {})",
+                     panel_id_, target, outgoing);
+        save();
+        return;
+    }
+
+    // First visit. Seed from the arrangement being left rather than from the
+    // shipped defaults: it is the layout the user was last looking at, and the
+    // remapper seats it on the new grid or drops a widget to auto-placement,
+    // per widget, rather than failing the layout.
+    int seated = 0;
+    if (old_cols > 0 && old_rows > 0) {
+        for (auto& page : pages_) {
+            std::vector<LegacyPlacement> saved;
+            saved.reserve(page.widgets.size());
+            for (const auto& e : page.widgets) {
+                saved.push_back({e.id, e.col, e.row, e.colspan, e.rowspan});
+            }
+            const auto ported = port_legacy_layout(saved, old_cols, old_rows, cols, rows);
+            for (size_t i = 0; i < page.widgets.size() && i < ported.size(); ++i) {
+                if (ported[i].seated) {
+                    page.widgets[i].col = ported[i].col;
+                    page.widgets[i].row = ported[i].row;
+                    page.widgets[i].colspan = ported[i].colspan;
+                    page.widgets[i].rowspan = ported[i].rowspan;
+                    ++seated;
+                } else {
+                    page.widgets[i].col = -1;
+                    page.widgets[i].row = -1;
+                }
+            }
+        }
+    }
+
+    grid_signature_ = target;
+    spdlog::info("[PanelWidgetConfig] '{}': seeded the {} grid from {} ({} widget(s) reseated, "
+                 "the rest auto-placed)",
+                 panel_id_, target, outgoing, seated);
+    save();
+}
+
+void PanelWidgetConfig::apply_pending_anchors(int grid_cols, int grid_rows) {
+    if (!pending_anchors_ || grid_cols <= 0 || grid_rows <= 0) {
+        return;
+    }
+
+    // Rebuild rather than patch. The anchor table decides enable/disable per
+    // tier and carries per-widget config, and a grid-qualified entry may differ
+    // from the tier entry in any of those, not only in coordinates — so the
+    // answer for this grid is whatever build_default_grid() says for it.
+    //
+    // Page 0 only. Extra pages are user-made, and a user who has built one has
+    // arranged page 0 too, so a layout still tagged pending has exactly one.
+    const auto rebuilt = build_default_grid(grid_cols, grid_rows);
+    if (!rebuilt.empty() && !pages_.empty()) {
+        pages_[0].widgets = rebuilt;
+    }
+
+    int anchored = 0;
+    for (const auto& e : pages_[0].widgets) {
+        if (e.has_grid_position()) {
+            ++anchored;
+        }
+    }
+    spdlog::info("[PanelWidgetConfig] '{}': applied default anchors for a {}x{} track grid, {} of "
+                 "{} widget(s) placed",
+                 panel_id_, grid_cols, grid_rows, anchored, pages_[0].widgets.size());
+
+    pending_anchors_ = false;
+    grid_signature_ = std::to_string(grid_cols) + "x" + std::to_string(grid_rows);
+    save();
 }
 
 } // namespace helix

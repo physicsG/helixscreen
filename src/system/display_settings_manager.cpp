@@ -7,6 +7,7 @@
 
 #include "config.h"
 #include "display_manager.h"
+#include "display_metrics.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "platform_capabilities.h"
 #include "platform_info.h"
@@ -824,6 +825,29 @@ void DisplaySettingsManager::set_keep_navbar_visible(bool enabled) {
 #ifdef __ANDROID__
     android_set_navbar_always_visible(enabled);
 #endif
+}
+
+int DisplaySettingsManager::get_ui_scale_percent() const {
+    return Config::get_instance()->get<int>("/display/ui_scale_percent",
+                                            helix::DisplayMetrics::kScaleSettingAutomatic);
+}
+
+void DisplaySettingsManager::set_ui_scale_percent(int percent) {
+    // Automatic, or a percentage the scale curve can actually produce. A value
+    // outside the band is stored as Automatic rather than clamped, matching
+    // what DisplayMetrics::scale_for_setting() does with one it reads back.
+    const bool in_band = percent >= helix::DisplayMetrics::kMinScaleSettingPercent &&
+                         percent <= helix::DisplayMetrics::kMaxScaleSettingPercent;
+    const int stored = in_band ? percent : helix::DisplayMetrics::kScaleSettingAutomatic;
+
+    Config* config = Config::get_instance();
+    config->set<int>("/display/ui_scale_percent", stored);
+    config->save();
+
+    spdlog::info(
+        "[DisplaySettingsManager] set_ui_scale_percent({}) -> {} (applies on next start)", percent,
+        stored == helix::DisplayMetrics::kScaleSettingAutomatic ? std::string("automatic")
+                                                                : std::to_string(stored) + "%");
 }
 
 int DisplaySettingsManager::get_bed_mesh_render_mode() const {

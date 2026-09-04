@@ -33,6 +33,8 @@
 
 #pragma once
 
+#include "ui_coalesced_timer.h"
+
 #include "lvgl/lvgl.h"
 
 struct temp_graph_tooltip_t; // owned by src/ui/temp_graph_tooltip.cpp
@@ -139,7 +141,11 @@ struct ui_temp_graph_t {
 
     // Axis label font (configurable via ui_temp_graph_set_axis_size)
     const lv_font_t* axis_font; // Font for X/Y axis labels (default: font_small)
-    int32_t y_axis_width;       // Width reserved for Y-axis labels
+    int32_t y_axis_width;       // Width reserved for Y-axis labels. Measured from the widest
+                                // label the current range/increment will draw in axis_font,
+                                // so it tracks the per-breakpoint font ladder.
+    int32_t y_axis_width_floor; // Lower bound from the axis-size table, also the value used
+                                // before a font/range is known.
 
     // Theme change observer (re-applies chart colors on theme toggle)
     lv_observer_t* theme_observer;
@@ -171,6 +177,14 @@ struct ui_temp_graph_t {
     uint64_t gradient_render_count = 0;
     uint64_t gradient_skip_count = 0;
     uint64_t gradient_render_us_total = 0;
+
+    // Carries the pending out-of-render-pass gradient recompute requested by the
+    // draw callback. Leading-edge, because that callback re-requests on every
+    // frame the cache is stale: a debounce would keep pushing the deadline out
+    // and the cache would never rebuild. Owning the timer here is also the
+    // lifetime guarantee — ~CoalescedTimer cancels it, so a pending recompute
+    // cannot fire into a freed graph.
+    helix::ui::CoalescedTimer gradient_refresh{0};
 
     // Tap-to-caption state. nullptr = tooltip disabled (the default). Owned and
     // defined by temp_graph_tooltip.cpp so no tooltip state leaks into this struct.

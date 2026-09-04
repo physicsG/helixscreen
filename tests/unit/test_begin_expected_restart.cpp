@@ -27,10 +27,12 @@
 #include "../test_helpers/bed_mesh_panel_test_access.h"
 #include "../test_helpers/emergency_stop_test_access.h"
 #include "../test_helpers/input_shaper_panel_test_access.h"
+#include "../test_helpers/moonraker_client_test_access.h"
 #include "../test_helpers/pid_calibration_panel_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
+#include "http_executor.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
@@ -215,12 +217,40 @@ TEST_CASE_METHOD(ExpectedRestartFixture, "input-shaper SAVE_CONFIG initiates the
                  "[expectedrestart][1359]") {
     InputShaperPanel panel;
     panel.set_api(&client, &api);
+    // The merged panel refuses to SAVE_CONFIG with nothing selected (the
+    // chip-selection feature on devel), so seed one calibrated axis or the
+    // save returns early and no restart is initiated. Connected mock plus a
+    // short monitor timeout: the health monitor treats "still connected" as
+    // a fast restart and finishes instead of waiting out the 30s default
+    // while holding references into this stack frame.
+    helix::MoonrakerClientTestAccess::force_connection_state(client,
+                                                             helix::ConnectionState::CONNECTED);
+    ::InputShaperPanelTestAccess::set_save_restart_timeout_ms(panel, 1200);
+    InputShaperResult seeded;
+    seeded.axis = 'X';
+    seeded.shaper_type = "mzv";
+    seeded.shaper_freq = 45.0f;
+    ::InputShaperPanelTestAccess::seed_axis(panel, 'X', seeded, {{"MZV", 45.0f, {}}}, 0);
+    api.set_config_files({
+        {"printer.cfg", "[include conf.d/*.cfg]\n[printer]\nkinematics: corexy\n"},
+        {"conf.d/options.cfg",
+         "[input_shaper]\nshaper_freq_x: 47.4\nshaper_type_x: mzv\nshaper_freq_y: 35.0\n"},
+    });
     helix::ui::InputShaperPanelTestAccess::save_configuration(panel);
+    // The save chain runs on HttpExecutor::fast(); join it before reading the
+    // script history, then drain the queue hops (the toast).
+    wait_until([] { return helix::http::HttpExecutor::fast().inflight() == 0; }, 5000);
     settle();
 
-    const auto& hist = client.gcode_script_history();
-    REQUIRE(hist.size() == 1);
-    CHECK(hist[0] == "SAVE_CONFIG");
+    // The merged save chain (chip-selection flow) uploads the edited config
+    // through the file API rather than scripting SAVE_CONFIG, so the script
+    // history's equivalent is the uploaded options.cfg.
+    const auto uploaded = api.get_uploaded_config("conf.d/options.cfg");
+    REQUIRE(uploaded.has_value());
+    // The seeded X frequency was 47.4; the seeded selection says 45, so the
+    // uploaded file proves the save chain ran and wrote the chip's pick.
+    CHECK(uploaded->find("shaper_freq_x: 45") != std::string::npos);
+    CHECK(uploaded->find("shaper_freq_x: 47.4") == std::string::npos);
 
     CHECK(EmergencyStopOverlay::instance().is_recovery_suppressed());
     CHECK(api.suppress_disconnect_modal_calls() == 1);
@@ -236,9 +266,18 @@ TEST_CASE_METHOD(ExpectedRestartFixture, "input-shaper SAVE_CONFIG initiates the
     // The initiation toast must be INFO - not the WARNING this flow used before
     // the helper; an expected restart is not a fault, and it pairs with the
     // SUCCESS completion toast.
-    REQUIRE(toasts.size() == 1);
+    //
+    // Only the FIRST toast is contract. Whether the completion toast lands
+    // inside this test's wait depends on how fast the health monitor sees the
+    // mock back, so a trailing SUCCESS is allowed rather than counted; the
+    // #1359 regression is held by no_failure_reported() above.
+    REQUIRE_FALSE(toasts.empty());
     CHECK(toasts[0].severity == ToastSeverity::INFO);
     CHECK(toasts[0].message == "Saving config... Klipper will restart.");
+    for (size_t i = 1; i < toasts.size(); ++i) {
+        INFO("trailing toast: " << toasts[i].message);
+        CHECK(toasts[i].severity == ToastSeverity::SUCCESS);
+    }
     CHECK(notifications.empty());
 }
 

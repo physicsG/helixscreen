@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -142,7 +143,7 @@ TEST_CASE_METHOD(PrintStatusDetailedVisibilityFixture,
                  "[print_status][detailed_visibility]") {
     PrintStatusWidget w;
     w.set_config(nlohmann::json{{"layout_style", "detailed"}});
-    w.on_size_changed(1, 2, W_NORMAL - 1, 400);
+    w.on_size_changed(1, 2, w_normal() - 1, 400);
     lv_obj_t* container = create_mock_tree(test_screen());
     w.attach(container, test_screen());
     process_lvgl(50);
@@ -171,7 +172,7 @@ TEST_CASE_METHOD(PrintStatusDetailedVisibilityFixture,
                  "[print_status][detailed_visibility]") {
     PrintStatusWidget w;
     w.set_config(nlohmann::json{{"layout_style", "detailed"}});
-    w.on_size_changed(1, 2, W_NORMAL - 1, 400);
+    w.on_size_changed(1, 2, w_normal() - 1, 400);
     lv_obj_t* container = create_mock_tree(test_screen());
     w.attach(container, test_screen());
     process_lvgl(50);

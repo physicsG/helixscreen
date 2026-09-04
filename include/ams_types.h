@@ -811,6 +811,67 @@ struct BufferHealth {
     /// -1 = not reported (fault detection off, or older firmware).
     float fault_timer = -1.0f;
 
+    /// Filament pressure sensor, present only on an `AFC_buffer` configured
+    /// `type: FPS_PSF` (AFCFPSBuffer, AFC v1.2.0+). A TurtleNeck buffer is
+    /// `type: switched` and reports none of these; -1 = not reported.
+    ///
+    /// `smoothed_fps` is the one to read: AFC's own advance/trailing triggers
+    /// compare it, not the raw `fps_value`, so it is what the firmware means by
+    /// the buffer's position (`AFC_buffer.py`, AFCFPSEndstop docstring).
+    ///
+    /// Note what is NOT here. `low_point` / `high_point` / `deadband` are
+    /// config-only — AFCFPSBuffer::get_status publishes `fps_value`,
+    /// `smoothed_fps` and `set_point` and nothing else — so the tuning range
+    /// cannot be read at runtime. afc_fps_to_bias() normalizes against the
+    /// sensor's own 0..1 rail instead.
+    float fps_value = -1.0f;
+    float smoothed_fps = -1.0f;
+    float fps_set_point = -1.0f;
+
+    /// Set when a frame actually carried `smoothed_fps`.
+    ///
+    /// Presence cannot be inferred from the value: the ADC is nominally 0..1
+    /// but it is a voltage divider on real hardware, so a reading can land
+    /// slightly below zero — and that is max tension, the single most
+    /// interesting reading there is. A value-based sentinel would blank the
+    /// meter exactly then.
+    bool fps_reported = false;
+
+    /// Whether this buffer publishes a proportional pressure reading at all.
+    /// False for the switched TurtleNeck every BoxTurtle ships with.
+    [[nodiscard]] bool has_fps() const {
+        return fps_reported && fps_set_point > 0.0f;
+    }
+
+    /// Map an AFC filament-pressure reading onto the -1..+1 sync-feedback bias
+    /// Happy Hare publishes directly, so one buffer meter can draw both.
+    ///
+    /// Sign follows the existing convention: negative is tension (filament
+    /// pulling tight), positive is compression (filament loose). AFC agrees —
+    /// its `low_point` is max tension and `high_point` max compression.
+    ///
+    /// The scale is the honest part. The plan for this wanted to normalize
+    /// against `high_point - set_point`, but neither point is published, so
+    /// each side is normalized against the distance from `set_point` to the
+    /// sensor's own rail (0.0 and 1.0). With the default set_point of 0.5 the
+    /// two agree; with an off-centre one this reads slightly conservative,
+    /// which is the right direction to be wrong in for a fault indicator.
+    ///
+    /// Returns -1.5 (the "no data" sentinel the rest of the UI gates on) when
+    /// the buffer is not an FPS one.
+    [[nodiscard]] float afc_fps_to_bias() const {
+        if (!has_fps()) {
+            return -1.5f;
+        }
+        const float sp = std::clamp(fps_set_point, 0.01f, 0.99f);
+        const float v = std::clamp(smoothed_fps, 0.0f, 1.0f);
+        const float span = (v >= sp) ? (1.0f - sp) : sp;
+        if (span <= 0.0f) {
+            return 0.0f;
+        }
+        return std::clamp((v - sp) / span, -1.0f, 1.0f);
+    }
+
     /// Compute fault threshold from error_sensitivity: (11 - sensitivity) * 10 mm
     /// Returns 60mm fallback when sensitivity is 0 (not reported)
     /// Clamps sensitivity to 10 max to ensure threshold >= 10mm
@@ -976,18 +1037,20 @@ struct SlotInfo {
     /**
      * @brief Fill-bar level for the slot UI, or nullopt to leave the bar as-is.
      *
-     * EMPTY/UNKNOWN lanes render empty (0.0) — even when a Spoolman link and
-     * material were deliberately RETAINED across an eject (#1071), so a ghost
-     * lane never shows a phantom fill (#1071 BUG-1). Present lanes use the real
-     * remaining/total ratio when both weights are known; else fall back to full
-     * when any filament metadata is present (some backends, e.g. Snapmaker RFID,
-     * report a total but never a remaining, and a lane outside Spoolman has no
-     * weights at all). Full is what every other printer UI shows for an unweighed
-     * spool, and matching them beats a half-bar nobody reads as "unknown". Else
-     * nullopt (leave unchanged).
+     * EMPTY lanes render empty (0.0) — even when a Spoolman link and material
+     * were deliberately RETAINED across an eject (#1071), so a ghost lane
+     * never shows a phantom fill (#1071 BUG-1). UNKNOWN carries no presence
+     * signal (a backend that publishes none, or the startup skeleton before
+     * the first status parse lands), so it falls through to the same logic as
+     * a present lane: the real remaining/total ratio when both weights are
+     * known, else full when any filament metadata is present (some backends,
+     * e.g. Snapmaker RFID, report a total but never a remaining, and a lane
+     * outside Spoolman has no weights at all). Full is what every other
+     * printer UI shows for an unweighed spool, and matching them beats a
+     * half-bar nobody reads as "unknown". Else nullopt (leave unchanged).
      */
     [[nodiscard]] std::optional<float> display_fill_level() const {
-        if (!is_present()) {
+        if (status == SlotStatus::EMPTY) {
             return 0.0f;
         }
         if (total_weight_g > 0.0f && remaining_weight_g >= 0.0f) {
@@ -1005,7 +1068,7 @@ struct SlotInfo {
      * Encodes display_fill_level() into the 0-100 int convention used by the
      * per-slot fill subjects (AmsState::get_slot_fill_subject): -1 when
      * display_fill_level() is nullopt (no data — leave the render untouched),
-     * otherwise the ratio rounded to 0-100 (absent lane -> 0, metadata-only
+     * otherwise the ratio rounded to 0-100 (empty lane -> 0, metadata-only
      * fallback -> 100, real ratio -> lround(ratio*100)). Implemented in terms of
      * display_fill_level() so the two never drift.
      */
@@ -1015,6 +1078,50 @@ struct SlotInfo {
             return -1;
         }
         return static_cast<int>(std::lround(*lvl * 100.0f));
+    }
+
+    /**
+     * @brief Remaining-length display string, or "" when it is not a
+     *        measurement.
+     *
+     * The CFS box reports two sentinel lengths that must never render as
+     * measurements: 100 is the "never measured" default the bay carries until
+     * the BOX_INFO_REFRESH probe sequence runs (see the probe notes in
+     * ams_backend_cfs.cpp), and 255 is what a probe against a busy box leaves
+     * behind (#1387). Anything <= 0 is equally not a measurement. Callers fall
+     * back to remaining_weight_g when this is empty.
+     *
+     * The sentinels are box dialect values; a genuine reading on another
+     * backend that happens to land exactly on 100.0 falls to the weight, the
+     * lesser mistake next to presenting a sentinel as a measurement.
+     */
+    [[nodiscard]] std::string remaining_length_display() const {
+        if (remaining_length_m <= 0.0f || remaining_length_m == 100.0f ||
+            remaining_length_m == 255.0f) {
+            return {};
+        }
+        return std::to_string(static_cast<int>(remaining_length_m)) + "m";
+    }
+
+    /**
+     * @brief The slot's remaining-filament display string: length when it is
+     *        a measurement, weight when only the weight is known, "" when
+     *        neither.
+     *
+     * The length-then-weight fallback lives here so every push site renders
+     * the same string: the length helper already hides the CFS sentinels
+     * (#1387), and the weight carries the display when it yields nothing.
+     * A weight <= 0 is the "unknown" default, not a measurement.
+     */
+    [[nodiscard]] std::string remaining_display() const {
+        std::string length = remaining_length_display();
+        if (!length.empty()) {
+            return length;
+        }
+        if (remaining_weight_g > 0) {
+            return std::to_string(static_cast<int>(remaining_weight_g)) + "g";
+        }
+        return {};
     }
 };
 
@@ -1269,7 +1376,24 @@ struct AmsSystemInfo {
     /// from this field** rather than answering independently, so the two cannot
     /// diverge. Read the capabilities, not this.
     bool endless_spool_enabled = false;
-    bool supports_tool_mapping = false;
+
+    /// Auto-refill equivalence groups as the firmware reported them:
+    /// endless_spool_group_ids[global_slot] = group ordinal, -1 = ungrouped.
+    /// Same transport story as endless_spool_enabled - the WebSocket parse
+    /// builds it off the main thread and commits it under the backend mutex.
+    /// One entry per addressable bay (CFS T1A..T4D), so the index is the TNN
+    /// address space, not the count of connected units. get_endless_spool_
+    /// capabilities() is the reader that matters; it only asks whether any
+    /// group pairs two or more lanes.
+    std::vector<int> endless_spool_group_ids;
+
+    /// True when the parsed frame actually carried grouping data (CFS
+    /// `same_material`, present as an array even when no two lanes match).
+    /// Without it, "no data" (the flat dialect never sends the field) and
+    /// "parsed and nothing groups" would be indistinguishable, and the
+    /// capability answer would claim a negative it never read.
+    bool endless_spool_groups_reported = false;
+
     bool supports_bypass = false;            ///< Has bypass selector position
     bool has_hardware_bypass_sensor = false; ///< true=auto-detect sensor, false=virtual/manual
     TipMethod tip_method = TipMethod::CUT;   ///< How filament tip is handled during unload
@@ -1698,7 +1822,14 @@ enum class BackupEligibility : int { Eligible = 0, GradeDiffers = 1, Incompatibl
 enum class EndlessSpoolEnabled : int {
     Unknown = -1, ///< Not readable from this backend / not read yet.
     Off = 0,
-    On = 1
+    On = 1,
+    /// Switched on, but the grouping data says nothing would switch: no two
+    /// lanes currently stand in for each other, so a runout will stop the
+    /// print despite the setting being on. CFS derives this from its
+    /// `same_material` groups (#1391); an enable axis value rather than a
+    /// bool beside it because EndlessSpoolCapabilities holds enums only, and
+    /// a separate flag could contradict `enabled`.
+    OnWithoutBackup = 2
 };
 
 /**
@@ -1884,11 +2015,17 @@ endless_spool_config_from_groups(const std::vector<int>& group_ids);
  * and saying "off" there is a promise we cannot keep.
  */
 enum class EndlessSpoolStatusKind : int {
-    Hidden = 0,     ///< Unsupported - render nothing.
-    On = 1,         ///< A runout will switch to a backup spool.
-    Off = 2,        ///< A runout will NOT switch. The print stops.
-    Unknown = 3,    ///< The backend could not tell us. Not the same as Off.
-    NeedsPlugin = 4 ///< The mechanism exists; its package is not installed.
+    Hidden = 0,      ///< Unsupported - render nothing.
+    On = 1,          ///< A runout will switch to a backup spool.
+    Off = 2,         ///< A runout will NOT switch. The print stops.
+    Unknown = 3,     ///< The backend could not tell us. Not the same as Off.
+    NeedsPlugin = 4, ///< The mechanism exists; its package is not installed.
+    /// Switched on but nothing would switch: no two lanes currently group, so
+    /// a runout will stop the print anyway (CFS same_material, #1391). MUST
+    /// NOT be On: the AMS panel hides kind On when healthy
+    /// (hide_when_healthy), and this state is exactly the sentence that panel
+    /// exists to surface.
+    OnWithoutBackup = 5
 };
 
 /**
@@ -1924,51 +2061,6 @@ struct EndlessSpoolStatus {
  *    translation, so this costs no string.
  */
 [[nodiscard]] EndlessSpoolStatus endless_spool_status(const EndlessSpoolCapabilities& caps);
-
-/**
- * @brief Capabilities for tool mapping feature
- *
- * Describes whether tool mapping is supported and whether the UI can modify
- * the configuration. Different backends have different capabilities:
- * - AFC: Fully editable, per-lane tool assignment via SET_MAP
- * - Happy Hare: Fully editable, tool-to-gate mapping via MMU_TTG_MAP
- * - Mock: Configurable for testing both modes
- * - ACE: Not supported (1:1 fixed mapping)
- * - ToolChanger: Not supported (tools ARE slots)
- */
-struct ToolMappingCapabilities {
-    bool supported = false;  ///< Does this backend support tool mapping?
-    bool editable = false;   ///< Can the UI modify the mapping?
-    std::string description; ///< UI hint text (e.g., "Per-lane tool assignment via SET_MAP")
-};
-
-/**
- * @brief Can a backend with these capabilities carry out an explicit user
- *        tool->lane choice, by EITHER route?
- *
- * Named and shared because @c editable answers only half of it, and the missing
- * half is silent. A backend can honor the choice two ways: the generic
- * set_tool_mapping() path (@c editable), or a firmware-native pre-print send
- * that writes the routing itself (@p applies_via_preprint — the Snapmaker U1,
- * whose SET_PRINT_EXTRUDER_MAP is emitted from build_preprint_gcode()). The U1
- * reports editable=false and still honors every pick the user makes, so any
- * caller that reads editability alone concludes the opposite of the truth about
- * it.
- *
- * Two callers ask this, for reasons that must not drift apart:
- * PrintStartController, deciding whether "remap not supported" is an honest
- * toast or a stale false alarm; and AmsState::effective_auto_match(), deciding
- * whether the user's auto-color preference is a live control on this printer or
- * a setting nothing can act on.
- *
- * @param caps                 backend->get_tool_mapping_capabilities()
- * @param applies_via_preprint backend->requires_preprint_send()
- * @return true when the backend can carry out the user's choice. Pure.
- */
-[[nodiscard]] inline bool honors_user_tool_mapping(const ToolMappingCapabilities& caps,
-                                                   bool applies_via_preprint) {
-    return applies_via_preprint || (caps.supported && caps.editable);
-}
 
 /**
  * @brief Action type for dynamic device controls

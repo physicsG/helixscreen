@@ -88,6 +88,7 @@ lib/lv_markdown/src/lv_markdown_style.c
 src/abort/abort_manager.cpp
 src/application/asset_manager.cpp
 src/application/data_root_resolver.cpp
+src/application/display_metrics.cpp
 # clean_error_text only (e-stop recovery dialog) — the full router stays excluded
 src/application/gcode_error_text.cpp
 src/application/moonraker_event_routing.cpp
@@ -132,6 +133,10 @@ src/printer/ams_backend_toolchanger.cpp
 src/printer/ams_endless_spool.cpp
 src/printer/ams_state.cpp
 src/printer/ams_subscription_backend.cpp
+src/printer/bed_dimensions.cpp
+src/printer/chamber_heater_backend_dragonbreath.cpp
+src/printer/chamber_heater_backend_generic.cpp
+src/printer/chamber_heater_backend_panda_breath.cpp
 src/printer/consumption_sink.cpp
 src/printer/filament_catalog.cpp
 src/printer/filament_consumption_tracker.cpp
@@ -176,7 +181,9 @@ src/printer/plr_offer.cpp
 src/printer/standard_macros.cpp
 src/printer/toolchanger_addon.cpp
 src/printer/toolhead_homing.cpp
+src/printer/tool_offsets.cpp
 src/printer/tool_state.cpp
+src/printer/tool_offsets.cpp
 src/sensors/accel_sensor_manager.cpp
 src/sensors/humidity_sensor_manager.cpp
 src/sensors/probe_sensor_manager.cpp
@@ -232,10 +239,12 @@ src/temperature/thermal_rate_model.cpp
 src/ui/action_prompt_manager.cpp
 src/ui/ams_drawing_utils.cpp
 src/ui/backdrop_blur.cpp
+src/ui/bed_coord_mapper.cpp
 src/ui/bed_mesh_profile_name.cpp
 src/ui/console_filter_engine.cpp
 src/ui/fan_spin_animation.cpp
 src/ui/fault_modal_registry.cpp
+src/ui/filament_op_execute.cpp
 src/ui/filament_op_router.cpp
 src/ui/filament_path_geometry.cpp
 src/ui/filament_tube_stroker.cpp
@@ -243,6 +252,7 @@ src/ui/grid_layout.cpp
 src/ui/helix_sparkline.cpp
 src/ui/job_queue_state.cpp
 src/ui/keyboard_layout_provider.cpp
+src/ui/layout_port.cpp
 src/ui/locale_formats.cpp
 src/ui/modals/buffer_status_modal.cpp
 src/ui/modals/camera_config_modal.cpp
@@ -255,6 +265,8 @@ src/ui/overlay_base.cpp
 src/ui/page_scroll_auto_inject.cpp
 src/ui/page_scroll_controller.cpp
 src/ui/panel_widget_manager.cpp
+src/ui/clog_meter_geometry.cpp
+src/ui/clog_meter_model.cpp
 src/ui/panel_widget_registry.cpp
 src/ui/panel_widgets/active_spool_widget.cpp
 src/ui/panel_widgets/bypass_widget.cpp
@@ -264,6 +276,7 @@ src/ui/panel_widgets/clog_detection_widget.cpp
 src/ui/panel_widgets/control_buttons_widget.cpp
 src/ui/panel_widgets/fan_stack_widget.cpp
 src/ui/panel_widgets/fan_widget.cpp
+src/ui/panel_widgets/filament_sensor_widget.cpp
 src/ui/panel_widgets/gcode_console_widget.cpp
 src/ui/panel_widgets/heater_temp_widget.cpp
 src/ui/panel_widgets/humidity_widget.cpp
@@ -304,12 +317,14 @@ src/ui/touch_calibration_session.cpp
 src/ui/tour/first_run_tour.cpp
 src/ui/tour/tour_overlay.cpp
 src/ui/tour/tour_steps.cpp
+src/ui/tune_controller.cpp
 src/ui/ui_ams_context_menu.cpp
 src/ui/ui_ams_current_tool.cpp
 src/ui/ui_ams_device_operations_overlay.cpp
 src/ui/ui_ams_device_section_detail_overlay.cpp
 src/ui/ui_ams_edit_overlay.cpp
 src/ui/ui_ams_environment_overlay.cpp
+src/ui/ui_ams_lane_bar.cpp
 src/ui/ui_ams_loading_error_modal.cpp
 src/ui/ui_ams_mini_status.cpp
 src/ui/ui_ams_selector_menu.cpp
@@ -325,6 +340,7 @@ src/ui/ui_bypass_toggle_controller.cpp
 src/ui/ui_card.cpp
 src/ui/ui_carousel.cpp
 src/ui/ui_change_host_modal.cpp
+src/ui/ui_clog_bar.cpp
 src/ui/ui_clog_meter.cpp
 src/ui/ui_color_picker.cpp
 src/ui/ui_component_header_bar.cpp
@@ -367,6 +383,7 @@ src/ui/ui_info_qr_modal.cpp
 src/ui/ui_job_queue_modal.cpp
 src/ui/ui_jog_pad.cpp
 src/ui/ui_keyboard_manager.cpp
+src/ui/ui_keycap_style.cpp
 src/ui/ui_led_chip_factory.cpp
 src/ui/ui_led_control_overlay.cpp
 src/ui/ui_lock_screen.cpp
@@ -460,6 +477,8 @@ src/ui/ui_spool_wizard.cpp
 src/ui/ui_status_pill.cpp
 src/ui/ui_step_progress.cpp
 src/ui/ui_subscription_guard.cpp
+src/ui/ui_search_debounce.cpp
+src/ui/ui_coalesced_timer.cpp
 src/ui/ui_swatch.cpp
 src/ui/ui_switch.cpp
 src/ui/ui_system_path_canvas.cpp
@@ -564,6 +583,7 @@ src/ui/gcode_preview_setup.cpp
 #   (registers a stub <bed_mesh> widget so layouts parse) plus the rest of the
 #   API. Kept panels reference ui_bed_mesh_register() ungated.
 src/ui/ui_bed_mesh.cpp
+src/ui/ui_keycap_style.cpp
 
 # ===== link-loop additions: genuinely-referenced core the app_boot path pulls =====
 # These are constructed (not just referenced by pointer) in KEPT code, so a
@@ -604,3 +624,4 @@ src/printer/probe_preparation.cpp
 # MOCK: src/api/moonraker_client_mock_queue.cpp
 # MOCK: src/api/moonraker_client_mock_server.cpp
 # MOCK: src/printer/ams_backend_mock.cpp
+src/system/host_identity.cpp

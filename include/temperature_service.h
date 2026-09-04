@@ -259,6 +259,11 @@ class TemperatureService {
     static void on_heater_confirm_clicked(lv_event_t* e);
     static void on_heater_custom_clicked(lv_event_t* e);
 
+    // Chamber-heater diagnostics card (issue #1290): both delegate to the
+    // globally-registered TemperatureController — never the api directly.
+    static void on_chamber_fault_reset_clicked(lv_event_t* e);
+    static void on_chamber_filter_fan_clicked(lv_event_t* e);
+
     // The eight per-material preset callbacks (on_nozzle_preset_pla_clicked and
     // friends) are gone: they were byte-identical bodies that all forwarded to
     // send_temperature(type, data->preset_value). All three temp panels now use

@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -6,7 +7,7 @@
  * colspan, and the recycle path (#1109) survives the swap.
  *
  * `on_size_changed` (active_spool_widget.cpp:135) computes
- * `wide = width_px >= W_NORMAL` and memoizes it in `is_wide_` *before*
+ * `wide = width_px >= w_normal()` and memoizes it in `is_wide_` *before*
  * checking `widget_obj_` is non-null (:136-141). `attach()` calls
  * `apply_layout_visibility()` unconditionally to paper over a call that
  * landed while unattached (see the comment at :95-101 and issue #1109) —
@@ -90,13 +91,13 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     CHECK(color_is(ui_spool_canvas_get_color(spool_compact), TEST_SPOOL_COLOR));
 
     // Wide by pixel, contradicting span (colspan=1 -> old predicate stays compact).
-    h.resize(1, 1, W_NORMAL, H_TALL);
+    h.resize(1, 1, w_normal(), h_tall());
     CHECK_FALSE(lv_obj_has_flag(wide_layout, LV_OBJ_FLAG_HIDDEN));
     CHECK(lv_obj_has_flag(spool_compact, LV_OBJ_FLAG_HIDDEN));
     CHECK(color_is(ui_spool_canvas_get_color(spool_wide), TEST_SPOOL_COLOR));
 
     // Back to compact by pixel, contradicting span (colspan=3 -> old predicate goes wide).
-    h.resize(3, 3, W_NORMAL - 1, H_TALL - 1);
+    h.resize(3, 3, w_normal() - 1, h_tall() - 1);
     CHECK(lv_obj_has_flag(wide_layout, LV_OBJ_FLAG_HIDDEN));
     CHECK_FALSE(lv_obj_has_flag(spool_compact, LV_OBJ_FLAG_HIDDEN));
     CHECK(color_is(ui_spool_canvas_get_color(spool_compact), TEST_SPOOL_COLOR));
@@ -121,12 +122,12 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     CHECK(std::string(lv_label_get_text(material_label)).empty());
 
     // Wide by pixel, contradicting span (colspan=1).
-    h.resize(1, 1, W_NORMAL, H_TALL);
+    h.resize(1, 1, w_normal(), h_tall());
     CHECK(lv_obj_has_flag(no_spool_label, LV_OBJ_FLAG_HIDDEN));
     CHECK(std::string(lv_label_get_text(material_label)) == lv_tr("No Spool"));
 
     // Back to compact by pixel, contradicting span (colspan=3).
-    h.resize(3, 3, W_NORMAL - 1, H_TALL - 1);
+    h.resize(3, 3, w_normal() - 1, h_tall() - 1);
     CHECK_FALSE(lv_obj_has_flag(no_spool_label, LV_OBJ_FLAG_HIDDEN));
     CHECK(std::string(lv_label_get_text(material_label)).empty());
 }
@@ -154,7 +155,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "active_spool stays colored after a wide ins
         static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "panel_widget_active_spool", nullptr));
     REQUIRE(comp1 != nullptr);
     widget.attach(comp1, test_screen());
-    widget.on_size_changed(2, 1, W_NORMAL, H_TALL);
+    widget.on_size_changed(2, 1, w_normal(), h_tall());
     process_lvgl(30);
 
     // Rebuild: destroy the old component, recycle the SAME widget onto a fresh
@@ -164,7 +165,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "active_spool stays colored after a wide ins
         static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "panel_widget_active_spool", nullptr));
     REQUIRE(comp2 != nullptr);
     widget.attach(comp2, test_screen());
-    widget.on_size_changed(2, 1, W_NORMAL, H_TALL);
+    widget.on_size_changed(2, 1, w_normal(), h_tall());
     process_lvgl(30);
 
     lv_obj_t* wide2 = lv_obj_find_by_name(comp2, "spool_wide");

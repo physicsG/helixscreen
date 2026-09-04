@@ -196,6 +196,77 @@ class PrinterTemperatureState {
         return &chamber_mode_;
     }
 
+    // Chamber-heater diagnostics subjects (backend-provided, issue #1290).
+    // Capability-gated: they only update once set_chamber_diagnostics_source()
+    // has wired a backend's surfaces; absent objects in a delta status frame
+    // leave the last values in place.
+    /// Latched chamber-heater fault (0/1)
+    lv_subject_t* get_chamber_heater_fault_subject() {
+        return &chamber_heater_fault_;
+    }
+    lv_subject_t* get_chamber_heater_fault_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_heater_fault_lifetime_;
+        return &chamber_heater_fault_;
+    }
+    /// Heating inhibited by the heater's own protection (0/1)
+    lv_subject_t* get_chamber_heater_inhibited_subject() {
+        return &chamber_heater_inhibited_;
+    }
+    lv_subject_t* get_chamber_heater_inhibited_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_heater_inhibited_lifetime_;
+        return &chamber_heater_inhibited_;
+    }
+    /// Translated fault reason for the UI ("" when none) — derived from the
+    /// backend's generic FaultReason kind; the raw vendor code never binds.
+    lv_subject_t* get_chamber_heater_fault_reason_text_subject() {
+        return &chamber_heater_fault_reason_text_;
+    }
+    lv_subject_t* get_chamber_heater_fault_reason_text_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_heater_fault_reason_text_lifetime_;
+        return &chamber_heater_fault_reason_text_;
+    }
+    /// Filter fan running state (-1 unknown, 0 off, 1 on)
+    lv_subject_t* get_chamber_filter_fan_on_subject() {
+        return &chamber_filter_fan_on_;
+    }
+    lv_subject_t* get_chamber_filter_fan_on_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_filter_fan_on_lifetime_;
+        return &chamber_filter_fan_on_;
+    }
+    /// Heating-element temp display string ("--" unknown; "106.2°C" nominal)
+    lv_subject_t* get_chamber_heater_element_temp_text_subject() {
+        return &chamber_heater_element_temp_text_;
+    }
+    lv_subject_t* get_chamber_heater_element_temp_text_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_heater_element_temp_text_lifetime_;
+        return &chamber_heater_element_temp_text_;
+    }
+    /// Filter fan speed display string ("--" unknown; "100%" nominal)
+    lv_subject_t* get_chamber_filter_fan_percent_text_subject() {
+        return &chamber_filter_fan_percent_text_;
+    }
+    lv_subject_t* get_chamber_filter_fan_percent_text_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_filter_fan_percent_text_lifetime_;
+        return &chamber_filter_fan_percent_text_;
+    }
+    /// Filter-fan toggle label (translated "Filter Fan: On"/"Filter Fan: Off")
+    lv_subject_t* get_chamber_filter_fan_on_text_subject() {
+        return &chamber_filter_fan_on_text_;
+    }
+    lv_subject_t* get_chamber_filter_fan_on_text_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_filter_fan_on_text_lifetime_;
+        return &chamber_filter_fan_on_text_;
+    }
+    /// Filter-fan toggle icon name ("fan"/"fan_off") — drives the compact
+    /// portrait card's icon button via bind_icon
+    lv_subject_t* get_chamber_filter_fan_icon_subject() {
+        return &chamber_filter_fan_icon_;
+    }
+    lv_subject_t* get_chamber_filter_fan_icon_subject(SubjectLifetime& lifetime) {
+        lifetime = chamber_filter_fan_icon_lifetime_;
+        return &chamber_filter_fan_icon_;
+    }
+
     /// Number of tracked extruders
     int extruder_count() const {
         return static_cast<int>(extruders_.size());
@@ -254,6 +325,23 @@ class PrinterTemperatureState {
     }
 
     /**
+     * @brief Set the chamber-heater diagnostics source (backend-resolved)
+     * @param backend_id Matched backend id ("" = none; see chamber_heater_backend.h)
+     * @param diagnostics_object Status object carrying diagnostics ("" = none)
+     * @param filter_fan_pin Binary filtration-fan output_pin ("" = none)
+     *
+     * Called from PrinterState's chamber resolution. Until a non-empty
+     * diagnostics object is wired, diagnostics status objects are ignored.
+     */
+    void set_chamber_diagnostics_source(const std::string& backend_id,
+                                        const std::string& diagnostics_object,
+                                        const std::string& filter_fan_pin) {
+        chamber_backend_id_ = backend_id;
+        chamber_diagnostics_object_ = diagnostics_object;
+        chamber_filter_fan_pin_ = filter_fan_pin;
+    }
+
+    /**
      * @brief Get the Klipper heater name for chamber (empty if sensor-only)
      */
     const std::string& chamber_heater_name() const {
@@ -265,6 +353,13 @@ class PrinterTemperatureState {
      */
     const std::string& chamber_sensor_name() const {
         return chamber_sensor_name_;
+    }
+
+    /**
+     * @brief Get the status object carrying chamber-heater diagnostics ("" = none)
+     */
+    const std::string& chamber_diagnostics_object() const {
+        return chamber_diagnostics_object_;
     }
 
     /**
@@ -343,6 +438,30 @@ class PrinterTemperatureState {
     SubjectLifetime chamber_effective_target_lifetime_;
     SubjectLifetime chamber_mode_lifetime_;
 
+    // Chamber-heater diagnostics (backend-provided, issue #1290). Absent
+    // objects in a delta status frame = no news: subjects keep last values.
+    lv_subject_t chamber_heater_fault_{};             ///< XML: 0/1
+    lv_subject_t chamber_heater_inhibited_{};         ///< XML: 0/1
+    lv_subject_t chamber_heater_fault_reason_text_{}; ///< XML: translated reason, "" when none
+    lv_subject_t chamber_filter_fan_on_{};            ///< XML: -1 unknown / 0 / 1
+    lv_subject_t chamber_heater_element_temp_text_{}; ///< XML: display string ("--"/"106.2°C")
+    lv_subject_t chamber_filter_fan_percent_text_{};  ///< XML: display string ("--"/"100%")
+    lv_subject_t chamber_filter_fan_on_text_{};       ///< XML: translated toggle label
+    lv_subject_t chamber_filter_fan_icon_{};          ///< XML: toggle icon name ("fan"/"fan_off")
+    char chamber_heater_fault_reason_text_buf_[64] = {};
+    char chamber_heater_element_temp_text_buf_[32] = {};
+    char chamber_filter_fan_percent_text_buf_[32] = {};
+    char chamber_filter_fan_on_text_buf_[64] = {};
+    char chamber_filter_fan_icon_buf_[16] = {};
+    SubjectLifetime chamber_heater_fault_lifetime_;
+    SubjectLifetime chamber_heater_inhibited_lifetime_;
+    SubjectLifetime chamber_heater_fault_reason_text_lifetime_;
+    SubjectLifetime chamber_filter_fan_on_lifetime_;
+    SubjectLifetime chamber_heater_element_temp_text_lifetime_;
+    SubjectLifetime chamber_filter_fan_percent_text_lifetime_;
+    SubjectLifetime chamber_filter_fan_on_text_lifetime_;
+    SubjectLifetime chamber_filter_fan_icon_lifetime_;
+
     // Dynamic per-extruder tracking
     std::unordered_map<std::string, ExtruderInfo> extruders_;
     lv_subject_t extruder_version_{}; ///< Bumped when extruder list changes
@@ -360,6 +479,11 @@ class PrinterTemperatureState {
     int chamber_fan_resting_deci_ =
         0; ///< Cooling fan's configured resting/off target
            ///< (decidegrees); M141 S0 returns the fan here. 0 = unknown.
+
+    // Chamber-heater diagnostics source (resolved in PrinterState::set_hardware)
+    std::string chamber_backend_id_;         ///< Matched backend id, "" = none/generic
+    std::string chamber_diagnostics_object_; ///< Status object with diagnostics, "" = none
+    std::string chamber_filter_fan_pin_;     ///< Binary filter fan output_pin, "" = none
 };
 
 } // namespace helix

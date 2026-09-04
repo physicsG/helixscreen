@@ -11,6 +11,8 @@
 #include "printer_state.h"
 #include "spdlog/spdlog.h"
 
+#include <spdlog/fmt/fmt.h>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -127,8 +129,11 @@ void TemperatureController::ensure_limits(HeaterType type) {
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
     auto tok = lifetime_.token();
+    // Snapshot the backend ceiling before the query: the callback below runs
+    // on the WebSocket thread, which must not read `this` members.
+    const double conservative_max = conservative_chamber_max_;
     api_->query_configfile(
-        [this, tok, type, section](const nlohmann::json& config) {
+        [this, tok, type, section, conservative_max](const nlohmann::json& config) {
             // Background (WS) thread: parse only — no `this` member access.
             int max_deg = 0;
             if (config.contains(section)) {
@@ -147,7 +152,14 @@ void TemperatureController::ensure_limits(HeaterType type) {
                 }
             }
             if (max_deg <= 0) {
-                return; // no usable ceiling — keep the heater default
+                // No configfile ceiling. Appliance backends carry a
+                // conservative cap (e.g. stock chamber limit 60); generic has
+                // none (0) and keeps the heater default.
+                if (type == HeaterType::Chamber && conservative_max > 0) {
+                    max_deg = static_cast<int>(conservative_max);
+                } else {
+                    return; // no usable ceiling — keep the heater default
+                }
             }
             // Main thread: mutate state.
             tok.defer("TemperatureController::apply_max",
@@ -245,6 +257,34 @@ void TemperatureController::apply_material(double nozzle, double bed, double cha
     const std::string chamber_name = resolved_name(HeaterType::Chamber);
     if (chamber > 0 && !chamber_name.empty()) {
         set_target(chamber_name, chamber, opts);
+    }
+}
+
+void TemperatureController::set_chamber_actions(std::string reset_gcode, std::string filter_fan_pin,
+                                                double conservative_max) {
+    chamber_reset_gcode_ = std::move(reset_gcode);
+    chamber_filter_fan_pin_ = std::move(filter_fan_pin);
+    conservative_chamber_max_ = conservative_max;
+}
+
+void TemperatureController::reset_chamber_fault() {
+    if (api_ && !chamber_reset_gcode_.empty()) {
+        spdlog::info("[TemperatureController] Chamber fault reset");
+        api_->execute_gcode(chamber_reset_gcode_, nullptr, nullptr);
+    }
+}
+
+void TemperatureController::set_chamber_filter_fan(bool on) {
+    if (api_ && !chamber_filter_fan_pin_.empty()) {
+        // Bare pin name — SET_PIN takes the object name, not the prefixed
+        // type ("output_pin dragonbreath_filter" → "dragonbreath_filter").
+        // find(' ') == npos for an already-bare name yields substr(0): the
+        // whole string, so both spellings work.
+        const std::string pin =
+            chamber_filter_fan_pin_.substr(chamber_filter_fan_pin_.find(' ') + 1);
+        spdlog::info("[TemperatureController] Chamber filter fan {}", on ? "on" : "off");
+        api_->execute_gcode(fmt::format("SET_PIN PIN={} VALUE={}", pin, on ? 1 : 0), nullptr,
+                            nullptr);
     }
 }
 

@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix/xml/indexed_subject_pool.h"

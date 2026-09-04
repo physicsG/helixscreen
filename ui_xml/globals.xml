@@ -14,6 +14,8 @@
     <px name="nav_padding" value="16"/>
     <!-- Modal backdrop opacity (0-255) -->
     <px name="modal_backdrop_opacity" value="120"/>
+    <!-- Ghosted lane cell opacity (0-255): LV_OPA_20 -->
+    <px name="ghost_opacity" value="51"/>
     <!-- border_radius is now resolved from BorderRadiusSizes table per breakpoint in C++ -->
     <!-- Fixed small radius for swatches/badges that always want 4px regardless of theme -->
     <px name="border_radius_small" value="4"/>
@@ -99,14 +101,29 @@
     <!-- Runtime selects appropriate variant via ui_theme_register_responsive_fonts()
          Unified icon size for cards, nav bar, and other standard icons
          Values: xs(16), sm(24), md(32), lg(48), xl(64) -->
-    <!-- NOTE: icon_size_micro="md" (32px) — sm(24) is too small at 272px vertical (~9% of screen height, illegible) -->
+    <!-- These are the NOMINAL size names above; the pixel face each one resolves to
+         also varies per tier (see icon_font_<size>_<tier> below), so "md" is 32px at
+         tiny but 24px at micro. Read both ladders together before changing either.
+
+         The rung is chosen so the glyph lands at 40-50% of the home grid's cell, which
+         is what keeps a tile's icon and its caption both inside the box. Cell edge is
+         2 * GridLayout::GRID_CELL[tier] = 68/80/80/120/120/144/192.
+
+         micro is the deliberate exception at 24px (35%): its 68px cell cannot host a
+         40% glyph AND a caption. "md" reads as 32px from the nominal list, but micro
+         demotes it to 24 - which is the size this comment used to reject as illegible,
+         so the value is right and the reasoning behind it was not. Measured: raising
+         micro to 32px (via "xl") clips 7 widgets on BOTH micro geometries. Leave it. -->
     <string name="icon_size_micro" value="md"/>
     <string name="icon_size_tiny" value="md"/>
     <string name="icon_size_small" value="md"/>
     <string name="icon_size_medium" value="lg"/>
-    <string name="icon_size_large" value="xl"/>
-    <string name="icon_size_xlarge" value="xl"/>
-    <string name="icon_size_xxlarge" value="xl"/>
+    <!-- large/xlarge/xxlarge sit on "lg" rather than "xl": GRID_CELL repeats 60 for
+         medium and large, so an "xl" here grew the glyph 48->64 with no more room and
+         put the tier at 53% - it clipped 10 widget/geometry pairs. -->
+    <string name="icon_size_large" value="lg"/>
+    <string name="icon_size_xlarge" value="lg"/>
+    <string name="icon_size_xxlarge" value="lg"/>
 
     <!-- Literal text that begins with '#'. resolve_consts() treats a leading
          '#' as a const reference on EVERY attribute, and only lets a value
@@ -120,17 +137,21 @@
     <!-- Responsive Badge Sizes (badge_size)                                   -->
     <!-- ===================================================================== -->
     <!-- Small round badge for tool numbers, counts, etc. overlaid on icons.
-         Scales with the BREAKPOINT, not with the icon it sits on - the icon_size
-         ladder (xs16/sm24/md32/lg48/xl64) is fixed per call site and does not move
-         with breakpoint, so these values only make sense on a roomy icon
-         (size="lg"/"xl"). A call site using a smaller icon must pass an explicit
-         badge size; see badge_size_on_sm_icon_* below. -->
+         These only make sense on a roomy icon (size="lg"/"xl"); a call site using
+         a smaller icon must pass an explicit badge size, see
+         badge_size_on_sm_icon_* below.
+
+         Hold each rung near a third of the icon it sits on. The xl icon rung is
+         NOT constant across breakpoints - icon_font_xl runs 64 at large, 80 at
+         xlarge and 96 at xxlarge - so a badge ladder that climbs more slowly
+         than the icon ladder shrinks in proportion as the screen grows.
+         Changing icon_font_xl_* means revisiting the matching rung here. -->
     <px name="badge_size_tiny" value="10"/>
     <px name="badge_size_small" value="16"/>
     <px name="badge_size_medium" value="18"/>
     <px name="badge_size_large" value="20"/>
     <px name="badge_size_xlarge" value="24"/>
-    <px name="badge_size_xxlarge" value="28"/>
+    <px name="badge_size_xxlarge" value="32"/>
 
     <!-- Badge sized to sit on a size="sm" (24px) icon. A badge disc can never be
          smaller than the line height of the font inside it without clipping the
@@ -187,6 +208,18 @@
     <px name="spinner_xs_large" value="16"/>
     <px name="spinner_xs_xlarge" value="18"/>
     <px name="spinner_xs_xxlarge" value="20"/>
+
+    <!-- meter_track_h: the bar a horizontal meter is drawn in — the FlowGuard
+         scale (clog_bar_page.xml). Thin enough to read as a scale rather than a
+         panel, and it climbs with the type ladder so the value marker and peak
+         tick stay visible next to the labels either side of it. -->
+    <px name="meter_track_h_micro" value="8"/>
+    <px name="meter_track_h_tiny" value="10"/>
+    <px name="meter_track_h_small" value="12"/>
+    <px name="meter_track_h_medium" value="12"/>
+    <px name="meter_track_h_large" value="14"/>
+    <px name="meter_track_h_xlarge" value="16"/>
+    <px name="meter_track_h_xxlarge" value="20"/>
 
     <!-- Spinner arc widths - proportional to size -->
     <px name="spinner_arc_lg_small" value="3"/>
@@ -382,9 +415,24 @@
          top of an overlay or on a home-screen widget. NOT badge_size_* — that
          family tops out at 28 and means the small count chip overlaid on an
          icon, which is a different component. icon_badge_radius is half the
-         size and MUST track it. -->
-    <px name="icon_badge_size" value="48"/>
-    <px name="icon_badge_radius" value="24"/>
+         size and MUST track it.
+
+         Responsive because the glyph inside it is: icon_font_md runs 32 / 48 /
+         64 across large / xlarge / xxlarge, so one flat size cannot hold every
+         rung. xxlarge clears its 64px glyph while still leaving room for the
+         status label beneath it in a two-row home widget — that label is what
+         caps it at 1.25x rather than the ~1.5x the smaller rungs carry.
+         xlarge stays at 48, where the glyph exactly fills the badge. -->
+    <px name="icon_badge_size_small" value="48"/>
+    <px name="icon_badge_size_medium" value="48"/>
+    <px name="icon_badge_size_large" value="48"/>
+    <px name="icon_badge_size_xlarge" value="48"/>
+    <px name="icon_badge_size_xxlarge" value="80"/>
+    <px name="icon_badge_radius_small" value="24"/>
+    <px name="icon_badge_radius_medium" value="24"/>
+    <px name="icon_badge_radius_large" value="24"/>
+    <px name="icon_badge_radius_xlarge" value="24"/>
+    <px name="icon_badge_radius_xxlarge" value="40"/>
 
     <!-- button_width_action: fixed width for a standalone action button that
          must not stretch to fill its row (Done/Retry/Close in calibration
@@ -500,7 +548,7 @@
     <string name="icon_font_lg_medium" value="mdi_icons_48"/>
     <string name="icon_font_lg_large" value="mdi_icons_48"/>
     <string name="icon_font_lg_xlarge" value="mdi_icons_64"/>
-    <string name="icon_font_lg_xxlarge" value="mdi_icons_96"/>
+    <string name="icon_font_lg_xxlarge" value="mdi_icons_80"/>
     <!-- NO BASE icon_font_lg - registered at runtime -->
     <!-- icon_font_xl: Navigation/hero icons (nav bar, large displays) -->
     <string name="icon_font_xl_micro" value="mdi_icons_32"/>
@@ -509,7 +557,7 @@
     <string name="icon_font_xl_medium" value="mdi_icons_64"/>
     <string name="icon_font_xl_large" value="mdi_icons_64"/>
     <string name="icon_font_xl_xlarge" value="mdi_icons_80"/>
-    <string name="icon_font_xl_xxlarge" value="mdi_icons_128"/>
+    <string name="icon_font_xl_xxlarge" value="mdi_icons_96"/>
     <!-- NO BASE icon_font_xl - registered at runtime -->
     <!-- icon_font_hero: Card-filling empty-state icons (thumbnail placeholders etc.) -->
     <!-- mdi_icons_96/128 live only in the xxlarge font tier (mk/fonts.mk). On -->
@@ -652,6 +700,7 @@
     <str name="icon_alpha_a_circle" value="󰯬"/>
     <str name="icon_animation" value="󰗘"/>
     <str name="icon_animation_play" value="󰤺"/>
+    <str name="icon_archive_arrow_down" value="󱉙"/>
     <str name="icon_arrow_down" value="󰁅"/>
     <str name="icon_arrow_down_bold" value="󰜮"/>
     <str name="icon_arrow_expand_down" value="󰞖"/>
@@ -734,6 +783,7 @@
     <str name="icon_folder_open" value="󰝰"/>
     <str name="icon_folder_upload" value="󰉙"/>
     <str name="icon_fridge_industrial" value="󱗮"/>
+    <str name="icon_gauge" value="󰊚"/>
     <str name="icon_grid_large" value="󰝘"/>
     <str name="icon_grid_off" value="󰋂"/>
     <str name="icon_grid_view" value="󰕰"/>
@@ -881,6 +931,7 @@
     <str name="icon_volume_off" value="󰖁"/>
     <str name="icon_water" value="󰖌"/>
     <str name="icon_waveform" value="󱑽"/>
+    <str name="icon_webcam" value="󰖠"/>
     <str name="icon_weight" value="󰖡"/>
     <str name="icon_wifi" value="󰖩"/>
     <str name="icon_wifi_alert" value="󱚵"/>

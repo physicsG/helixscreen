@@ -245,11 +245,12 @@ TEST_CASE("bypass widget: gated on ams_supports_bypass", "[ams][bypass-home]") {
     REQUIRE(def != nullptr);
     CHECK(def->hardware_gate_subject != nullptr);
     CHECK(std::string_view(def->hardware_gate_subject) == "ams_supports_bypass");
-    // Default span 1x1, scalable to 2x1 per the registry row.
-    CHECK(def->colspan == 1);
-    CHECK(def->rowspan == 1);
-    CHECK(def->max_colspan == 2);
-    CHECK(def->max_rowspan == 1);
+    // Default span one cell (2x2 tracks), scalable to 2x1 cells (4x2
+    // tracks) per the registry row - spans are in grid tracks, half a cell.
+    CHECK(def->colspan == 2);
+    CHECK(def->rowspan == 2);
+    CHECK(def->max_colspan == 4);
+    CHECK(def->max_rowspan == 2);
     // opt-in tile, like the ams row
     CHECK_FALSE(def->default_enabled);
 }

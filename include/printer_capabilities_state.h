@@ -112,6 +112,12 @@ class PrinterCapabilitiesState {
     /** @brief Override chamber heater capability after manual assignment resolution */
     void set_has_chamber_heater(bool available);
 
+    /** @brief Set chamber-heater diagnostics capability (backend diagnostics object resolved) */
+    void set_has_chamber_heater_diagnostics(bool available);
+
+    /** @brief Set chamber filter-fan capability (backend filter pin resolved) */
+    void set_has_chamber_filter_fan(bool available);
+
     /**
      * @brief Set stepper_z position_endstop value (for non-probe printers)
      *
@@ -245,6 +251,16 @@ class PrinterCapabilitiesState {
         return const_cast<lv_subject_t*>(&printer_has_chamber_heater_);
     }
 
+    /// 1 if the chamber heater exposes backend diagnostics
+    lv_subject_t* get_printer_has_chamber_heater_diagnostics_subject() const {
+        return const_cast<lv_subject_t*>(&printer_has_chamber_heater_diagnostics_);
+    }
+
+    /// 1 if the chamber has a backend-resolved filter fan (output_pin)
+    lv_subject_t* get_printer_has_chamber_filter_fan_subject() const {
+        return const_cast<lv_subject_t*>(&printer_has_chamber_filter_fan_);
+    }
+
     /// 1 if printer has any chamber capability (sensor OR heater)
     lv_subject_t* get_printer_has_chamber_subject() const {
         return const_cast<lv_subject_t*>(&printer_has_chamber_);
@@ -367,17 +383,20 @@ class PrinterCapabilitiesState {
     lv_subject_t printer_bed_moves_{};               // 0=gantry moves on Z, 1=bed moves on Z
     lv_subject_t printer_has_chamber_sensor_{};      // chamber temperature sensor
     lv_subject_t printer_has_chamber_heater_{};      // active chamber heater (heater_generic)
-    lv_subject_t printer_has_chamber_{};             // combined: sensor OR heater
-    lv_subject_t printer_has_screws_tilt_{};         // screws_tilt_adjust
-    lv_subject_t printer_has_webcam_{};              // enabled webcam configured
-    std::string webcam_stream_url_;                  // MJPEG stream URL
-    std::string webcam_snapshot_url_;                // snapshot URL
-    bool webcam_flip_h_ = false;                     // flip horizontal
-    bool webcam_flip_v_ = false;                     // flip vertical
-    int webcam_target_fps_ = 15;                     // configured target FPS
-    lv_subject_t printer_has_extra_fans_{};          // extra controllable fans beyond part cooling
-    lv_subject_t power_device_count_{};              // number of power devices (0 = none)
-    lv_subject_t sensor_count_{};                    // number of Moonraker sensors (0 = none)
+    lv_subject_t
+        printer_has_chamber_heater_diagnostics_{};  // chamber heater exposes backend diagnostics
+    lv_subject_t printer_has_chamber_filter_fan_{}; // chamber filter fan (output_pin)
+    lv_subject_t printer_has_chamber_{};            // combined: sensor OR heater
+    lv_subject_t printer_has_screws_tilt_{};        // screws_tilt_adjust
+    lv_subject_t printer_has_webcam_{};             // enabled webcam configured
+    std::string webcam_stream_url_;                 // MJPEG stream URL
+    std::string webcam_snapshot_url_;               // snapshot URL
+    bool webcam_flip_h_ = false;                    // flip horizontal
+    bool webcam_flip_v_ = false;                    // flip vertical
+    int webcam_target_fps_ = 15;                    // configured target FPS
+    lv_subject_t printer_has_extra_fans_{};         // extra controllable fans beyond part cooling
+    lv_subject_t power_device_count_{};             // number of power devices (0 = none)
+    lv_subject_t sensor_count_{};                   // number of Moonraker sensors (0 = none)
 };
 
 } // namespace helix

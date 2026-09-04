@@ -22,6 +22,7 @@
 #include "audio_settings_manager.h"
 #include "border_radius_sizes.h"
 #include "display_manager.h"
+#include "display_metrics.h"
 #include "display_settings_manager.h"
 #include "format_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
@@ -38,6 +39,20 @@
 #include <memory>
 
 namespace helix::settings {
+
+namespace {
+
+/// Explicit UI scale steps offered below Automatic, in dropdown order. 100% is
+/// a real choice rather than a synonym for Automatic: it pins a high-DPI panel
+/// back to authored sizing. The top of the range is
+/// DisplayMetrics::kMaxScaleSettingPercent, so the dropdown cannot ask for a
+/// scale the curve itself would refuse.
+constexpr int kUiScalePercents[] = {100, 125, 150, 175, 200};
+static_assert(kUiScalePercents[0] == helix::DisplayMetrics::kMinScaleSettingPercent);
+static_assert(kUiScalePercents[std::size(kUiScalePercents) - 1] ==
+              helix::DisplayMetrics::kMaxScaleSettingPercent);
+
+} // namespace
 
 // ============================================================================
 // SINGLETON ACCESSOR
@@ -110,6 +125,7 @@ void DisplaySoundSettingsOverlay::register_callbacks() {
         {"on_brightness_commit", on_brightness_commit},
         {"on_widget_labels_changed", on_widget_labels_changed},
         {"on_page_scroll_buttons_changed", on_page_scroll_buttons_changed},
+        {"on_ui_scale_changed", on_ui_scale_changed},
         {"on_bed_mesh_mode_changed", on_bed_mesh_mode_changed},
         {"on_dim_changed", on_dim_changed},
         {"on_sleep_changed", on_sleep_changed},
@@ -211,6 +227,7 @@ void DisplaySoundSettingsOverlay::on_activate() {
     init_dim_dropdown();
     init_sleep_dropdown();
     init_sleep_while_printing_toggle();
+    init_ui_scale_dropdown();
     init_bed_mesh_dropdown();
 
 #ifdef HELIX_ENABLE_SCREENSAVER
@@ -404,6 +421,46 @@ void DisplaySoundSettingsOverlay::init_sleep_while_printing_toggle() {
         }
         spdlog::trace("[{}] Sleep while printing toggle initialized", get_name());
     }
+}
+
+void DisplaySoundSettingsOverlay::init_ui_scale_dropdown() {
+    if (!overlay_root_)
+        return;
+
+    lv_obj_t* row = lv_obj_find_by_name(overlay_root_, "row_ui_scale");
+    lv_obj_t* dropdown = row ? lv_obj_find_by_name(row, "dropdown") : nullptr;
+    if (!dropdown)
+        return;
+
+    // The Automatic row carries the percentage the panel's DPI resolved to, so
+    // a user on a phone-class screen can see what it chose before deciding to
+    // override it. Every shipping printer sits in the DPI deadband and reads
+    // "Automatic (100%)".
+    const int auto_percent =
+        static_cast<int>(std::lround(helix::DisplayMetrics::auto_scale() * 100.0));
+    std::string options =
+        std::string(lv_tr("Automatic")) + " (" + std::to_string(auto_percent) + "%)";
+    for (int percent : kUiScalePercents) {
+        options += "\n" + std::to_string(percent) + "%";
+    }
+    lv_dropdown_set_options(dropdown, options.c_str());
+
+    // Index 0 is Automatic; the explicit steps follow in kUiScalePercents
+    // order. A stored value that is not one of the offered steps (hand-edited,
+    // or a step we later drop) selects Automatic, which is what it will
+    // actually behave as on the next start.
+    const int stored = DisplaySettingsManager::instance().get_ui_scale_percent();
+    uint32_t selected = 0;
+    for (size_t i = 0; i < std::size(kUiScalePercents); ++i) {
+        if (kUiScalePercents[i] == stored) {
+            selected = static_cast<uint32_t>(i + 1);
+            break;
+        }
+    }
+    lv_dropdown_set_selected(dropdown, selected);
+
+    spdlog::debug("[{}] UI scale dropdown initialized: stored={} auto={}%", get_name(), stored,
+                  auto_percent);
 }
 
 void DisplaySoundSettingsOverlay::init_bed_mesh_dropdown() {
@@ -692,6 +749,19 @@ void DisplaySoundSettingsOverlay::handle_page_scroll_buttons_changed(bool enable
     // Apply immediately to the current screen — this callback is the authoritative
     // user-toggle signal (a subject observer can't be used; see PageScrollAutoInject::init).
     helix::ui::PageScrollAutoInject::instance().on_setting_toggled(enabled);
+}
+
+void DisplaySoundSettingsOverlay::handle_ui_scale_changed(int index) {
+    const int percent = (index >= 1 && index <= static_cast<int>(std::size(kUiScalePercents)))
+                            ? kUiScalePercents[index - 1]
+                            : helix::DisplayMetrics::kScaleSettingAutomatic;
+    DisplaySettingsManager::instance().set_ui_scale_percent(percent);
+
+    // Say it rather than fake it. Applying live would need every screen to
+    // re-tier, and AssetManager only ever registers font tiers upward
+    // (register_fonts_for_tier() early-returns on a lower tier), so a downward
+    // change cannot un-register the faces it already handed out.
+    ToastManager::instance().show(ToastSeverity::INFO, lv_tr("UI scale applies after restart"));
 }
 
 void DisplaySoundSettingsOverlay::handle_bed_mesh_mode_changed(int mode) {
@@ -1174,6 +1244,14 @@ void DisplaySoundSettingsOverlay::on_page_scroll_buttons_changed(lv_event_t* e) 
     LVGL_SAFE_EVENT_CB_END();
 }
 
+void DisplaySoundSettingsOverlay::on_ui_scale_changed(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[DisplaySoundSettingsOverlay] on_ui_scale_changed");
+    auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    int index = static_cast<int>(lv_dropdown_get_selected(dropdown));
+    get_display_sound_settings_overlay().handle_ui_scale_changed(index);
+    LVGL_SAFE_EVENT_CB_END();
+}
+
 void DisplaySoundSettingsOverlay::on_bed_mesh_mode_changed(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[DisplaySoundSettingsOverlay] on_bed_mesh_mode_changed");
     auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
@@ -1247,12 +1325,12 @@ void DisplaySoundSettingsOverlay::on_preview_open_modal(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[DisplaySoundSettingsOverlay] on_preview_open_modal");
     LV_UNUSED(e);
 
-    helix::ui::modal_show_confirmation(
+    helix::ui::modal_confirm(
         lv_tr("Sample Dialog"),
         "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod "
         "tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim "
         "veniam, quis nostrud exercitation ullamco laboris.",
-        ModalSeverity::Info, "OK", nullptr, nullptr, nullptr); // i18n: universal
+        ModalSeverity::Info, "OK", nullptr); // i18n: universal
 
     auto& overlay = get_display_sound_settings_overlay();
     overlay.apply_preview_palette_to_screen_popups();

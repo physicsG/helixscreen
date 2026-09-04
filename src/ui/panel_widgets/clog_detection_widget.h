@@ -11,12 +11,17 @@ class ClogDetectionConfigModal;
 
 namespace helix {
 namespace ui {
-class UiClogMeter;
+class UiClogBar;
 class UiBufferMeter;
 } // namespace ui
 
 /// Panel widget for filament health monitoring on the home panel.
-/// Shows a carousel with clog arc meter and optional buffer meter pages.
+///
+/// Shows a carousel with the FlowGuard bar and, on Happy Hare, a buffer meter
+/// page. The bar replaced the arc at 2x1 (#1017): the widget is authored wide
+/// and short, which is the shape a horizontal scale wants — and it lets both
+/// ends carry a label, so a Flowguard reading says which fault it is leaning
+/// toward. UiClogMeter's arc is still what the AMS sidebar and loaded card use.
 class ClogDetectionWidget : public PanelWidget {
   public:
     ClogDetectionWidget() = default;
@@ -45,7 +50,7 @@ class ClogDetectionWidget : public PanelWidget {
     lv_obj_t* carousel_ = nullptr;
     lv_obj_t* clog_page_ = nullptr;
     lv_obj_t* buffer_page_ = nullptr;
-    std::unique_ptr<ui::UiClogMeter> clog_meter_;
+    std::unique_ptr<ui::UiClogBar> clog_bar_;
     std::unique_ptr<ui::UiBufferMeter> buffer_meter_;
     std::unique_ptr<ClogDetectionConfigModal> config_modal_;
     bool has_buffer_page_ = false;

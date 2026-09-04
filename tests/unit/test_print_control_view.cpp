@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // tests/unit/test_print_control_view.cpp
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "print_control_view.h"

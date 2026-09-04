@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "ui_emergency_stop.h"
@@ -9,6 +10,7 @@
 #include "../test_helpers/emergency_stop_test_access.h"
 #include "app_globals.h"
 #include "printer_state.h"
+#include "translation_loader.h"
 
 #include <spdlog/spdlog.h>
 
@@ -107,6 +109,117 @@ TEST_CASE_METHOD(LVGLTestFixture, "An expiring window with no shutdown behind it
     REQUIRE(EmergencyStopOverlayTestAccess::recovery_reason(estop) == RecoveryReason::NONE);
 
     EmergencyStopOverlayTestAccess::reset_suppression(estop);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "A re-check a guard declines keeps the shutdown latched instead of eating it",
+                 "[recovery][suppress][1345]") {
+    // The other half of the latch's contract. Surfacing the reason when the
+    // window expires is only non-lossy if the reason survives a re-check that
+    // show_recovery_for_main() refuses: the latch is the ONLY copy by then, so
+    // consuming it ahead of the guards drops the shutdown exactly the way an
+    // un-latched suppression window used to.
+    auto& estop = EmergencyStopOverlay::instance();
+    EmergencyStopOverlayTestAccess::reset_recovery_reason(estop);
+    EmergencyStopOverlayTestAccess::reset_suppression(estop);
+    EmergencyStopOverlayTestAccess::reset_pending_recovery_reason(estop);
+
+    // The recovery dialog's Restart button sets this, and only a klippy READY
+    // clears it. An MCU that comes back up in a hard shutdown never delivers one
+    // - a Klipper RESTART cannot clear an MCU shutdown - so the guard is still
+    // true when the window ends, and stays true.
+    EmergencyStopOverlayTestAccess::set_restart_in_progress(estop, true);
+
+    estop.suppress_recovery_dialog(50);
+    estop.show_recovery_for(RecoveryReason::SHUTDOWN);
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(EmergencyStopOverlayTestAccess::pending_recovery_reason(estop) ==
+            RecoveryReason::SHUTDOWN);
+
+    // Window expires, the re-check fires, the restart guard declines it.
+    process_lvgl(100);
+
+    CHECK(EmergencyStopOverlayTestAccess::recovery_reason(estop) == RecoveryReason::NONE);
+    REQUIRE(EmergencyStopOverlayTestAccess::pending_recovery_reason(estop) ==
+            RecoveryReason::SHUTDOWN);
+
+    // The restart resolves - or the user stops waiting on it - and the retry
+    // that the decline armed has to surface what was held.
+    EmergencyStopOverlayTestAccess::set_restart_in_progress(estop, false);
+    process_lvgl(3000);
+    helix::ui::UpdateQueue::instance().drain();
+
+    CHECK(EmergencyStopOverlayTestAccess::recovery_reason(estop) == RecoveryReason::SHUTDOWN);
+    CHECK(EmergencyStopOverlayTestAccess::pending_recovery_reason(estop) == RecoveryReason::NONE);
+
+    EmergencyStopOverlayTestAccess::reset_recovery_reason(estop);
+    EmergencyStopOverlayTestAccess::reset_suppression(estop);
+    EmergencyStopOverlayTestAccess::reset_pending_recovery_reason(estop);
+}
+
+// ============================================================================
+// The restart guard has to end by itself
+// ============================================================================
+//
+// restart_klipper() and firmware_restart() arm a restart window and no
+// suppression window, so a SHUTDOWN they produce is declined outright by
+// show_recovery_for_main() - never latched, never re-checked. That is correct
+// while the restart is genuinely in flight and catastrophic once it is not: the
+// window used to be a bare bool whose only exit was the klippy-READY handler,
+// and a printer whose MCU comes back up in a hard shutdown never sends a READY
+// (a Klipper RESTART cannot clear an MCU shutdown - the K2's behaviour). The
+// flag stayed true and every later recovery dialog was dropped at the guard,
+// leaving a halted printer looking idle.
+
+TEST_CASE_METHOD(LVGLTestFixture, "The restart guard suppresses a shutdown inside its window",
+                 "[recovery][suppress]") {
+    // The half that must NOT regress: an expiry that fires early, or a guard
+    // reduced to a no-op, both show a recovery dialog for the SHUTDOWN every
+    // restart passes through on its way down.
+    auto& estop = EmergencyStopOverlay::instance();
+    EmergencyStopOverlayTestAccess::reset_recovery_reason(estop);
+    EmergencyStopOverlayTestAccess::reset_suppression(estop);
+    EmergencyStopOverlayTestAccess::reset_pending_recovery_reason(estop);
+    EmergencyStopOverlayTestAccess::set_restart_in_progress(estop, true);
+
+    REQUIRE(estop.is_expected_restart());
+
+    estop.show_recovery_for(RecoveryReason::SHUTDOWN);
+    process_lvgl(50);
+
+    CHECK(EmergencyStopOverlayTestAccess::recovery_reason(estop) == RecoveryReason::NONE);
+    // Well inside the window it is still in flight, so the dialog stays away.
+    lv_tick_inc(RecoverySuppression::RESTART_FLAG_TIMEOUT / 2);
+    CHECK(estop.is_expected_restart());
+
+    estop.show_recovery_for(RecoveryReason::SHUTDOWN);
+    process_lvgl(50);
+    REQUIRE(EmergencyStopOverlayTestAccess::recovery_reason(estop) == RecoveryReason::NONE);
+
+    EmergencyStopOverlayTestAccess::set_restart_in_progress(estop, false);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "A restart that never reports READY stops suppressing the recovery dialog",
+                 "[recovery][suppress]") {
+    auto& estop = EmergencyStopOverlay::instance();
+    EmergencyStopOverlayTestAccess::reset_recovery_reason(estop);
+    EmergencyStopOverlayTestAccess::reset_suppression(estop);
+    EmergencyStopOverlayTestAccess::reset_pending_recovery_reason(estop);
+    EmergencyStopOverlayTestAccess::set_restart_in_progress(estop, true);
+
+    // No klippy READY is ever delivered here, so nothing in production clears
+    // the window - the backstop is the only thing that can end it.
+    lv_tick_inc(RecoverySuppression::RESTART_FLAG_TIMEOUT + 1000);
+    CHECK_FALSE(estop.is_expected_restart());
+
+    // And the printer is still down, which the user now has to be told.
+    estop.show_recovery_for(RecoveryReason::SHUTDOWN);
+    process_lvgl(50);
+    REQUIRE(EmergencyStopOverlayTestAccess::recovery_reason(estop) == RecoveryReason::SHUTDOWN);
+
+    EmergencyStopOverlayTestAccess::reset_recovery_reason(estop);
+    EmergencyStopOverlayTestAccess::set_restart_in_progress(estop, false);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "Expected restart - tracks SAVE_CONFIG suppression window",
@@ -673,6 +786,57 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog - truncated JSON falls back
 
     REQUIRE(displayed.find("No active exception to reraise") != std::string::npos);
     REQUIRE(code.empty());
+}
+
+namespace {
+// Packs cannot be unregistered (LVGL has no remove API), so the probe locale
+// below outlives this case - but nothing else ever selects it, and restoring
+// the identity locale keeps the rest of the shard on English lookups.
+class ScopedIdentityLanguage {
+  public:
+    ~ScopedIdentityLanguage() {
+        lv_translation_set_language(helix::ui::kIdentityLocale);
+    }
+};
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture, "Recovery dialog translates its content exactly once",
+                 "[recovery][integration][i18n]") {
+    auto& estop = EmergencyStopOverlay::instance();
+    ScopedIdentityLanguage restore_lang;
+
+    // A probe locale whose DISCONNECTED-title translation is itself another
+    // real tag. Wrapping the recovery strings in lv_tr() twice sends the
+    // already-translated text into the second lookup, and when that text
+    // happens to be a tag in its own right the dialog shows the WRONG string
+    // instead of merely falling back to the right one (bundle CSLYH92R showed
+    // the harmless half: every refresh logged "tag is not found" for strings
+    // that were already French).
+    lv_translation_pack_t* pack = lv_translation_add_dynamic();
+    REQUIRE(lv_translation_add_language(pack, "zz-once") == LV_RESULT_OK);
+    int32_t lang_idx = lv_translation_get_language_index(pack, "zz-once");
+    REQUIRE(lang_idx >= 0);
+    lv_translation_tag_dsc_t* title_tag =
+        lv_translation_add_tag(pack, "Printer Firmware Disconnected");
+    REQUIRE(title_tag != nullptr);
+    REQUIRE(lv_translation_set_tag_translation(pack, title_tag, lang_idx, "Printer Shutdown") ==
+            LV_RESULT_OK);
+    lv_translation_tag_dsc_t* chained_tag = lv_translation_add_tag(pack, "Printer Shutdown");
+    REQUIRE(chained_tag != nullptr);
+    REQUIRE(lv_translation_set_tag_translation(pack, chained_tag, lang_idx, "SECOND PASS") ==
+            LV_RESULT_OK);
+
+    lv_translation_set_language("zz-once");
+
+    estop.show_recovery_for(RecoveryReason::DISCONNECTED);
+    process_lvgl(50);
+
+    lv_obj_t* dialog = lv_obj_find_by_name(lv_screen_active(), "klipper_recovery_card");
+    REQUIRE(dialog != nullptr);
+    lv_obj_t* title = lv_obj_find_by_name(dialog, "recovery_title");
+    REQUIRE(title != nullptr);
+    // One translation lands on the title's own string; two land on "SECOND PASS".
+    REQUIRE(std::string(lv_label_get_text(title)) == "Printer Shutdown");
 }
 
 #endif // __APPLE__

@@ -39,7 +39,7 @@ Navigation basics, touch gestures, connection status, first-time setup wizard, W
 Which printers get deep, model-specific integration — and exactly what works on each. Covers the FlashForge Adventurer 5M/5X (IFS), Creality K1/K2 (CFS), QIDI Box, Snapmaker U1, Anycubic ACE, and how every other Klipper printer is auto-detected.
 
 ### [Home Panel](guide/home-panel.md)
-Your printer dashboard — status area, configurable home widgets (temperature, network, LED, AMS, power, notifications, and more), active tool badge for toolchanger printers, emergency stop, and the Printer Manager with custom images. Customize which widgets appear and their order in Edit Mode — long-press the dashboard, then tap the **+** button on the navigation bar to open the Widget Catalog. Long-press the lightbulb widget for full LED controls with color, brightness, effects, and WLED presets.
+Your printer dashboard — status area, configurable home widgets (temperature, network, LED, AMS, power, notifications, and more), active tool badge for toolchanger printers, emergency stop, and the Printer Manager with custom images. Long-press the widget grid to enter Edit Mode, where you can add, move, resize, and configure widgets across up to 8 pages. Add the LED Controls widget and tap it for full LED controls with color, brightness, effects, and WLED presets; the lightbulb widget is a plain on/off toggle.
 
 ### [Printing](guide/printing.md)
 The full printing workflow — file selection, preview, pre-print options, monitoring active prints, tune overlay, Z-offset baby steps, pressure advance, exclude object, and post-print summary.

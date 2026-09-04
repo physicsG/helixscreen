@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -76,7 +77,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "print_status card keeps row layout after at
 
         // Wide band -> row layout. is_column_ starts false, so on_size_changed
         // early-returns; attach() must have already applied the row layout.
-        widget.on_size_changed(3, 2, W_WIDE, 400);
+        widget.on_size_changed(3, 2, w_wide(), 400);
         process_lvgl(30);
         flow = card_flow(comp);
     }
@@ -126,7 +127,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "print_status card layout survives instance 
         lv_obj_t* comp1 = make_print_status(test_screen());
         REQUIRE(comp1 != nullptr);
         widget.attach(comp1, test_screen());
-        widget.on_size_changed(3, 2, W_WIDE, 400);
+        widget.on_size_changed(3, 2, w_wide(), 400);
         process_lvgl(30);
         flow_first = card_flow(comp1);
 
@@ -138,7 +139,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "print_status card layout survives instance 
         lv_obj_t* comp2 = make_print_status(test_screen());
         REQUIRE(comp2 != nullptr);
         widget.attach(comp2, test_screen());
-        widget.on_size_changed(3, 2, W_WIDE, 400);
+        widget.on_size_changed(3, 2, w_wide(), 400);
         process_lvgl(30);
         flow_recycled = card_flow(comp2);
 
@@ -147,7 +148,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "print_status card layout survives instance 
         lv_obj_t* comp3 = make_print_status(test_screen());
         REQUIRE(comp3 != nullptr);
         widget.attach(comp3, test_screen());
-        widget.on_size_changed(2, 2, W_NORMAL, H_TALL);
+        widget.on_size_changed(2, 2, w_normal(), h_tall());
         process_lvgl(30);
         flow_transitioned = card_flow(comp3);
     }

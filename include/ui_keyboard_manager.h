@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "ui_observer_guard.h"
+
 #include "lvgl.h"
 
 #include <string>
@@ -179,6 +181,16 @@ class KeyboardManager {
 
     // Helper methods
     void apply_keyboard_mode();
+
+    /**
+     * @brief Re-derive every theme-dependent key style onto the keyboard.
+     *
+     * Called from init() and again whenever the theme changes. Sets each
+     * property unconditionally rather than skipping the ones the current depth
+     * does not use, so a re-apply clears the previous treatment instead of
+     * leaving it behind.
+     */
+    void apply_key_styles();
     void overlay_cleanup();
     void longpress_reset();
     void show_overlay(const lv_area_t* key_area, const char* alternatives);
@@ -227,6 +239,11 @@ class KeyboardManager {
     static void longpress_event_handler(lv_event_t* e);
     static void keyboard_event_cb(lv_event_t* e);
     static void keyboard_draw_alternative_chars(lv_event_t* e);
+
+    // Re-applies key styles on theme change. The keyboard is built once at
+    // startup and never rebuilt, so without this the keys keep the palette they
+    // were created with.
+    ObserverGuard theme_observer_;
 
     // Global keyboard instance
     lv_obj_t* keyboard_ = nullptr;

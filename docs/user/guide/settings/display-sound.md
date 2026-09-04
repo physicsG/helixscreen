@@ -64,6 +64,16 @@ Changing the rotation applies the next time HelixScreen starts — when you pick
 
 Switch between light and dark themes. Disabled when the active theme doesn't support both modes.
 
+### UI Scale
+
+How big the interface is drawn. The dropdown offers **Automatic**, then 100% through 200%.
+
+**Automatic** works the size out from your panel's physical pixel density, so a screen that packs more pixels into the same number of millimetres gets a proportionally larger UI and everything stays the same real-world size. On every supported printer this comes out at 100%, so Automatic changes nothing there. It only grows the interface on very high-density displays — an Android phone or tablet, where the stock sizing would otherwise be uncomfortably tiny. Automatic shows you the figure it picked, e.g. *Automatic (158%)*.
+
+Pick an explicit percentage if the result is not to your taste, or if HelixScreen has guessed wrong about a display it does not know. 100% pins the interface to its authored size whatever the panel reports.
+
+**The new size appears after you restart HelixScreen.** Fonts and layout are worked out once, while the screen is being set up, so the change cannot be applied to a running interface. Nothing is lost by waiting — the setting is saved as soon as you pick it.
+
 ### Theme Colors
 
 Open the theme explorer to browse, preview, and apply color themes.

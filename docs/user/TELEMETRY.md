@@ -27,7 +27,7 @@ Recorded once per application launch. Helps us understand the hardware landscape
 | `event` | Event type identifier | `"session"` |
 | `device_id` | Anonymized device identifier (see below) | `"a3f8c1..."` (64-char hex) |
 | `timestamp` | ISO 8601 UTC timestamp | `"2026-02-08T14:30:00Z"` |
-| `app.version` | HelixScreen version | `"1.0.0"` |
+| `app.version` | HelixScreen version | `"0.99.111"` |
 | `app.platform` | Hardware platform | `"rpi4"`, `"rpi5"`, `"x86_64"` |
 | `app.display` | Display resolution | `"800x480"` |
 
@@ -61,7 +61,7 @@ Recorded automatically when HelixScreen crashes. Picked up on the next startup. 
 | `timestamp` | ISO 8601 UTC timestamp | `"2026-02-08T12:00:00Z"` |
 | `signal` | POSIX signal number | `11` |
 | `signal_name` | Signal name | `"SIGSEGV"`, `"SIGABRT"`, `"SIGBUS"`, `"SIGFPE"` |
-| `app_version` | HelixScreen version at time of crash | `"1.0.0"` |
+| `app_version` | HelixScreen version at time of crash | `"0.99.111"` |
 | `uptime_sec` | Seconds since application started | `3600` |
 | `backtrace` | Stack frame addresses (hex) | `["0x0040abcd", "0x0040ef01"]` |
 
@@ -285,7 +285,7 @@ This permanently removes all queued events from your device. Events that have al
 ## Data Retention and Transmission
 
 ### Local Queue
-- Events are stored locally in `telemetry_queue.json` in your config directory
+- Events are stored locally in telemetry_queue.json in your config directory
 - Maximum **100 events** in the queue; oldest events are dropped when the limit is reached
 - Queue persists across application restarts
 
@@ -295,7 +295,7 @@ This permanently removes all queued events from your device. Events that have al
 - Transmission is attempted every **24 hours** when telemetry is enabled
 - On failure, exponential backoff is applied (doubling interval, capped at 7 days)
 - On success, sent events are removed from the local queue
-- User-Agent header includes the HelixScreen version (e.g., `HelixScreen/1.0.0`)
+- User-Agent header includes the HelixScreen version (e.g., `HelixScreen/0.99.111`)
 
 ---
 
@@ -327,5 +327,5 @@ For developers and the technically curious:
 - **Implementation**: handled by the telemetry and crash-handling modules built into HelixScreen itself — no external agents, scripts, or third-party trackers are involved
 - **Crash handling**: written to keep working even while the app is crashing, so a crash is still captured and queued for sending
 - **Schema version**: `2` (all events include `schema_version` for forward compatibility)
-- **Identity files**: `telemetry_device.json` (UUID + salt), `telemetry_config.json` (enabled state), `telemetry_queue.json` (event queue)
+- **Identity files**: telemetry_device.json (UUID + salt), telemetry_config.json (enabled state), telemetry_queue.json (event queue)
 - **Privacy policy**: [PRIVACY_POLICY.md](PRIVACY_POLICY.md)

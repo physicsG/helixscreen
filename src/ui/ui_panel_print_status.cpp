@@ -4,6 +4,7 @@
 #include "ui_panel_print_status.h"
 
 #include "ui_ams_current_tool.h"
+#include "ui_breakpoint.h"
 #include "ui_callback_helpers.h"
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
@@ -29,6 +30,7 @@
 #include "ams_state.h"
 #include "app_constants.h"
 #include "app_globals.h"
+#include "bed_dimensions.h"
 #include "config.h"
 #include "display_manager.h"
 #include "display_settings_manager.h"
@@ -87,6 +89,27 @@ using helix::gcode::resolve_gcode_filename;
 static bool is_no_thumbnail_placeholder(const char* path) {
     return path != nullptr &&
            std::strcmp(path, helix::PrinterPrintState::no_thumbnail_placeholder()) == 0;
+}
+
+#if HELIX_HAS_CAMERA
+// Defined in src/ui/panel_widgets/camera_widget.cpp; that directory is not on
+// this file's include path, so forward-declare rather than including the
+// header (same pattern as ui_settings_hardware.cpp).
+namespace helix {
+void open_standalone_camera_fullscreen(lv_obj_t* parent_screen);
+}
+#endif
+
+// Take the panel's LV_EVENT_DELETE hook off the tree @p root names and clear
+// the tracking pointer. The lv_is_initialized() guard is what makes this safe
+// from ~PrintStatusPanel(), which can run during static destruction after
+// lv_deinit(). Shared by all three uninstall paths (destructor, explicit
+// teardown, and the re-install in create()) so they cannot drift apart.
+static void uninstall_root_delete_hook(lv_obj_t*& root, lv_event_cb_t cb, void* owner) {
+    if (root != nullptr && lv_is_initialized()) {
+        lv_obj_remove_event_cb_with_user_data(root, cb, owner);
+    }
+    root = nullptr;
 }
 
 // Global instance for legacy API and resize callback
@@ -442,6 +465,14 @@ PrintStatusPanel::PrintStatusPanel(PrinterState& printer_state, IMoonrakerAPI* a
 }
 
 PrintStatusPanel::~PrintStatusPanel() {
+    // The widget tree can outlive this panel: StaticPanelRegistry::destroy_all()
+    // runs before lv_deinit(), and destroy_overlay_ui()'s deletion is deferred.
+    // Uninstall the delete hook while the object is still valid, or the tree's
+    // eventual teardown would call on_root_deleted() on freed memory. A null
+    // delete_hook_root_ means the tree already died (the hook fired) or the
+    // explicit teardown path removed it — nothing left to uninstall.
+    uninstall_root_delete_hook(delete_hook_root_, on_root_deleted, this);
+
     // Before deinit_subjects(): the mini-graph's observers are attached to
     // PrinterState subjects, and detaching them after those are freed is the
     // exact use-after-free ObserverGuard exists to prevent. Synchronous delete —
@@ -521,6 +552,23 @@ void PrintStatusPanel::init_subjects() {
     // Populated lazily at first update (icon_cube const resolves only after globals load).
     UI_MANAGED_SUBJECT_STRING(view_toggle_icon_subject_, view_toggle_icon_buf_, "",
                               "view_toggle_icon", subjects_);
+    // Camera button label: "Camera" only where Row 2 has breathing room (narrow
+    // axis >= LARGE, e.g. 1024x600); "Cam" at MEDIUM and below (800x480 and the
+    // cramped portrait row) where the full word barely fits. The XML expression
+    // engine is int-only, so a string label conditioned on ui_breakpoint needs
+    // this subject — same shape as view_toggle_icon above.
+    UI_MANAGED_SUBJECT_STRING(camera_button_label_subject_, camera_button_label_buf_, lv_tr("Cam"),
+                              "camera_button_label", subjects_);
+    if (lv_subject_t* bp = lv_xml_get_subject(nullptr, "ui_breakpoint")) {
+        update_camera_button_label(lv_subject_get_int(bp));
+        auto token = lifetime_.token();
+        camera_label_observer_ = observe_int_sync<PrintStatusPanel>(
+            bp, this, [token](PrintStatusPanel* self, int value) {
+                if (token.expired())
+                    return;
+                self->update_camera_button_label(value);
+            });
+    }
 
     // Initialize light/timelapse controls (extracted Phase 2)
     light_timelapse_controls_.init_subjects();
@@ -753,6 +801,7 @@ void PrintStatusPanel::init_subjects() {
     // (light and timelapse callbacks are registered by light_timelapse_controls_.init_subjects())
     register_xml_callbacks({
         {"on_print_status_tune", on_tune_clicked},
+        {"on_print_status_camera", on_print_status_camera},
         {"on_print_status_reprint", on_reprint_clicked},
         {"on_temp_card_clicked", on_temp_card_clicked},
         {"on_print_status_graph_clicked", on_temp_graph_clicked},
@@ -818,6 +867,7 @@ void PrintStatusPanel::deinit_subjects() {
     print_message_observer_.reset();
 
     // Fan-row observers — lifetimes BEFORE observer guards per [L084]
+    camera_label_observer_.reset();
     fans_version_observer_.reset();
     primary_fans_version_observer_.reset();
     animations_enabled_observer_.reset();
@@ -851,6 +901,23 @@ lv_obj_t* PrintStatusPanel::create(lv_obj_t* parent) {
         spdlog::error("[{}] Failed to create overlay from XML", get_name());
         return nullptr;
     }
+
+    // A rebuild reaches create() with the hook still on the previous root:
+    // OverlayBase::rebuild() condemns that tree only AFTER create() has pointed
+    // the panel at the successor, and safe_delete_subtree() defers the actual
+    // deletion. Left installed, that late event would fire into a panel whose
+    // uninstall paths only know delete_hook_root_ — which by then names the
+    // successor — so nothing could ever take it off, and a shutdown before the
+    // async tick would reach a freed `this`. Take it off first, the way
+    // PanelWidget::install_delete_hook() does.
+    uninstall_root_delete_hook(delete_hook_root_, on_root_deleted, this);
+
+    // The panel/navigation layer owns this tree; a raw lv_obj_delete() gives
+    // the panel no other notice, and the queued observe_int_sync handlers
+    // would run against the freed child pointers on the next drain.
+    // DECLARATIVE_OK: LV_EVENT_DELETE cleanup has no declarative equivalent.
+    lv_obj_add_event_cb(overlay_root_, on_root_deleted, LV_EVENT_DELETE, this);
+    delete_hook_root_ = overlay_root_;
 
     spdlog::debug("[{}] Setting up panel...", get_name());
 
@@ -1229,6 +1296,13 @@ void PrintStatusPanel::cleanup() {
 void PrintStatusPanel::on_ui_destroyed() {
     spdlog::debug("[{}] on_ui_destroyed() - nulling widget pointers", get_name());
 
+    // The tree is only detached here (the actual deletion is deferred), so the
+    // delete hook is still installed on it. Remove it now: the panel can be
+    // destroyed before the deferred delete executes, and that late event must
+    // not reach a freed `this`. overlay_root_ is already null —
+    // safe_delete_deferred() cleared it — hence the dedicated hook copy.
+    uninstall_root_delete_hook(delete_hook_root_, on_root_deleted, this);
+
     // Cancel pending deferred G-code load
     if (gcode_load_timer_) {
         lv_timer_delete(gcode_load_timer_);
@@ -1261,21 +1335,9 @@ void PrintStatusPanel::on_ui_destroyed() {
         lv_subject_set_int(&graph_fits_subject_, 0);
     }
 
-    // Null all child widget pointers (widget tree is already deleted by base class)
-    progress_bar_ = nullptr;
-    preparing_progress_bar_ = nullptr;
-    gcode_viewer_ = nullptr;
-    print_thumbnail_ = nullptr;
-    gradient_background_ = nullptr;
-    btn_timelapse_ = nullptr;
-    btn_tune_ = nullptr;
-    btn_cancel_ = nullptr;
-    // Lazy fan control overlay — force re-creation on next click so we don't
-    // dereference a pointer into a destroyed widget tree (mirrors FanStackWidget::detach).
-    fan_control_panel_ = nullptr;
-    success_badge_ = nullptr;
-    cancel_badge_ = nullptr;
-    error_badge_ = nullptr;
+    // Null all child widget pointers (the tree's actual deletion is deferred by
+    // the base class, but every pointer below is dead from here on)
+    forget_cached_widgets();
 
     // Heater icon animators — at this point the widget tree is only hidden
     // and reparented to the top layer (destroy_overlay_ui() defers the actual
@@ -1298,6 +1360,49 @@ void PrintStatusPanel::on_ui_destroyed() {
     displayed_file_.clear();
     gcode_displayed_file_.clear();
     pending_gcode_filename_.clear();
+}
+
+void PrintStatusPanel::on_root_deleted(lv_event_t* e) {
+    auto* self = static_cast<PrintStatusPanel*>(lv_event_get_user_data(e));
+    if (!self) {
+        return;
+    }
+    auto* dying = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+
+    // Only the tree the hook was installed for matters. OverlayBase::rebuild()
+    // deletes a replaced root after create() already pointed the panel at the
+    // successor, so that event can land while the successor's pointers are
+    // live — clearing them then would blank a live tree. (Compared against
+    // delete_hook_root_, not overlay_root_: the explicit teardown path has
+    // already cleared the latter by the time this deferred event fires.)
+    if (dying != self->delete_hook_root_) {
+        return;
+    }
+
+    self->forget_cached_widgets();
+    self->delete_hook_root_ = nullptr;
+    if (s_cached_panel == dying) {
+        s_cached_panel = nullptr;
+    }
+    spdlog::debug("[{}] Widget tree deleted - cached pointers dropped", self->get_name());
+}
+
+void PrintStatusPanel::forget_cached_widgets() {
+    overlay_root_ = nullptr;
+    progress_bar_ = nullptr;
+    preparing_progress_bar_ = nullptr;
+    gcode_viewer_ = nullptr;
+    print_thumbnail_ = nullptr;
+    gradient_background_ = nullptr;
+    btn_timelapse_ = nullptr;
+    btn_tune_ = nullptr;
+    btn_cancel_ = nullptr;
+    // Lazy fan control overlay — force re-creation on next click so we don't
+    // dereference a pointer into a destroyed widget tree (mirrors FanStackWidget::detach).
+    fan_control_panel_ = nullptr;
+    success_badge_ = nullptr;
+    cancel_badge_ = nullptr;
+    error_badge_ = nullptr;
 }
 
 lv_obj_t* PrintStatusPanel::get_cached_overlay() {
@@ -1474,16 +1579,8 @@ void PrintStatusPanel::show_exclude_map_view() {
 
     if (thumbnail_mode && thumbnail_section) {
         // Bed dimensions for the overhead map view (thumbnail mode only).
-        float bed_w = 235.0f, bed_h = 235.0f;
-        if (api_) {
-            const auto& vol = api_->hardware().build_volume();
-            float w = vol.x_max - vol.x_min;
-            float h = vol.y_max - vol.y_min;
-            if (w > 0.0f && h > 0.0f) {
-                bed_w = w;
-                bed_h = h;
-            }
-        }
+        const auto bed = helix::bed_dimensions(api_, &printer_state_);
+        float bed_w = bed.w_mm, bed_h = bed.h_mm;
 
         // XML bindings on print_thumbnail/gradient_background hide them when
         // exclude_map_active == 1 — set before creating the map to avoid one
@@ -1702,7 +1799,7 @@ void PrintStatusPanel::load_gcode_file(const char* file_path) {
 }
 
 void PrintStatusPanel::update_layer_text() {
-    std::string text = helix::ui::format_layer_progress(
+    std::string text = helix::ui::format_layer_progress_compact(
         lifecycle_.current_layer(), lifecycle_.total_layers(), printer_state_.layer_is_accurate(),
         lv_subject_get_int(printer_state_.get_gcode_position_z_subject()));
     std::snprintf(layer_text_buf_, sizeof(layer_text_buf_), "%s", text.c_str());
@@ -1713,8 +1810,7 @@ void PrintStatusPanel::update_filament_used_text() {
     int filament_mm = lv_subject_get_int(get_printer_state().get_print_filament_used_subject());
     if (filament_mm > 0) {
         std::string fil_str =
-            helix::format::format_filament_length(static_cast<double>(filament_mm)) + " " +
-            lv_tr("used");
+            helix::format::format_filament_length(static_cast<double>(filament_mm));
         std::strncpy(filament_used_text_buf_, fil_str.c_str(), sizeof(filament_used_text_buf_) - 1);
         filament_used_text_buf_[sizeof(filament_used_text_buf_) - 1] = '\0';
     } else {
@@ -1881,8 +1977,7 @@ void PrintStatusPanel::recompute_scoped_runout() {
     // previous job, so widening this would scope the badge to the wrong file
     // instead of hiding it — which is why print_scopes_runout_badge() is
     // narrower than PrintLifecycleState::is_active().
-    auto state = static_cast<PrintJobState>(
-        lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
+    auto state = printer_state_.get_print_job_state();
     if (!helix::print_scopes_runout_badge(state)) {
         fsm.set_scoped_runout(-1);
         return;
@@ -1954,6 +2049,20 @@ void PrintStatusPanel::on_tune_clicked(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[PrintStatusPanel] on_tune_clicked");
     (void)e;
     get_global_print_status_panel().handle_tune_button();
+    LVGL_SAFE_EVENT_CB_END();
+}
+
+void PrintStatusPanel::on_print_status_camera(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[PrintStatusPanel] on_print_status_camera");
+    (void)e;
+#if HELIX_HAS_CAMERA
+    // No-ops when no webcam is configured or a fullscreen view is already
+    // open; reuses an attached home CameraWidget's stream when one exists
+    // (single-MJPEG-client safe).
+    helix::open_standalone_camera_fullscreen(lv_display_get_screen_active(nullptr));
+#else
+    spdlog::debug("[PrintStatusPanel] Camera support disabled in this build");
+#endif
     LVGL_SAFE_EVENT_CB_END();
 }
 
@@ -2648,9 +2757,8 @@ void PrintStatusPanel::recompute_paused_overlay_visibility() {
     // driving the optimistic Pause/Resume overlay. (PAUSED outranks a live phase
     // in derive_print_state(), so the lifecycle would answer identically; the
     // wire is simply the more direct statement of what is being asked.)
-    auto state = static_cast<PrintJobState>(
-        // RAW_PRINT_STATE_OK: see the optimistic-overlay note below.
-        lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
+    // RAW_PRINT_STATE_OK: see the optimistic-overlay note below.
+    auto state = printer_state_.get_print_job_state();
     // RAW_PRINT_STATE_OK: is the printer REPORTING paused - the optimistic
     // Pause/Resume overlay tracks the printer, not our intent.
     bool paused = (state == PrintJobState::PAUSED);
@@ -3109,8 +3217,7 @@ void PrintStatusPanel::on_print_start_phase_changed(int phase) {
     // Delegate state transition to lifecycle. RAW_PRINT_STATE_OK: the panel's
     // PrintLifecycleState derives its own PrintState from (wire, phase) via
     // derive_print_state(), so this feeds it the wire half deliberately.
-    auto current_job_state = static_cast<PrintJobState>(
-        lv_subject_get_int(printer_state_.get_print_state_enum_subject()));
+    auto current_job_state = printer_state_.get_print_job_state();
     bool state_changed = lifecycle_.on_start_phase_changed(phase, current_job_state);
 
     // Update preparing visibility, debounced on the way UP only. Hiding is
@@ -3294,12 +3401,19 @@ void PrintStatusPanel::update_objects_text() {
     int total = static_cast<int>(defined.size());
     int active = std::max(0, total - static_cast<int>(excluded.size()));
     if (total >= 2) {
-        std::snprintf(objects_text_buf_, sizeof(objects_text_buf_), "%d of %d objects", active,
-                      total);
+        std::snprintf(objects_text_buf_, sizeof(objects_text_buf_), "%d/%d", active, total);
     } else {
         objects_text_buf_[0] = '\0';
     }
     lv_subject_copy_string(&objects_text_subject_, objects_text_buf_);
+}
+
+void PrintStatusPanel::update_camera_button_label(int breakpoint_value) {
+    // Full word only from LARGE up (narrow axis >= 551px, e.g. 1024x600); the
+    // 800x480 Row 2 and the cramped portrait row get the short form.
+    const char* label =
+        breakpoint_value >= to_int(UiBreakpoint::Large) ? lv_tr("Camera") : lv_tr("Cam");
+    lv_subject_copy_string(&camera_button_label_subject_, label);
 }
 
 void PrintStatusPanel::update_button_states() {

@@ -24,11 +24,7 @@
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
-// ============================================================================
-// Test Helper: URL Parsing (tests the internal URL parsing logic)
-// ============================================================================
-
-TEST_CASE("HelixPluginInstaller URL parsing", "[plugin_installer]") {
+TEST_CASE("HelixPluginInstaller is_local_moonraker WSS handling", "[plugin_installer]") {
     SECTION("is_local_moonraker answers from the URL the installer was given") {
         // The predicate itself is tested once, in test_host_identity.cpp. What
         // belongs here is the wiring: that the installer names the host from its
@@ -53,43 +49,6 @@ TEST_CASE("HelixPluginInstaller URL parsing", "[plugin_installer]") {
         // No URL at all is not evidence of locality — auto-install must not fire.
         installer.set_websocket_url("");
         REQUIRE_FALSE(installer.is_local_moonraker());
-    }
-
-    SECTION("extract_host_from_websocket_url parses URLs correctly") {
-        // Standard WebSocket URLs (ws://)
-        REQUIRE(helix::extract_host_from_websocket_url("ws://localhost:7125/websocket") ==
-                "localhost");
-        REQUIRE(helix::extract_host_from_websocket_url("ws://127.0.0.1:7125/websocket") ==
-                "127.0.0.1");
-        REQUIRE(helix::extract_host_from_websocket_url("ws://192.168.1.100:7125/websocket") ==
-                "192.168.1.100");
-        REQUIRE(helix::extract_host_from_websocket_url("ws://printer.local:7125/websocket") ==
-                "printer.local");
-
-        // Secure WebSocket URLs (wss://)
-        REQUIRE(helix::extract_host_from_websocket_url("wss://localhost:7125/websocket") ==
-                "localhost");
-        REQUIRE(helix::extract_host_from_websocket_url("wss://127.0.0.1:7125/websocket") ==
-                "127.0.0.1");
-        REQUIRE(helix::extract_host_from_websocket_url("wss://192.168.1.100:7125/websocket") ==
-                "192.168.1.100");
-        REQUIRE(helix::extract_host_from_websocket_url("wss://printer.local:443/websocket") ==
-                "printer.local");
-
-        // With different ports
-        REQUIRE(helix::extract_host_from_websocket_url("ws://localhost:80/websocket") ==
-                "localhost");
-        REQUIRE(helix::extract_host_from_websocket_url("ws://192.168.1.100:8080/websocket") ==
-                "192.168.1.100");
-
-        // IPv6 URLs (bracketed format)
-        REQUIRE(helix::extract_host_from_websocket_url("ws://[::1]:7125/websocket") == "::1");
-        REQUIRE(helix::extract_host_from_websocket_url("wss://[::1]:7125/websocket") == "::1");
-
-        // Edge cases
-        REQUIRE(helix::extract_host_from_websocket_url("") == "");
-        REQUIRE(helix::extract_host_from_websocket_url("invalid") == "");
-        REQUIRE(helix::extract_host_from_websocket_url("http://not-websocket:7125") == "");
     }
 
     SECTION("is_local_moonraker works with WSS URLs") {
@@ -345,30 +304,6 @@ TEST_CASE("HelixPluginInstaller install_local error handling", "[plugin_installe
 
         // State should remain IDLE (install didn't start due to remote URL)
         REQUIRE(installer.get_state() == helix::PluginInstallState::IDLE);
-    }
-}
-
-// ============================================================================
-// Test: Edge Cases in URL Parsing
-// ============================================================================
-
-TEST_CASE("HelixPluginInstaller URL edge cases", "[plugin_installer]") {
-    SECTION("extract_host handles malformed IPv6 brackets") {
-        // Missing closing bracket
-        REQUIRE(helix::extract_host_from_websocket_url("ws://[::1:7125/websocket") == "");
-
-        // Empty brackets
-        REQUIRE(helix::extract_host_from_websocket_url("ws://[]:7125/websocket") == "");
-    }
-
-    SECTION("extract_host handles URLs without port") {
-        REQUIRE(helix::extract_host_from_websocket_url("ws://localhost/websocket") == "localhost");
-        REQUIRE(helix::extract_host_from_websocket_url("ws://192.168.1.100/path") ==
-                "192.168.1.100");
-    }
-
-    SECTION("extract_host handles URLs with just hostname") {
-        REQUIRE(helix::extract_host_from_websocket_url("ws://localhost") == "localhost");
     }
 }
 

@@ -3,8 +3,8 @@
 # Module: platform
 # Platform detection: AD5M vs K1 vs Pi, firmware variant, installation paths
 #
-# Reads: -
-# Writes: PLATFORM, AD5M_FIRMWARE, K1_FIRMWARE, INSTALL_DIR, INIT_SCRIPT_DEST, PREVIOUS_UI_SCRIPT, TMP_DIR, KLIPPER_USER, KLIPPER_GROUP, KLIPPER_HOME
+# Reads: HOST_MOD_ROOT, HOST_MOD_CHROOT (host_profile.sh)
+# Writes: PLATFORM, MOD_FLAVOR, AD5M_FIRMWARE, K1_FIRMWARE, INSTALL_DIR, INIT_SCRIPT_DEST, PREVIOUS_UI_SCRIPT, TMP_DIR, KLIPPER_USER, KLIPPER_GROUP, KLIPPER_HOME
 
 # Source guard
 [ -n "${_HELIX_PLATFORM_SOURCED:-}" ] && return 0
@@ -21,6 +21,13 @@ _USER_INSTALL_DIR="${INSTALL_DIR}"
 [ "$_USER_INSTALL_DIR" = "/opt/helixscreen" ] && _USER_INSTALL_DIR=""
 INIT_SCRIPT_DEST=""
 PREVIOUS_UI_SCRIPT=""
+# The firmware-mod flavor (forge_x | zmod | klipper_mod | stock), detected for
+# BOTH ad5m and ad5x. AD5M_FIRMWARE stays as a compat alias: consumers
+# written before the ad5x rework (uninstall restore paths, forgex.sh) still
+# read it, so main() assigns both from one detect_mod_flavor call.
+# shellcheck disable=SC2034  # consumed by main.sh (set_install_paths dispatch)
+MOD_FLAVOR=""
+# shellcheck disable=SC2034  # compat alias, consumed by main.sh consumers
 AD5M_FIRMWARE=""
 # shellcheck disable=SC2034  # consumed by main.sh and competing_uis.sh
 K1_FIRMWARE=""
@@ -183,9 +190,14 @@ detect_platform() {
     fi
 
     # Check for FlashForge AD5X (MIPS with /usr/data and FlashForge indicators)
-    # AD5X uses Ingenic X2600 (MIPS); identified by /usr/prog/ dir or /ZMOD file alongside /usr/data/
+    # AD5X uses Ingenic X2600 (MIPS); identified by /usr/prog/ dir or /ZMOD file
+    # alongside /usr/data/. A Forge-X host carries neither marker: there the
+    # host profile's probe (mod git tree or chroot) is the evidence, so the
+    # probe globals qualify on their own — which also keeps this clause
+    # testable through the probe's env-overridable candidate roots.
     if [ "$arch" = "mips" ]; then
-        if [ -d "/usr/data" ] && { [ -d "/usr/prog" ] || [ -f "/ZMOD" ]; }; then
+        if { [ -d "/usr/data" ] && { [ -d "/usr/prog" ] || [ -f "/ZMOD" ]; }; } \
+           || [ -n "${HOST_MOD_ROOT:-}" ] || [ -n "${HOST_MOD_CHROOT:-}" ]; then
             echo "ad5x"
             return
         fi
@@ -398,19 +410,30 @@ helix_self_update_asset() {
     esac
 }
 
-# AD5X (FlashForge / ZMOD) preflight: refuse to run outside the chroot.
+# Mod-host (FlashForge AD5X) preflight: refuse to run outside the ZMOD chroot.
 #
-# ZMOD installs HelixScreen into an overlay rooted at /usr/data/.mod/.zmod/.
-# Inside the chroot the rootfs is the overlay (/, /etc, /opt, /srv all live
-# under that overlay). Outside, those same paths point at the squashfs base
-# view that helix-screen never sees — so a curl|sh, --local, --update, or
-# --uninstall run from a fresh SSH session writes to the wrong filesystem
-# entirely. The `/usr/data/.mod/.zmod` directory is only visible from outside
-# the chroot, so its presence is the reliable "you forgot to chroot" tell.
+# The FlashForge mods run out of chroots under /usr/data/.mod — ZMOD's overlay
+# at .zmod, Forge-X's environment at .forge-x — and only ZMOD's layout needs
+# the installer INSIDE it. ZMOD installs HelixScreen into an overlay rooted at
+# /usr/data/.mod/.zmod/: inside the chroot the rootfs is the overlay (/, /etc,
+# /opt, /srv all live under it), while outside those same paths point at the
+# squashfs base view that helix-screen never sees — so a curl|sh, --local,
+# --update, or --uninstall run from a fresh SSH session writes to the wrong
+# filesystem entirely. The chroot root is only visible from outside it, so its
+# presence is the reliable "you forgot to chroot" tell.
 #
-# Aborts with an actionable message when called outside the chroot.
-ad5x_check_chroot_context() {
-    [ -d "/usr/data/.mod/.zmod" ] || return 0
+# A Forge-X host never trips this: its install is host-side into the mod's git
+# tree, and it has no .zmod root — hence the mod-generic name.
+#
+# Aborts with an actionable message when called outside the ZMOD chroot.
+mod_check_chroot_context() {
+    local zmod_root="/usr/data/.mod/.zmod"
+    # The probe's candidate roots are env-overridable (sandboxed tests); honour
+    # a probed ZMOD chroot so the refusal is exercisable without a real device.
+    case "${HOST_MOD_CHROOT:-}" in
+        */.zmod) zmod_root="$HOST_MOD_CHROOT" ;;
+    esac
+    [ -d "$zmod_root" ] || return 0
 
     log_error ""
     log_error "=========================================================="
@@ -418,7 +441,7 @@ ad5x_check_chroot_context() {
     log_error "=========================================================="
     log_error ""
     log_error "ZMOD installs HelixScreen into an overlay at:"
-    log_error "  /usr/data/.mod/.zmod/"
+    log_error "  $zmod_root/"
     log_error ""
     log_error "Running this installer from your default SSH shell writes"
     log_error "into the squashfs base view, not the overlay HelixScreen"
@@ -428,7 +451,7 @@ ad5x_check_chroot_context() {
     log_error ""
     log_error "Enter the chroot first, then re-run your command:"
     log_error ""
-    log_error "  chroot /usr/data/.mod/.zmod"
+    log_error "  chroot $zmod_root"
     log_error "  # then re-run: curl ... | sh   OR   sh install.sh --local <zip>"
     log_error "  # OR:          sh install.sh --update / --uninstall"
     log_error ""
@@ -437,6 +460,12 @@ ad5x_check_chroot_context() {
     log_error "specific versions, or troubleshooting."
     log_error ""
     exit 1
+}
+
+# Compat wrapper for the pre-rework name. The uninstaller bundle's main()
+# still calls this; it delegates rather than forking the guard.
+ad5x_check_chroot_context() {
+    mod_check_chroot_context "$@"
 }
 
 # Detect the Klipper ecosystem user (who runs klipper/moonraker services)
@@ -507,10 +536,25 @@ detect_klipper_user() {
     return 0
 }
 
-# Detect AD5M firmware variant (Klipper Mod vs Forge-X vs ZMOD)
-# Only called when platform is "ad5m"
-# Returns: "klipper_mod", "forge_x", or "zmod"
-detect_ad5m_firmware() {
+# Detect the firmware-mod flavor (Forge-X vs ZMOD vs Klipper Mod vs stock).
+# Called for BOTH "ad5m" and "ad5x" — the mods ship for the whole FlashForge
+# Adventurer line and share their markers across the two platforms.
+# Returns: "forge_x", "zmod", "klipper_mod", or "stock"
+detect_mod_flavor() {
+    # Forge-X indicators — the host profile's probe. The mod's git tree is the
+    # primary evidence and its chroot root the fallback (matched by basename so
+    # a sandboxed probe qualifies); both are checked BEFORE the /ZMOD test so
+    # a Forge-X AD5X — no /ZMOD, no /usr/prog — is not misread as stock.
+    # The ZMOD chroot deliberately does not match here: it owns the branch
+    # below.
+    if [ -n "${HOST_MOD_ROOT:-}" ]; then
+        echo "forge_x"
+        return
+    fi
+    case "${HOST_MOD_CHROOT:-}" in
+        */.forge-x) echo "forge_x"; return ;;
+    esac
+
     # ZMOD indicator - check for /ZMOD marker file
     # ZMOD is used on AD5M, AD5M Pro, and AD5X (FlashForge series)
     if [ -f "/ZMOD" ]; then
@@ -527,14 +571,23 @@ detect_ad5m_firmware() {
         return
     fi
 
-    # Forge-X indicators - check for its mod overlay structure
+    # Forge-X on the AD5M: the mod overlay structure marker, for hosts the
+    # probe did not recognize (its .shell/platform.sh marker is refactorable)
     if [ -d "/opt/config/mod/.root" ]; then
         echo "forge_x"
         return
     fi
 
-    # Default to forge_x (original behavior, most common)
-    echo "forge_x"
+    # No mod evidence at all: stock FlashForge firmware
+    echo "stock"
+}
+
+# UNCALLED_OK: compat wrapper for the pre-rework name, kept for external
+# callers that source this module (its behavior is pinned by
+# test_platform_detection.bats); the installer and the uninstaller bundle both
+# call detect_mod_flavor directly now.
+detect_ad5m_firmware() {
+    detect_mod_flavor "$@"
 }
 
 # Detect K1 firmware variant (Simple AF, Guilouz helper-script, or stock)
@@ -685,11 +738,15 @@ detect_pi_install_dir() {
 # User can override via TMP_DIR env var.
 # Sets: TMP_DIR
 detect_tmp_dir() {
-    # User already set TMP_DIR — respect it, but only after the name guard.
-    # TMP_DIR is rm -rf'd on both the success and the failure path, so an
-    # unvalidated override erases whatever it points at (validate_tmp_dir in
-    # common.sh; the /mnt/UDISK incident).
+    # User already set TMP_DIR — respect it, but only after the ownership and
+    # name guards. TMP_DIR is rm -rf'd on both the success and the failure
+    # path, so an unvalidated override erases whatever it points at
+    # (validate_tmp_dir in common.sh). The mod-owned refusal rides HERE, one
+    # layer above the validator: common.sh is the bundle's first module and
+    # must stay free of later-module calls, so this module (which loads after
+    # the profile) owns the guard call. It runs BEFORE the name check.
     if [ -n "${TMP_DIR:-}" ]; then
+        host_refuse_mod_owned "stage the download in" "$TMP_DIR"
         validate_tmp_dir "$TMP_DIR" || exit 1
         log_info "Temp directory (user override): $TMP_DIR"
         return 0
@@ -721,11 +778,14 @@ detect_tmp_dir() {
     if [ -n "${TMP_DIR_PREFERRED:-}" ]; then
         # Name-guard it like any other TMP_DIR: whatever wins here is rm -rf'd
         # on exit, so a declared root that is a bare mountpoint (the /mnt/UDISK
-        # incident shape) must be dropped rather than staged into.
-        if _user_dir_name_ok "$TMP_DIR_PREFERRED" '*helixscreen-install*' '.helix-update-staging'; then
-            candidates="$TMP_DIR_PREFERRED"
-        else
+        # incident shape) must be dropped rather than staged into. Mod-owned is
+        # dropped for the same reason as the candidate loop below.
+        if ! _user_dir_name_ok "$TMP_DIR_PREFERRED" '*helixscreen-install*' '.helix-update-staging'; then
             log_warn "Ignoring TMP_DIR_PREFERRED='$TMP_DIR_PREFERRED' (not an installer scratch dir name)"
+        elif host_path_is_mod_owned "$TMP_DIR_PREFERRED"; then
+            log_warn "Ignoring TMP_DIR_PREFERRED='$TMP_DIR_PREFERRED' (inside the firmware mod's tree)"
+        else
+            candidates="$TMP_DIR_PREFERRED"
         fi
     fi
     if [ -n "${INSTALL_DIR:-}" ]; then
@@ -743,6 +803,14 @@ detect_tmp_dir() {
     candidates="$candidates /user-resource/helixscreen-install /data/helixscreen-install /mnt/data/helixscreen-install /usr/data/helixscreen-install /var/tmp/helixscreen-install /tmp/helixscreen-install"
 
     for candidate in $candidates; do
+        # Never AUTO-stage inside the mod's tree, in any mode: the scratch dir
+        # is untracked in their git repo, so their OTA's git clean removes it
+        # mid-run, and the installer's own cleanup rm -rf's it later. This is
+        # our choice, not the operator's, so the next candidate simply wins -
+        # a user-set TMP_DIR keeps its explicit --mod-payload exemption in the
+        # ownership guard on this function's override branch instead.
+        host_path_is_mod_owned "$candidate" && continue
+
         local check_dir
         check_dir=$(dirname "$candidate")
 
@@ -775,6 +843,50 @@ detect_tmp_dir() {
 
 # Set installation paths based on platform and firmware
 # Sets: INSTALL_DIR, INIT_SCRIPT_DEST, PREVIOUS_UI_SCRIPT, TMP_DIR, KLIPPER_CONFIG_DIR
+# The install root as the SERVICE will see it, from inside the mod's chroot.
+#
+# A mod tree can be reachable by more than one host path — the AD5X carries
+# both /usr/data/config/mod and /opt/config/mod for one directory — and only
+# some of those spellings are bind-mounted into the chroot. The service runs
+# inside it, so a DAEMON_DIR that resolves only on the host makes the init
+# script cd into nothing and exit 0 silently, which looks like a healthy boot
+# with no UI.
+#
+# Sets HELIX_CHROOT_DAEMON_DIR to a spelling that resolves in-chroot, trying
+# INSTALL_DIR first and then the same path under each other mod-tree candidate.
+# Leaves it empty and warns when none does: a wrong DAEMON_DIR fails silently,
+# so it must be said out loud here.
+# shellcheck disable=SC2034  # consumed by service.sh (install_service_sysv)
+resolve_chroot_daemon_dir() {
+    HELIX_CHROOT_DAEMON_DIR=""
+    [ -n "${HOST_MOD_CHROOT:-}" ] && [ -n "${INSTALL_DIR:-}" ] || return 0
+
+    if [ -d "${HOST_MOD_CHROOT}${INSTALL_DIR}" ]; then
+        # shellcheck disable=SC2034  # consumed by service.sh (install_service_sysv)
+        HELIX_CHROOT_DAEMON_DIR="$INSTALL_DIR"
+        return 0
+    fi
+
+    local cand suffix candidate
+    suffix="${INSTALL_DIR#"${HOST_MOD_ROOT}"}"
+    # shellcheck disable=SC2086  # word splitting is the point: a candidate list
+    for cand in ${HELIX_MOD_TREE_CANDIDATES:-/usr/data/config/mod /opt/config/mod}; do
+        [ "$cand" = "${HOST_MOD_ROOT:-}" ] && continue
+        candidate="${cand}${suffix}"
+        if [ -d "${HOST_MOD_CHROOT}${candidate}" ]; then
+            # shellcheck disable=SC2034  # consumed by service.sh (install_service_sysv)
+            HELIX_CHROOT_DAEMON_DIR="$candidate"
+            log_info "Mod host: service reaches the payload in-chroot as ${candidate}"
+            return 0
+        fi
+    done
+
+    log_warn "No install-root spelling resolves inside ${HOST_MOD_CHROOT}."
+    log_warn "The service starts from in there, so it would find nothing at boot."
+    log_warn "Checked: ${INSTALL_DIR}"
+    return 0
+}
+
 set_install_paths() {
     local platform=$1
     local firmware=${2:-}
@@ -933,14 +1045,101 @@ set_install_paths() {
         detect_pi_install_dir
     fi
 
+    # A probed mod host installs into the mod's own payload root: the mod owns
+    # the UI's service and its OTA manages the tree, so the per-platform roots
+    # above (/srv, /opt, ...) are not where this install may write. The
+    # validate gate below then refuses the run unless the payload contract
+    # (auto-detected in main.sh) accepted the in-place update, which is the
+    # point: on a mod host, that IS the default contract. --standalone opts
+    # back into the self-managed install, which keeps the platform root above.
+    # An explicitly user-provided INSTALL_DIR still wins over auto-detection,
+    # same as everywhere else in this file -- the branches above overwrite
+    # INSTALL_DIR, so restore the captured value here.
+    if [ -n "${HOST_INSTALL_ROOT:-}" ]; then
+        if [ -n "${_USER_INSTALL_DIR:-}" ]; then
+            INSTALL_DIR="$_USER_INSTALL_DIR"
+            log_info "Mod host: honoring the explicitly requested install directory"
+        elif [ "${STANDALONE_INSTALL:-}" != "1" ]; then
+            INSTALL_DIR="$HOST_INSTALL_ROOT"
+            log_info "Mod host: install root is the firmware mod's payload tree"
+            # The payload boots from inside the mod's chroot, so its init
+            # script goes in the chroot's /etc/init.d, not the host's. The mod
+            # runs `chroot $MOD .root/start.sh`, which starts every S* it finds
+            # in /etc/init.d in any display mode -- the add-on mechanism
+            # upstream documents (DrA1ex/ff5m#74). A stock rig has no such
+            # directory; install_service_sysv creates it.
+            #
+            # Only the directory moves. The S-number stays whatever this
+            # platform chose above, preserving its ordering intent.
+            if [ -n "${HOST_MOD_CHROOT:-}" ] && [ -n "${INIT_SCRIPT_DEST:-}" ]; then
+                INIT_SCRIPT_DEST="${HOST_MOD_CHROOT}/etc/init.d/$(basename "$INIT_SCRIPT_DEST")"
+                log_info "Mod host: service installs into the chroot: ${INIT_SCRIPT_DEST}"
+                resolve_chroot_daemon_dir
+            fi
+        else
+            log_info "Mod host: --standalone keeps the platform root for this install"
+        fi
+        log_info "Install directory: ${INSTALL_DIR}"
+    fi
+
     # Final gate on whatever INSTALL_DIR we ended up with. Every hard-coded
     # platform path above already satisfies it; this catches a future branch
     # (or an override route added later) that would hand a bare data directory
-    # to the mv/rm -rf in release.sh and uninstall.sh.
+    # to the mv/rm -rf in release.sh and uninstall.sh. The mod-owned refusal
+    # rides HERE, one layer above the name validator: common.sh is the
+    # bundle's first module and must not call into later ones, and this module
+    # loads after host_profile.sh. Order matters - the ownership refusal must
+    # run BEFORE the name check.
+    host_refuse_mod_owned "install into" "$INSTALL_DIR"
     validate_install_dir "$INSTALL_DIR" || exit 1
 
     # Auto-detect best temp directory (all platforms)
     detect_tmp_dir
+}
+
+# Decide which platform-hook file a host needs, without installing anything.
+#
+# The ONE implementation of this rule. Two consumers: the installer, which
+# deploys the answer, and the dev-deploy path, which asks for it over ssh
+# (scripts/device-profile.sh, used by mk/cross.mk's deploy-ad5m). Neither may
+# re-derive it -- a wrong key installs a hook that runs and points nowhere.
+#
+# $1 = platform (detect_platform's answer). Echoes the hook key, or nothing
+# when the platform ships no hooks.
+resolve_platform_hook_key() {
+    local platform="$1"
+    local platform_hook=""
+    case "${AD5M_FIRMWARE:-}" in
+        forge_x)     platform_hook="ad5m-forgex" ;;
+        klipper_mod) platform_hook="ad5m-kmod" ;;
+        zmod)        platform_hook="ad5m-zmod" ;;
+    esac
+
+    # Platform hooks (pi32 shares Pi hooks). AD5X gets its own key, never
+    # ad5m-zmod: it runs inside the chroot at /usr/data/.mod/.zmod, installs to
+    # /srv/helixscreen, and has no /data, so the AD5M hook's
+    # HELIX_CACHE_DIR=/data/helixscreen/cache does not exist there.
+    case "$platform" in
+        pi|pi32)       platform_hook="pi" ;;
+        k1)            platform_hook="k1" ;;
+        k2)            platform_hook="k2" ;;
+        cc1)           platform_hook="cc1" ;;
+        m1)            platform_hook="m1" ;;
+        ad5x)          platform_hook="ad5x" ;;
+        snapmaker-u1)  platform_hook="snapmaker-u1" ;;
+    esac
+
+    # A probed mod host outranks both dispatches above. HOST_PLATFORM_HOOK_KEY
+    # is set only when the mod's own tree layout was found, and names the
+    # payload layout that rig actually runs. Without this a Forge-X AD5X
+    # reports platform=ad5x AND flavor=forge_x — the flavor case picks
+    # ad5m-forgex, the platform case overrides to ad5x (the Z-Mod hook) — and
+    # neither dispatch knows the forge-x payload layout exists.
+    if [ -n "${HOST_PLATFORM_HOOK_KEY:-}" ]; then
+        platform_hook="$HOST_PLATFORM_HOOK_KEY"
+    fi
+
+    echo "$platform_hook"
 }
 
 # User-editable config files that live in printer_data/config/helixscreen/.

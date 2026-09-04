@@ -3,6 +3,7 @@
 
 #include "ui_breakpoint.h"
 
+#include "display_metrics.h"
 #include "lvgl/lvgl.h"
 #include "theme_manager.h"
 
@@ -41,6 +42,12 @@ namespace helix::widget_size {
 /// a band that also moves in em puts every panel in the same band. Flat bands
 /// did not: the same two-cell widget read "wide" on medium/large/xlarge and
 /// "normal" on tiny/small, because those tiers' pixels buy fewer glyphs.
+/// tests/unit/test_registry_span_bands.cpp pins the result - one band per
+/// authored span, identical across all eight shipping geometries.
+///
+/// The high-DPI UI scale factor is the second axis the same reasoning runs
+/// along, and the bands carry it for the same reason - see detail::scaled_band
+/// below.
 ///
 /// Span and physical width are still not monotonic across tiers (a portrait
 /// panel's single column is wider than a small landscape panel's two), so
@@ -93,20 +100,6 @@ static_assert(W_WIDE_PX[static_cast<size_t>(to_int(BASE_TIER))] == 205);
 static_assert(H_TALL_PX[static_cast<size_t>(to_int(BASE_TIER))] == 131);
 static_assert(H_TALLER_PX[static_cast<size_t>(to_int(BASE_TIER))] == 197);
 
-/// Legacy flat bands - the Small rung of each ladder above, frozen.
-///
-/// These are what every call site used before the ladder existed. Ported call
-/// sites read the tier-aware `w_normal()`-style accessors below; the rest
-/// (camera, humidity, tips, print_stats, job_queue, tool_switcher,
-/// width_sensor, favorite_macro, print_status, temp_graph, temp_stack, clock,
-/// and their tests) are still pending and keep pointing here. Do not add new
-/// uses.
-inline constexpr int W_NORMAL = 135; ///< was colspan >= 2 (smallest measured: 135, Small span2)
-inline constexpr int W_WIDE = 205;   ///< was colspan >= 3 (smallest measured: 205, Small span3)
-inline constexpr int H_TALL = 131;   ///< was rowspan >= 2 (smallest measured: 131, Micro row2)
-inline constexpr int H_TALLER = 197; ///< was rowspan >= 3 (smallest measured: 197.5, truncates to
-                                     ///< 197 at runtime, Micro row3 — already the `>=` value)
-
 namespace detail {
 /// Clamped table read. A tier out of range would otherwise index off the end
 /// of a seven-entry table with whatever int a caller happened to hold.
@@ -119,6 +112,27 @@ constexpr int band_at(const std::array<int, std::size(FONT_BODY_PX)>& table, UiB
         i = to_int(UiBreakpoint::XXLarge);
     }
     return table[static_cast<size_t>(i)];
+}
+
+/// A band at the UI scale now in force.
+///
+/// The scale grows both sides of the question a band asks.
+/// GridLayout::get_dimensions() puts the authored track edge through
+/// DisplayMetrics::scaled_px(), so a widget's cell gets wider; theme_manager
+/// scales the type ladder, so the text that has to fit inside it gets taller.
+/// A band left on its authored pixels would be answering about a panel that is
+/// no longer on screen: on 1080x2400 at 405 DPI the home grid quantises to 6
+/// columns instead of 12, handing the two-cell fan stack 337px where the
+/// unscaled panel handed it 168px, and 337 clears an unscaled 309px XXLarge
+/// band that was calibrated against type 1.578x shorter than what now renders.
+///
+/// Running the band through the same scaled_px() the cell went through
+/// preserves the cell-to-band ratio, so an authored span lands in the same band
+/// at every scale — the scale-axis counterpart of what the font_body ladder
+/// does across tiers. active_scale() is 1.0 on every shipping printer (all sit
+/// inside the DPI deadband), which makes this an exact no-op there.
+inline int scaled_band(const std::array<int, std::size(FONT_BODY_PX)>& table, UiBreakpoint bp) {
+    return DisplayMetrics::scaled_px(band_at(table, bp), DisplayMetrics::active_scale());
 }
 } // namespace detail
 
@@ -140,18 +154,20 @@ inline UiBreakpoint current_breakpoint() {
 /// Band for an explicit tier. Used by anything reasoning about a panel other
 /// than the one it is running on - the shipping-geometry sweeps in the tests -
 /// and by the widgets whose size predicate takes the tier as a parameter
-/// (TempGraphWidget, PrintStatsWidget).
+/// (TempGraphWidget, PrintStatsWidget). The UI scale is process-wide rather
+/// than per-tier, so these carry it too: a caller naming a tier is choosing
+/// which type ladder to measure against, not opting out of the panel's scale.
 inline int w_normal(UiBreakpoint bp) {
-    return detail::band_at(W_NORMAL_PX, bp);
+    return detail::scaled_band(W_NORMAL_PX, bp);
 }
 inline int w_wide(UiBreakpoint bp) {
-    return detail::band_at(W_WIDE_PX, bp);
+    return detail::scaled_band(W_WIDE_PX, bp);
 }
 inline int h_tall(UiBreakpoint bp) {
-    return detail::band_at(H_TALL_PX, bp);
+    return detail::scaled_band(H_TALL_PX, bp);
 }
 inline int h_taller(UiBreakpoint bp) {
-    return detail::band_at(H_TALLER_PX, bp);
+    return detail::scaled_band(H_TALLER_PX, bp);
 }
 
 /// Band for the tier now on screen. What a widget's on_size_changed() wants:

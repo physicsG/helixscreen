@@ -8,12 +8,18 @@
  *        colspan exceeded the grid width, even when the widget's own
  *        min_colspan would have fit.
  *
- * `tips` is defined colspan=4 / min_colspan=2 against the 6-column landscape
- * grid. Portrait computes 2-3 columns, so auto-placement asked
- * find_available_bottom(4, 2), got nullopt (its `for (c = ncols - colspan; ...)`
- * loop never runs when colspan > ncols), and the caller wrote enabled=false,
- * col=-1, row=-1 into settings.json and toasted "'Tips' removed — grid full" on
- * a grid with entirely free rows.
+ * `tips` is the widest widget in the registry, and a portrait panel has far
+ * fewer columns than a landscape one of the same class. Auto-placement asked
+ * find_available_bottom() for the authored colspan, got nullopt (its
+ * `for (c = ncols - colspan; ...)` loop never runs when colspan > ncols), and
+ * the caller wrote enabled=false, col=-1, row=-1 into settings.json and toasted
+ * "'Tips' removed — grid full" on a grid with entirely free rows.
+ *
+ * Track counts are derived from the live panel, so these tests read the grid
+ * they are about to exercise rather than naming a dimension: a premise that
+ * hardcodes "2 columns" stops describing the scenario the moment the grid
+ * changes, and a regression test whose premise has quietly stopped holding is
+ * worse than no test.
  */
 
 #include "../test_fixtures.h"
@@ -26,6 +32,7 @@
 #include "panel_widget_config.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
+#include "theme_manager.h"
 
 #include <map>
 #include <string>
@@ -149,6 +156,30 @@ class ScopedSpanOverride {
     PanelWidgetDef saved_{};
 };
 
+/// The breakpoint PanelWidgetManager builds its grid from
+/// (panel_widget_manager.cpp). It comes from the theme's display, not from
+/// LayoutManager, so a test premise that names a tier by hand can quietly
+/// describe a different grid than the code under test uses.
+UiBreakpoint active_breakpoint() {
+    lv_subject_t* subject = theme_manager_get_breakpoint_subject();
+    return subject ? as_breakpoint(lv_subject_get_int(subject)) : UiBreakpoint::Medium;
+}
+
+/// The grid PanelWidgetManager will build inside a container of this outer
+/// size. Track counts come from the CONTENT box, and lv_obj's default padding
+/// and border sit between that and the outer size, so a premise stated against
+/// the outer size describes a different grid than the code under test uses.
+/// Measures a throwaway container rather than assuming the inset.
+GridDimensions grid_for_container(lv_obj_t* parent, int w, int h) {
+    lv_obj_t* probe = lv_obj_create(parent);
+    lv_obj_set_size(probe, w, h);
+    lv_obj_update_layout(probe);
+    const GridDimensions dims = GridLayout::get_dimensions(
+        active_breakpoint(), lv_obj_get_content_width(probe), lv_obj_get_content_height(probe));
+    lv_obj_delete(probe);
+    return dims;
+}
+
 /// Register the dependency-free XML component the spy resolves to.
 void register_spy_component() {
     lv_xml_register_component_from_data(
@@ -181,8 +212,8 @@ nlohmann::json make_tips_layout(int col, int row, int colspan, int rowspan,
                            {"enabled", true},
                            {"col", -1},
                            {"row", -1},
-                           {"colspan", 1},
-                           {"rowspan", 1}});
+                           {"colspan", GridLayout::TRACKS_PER_CELL},
+                           {"rowspan", GridLayout::TRACKS_PER_CELL}});
     }
     return nlohmann::json{{"main_page_index", 0},
                           {"next_page_id", 2},
@@ -225,12 +256,16 @@ class PortraitSpanFixture : public XMLTestFixture {
 TEST_CASE_METHOD(PortraitSpanFixture,
                  "Portrait auto-place shrinks an over-wide widget to its minimum",
                  "[panel_widget][manager][regression][1216]") {
-    REQUIRE(GridLayout::get_cols(UiBreakpoint::Tiny) == 2);
-
+    // Premise: `tips` is authored wider than this grid, but its declared
+    // minimum fits, so it must be seated at a reduced span rather than
+    // disabled. Read off the live grid rather than a dimension table — track
+    // counts come from the container, so a hardcoded number would either fail
+    // or, worse, describe a grid where nothing is over-wide and prove nothing.
+    const auto grid = grid_for_container(test_screen(), 320, 1480);
     const auto* tips_def = helix::find_widget_def("tips");
     REQUIRE(tips_def != nullptr);
-    REQUIRE(tips_def->colspan == 4);                 // authored for landscape
-    REQUIRE(tips_def->effective_min_colspan() == 2); // …but advertises a 2-col minimum
+    REQUIRE(tips_def->colspan > grid.cols);                  // authored for landscape
+    REQUIRE(tips_def->effective_min_colspan() <= grid.cols); // …but its minimum fits
 
     ScopedFactoryOverride factory("tips", [](const std::string&) -> std::unique_ptr<PanelWidget> {
         return std::make_unique<SpanSpyWidget>();
@@ -240,7 +275,8 @@ TEST_CASE_METHOD(PortraitSpanFixture,
     auto* cfg = Config::get_instance();
     const std::string panel_path = cfg->df() + "panel_widgets/" + panel_id;
     // col/row = -1 -> no saved position -> auto-place path.
-    cfg->set<nlohmann::json>(panel_path, make_tips_layout(-1, -1, 4, 2));
+    cfg->set<nlohmann::json>(panel_path,
+                             make_tips_layout(-1, -1, tips_def->colspan, tips_def->rowspan));
 
     auto& mgr = PanelWidgetManager::instance();
     mgr.get_widget_config(panel_id).mark_dirty();
@@ -252,11 +288,11 @@ TEST_CASE_METHOD(PortraitSpanFixture,
 
     auto widgets = mgr.populate_widgets(panel_id, container, /*page_index=*/1);
 
-    // The widget was built and told its REDUCED span, not the default 4.
+    // The widget was built and told its REDUCED span, not the authored default.
     CHECK(SpanSpyWidget::s_attach_count == 1);
     CHECK(SpanSpyWidget::s_size_changed_count == 1);
-    CHECK(SpanSpyWidget::s_colspan == 2);
-    CHECK(SpanSpyWidget::s_rowspan == 2);
+    CHECK(SpanSpyWidget::s_colspan == grid.cols);
+    CHECK(SpanSpyWidget::s_rowspan == tips_def->rowspan);
 
     // And it stayed enabled with a real grid position.
     const auto& entries = mgr.get_widget_config(panel_id).page_entries(1);
@@ -287,7 +323,11 @@ TEST_CASE_METHOD(PortraitSpanFixture,
     const std::string panel_id = "test_portrait_span_persist";
     auto* cfg = Config::get_instance();
     const std::string panel_path = cfg->df() + "panel_widgets/" + panel_id;
-    cfg->set<nlohmann::json>(panel_path, make_tips_layout(-1, -1, 4, 2, /*with_companion=*/true));
+    const auto* tips_def = helix::find_widget_def("tips");
+    REQUIRE(tips_def != nullptr);
+    cfg->set<nlohmann::json>(
+        panel_path,
+        make_tips_layout(-1, -1, tips_def->colspan, tips_def->rowspan, /*with_companion=*/true));
 
     auto& mgr = PanelWidgetManager::instance();
     mgr.get_widget_config(panel_id).mark_dirty();
@@ -311,8 +351,8 @@ TEST_CASE_METHOD(PortraitSpanFixture,
     CHECK(tips["row"].get<int>() >= 0);
 
     // A span reduced only to survive this orientation must not be written back —
-    // otherwise rotating to landscape once would leave `tips` permanently 2 wide.
-    CHECK(tips["colspan"].get<int>() == 4);
+    // otherwise rotating to landscape once would leave `tips` permanently narrow.
+    CHECK(tips["colspan"].get<int>() == tips_def->colspan);
 
     mgr.clear_panel_config(panel_id);
 }
@@ -328,8 +368,13 @@ TEST_CASE_METHOD(PortraitSpanFixture, "Portrait saved-position pass clamps an ov
     const std::string panel_id = "test_portrait_span_saved";
     auto* cfg = Config::get_instance();
     const std::string panel_path = cfg->df() + "panel_widgets/" + panel_id;
-    // Explicit saved position from a landscape session: (0,0) spanning 4x2.
-    cfg->set<nlohmann::json>(panel_path, make_tips_layout(0, 0, 4, 2));
+    // Explicit saved position from a landscape session: (0,0) at the authored span.
+    const auto grid = grid_for_container(test_screen(), 320, 1480);
+    const auto* tips_def = helix::find_widget_def("tips");
+    REQUIRE(tips_def != nullptr);
+    REQUIRE(tips_def->colspan > grid.cols);
+    cfg->set<nlohmann::json>(panel_path,
+                             make_tips_layout(0, 0, tips_def->colspan, tips_def->rowspan));
 
     auto& mgr = PanelWidgetManager::instance();
     mgr.get_widget_config(panel_id).mark_dirty();
@@ -341,10 +386,10 @@ TEST_CASE_METHOD(PortraitSpanFixture, "Portrait saved-position pass clamps an ov
 
     auto widgets = mgr.populate_widgets(panel_id, container, /*page_index=*/1);
 
-    // Placed at its saved anchor, span clamped to the 2-column grid.
+    // Placed at its saved anchor, span clamped to the grid width.
     CHECK(SpanSpyWidget::s_attach_count == 1);
-    CHECK(SpanSpyWidget::s_colspan == 2);
-    CHECK(SpanSpyWidget::s_rowspan == 2);
+    CHECK(SpanSpyWidget::s_colspan == grid.cols);
+    CHECK(SpanSpyWidget::s_rowspan == tips_def->rowspan);
 
     const auto& entries = mgr.get_widget_config(panel_id).page_entries(1);
     auto it = std::find_if(entries.begin(), entries.end(),
@@ -362,9 +407,12 @@ TEST_CASE_METHOD(PortraitSpanFixture, "Portrait saved-position pass clamps an ov
 // disable anything and the "grid full" path would rot untested.
 TEST_CASE_METHOD(PortraitSpanFixture, "Portrait still disables a widget that cannot fit at minimum",
                  "[panel_widget][manager][regression][1216]") {
-    // 6 columns minimum in a 2-column grid — unplaceable at any span.
-    ScopedSpanOverride span("tips", /*colspan=*/6, /*rowspan=*/2, /*min_colspan=*/6,
-                            /*min_rowspan=*/2);
+    // A minimum wider than the whole grid — unplaceable at any span. Derived
+    // from the live track count so the scenario cannot become satisfiable.
+    const auto grid = grid_for_container(test_screen(), 320, 1480);
+    const int too_wide = grid.cols + GridLayout::TRACKS_PER_CELL;
+    ScopedSpanOverride span("tips", /*colspan=*/too_wide, /*rowspan=*/2,
+                            /*min_colspan=*/too_wide, /*min_rowspan=*/2);
     ScopedFactoryOverride factory("tips", [](const std::string&) -> std::unique_ptr<PanelWidget> {
         return std::make_unique<SpanSpyWidget>();
     });
@@ -372,7 +420,7 @@ TEST_CASE_METHOD(PortraitSpanFixture, "Portrait still disables a widget that can
     const std::string panel_id = "test_portrait_span_toobig";
     auto* cfg = Config::get_instance();
     const std::string panel_path = cfg->df() + "panel_widgets/" + panel_id;
-    cfg->set<nlohmann::json>(panel_path, make_tips_layout(-1, -1, 6, 2));
+    cfg->set<nlohmann::json>(panel_path, make_tips_layout(-1, -1, too_wide, 2));
 
     auto& mgr = PanelWidgetManager::instance();
     mgr.get_widget_config(panel_id).mark_dirty();
@@ -396,8 +444,8 @@ TEST_CASE_METHOD(PortraitSpanFixture, "Portrait still disables a widget that can
 
     // …and the reason is reported as "too large", not "grid full" — the grid was
     // completely empty.
-    GridLayout grid(UiBreakpoint::Tiny);
-    auto fit = grid.find_available_bottom_min(6, 2);
+    GridLayout empty_grid(active_breakpoint(), grid);
+    auto fit = empty_grid.find_available_bottom_min(too_wide, 2);
     CHECK(fit.failure == GridLayout::PlacementFailure::TooLargeForGrid);
 
     mgr.clear_panel_config(panel_id);
@@ -528,13 +576,22 @@ class Portrait480x800Fixture : public GeometryFixture {
 // that visibly shrank would be a worse bug than the one being fixed.
 TEST_CASE_METHOD(LandscapeFixture, "Landscape auto-place ends at the authored default span",
                  "[panel_widget][manager][regression][1216][landscape]") {
-    REQUIRE(GridLayout::get_cols(UiBreakpoint::Micro) == 6);
-    REQUIRE(GridLayout::get_rows(UiBreakpoint::Micro) == 4);
-
-    // 20 of the 24 cells at authored spans — roomy, nothing should shrink.
     const std::vector<std::string> ids = {"printer_image", "print_status",  "tips",
                                           "clock",         "notifications", "shutdown"};
     ScopedRecordingFactories factories(ids);
+
+    // Premise: the authored spans leave room to spare, so nothing has any
+    // excuse to shrink. Computed from the live grid — a hardcoded dimension
+    // would silently turn this into the scarce case it is the counterpart to.
+    const auto grid = grid_for_container(test_screen(), 800, 480);
+    int authored_tracks = 0;
+    for (const auto& id : ids) {
+        const auto* def = helix::find_widget_def(id);
+        REQUIRE(def != nullptr);
+        authored_tracks += def->colspan * def->rowspan;
+    }
+    INFO("authored " << authored_tracks << " of " << (grid.cols * grid.rows) << " track cells");
+    REQUIRE(authored_tracks < grid.cols * grid.rows);
 
     const std::string panel_id = "test_landscape_authored_span";
     auto* cfg = Config::get_instance();
@@ -577,21 +634,37 @@ TEST_CASE_METHOD(LandscapeFixture, "Landscape auto-place ends at the authored de
     mgr.clear_panel_config(panel_id);
 }
 
-// The regression this round fixes: at 480x800 the authored spans total 24 cells
-// on an 18-cell grid, so SOMETHING has to give. Greedy allocation gave the
+// The regression this round fixes: at 480x800 the authored spans want more of
+// the grid than exists, so SOMETHING has to give. Greedy allocation gave the
 // earliest widgets their full size and disabled the rest; minimum-first must
-// keep every widget, because every widget fits at its declared minimum
-// (1+2+2+1+1+1+1+1+1+1 = 12 of 18 cells).
+// keep every widget, because every widget fits at its declared minimum.
+//
+// The widget list is sized so the scenario stays scarce: the two REQUIREs below
+// assert the oversubscription from the live grid, so a grid that outgrows it
+// fails here rather than leaving a green test that exercises nothing.
 TEST_CASE_METHOD(Portrait480x800Fixture,
                  "Portrait 480x800 loses no widget that fits at its minimum",
                  "[panel_widget][manager][regression][1216][portrait]") {
-    REQUIRE(GridLayout::get_cols(UiBreakpoint::Micro) == 3);
-    REQUIRE(GridLayout::get_rows(UiBreakpoint::Micro) == 6);
-
-    const std::vector<std::string> ids = {"printer_image", "print_status", "tips",   "clock",
-                                          "notifications", "shutdown",     "macros", "motion",
-                                          "gcode_console", "lock"};
+    const std::vector<std::string> ids = {
+        "printer_image", "print_status", "tips",       "clock",           "notifications",
+        "shutdown",      "macros",       "motion",     "gcode_console",   "lock",
+        "temperature",   "network",      "temp_stack", "bed_temperature", "tool_switcher"};
     ScopedRecordingFactories factories(ids);
+
+    const auto grid = grid_for_container(test_screen(), 480, 800);
+    const int capacity = grid.cols * grid.rows;
+    int authored_tracks = 0;
+    int minimum_tracks = 0;
+    for (const auto& id : ids) {
+        const auto* def = helix::find_widget_def(id);
+        REQUIRE(def != nullptr);
+        authored_tracks += def->colspan * def->rowspan;
+        minimum_tracks += def->effective_min_colspan() * def->effective_min_rowspan();
+    }
+    INFO("grid " << grid.cols << "x" << grid.rows << " = " << capacity << " track cells; authored "
+                 << authored_tracks << ", minimum " << minimum_tracks);
+    REQUIRE(authored_tracks > capacity); // the authored spans cannot all be granted…
+    REQUIRE(minimum_tracks < capacity);  // …but every widget fits at its declared minimum
 
     const std::string panel_id = "test_portrait_no_loss";
     auto* cfg = Config::get_instance();
@@ -632,21 +705,21 @@ TEST_CASE_METHOD(Portrait480x800Fixture,
         auto it = RecordingWidget::s_spans.find(id);
         INFO("widget " << id);
         REQUIRE(it != RecordingWidget::s_spans.end());
-        CHECK(it->second.first >= std::min(def->effective_min_colspan(), 3));
+        CHECK(it->second.first >= std::min(def->effective_min_colspan(), grid.cols));
         CHECK(it->second.second >= def->effective_min_rowspan());
         // …and nothing grew past what its definition authors.
         CHECK(it->second.first <= def->colspan);
         CHECK(it->second.second <= def->rowspan);
     }
 
-    // The 18 cells are not over-subscribed.
+    // The grid is not over-subscribed.
     int cells = 0;
     for (const auto& [id, span] : RecordingWidget::s_spans) {
         (void)id;
         cells += span.first * span.second;
     }
-    INFO("cells consumed: " << cells);
-    CHECK(cells <= 18);
+    INFO("track cells consumed: " << cells << " of " << capacity);
+    CHECK(cells <= capacity);
 
     mgr.clear_panel_config(panel_id);
 }

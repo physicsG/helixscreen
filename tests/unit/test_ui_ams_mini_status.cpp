@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -13,6 +14,7 @@
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "config.h"
+#include "grid_layout.h"
 #include "panel_widget_registry.h"
 #include "theme_manager.h"
 
@@ -22,7 +24,10 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams registry: scalable to 4x wide",
                  "[ui][ams_mini][registry]") {
     const PanelWidgetDef* def = find_widget_def("ams");
     REQUIRE(def != nullptr);
-    REQUIRE(def->max_colspan == 4);
+    // Spans are authored in tracks, and a track is half a cell, so four cells
+    // of width is 4 * TRACKS_PER_CELL. Derived rather than written out so the
+    // widget's authored reach stays four cells if the track resolution changes.
+    REQUIRE(def->max_colspan == 4 * helix::GridLayout::TRACKS_PER_CELL);
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: set_width applies its width argument",
@@ -49,7 +54,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: set_width applies its width argum
     REQUIRE(spools != nullptr);
     REQUIRE_FALSE(lv_obj_has_flag(spools, LV_OBJ_FLAG_HIDDEN));
 
-    // Dropping below W_NORMAL hides the spool view rather than deleting it (the
+    // Dropping below w_normal() hides the spool view rather than deleting it (the
     // container is built once and recycled), so assert on the flag.
     ui_ams_mini_status_set_width(w, 130);
     helix::ui::UpdateQueue::instance().drain();
@@ -64,7 +69,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: set_width applies its width argum
     lv_obj_delete(w);
 }
 
-TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: width_px >= W_NORMAL selects spool mode",
+TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini: width_px >= w_normal() selects spool mode",
                  "[ui][ams_mini][mode]") {
     ui_ams_mini_status_init();
     lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);

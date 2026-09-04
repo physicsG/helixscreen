@@ -11,6 +11,7 @@ All developer documentation lives here. When working on features, look up the re
 | `ARCHITECTURE.md` | The 15-minute whole-app model (XML → Subjects → C++) + the routing table into the chapter series. Start here for "how does the app fit together" |
 | `architecture/` | The 16-chapter architecture guide — one subsystem per chapter, ~1 hour each. `architecture/README.md` is the "I want to work on..." index |
 | `THREADING.md` | **Single source of truth** for threading, async-callback, and object-lifetime rules. Read before any code that crosses a thread boundary, observes a subject, or destroys a widget |
+| `BRANCHING.md` | The two long-lived branches, which way fixes flow between them, and the `RELEASE_CHANNEL` rule that keeps a trunk tag off the stable channel |
 | `BUILD_SYSTEM.md` | Makefile internals, make target reference, cross-compilation, worktree workflow, ccache, patches |
 | `REVIEW_RUBRIC.md` | The quality bar for reviews: crash families, silent-failure traps, what not to flag, what the gates already cover |
 | `../../scripts/CLAUDE.md` | Index of `scripts/` — installer, release, asset regeneration, and the "Quality & Auditing" gate table covering every `check_*.py` lint and what it enforces |
@@ -22,6 +23,7 @@ All developer documentation lives here. When working on features, look up the re
 | `RELEASE_PROCESS.md` | Release workflow, versioning |
 | `CHANGELOG_STYLE.md` | How `CHANGELOG.md` entries are written: user-facing voice, hyphen separator, bare `(#N)` links, daily vs milestone shapes. Read before drafting a release's changelog section |
 | `RELEASE_1_0_CHECKLIST.md` | Everything blocking `v1.0.0` and the 1.1 devel track — the atomic `release/1.0` branch cut + `RELEASE_CHANNEL` flip, open milestone issues, what is and is not verified. Delete once 1.0 ships |
+| `CHANGELOG_1_1_DRAFT.md` | Running release notes for everything on `main` that is not in the 1.0 release. Kept out of `CHANGELOG.md` so the release tooling owns that file; becomes the `## [1.1]` entry at release, then delete |
 | `CI_CD_GUIDE.md` | CI pipeline, GitHub Actions |
 | `ANDROID_PLAY_STORE.md` | Play Store publishing pipeline, one-time setup, promotion flow |
 | `ANDROID_ASSETS.md` | How `ui_xml/`/`assets/`/`config/` reach the APK. Read before touching anything under `android/app/src/main/assets/` — it is a Gradle build output, not source |
@@ -66,11 +68,12 @@ All developer documentation lives here. When working on features, look up the re
 | `MULTI_EXTRUDER_TEMPERATURE.md` | Multi-extruder temperature tracking, ExtruderInfo, dynamic subjects |
 | `TOOL_ABSTRACTION.md` | ToolState singleton, ToolInfo, tool-to-backend mapping, DetectState |
 | `INPUT_SHAPER.md` | Calibration panels, frequency response charts, CSV parser, PID |
+| `BELT_TUNER.md` | Pluck-based belt tension tuner: Klipper UDS accel stream, pluck detection, harmonic pitch estimation. **Read its Validation status section first - the feature is green in CI and has never measured a real belt, and its thresholds are circular** |
 | `PREPRINT_PREDICTION.md` | ETA prediction engine, phase timing, weighted history |
 | `EXCLUDE_OBJECTS.md` | Object exclusion, per-object thumbnails, slicer setup |
 | `PRINT_STATE_MACHINE.md` | Print lifecycle state machine: states, transitions, guards, resource lifecycle |
 | `PRINT_CONTROL_BUTTONS.md` | PrintControlButtons controller: owned subjects, pure view function, optimistic pending-action machine, 2x1 home widget, panel delegation |
-| `PRINT_START_PROFILES.md` | Print start phase detection, JSON profiles |
+| `PRINT_START_PROFILES.md` | Print start phase detection: evidence kinds, JSON profile schema, authoring a profile for a new printer |
 | `PRINT_START_OBSERVERS.md` | The whole pre-print observer system: arming, the five signal sources (console, probe lines, bed-mesh flap, toolhead position, fallbacks), threading/lifetime rules, and which tests pin what |
 | `PRINT_START_INTEGRATION.md` | User-facing macro setup for print start tracking |
 | `Z_OFFSET_PERSISTENCE.md` | Firmware that stores the z-offset outside `gcode_move` and zeroes the live one between prints (ZMOD on AD5M/AD5X): why the idle reading lies, the `persisted_z_offset` subjects, the relative-vs-absolute `SET_GCODE_OFFSET` rule, and the one-row recipe for adding a firmware |
@@ -78,6 +81,7 @@ All developer documentation lives here. When working on features, look up the re
 | `UPDATE_SYSTEM.md` | Update channels (stable/beta/dev), R2 CDN, Moonraker updater |
 | `SOUND_SYSTEM.md` | Audio architecture, JSON themes, backends (SDL, ALSA, PWM, M300). User guide: `../user/guide/settings/display-sound.md#sound` |
 | `LED_CONTROL.md` | LED control system: 5 backends, auto-state lighting, control/settings overlays, home panel widget |
+| `CHAMBER_HEATER.md` | Chamber heaters: backend registry (generic/dragonbreath/panda_breath), discovery, diagnostics subjects + card, ceiling rules, arbitration, verification logs |
 | `PRINTER_MANAGER.md` | Printer overlay, custom images, inline name editing |
 | `MULTI_PRINTER.md` | Multi-printer management: config v4, soft restart, printer switching |
 | `TIMELAPSE.md` | Moonraker timelapse plugin integration |
@@ -115,7 +119,7 @@ All developer documentation lives here. When working on features, look up the re
 
 | Doc | When to read |
 |-----|-------------|
-| `plans/` | The single tracked home for in-flight plans and specs — **point-in-time, not current truth.** Scaffolding, deleted in the same change that ships the work (lifecycle convention: `../CLAUDE.md`). A plan records what was intended when it was written; several prescribe approaches the shipped code has since diverged from, and they read as instructions. Verify every predicate against the code before following one. Live example: `plans/2026-06-25-ad5x-ifs-seated-chan-robustness.md:118-120` tells you to gate on `head_filament_`, which `include/ams_backend_ad5x_ifs.h:80-83` now documents as untrustworthy on its own — the shipped gate is `head_switch_seen_ && !head_switch_present_`. |
+| `plans/` | The single tracked home for in-flight plans and specs — **point-in-time, not current truth.** Scaffolding, deleted in the same change that ships the work (lifecycle convention: `../CLAUDE.md`). A plan records what was intended when it was written; several prescribe approaches the shipped code has since diverged from, and they read as instructions. Verify every predicate against the code before following one. Live example: `docs/devel/plans/2026-06-25-ad5x-ifs-seated-chan-robustness.md#"Fix 2 — Persist last-known seated slot across restart (RC2 + cold-boot floor)"` tells you to gate on `head_filament_`, which `include/ams_backend_ad5x_ifs.h` now documents as untrustworthy on its own — the shipped gate is `head_switch_seen_ && !head_switch_present_`. |
 | `printer-research/` | Printer-specific research notes |
 | `printer-research/FLASHFORGE_AD5X_IFS_ANALYSIS.md` | AD5X IFS protocol reverse engineering |
 | `printer-research/ANYCUBIC_ACE_KOBRA_S1_LOG_ANALYSIS.md` | Kobra S1 + ACE Pro real-log analysis: mainline-Python Klipper fork path (`[ace_status]`), command surface, inventory model |

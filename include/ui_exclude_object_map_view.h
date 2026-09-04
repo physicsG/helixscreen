@@ -3,6 +3,7 @@
 
 #include "ui_observer_guard.h"
 
+#include "bed_coord_mapper.h"
 #include "gcode_parser.h"
 
 #include <cmath>
@@ -25,31 +26,12 @@ class PrintExcludeObjectManager;
 
 class ExcludeObjectMapView {
   public:
-    static constexpr float MIN_TOUCH_TARGET_PX = 28.0f;
+    // Canonical value lives on helix::BedCoordMapper; aliased here so existing
+    // ExcludeObjectMapView::MIN_TOUCH_TARGET_PX references keep compiling.
+    static constexpr float MIN_TOUCH_TARGET_PX = helix::BedCoordMapper::MIN_TOUCH_TARGET_PX;
 
-    struct PixelRect {
-        float x, y, w, h;
-    };
-
-    class CoordMapper {
-      public:
-        /// Map coordinate range (origin_x..origin_x+bed_w) to viewport
-        CoordMapper(float bed_w_mm, float bed_h_mm, int viewport_w_px, int viewport_h_px,
-                    float origin_x = 0.0f, float origin_y = 0.0f);
-        std::pair<float, float> mm_to_px(float x_mm, float y_mm) const;
-        PixelRect bbox_to_rect(glm::vec2 bbox_min, glm::vec2 bbox_max) const;
-        float scale() const {
-            return scale_;
-        }
-
-      private:
-        float scale_{1.0f};
-        float offset_x_{0.0f};
-        float offset_y_{0.0f};
-        float origin_x_{0.0f};
-        float origin_y_{0.0f};
-        int viewport_h_{0};
-    };
+    using PixelRect = helix::PixelRect;
+    using CoordMapper = helix::BedCoordMapper;
 
     enum class KeyBarMode { FullNames, Abbreviated, Summary };
     static KeyBarMode key_bar_mode(int object_count);

@@ -27,10 +27,6 @@
     <px name="metadata_clip_height_xlarge" value="156"/>
     <px name="metadata_clip_height_xxlarge" value="196"/>
   </consts>
-  <styles>
-    <!-- Fully transparent but still takes up layout space -->
-    <style name="invisible" opa="0"/>
-  </styles>
   <!-- Print Status Panel - Active print monitoring with G-code 3D viewer -->
   <!-- Uses same sizing as print_file_detail: overlay_width_transient_large, 5:4 flex ratio -->
   <view name="print_status_panel"
@@ -164,6 +160,18 @@
                        height="#button_height" flex_grow="1" icon="tune" text="Tune" translation_tag="Tune">
               <event_cb trigger="clicked" callback="on_print_status_tune"/>
               <bind_state_if_eq subject="print_controls_enabled" state="disabled" ref_value="0"/>
+            </ui_button>
+            <!-- Camera button: live view of the print. Only when a webcam is
+                 configured AND this screen runs remotely from the printer
+                 (moonraker_is_remote — on the printer's own screen the print is
+                 in front of you) AND the build has camera support compiled in
+                 (platform_extras_available gates the ESP32 v1 cut). Label is a
+                 subject: "Cam" where Row 2 is tight, "Camera" from LARGE up. -->
+            <ui_button name="btn_camera"
+                       height="#button_height" flex_grow="1" icon="webcam" bind_text="camera_button_label">
+              <bind_flag_if cond="printer_has_webcam and moonraker_is_remote and platform_extras_available"
+                            flag="hidden" invert="true"/>
+              <event_cb trigger="clicked" callback="on_print_status_camera"/>
             </ui_button>
             <!-- Cancel button: visible only during active print (outcome == NONE/0) -->
             <ui_button name="btn_cancel"

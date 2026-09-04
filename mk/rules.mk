@@ -150,7 +150,16 @@ endif
 # CALLED → getaddrinfo() EAI_SYSTEM on static-glibc devices). A fresh CI build
 # hides this because libhv.a doesn't exist yet; it only bites incremental dev
 # trees. Re-applying patches now invalidates the archive so the wiring lands.
-$(LIBHV_LIB): $(PATCHES_STAMP)
+#
+# $(LIBHV_PATCHED_SRCS) covers the case the stamp cannot see. lib/ is shared
+# between worktrees but build/ is not, so a tree that built its archive before
+# another tree re-applied the patches keeps that archive forever: its own stamp
+# never moved. Two libhv patches add members to hv::WebSocketClient and
+# hv::TcpClientEventLoopTmpl, so a stale archive constructs the object at
+# different member offsets than the headers our own objects compiled against —
+# ~MoonrakerClient then reads loop_ from the wrong offset and blocks forever on
+# a mutex made of unrelated bytes.
+$(LIBHV_LIB): $(PATCHES_STAMP) $(LIBHV_PATCHED_SRCS)
 	$(Q)$(MAKE) libhv-build
 
 ifneq ($(LIBHV_JSON_HEADER),)
@@ -276,7 +285,13 @@ endif
 # unit; off_t crosses no TU boundary here (see the comment in the source).
 # Side effect: the flags no longer match $(PCH), so this object re-parses
 # lvgl_pch.h from source instead of using the precompiled copy.
-$(OBJ_DIR)/rendering/gcode_data_source.o: CXXFLAGS += -D_FILE_OFFSET_BITS=64
+#
+# `override` is load-bearing: the sanitizer targets re-invoke make with CXXFLAGS
+# on the command line, and a command-line variable discards every makefile
+# assignment to it - target-specific ones included - unless the assignment says
+# so. Nothing else supplies this define, so without the keyword the object
+# compiles with a 32-bit off_t wherever that route is taken.
+$(OBJ_DIR)/rendering/gcode_data_source.o: override CXXFLAGS += -D_FILE_OFFSET_BITS=64
 
 # Compile app Objective-C++ sources (macOS .mm files)
 # Uses DEPFLAGS to generate .d files for header dependency tracking

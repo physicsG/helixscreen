@@ -4,6 +4,7 @@
 
 #include "ui_panel_print_status.h"
 
+#include <set>
 #include <string>
 
 // Friend access to PrintStatusPanel internals. `ui_panel_print_status.h`
@@ -66,6 +67,32 @@ class PrintStatusPanelTestAccess {
 
     static lv_obj_t* thumbnail_widget(const PrintStatusPanel& panel) {
         return panel.print_thumbnail_;
+    }
+
+    /// The preparing-phase progress bar, whose cached pointer is the one a
+    /// queued print-start-progress apply dereferences (the teardown-uaf tests).
+    static lv_obj_t* preparing_progress_widget(const PrintStatusPanel& panel) {
+        return panel.preparing_progress_bar_;
+    }
+
+    /// What on_print_start_progress_changed() published to its own subject —
+    /// proves a drained handler ran its body rather than early-outing.
+    /// Non-const because lv_subject_get_int() takes a mutable subject.
+    static int preparing_progress_subject_value(PrintStatusPanel& panel) {
+        return lv_subject_get_int(&panel.preparing_progress_subject_);
+    }
+
+    /// Stands in for the XML build, which is what normally assigns
+    /// gcode_viewer_. get_tools_used() reads nothing else, so this is the whole
+    /// wiring a tools-used test needs.
+    static void set_gcode_viewer(PrintStatusPanel& panel, lv_obj_t* viewer) {
+        panel.gcode_viewer_ = viewer;
+    }
+
+    /// The tool set the panel answers with - what the print-scoped runout badge
+    /// and the Snapmaker reprint preamble are both built from.
+    static std::set<int> tools_used(const PrintStatusPanel& panel) {
+        return panel.get_tools_used();
     }
 
     /// The image source actually set on the panel's thumbnail widget, or "" when

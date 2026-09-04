@@ -17,7 +17,13 @@ namespace helix::ui {
  * - Tension (bias<0): inner slides up, minimal overlap
  * - Compression (bias>0): inner slides down, near-complete overlap
  *
- * Happy Hare only — AFC has no proportional sensor data.
+ * Driven by `sync_feedback_bias`, whatever produces it: Happy Hare publishes
+ * one directly, and an AFC_buffer configured `type: FPS_PSF` has an analog
+ * filament pressure sensor that AmsBackendAfc maps onto the same -1..+1 scale.
+ * A switched TurtleNeck buffer has no proportional reading and gates this out.
+ *
+ * (This said "Happy Hare only — AFC has no proportional sensor data", which was
+ * only ever true of the switched buffer.)
  */
 class UiBufferMeter {
   public:

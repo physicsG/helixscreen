@@ -201,29 +201,37 @@ TEST_CASE("INIT_SUBJECT macros work together", "[state][subject][macro][integrat
 
     SubjectManager subjects;
 
-    // Simulate a typical state class with multiple subjects
-    lv_subject_t temp_value_;
-    lv_subject_t target_value_;
-    lv_subject_t status_text_;
-    char status_text_buf_[64];
+    // Simulate a typical state class with multiple subjects.
+    //
+    // The names are prefixed because the last macro argument registers them in
+    // LVGL's XML subject scope, which is process-global and outlives this stack
+    // frame — there is no unregister. Naming one of these `status_text` put a
+    // DEAD STACK ADDRESS behind the name four production components bind
+    // (panel_widget_tips, change_host_modal, qr_scanner_overlay,
+    // crash_report_modal), so the next test in the process to build one of them
+    // segfaulted inside lv_label_bind_text. A test-only prefix cannot collide.
+    lv_subject_t macro_temp_value_;
+    lv_subject_t macro_target_value_;
+    lv_subject_t macro_status_text_;
+    char macro_status_text_buf_[64];
 
     // Initialize all subjects
-    INIT_SUBJECT_INT(temp_value, 2500, subjects, true);   // 250.0 degrees in decidegrees
-    INIT_SUBJECT_INT(target_value, 2100, subjects, true); // 210.0 degrees target
-    INIT_SUBJECT_STRING(status_text, "Heating...", subjects, true);
+    INIT_SUBJECT_INT(macro_temp_value, 2500, subjects, true);   // 250.0 deg in decidegrees
+    INIT_SUBJECT_INT(macro_target_value, 2100, subjects, true); // 210.0 deg target
+    INIT_SUBJECT_STRING(macro_status_text, "Heating...", subjects, true);
 
     // Verify all registered
     REQUIRE(subjects.count() == 3);
 
     // Verify XML registration
-    REQUIRE(lv_xml_get_subject(NULL, "temp_value") == &temp_value_);
-    REQUIRE(lv_xml_get_subject(NULL, "target_value") == &target_value_);
-    REQUIRE(lv_xml_get_subject(NULL, "status_text") == &status_text_);
+    REQUIRE(lv_xml_get_subject(NULL, "macro_temp_value") == &macro_temp_value_);
+    REQUIRE(lv_xml_get_subject(NULL, "macro_target_value") == &macro_target_value_);
+    REQUIRE(lv_xml_get_subject(NULL, "macro_status_text") == &macro_status_text_);
 
     // Verify values
-    REQUIRE(lv_subject_get_int(&temp_value_) == 2500);
-    REQUIRE(lv_subject_get_int(&target_value_) == 2100);
-    REQUIRE(std::string(lv_subject_get_string(&status_text_)) == "Heating...");
+    REQUIRE(lv_subject_get_int(&macro_temp_value_) == 2500);
+    REQUIRE(lv_subject_get_int(&macro_target_value_) == 2100);
+    REQUIRE(std::string(lv_subject_get_string(&macro_status_text_)) == "Heating...");
 }
 
 // ============================================================================

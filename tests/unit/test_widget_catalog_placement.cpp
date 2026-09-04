@@ -202,6 +202,13 @@ class CatalogRowFixture : public LVGLUITestFixture {
         // already been through close_catalog() — going back a second time would
         // pop whatever is under the catalog instead.
         if (selected_.empty()) {
+            // A drilled-in category is its own pushed page: pop it first, or the
+            // single go_back() below lands on it and leaves the catalog open for
+            // the next test's show() to refuse.
+            if (WidgetCatalogOverlay::active_category_root() != nullptr) {
+                NavigationManager::instance().go_back();
+                process_lvgl(10);
+            }
             NavigationManager::instance().go_back();
         }
         process_lvgl(10);
@@ -217,8 +224,49 @@ class CatalogRowFixture : public LVGLUITestFixture {
         return config_.entries()[0]; // unreachable
     }
 
+    /// The sub-page scroll holding one row per widget in @p widget_id's
+    /// category, drilling in first if the catalog is still at the top level.
+    ///
+    /// The catalog lists CATEGORIES at its root and only builds widget rows
+    /// inside a pushed sub-page, so a top-level search finds no widget at all.
+    /// Mirrors category_scroll() in test_widget_catalog_categories.cpp.
+    lv_obj_t* category_scroll_for(const char* widget_id) {
+        const auto* def = find_widget_def(widget_id);
+        REQUIRE(def != nullptr);
+
+        // Drive it by CLICK, the way a user reaches it: show_category() is
+        // private, and the click path is what test_widget_catalog_categories.cpp
+        // exercises. Row order follows get_widget_categories().
+        lv_obj_t* root = WidgetCatalogOverlay::active_root();
+        REQUIRE(root != nullptr);
+        lv_obj_t* group = lv_obj_find_by_name(root, "category_group");
+        REQUIRE(group != nullptr);
+
+        const auto& categories = get_widget_categories();
+        size_t index = categories.size();
+        for (size_t i = 0; i < categories.size(); ++i) {
+            if (categories[i].id == def->category) {
+                index = i;
+                break;
+            }
+        }
+        INFO("no category row for '" << widget_id << "'");
+        REQUIRE(index < categories.size());
+        REQUIRE(index < lv_obj_get_child_count(group));
+
+        lv_obj_send_event(lv_obj_get_child(group, static_cast<int32_t>(index)), LV_EVENT_CLICKED,
+                          nullptr);
+        process_lvgl(10);
+        lv_obj_t* page = WidgetCatalogOverlay::active_category_root();
+        INFO("no category sub-page for '" << widget_id << "'");
+        REQUIRE(page != nullptr);
+        lv_obj_t* scroll = lv_obj_find_by_name(page, "catalog_scroll");
+        REQUIRE(scroll != nullptr);
+        return scroll;
+    }
+
     lv_obj_t* row_for(const char* widget_id) {
-        lv_obj_t* row = find_row(scroll_, display_name_of(widget_id));
+        lv_obj_t* row = find_row(category_scroll_for(widget_id), display_name_of(widget_id));
         INFO("no catalog row for '" << widget_id << "'");
         REQUIRE(row != nullptr);
         return row;
@@ -299,9 +347,10 @@ TEST_CASE_METHOD(CatalogRowFixture, "Catalog: the placed count skips instances w
     const std::string expected = base + " (1 " + lv_tr("Placed") + ")";
     const std::string overcounted = base + " (2 " + lv_tr("Placed") + ")";
 
+    lv_obj_t* scroll = category_scroll_for(MULTI_ID);
     INFO("expected row label: " << expected);
-    CHECK(find_row(scroll_, overcounted) == nullptr);
-    CHECK(find_row(scroll_, expected) != nullptr);
+    CHECK(find_row(scroll, overcounted) == nullptr);
+    CHECK(find_row(scroll, expected) != nullptr);
 }
 
 // Placing a limbo widget from the catalog while editing another page used to

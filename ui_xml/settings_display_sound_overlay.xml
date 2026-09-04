@@ -110,6 +110,13 @@
                             callback="on_dark_mode_changed">
           <bind_state_if_eq subject="settings_dark_mode_available" state="disabled" ref_value="0"/>
         </setting_toggle_row>
+        <!-- UI Scale (options populated dynamically in C++ — the Automatic row
+             carries the DPI-resolved percentage) -->
+        <setting_dropdown_row name="row_ui_scale"
+                              label="UI Scale" label_tag="UI Scale" icon="magnify"
+                              description="Interface size. Applies after restart."
+                              description_tag="Interface size. Applies after restart." options=""
+                              callback="on_ui_scale_changed"/>
         <!-- Theme Colors -->
         <setting_action_row name="row_theme_settings"
                             label="Theme Colors" label_tag="Theme Colors" icon="tune"

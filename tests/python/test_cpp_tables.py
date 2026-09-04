@@ -3,10 +3,10 @@
 """
 Tests for the static-C++-table extractor (scripts/translations/cpp_tables.py).
 
-These tables reach lv_tr() through a variable -- `lv_tr(def.display_name)` --
-so the call-site patterns in extractor.py never saw the strings they hold. The
-whole home-screen widget catalog and the AFC/Happy Hare/ACE device-settings
-surface were untranslated in all nine languages as a result.
+These tables reach lv_tr() through a variable -- `lv_tr(s.label.c_str())` -- so
+the call-site patterns in extractor.py never saw the strings they hold. The
+AFC/Happy Hare/ACE device-settings surface was untranslated in all nine
+languages as a result.
 
 Each false-positive case below is one the parsers actually produced while being
 written; they are pinned so a later loosening cannot bring them back.
@@ -20,43 +20,6 @@ scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
 from translations.cpp_tables import extract_table_strings  # noqa: E402
-
-
-# =============================================================================
-# PanelWidgetDef
-# =============================================================================
-
-
-WIDGET_TABLE = dedent("""\
-    static std::vector<PanelWidgetDef> s_widget_defs = {
-        {"printer_image", "Printer Image", "rotate_3d", "3D printer visualization",
-         nullptr, nullptr, true, 2, 2, 1, 1, 4, 3},
-        {"power_device", "Power", "power_cycle", "Toggle Moonraker power devices",
-         "power_device_count", "Requires Moonraker power device",
-         false, 1, 1, 1, 1, 1, 1, true},
-    };
-""")
-
-
-def test_widget_rows_yield_name_description_and_gate_hint():
-    found = extract_table_strings(WIDGET_TABLE)
-    assert "Printer Image" in found
-    assert "3D printer visualization" in found
-    assert "Toggle Moonraker power devices" in found
-    assert "Requires Moonraker power device" in found
-
-
-def test_widget_rows_do_not_yield_ids_icons_or_gate_subjects():
-    """Only the three display fields are user-facing."""
-    found = extract_table_strings(WIDGET_TABLE)
-    for internal in ("printer_image", "rotate_3d", "power_cycle", "power_device_count"):
-        assert internal not in found
-
-
-def test_a_nullptr_gate_hint_is_not_a_string():
-    found = extract_table_strings(WIDGET_TABLE)
-    assert "nullptr" not in found
-    assert "" not in found
 
 
 # =============================================================================

@@ -225,22 +225,22 @@ void register_print_handlers(std::unordered_map<std::string, MethodHandler>& reg
     // printer.firmware_restart - Restart firmware (MCU reset)
     //
     // Restarting is trigger_restart()'s job, not a second private imitation of
-    // it: a restart drops the print, zeroes the heater targets and clears
-    // excluded objects. This handler used to fake only the klippy state, so a
-    // restart reached through the RPC left the mock reporting a print still
-    // running and heaters still targeted on a machine that had just rebooted.
+    // it: a restart drops the print, zeroes the heater targets, clears excluded
+    // objects and reloads everything Klipper reads from printer.cfg. This
+    // handler used to fake only the klippy state, so a restart reached through
+    // the RPC left the mock claiming a print was still running on a machine that
+    // had just rebooted, and left unsaved per-tool offsets alive.
     //
     // It also poked get_printer_state() directly - the process-global one, not
     // whoever subscribed to THIS client - instead of dispatching the webhooks
-    // status update a real restart arrives as. And it scheduled the return to
-    // READY on an lv_timer, which never fires in a test that does not pump
-    // LVGL, so klippy stayed SHUTDOWN there forever.
+    // status update a real restart arrives as. And it used an lv_timer for the
+    // return to READY, which never fires in a test that does not pump LVGL, so
+    // klippy stayed SHUTDOWN forever there.
     //
     // The ack is right, though, and stays: Moonraker's do_restart() catches
     // "Klippy Disconnected" and returns "ok" (klippy_apis.py). That is exactly
-    // why this path needs no wait-for-READY handling and SAVE_CONFIG does -
-    // SAVE_CONFIG goes through the generic printer.gcode.script endpoint, which
-    // has no such catch.
+    // why SAVE_CONFIG needs SaveConfigWatch and this does not - SAVE_CONFIG goes
+    // through the generic printer.gcode.script path, which has no such catch.
     registry["printer.firmware_restart"] =
         [](MoonrakerClientMock* self, [[maybe_unused]] const json& params,
            std::function<void(const json&)> success_cb,

@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -27,6 +28,7 @@
 
 #include "ui_breakpoint.h"
 
+#include "display_metrics.h"
 #include "panel_widget_size.h"
 
 #include "catch_amalgamated.hpp"
@@ -34,6 +36,18 @@
 using namespace helix::widget_size;
 
 namespace {
+
+/// Restores the process-wide UI scale on the way out. The scale is global
+/// state read by every band, so a test that raises it must put it back or the
+/// rest of the suite measures against a scaled ladder.
+struct ScopedUiScale {
+    explicit ScopedUiScale(double scale) {
+        helix::DisplayMetrics::set_active_scale(scale);
+    }
+    ~ScopedUiScale() {
+        helix::DisplayMetrics::set_active_scale(1.0);
+    }
+};
 
 /// A measured extent and the tier whose panel produced it.
 struct TierExtent {
@@ -164,16 +178,60 @@ TEST_CASE("size bands scale with the font_body ladder", "[widget_size][panel_wid
     CHECK(182 < w_normal(UiBreakpoint::XXLarge));
 }
 
-TEST_CASE("the legacy flat bands are the Small rung of their ladders",
+TEST_CASE("size bands scale with the high-DPI UI scale factor",
           "[widget_size][panel_widget_size]") {
-    // W_NORMAL/W_WIDE/H_TALL/H_TALLER are what the not-yet-ported call sites
-    // still read. They have to stay exactly the Small rung, or porting a call
-    // site would silently move its behavior on the tier the numbers were
-    // measured on — which is the one tier this change is NOT meant to touch.
-    CHECK(W_NORMAL == w_normal(BASE_TIER));
-    CHECK(W_WIDE == w_wide(BASE_TIER));
-    CHECK(H_TALL == h_tall(BASE_TIER));
-    CHECK(H_TALLER == h_taller(BASE_TIER));
+    // A band asks "is there room for the roomy layout", and the UI scale grows
+    // both sides of that question at once: GridLayout::get_dimensions() scales
+    // the authored track edge, so a widget's cell gets wider, and
+    // theme_manager scales the type ladder, so the text that has to fit gets
+    // taller. A band that stayed on its authored pixels would answer the
+    // question about a panel that no longer exists.
+    //
+    // Both sides go through DisplayMetrics::scaled_px(), so the cell-to-band
+    // ratio is preserved and an authored span lands in the same band at every
+    // scale — the same invariant the font_body ladder gives across tiers.
+    const double scale = 1.578; // 405 DPI, the 1080x2400 phone case
+
+    const int unscaled_w_normal = w_normal(UiBreakpoint::XXLarge);
+    const int unscaled_w_wide = w_wide(UiBreakpoint::XXLarge);
+    const int unscaled_h_tall = h_tall(UiBreakpoint::XXLarge);
+    const int unscaled_h_taller = h_taller(UiBreakpoint::XXLarge);
+
+    ScopedUiScale scaled(scale);
+
+    CHECK(w_normal(UiBreakpoint::XXLarge) ==
+          helix::DisplayMetrics::scaled_px(unscaled_w_normal, scale));
+    CHECK(w_wide(UiBreakpoint::XXLarge) ==
+          helix::DisplayMetrics::scaled_px(unscaled_w_wide, scale));
+    CHECK(h_tall(UiBreakpoint::XXLarge) ==
+          helix::DisplayMetrics::scaled_px(unscaled_h_tall, scale));
+    CHECK(h_taller(UiBreakpoint::XXLarge) ==
+          helix::DisplayMetrics::scaled_px(unscaled_h_taller, scale));
+
+    // The regression this pins. On 1080x2400 the home grid quantises to 6
+    // columns at this scale instead of 12, so the 2-cell fan stack is handed
+    // 337px where the unscaled panel handed it 168px. Against an unscaled
+    // 309px band that 337 read as "room for resolved fan names", and
+    // FanStackWidget drew "Part Cooling Fan" into a cell 74px too narrow,
+    // pushing the speed labels past the right screen edge.
+    CHECK(168 < unscaled_w_normal);
+    CHECK(337 < w_normal(UiBreakpoint::XXLarge));
+}
+
+TEST_CASE("size bands are byte-identical at scale 1.0", "[widget_size][panel_widget_size]") {
+    // Every shipping printer sits inside the DPI deadband, so the scale is
+    // exactly 1.0 there and the multiply must be a true no-op — not a value
+    // that rounds back to the same number for most bands and shifts one.
+    ScopedUiScale unscaled(1.0);
+
+    for (int i = to_int(UiBreakpoint::Micro); i <= to_int(UiBreakpoint::XXLarge); ++i) {
+        const auto bp = as_breakpoint(i);
+        INFO("tier " << i);
+        CHECK(w_normal(bp) == W_NORMAL_PX[static_cast<size_t>(i)]);
+        CHECK(w_wide(bp) == W_WIDE_PX[static_cast<size_t>(i)]);
+        CHECK(h_tall(bp) == H_TALL_PX[static_cast<size_t>(i)]);
+        CHECK(h_taller(bp) == H_TALLER_PX[static_cast<size_t>(i)]);
+    }
 }
 
 TEST_CASE("band accessors clamp an out-of-range tier instead of reading off the table",

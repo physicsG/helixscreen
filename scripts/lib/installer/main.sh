@@ -19,9 +19,9 @@ trap 'error_handler $LINENO' ERR 2>/dev/null || true
 # Remove the scratch dir however the installer ends.
 #
 # The ERR trap above is a bash extension and is silently discarded on the
-# ash/dash shells every embedded platform runs, so an interrupted or failing
-# install used to leak the whole download: a K2 was found holding a 60MB
-# helixscreen.zip from four months earlier, on a 240MB overlay partition.
+# ash/dash shells every embedded platform runs, so without this trap an
+# interrupted or failing install leaks the whole download - tens of megabytes
+# stranded on a partition that may only have a couple of hundred.
 #
 # cleanup_on_success is idempotent (it tests for the directory first) so the
 # explicit call on the success path is unaffected, and it routes through
@@ -46,6 +46,19 @@ usage() {
     echo "  --local FILE   Install from local archive (.zip or .tar.gz, skip download)"
     echo "  --skip-kiauh-registration"
     echo "                 Skip KIAUH extension registration (default: install if KIAUH detected)"
+    echo "  --standalone   Self-managed install beside your printer's mod"
+    echo "                 (Forge-X / Z-Mod). Default on such hosts is the"
+    echo "                 payload install: contents replaced in place, no"
+    echo "                 service installed or started (the mod owns the UI"
+    echo "                 service), config/ and platform/ preserved."
+    echo "  --payload-root PATH  Payload root (default: the mod's own tree on"
+    echo "                 Forge-X hosts, AD5X and AD5M alike). A host that"
+    echo "                 still carries an older standalone install is"
+    echo "                 offered adoption of that root; declining leaves it"
+    echo "                 untouched, with the migration steps printed"
+    echo "  --auto-update  Also write the [update_manager helixscreen] stanza"
+    echo "                 into the mod's user.moonraker.conf (opt-in: a stanza"
+    echo "                 is a real side effect)"
     echo "  --help         Show this help message"
     echo ""
     echo "Examples:"
@@ -55,15 +68,368 @@ usage() {
     echo "  $0 --clean --yes      # Same, without the interactive confirmation"
     echo "  $0 --version v1.1.0   # Install specific version"
     echo "  $0 --local /tmp/helixscreen-ad5m.tar.gz  # Install from local file"
+    echo "  $0 --standalone       # Self-managed install beside the mod (mod hosts)"
+}
+
+# Parse the command line into the mode globals main() reads. Split out of
+# main() so the parser is testable on its own (the mode flags especially:
+# HELIX_MOD_PAYLOAD is the one variable that arms the mod-owned destruct
+# exemption, and only this function may set it).
+parse_installer_args() {
+    update_mode=false
+    uninstall_mode=false
+    clean_mode=false
+    ASSUME_YES=false
+    version=""
+    local_tarball=""
+    skip_kiauh_registration=false
+    MOD_PAYLOAD_ROOT=""
+    HELIX_MOD_PAYLOAD_UPDATES=""
+    STANDALONE_INSTALL=""
+    MOD_PAYLOAD_FLAG_GIVEN=""
+
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --update)
+                update_mode=true
+                shift
+                ;;
+            --uninstall)
+                uninstall_mode=true
+                shift
+                ;;
+            --clean)
+                clean_mode=true
+                shift
+                ;;
+            --yes|-y|--force)
+                # Explicit non-interactive consent for destructive prompts.
+                # ASSUME_YES is read by clean_old_installation (uninstall.sh);
+                # it is deliberately NOT inferred from a non-TTY stdin, since
+                # the documented `curl ... | sh` invocation always has one.
+                # shellcheck disable=SC2034  # consumed by uninstall.sh (clean_old_installation)
+                ASSUME_YES=true
+                shift
+                ;;
+            --version)
+                if [ -z "${2:-}" ]; then
+                    log_error "--version requires a version argument"
+                    exit 1
+                fi
+                version="$2"
+                shift 2
+                ;;
+            --local)
+                if [ -z "${2:-}" ]; then
+                    log_error "--local requires a file path argument"
+                    exit 1
+                fi
+                local_tarball="$2"
+                shift 2
+                ;;
+            --skip-kiauh-registration)
+                skip_kiauh_registration=true
+                shift
+                ;;
+            --standalone)
+                STANDALONE_INSTALL=1
+                shift
+                ;;
+            --payload-root)
+                if [ -z "${2:-}" ]; then
+                    log_error "--payload-root requires a path argument"
+                    exit 1
+                fi
+                MOD_PAYLOAD_ROOT="$2"
+                shift 2
+                ;;
+            --auto-update)
+                # shellcheck disable=SC2034  # consumed by moonraker.sh (configure_moonraker_updates)
+                HELIX_MOD_PAYLOAD_UPDATES=1
+                shift
+                ;;
+            --no-mod-payload)
+                # Deprecated alias for --standalone (pre-release courtesy).
+                log_info "--no-mod-payload is deprecated; use --standalone"
+                STANDALONE_INSTALL=1
+                shift
+                ;;
+            --mod-payload-root)
+                # Deprecated alias for --payload-root.
+                if [ -z "${2:-}" ]; then
+                    log_error "--mod-payload-root requires a path argument"
+                    exit 1
+                fi
+                log_info "--mod-payload-root is deprecated; use --payload-root"
+                MOD_PAYLOAD_ROOT="$2"
+                shift 2
+                ;;
+            --mod-payload-updates)
+                # Deprecated alias for --auto-update.
+                log_info "--mod-payload-updates is deprecated; use --auto-update"
+                # shellcheck disable=SC2034  # consumed by moonraker.sh (configure_moonraker_updates)
+                HELIX_MOD_PAYLOAD_UPDATES=1
+                shift
+                ;;
+            --mod-payload)
+                # Compat no-op: the payload contract is auto-detected on hosts
+                # the mod profile recognizes. Kept so documented invocations
+                # keep working; mod_payload_mode_block logs the no-op notice.
+                MOD_PAYLOAD_FLAG_GIVEN=1
+                shift
+                ;;
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+
+    # A payload root is a payload-contract request; it cannot also name where
+    # a self-managed install goes (that is INSTALL_DIR).
+    if [ "${STANDALONE_INSTALL:-}" = "1" ] && [ -n "$MOD_PAYLOAD_ROOT" ]; then
+        log_error "--payload-root cannot be combined with --standalone"
+        exit 1
+    fi
+}
+
+# Auto-detect the payload contract: a bare install on a host the mod profile
+# recognizes IS a payload install - the mod owns the payload tree and its OTA,
+# so the in-place payload contract is the default and every standalone
+# destructive shape stays refused. Runs BEFORE
+# set_install_paths: its validate gate needs the contract armed to accept the
+# mod's payload root as INSTALL_DIR.
+#
+# Overrides: --standalone opts back into the self-managed install; naming a
+# payload root opts into the contract on any host (on a mod host that is
+# already the default). HELIX_MOD_PAYLOAD stays env-scrubbed (host_profile.sh)
+# - the probe and these flags are its only setters.
+mod_payload_autodetect() {
+    [ "${STANDALONE_INSTALL:-}" = "1" ] && return 0
+    # An explicit --payload-root opts in on any host: the operator named the
+    # root, which is the whole decision.
+    if [ -n "${MOD_PAYLOAD_ROOT:-}" ]; then
+        HELIX_MOD_PAYLOAD=1
+        return 0
+    fi
+    # Auto-detect only the mod's own shape: the tree WITH its Buildroot
+    # chroot, which both Forge-X layouts carry (AD5X and AD5M alike - one
+    # mod, one contract shape, one descriptor). A probed tree without a
+    # chroot is a mod mid-install or half-removed, so it requires an explicit
+    # --payload-root. The chroot answer exists from host_profile_probe, which
+    # main() runs before this.
+    [ "${HOST_CHROOT_STATE:-none}" = "none" ] && return 0
+    if [ -n "${HOST_MOD_ROOT:-}" ]; then
+        HELIX_MOD_PAYLOAD=1
+    fi
+}
+
+# The legacy AD5M population's adopt-or-warn. ad5m+forge_x hosts exist in the
+# field with an install at /opt/helixscreen and an S90helixscreen service, and
+# a payload install that silently relocated to the mod's default root would
+# strand them. So the armed install OFFERS to adopt the legacy root as its
+# payload root - outside the mod's git tree, which is also the OTA-durable
+# answer - and a declined or unanswerable offer proceeds at the mod default
+# with the exact manual migration commands.
+#
+# Nothing is ever deleted here: the legacy root and its service are the
+# operator's to remove, with the commands printed below or the shipped
+# uninstaller. An adoption IS recorded (the record write later in
+# mod_payload_mode_block), which is also how the next run resumes it without
+# re-asking.
+payload_legacy_adopt_or_warn() {
+    # Only an armed, bare payload install reaching for the mod's default
+    # root: an explicit --payload-root or INSTALL_DIR is the operator's own
+    # choice, --standalone never reaches here armed, and uninstall is not an
+    # install.
+    [ "${HELIX_MOD_PAYLOAD:-}" = "1" ] || return 0
+    [ -z "${MOD_PAYLOAD_ROOT:-}" ] || return 0
+    [ -z "${_USER_INSTALL_DIR:-}" ] || return 0
+    [ "$uninstall_mode" != true ] || return 0
+    [ "${STANDALONE_INSTALL:-}" != "1" ] || return 0
+    [ -n "${HOST_LEGACY_INSTALL_ROOT:-}" ] || return 0
+    [ "${INSTALL_DIR:-}" = "${HOST_INSTALL_ROOT:-}" ] || return 0
+
+    local legacy="$HOST_LEGACY_INSTALL_ROOT"
+    local svc="${HOST_LEGACY_INIT_SCRIPT:-/etc/init.d/S90helixscreen}"
+
+    # A prior adopt recorded its choice; resuming it is not relocation.
+    if [ "$(read_payload_root_record 2>/dev/null || true)" = "$legacy" ]; then
+        INSTALL_DIR="$legacy"
+        validate_install_dir "$INSTALL_DIR" || exit 1
+        log_info "Payload root: resuming the adopted root $INSTALL_DIR"
+        log_info "(recorded in $(host_payload_root_record); clear that file to re-choose)"
+        return 0
+    fi
+
+    if payload_legacy_prompt_adopt "$legacy"; then
+        INSTALL_DIR="$legacy"
+        # The probe's platform-keyed candidate, not an operator path: the
+        # name gate still applies (a legacy root is a canonical platform
+        # root, so this cannot fail on a real rig).
+        validate_install_dir "$INSTALL_DIR" || exit 1
+        log_info "Adopted the existing install at $INSTALL_DIR as the payload root"
+        log_info "(outside the mod's git tree, so a Forge-X OTA cannot remove it)"
+        # The service STAYS: it is the ONE boot path this adopted root has,
+        # and the in-place update keeps the launcher it starts current. The
+        # mod starts nothing of ours - a payload install at the mod's own root
+        # gets OUR service inside the mod chroot's /etc/init.d, where
+        # set_install_paths points INIT_SCRIPT_DEST and where Forge-X's
+        # .root/start.sh (running inside the chroot) starts every S* it finds.
+        # An adopted legacy root sits outside that chroot, so its host-side
+        # S90 script is what boots it.
+        # It is named for removal only at uninstall time, when it is stale.
+        log_info "Keeping the standalone service $svc - it is this payload's"
+        log_info "boot path: an adopted root sits outside the mod's chroot, so"
+        log_info "the chroot's init.d cannot reach it."
+        return 0
+    fi
+
+    log_warn "An older standalone HelixScreen install exists at $legacy"
+    log_warn "(service: $svc). This payload install uses the mod's root instead:"
+    log_warn "  $INSTALL_DIR"
+    log_warn "The old install is left untouched. To finish the migration by hand:"
+    log_warn "  cp $legacy/config/settings.json ${HOST_CONFIG_DIR:-}/settings.json"
+    log_warn "  rm $svc"
+    log_warn "  rm -rf $legacy"
+    log_warn "Or adopt that root as the payload root:"
+    log_warn "  --payload-root $legacy"
+}
+
+# Ask the adopt question where it can be answered: a TTY. The curl|sh pipe
+# cannot answer (stdin carries the script), so every other stdin declines -
+# the same rule confirm_clean_install applies, except a decline proceeds at
+# the mod default rather than aborting.
+# Returns 0 to adopt.
+payload_legacy_prompt_adopt() {
+    [ -t 0 ] || return 1
+    printf "Adopt the existing install at %s as the payload root? [y/N] " "$1"
+    read -r response
+    case "$response" in
+        [yY][eE][sS]|[yY]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Payload-mode wiring. Runs after set_install_paths (INSTALL_DIR holds the
+# mod's payload root, an explicit env INSTALL_DIR, or the platform default)
+# and before the pre-flight checks, so every later step sees the mode's
+# answers.
+#
+# Root precedence: --payload-root > an adopted legacy root (the operator's
+# recorded or just-given choice) > whatever set_install_paths chose (an
+# explicit env INSTALL_DIR > the host profile's HOST_INSTALL_ROOT).
+mod_payload_mode_block() {
+    if [ -n "${MOD_PAYLOAD_ROOT:-}" ]; then
+        INSTALL_DIR="$MOD_PAYLOAD_ROOT"
+        # The override gets the same gate every other INSTALL_DIR passes: it
+        # must name helixscreen, and a mod-owned root needs the payload
+        # contract this run is already in (mod_payload_autodetect arms it on
+        # the flag, and --standalone + a payload root is refused at parse -
+        # so the guard below is the enforced form of that invariant, not an
+        # expectation about a caller elsewhere).
+        host_refuse_mod_owned "install into" "$INSTALL_DIR"
+        validate_install_dir "$INSTALL_DIR" || exit 1
+        log_info "Payload root (--payload-root): $INSTALL_DIR"
+    fi
+
+    # The legacy-population choice, before anything reads or records the
+    # root: it may move INSTALL_DIR off the mod default.
+    payload_legacy_adopt_or_warn
+
+    # Compat no-op notice for the old opt-in flag, whichever way it lands.
+    if [ "${MOD_PAYLOAD_FLAG_GIVEN:-}" = "1" ]; then
+        if [ "${HOST_SERVICE_MECHANISM:-}" = "mod-managed" ]; then
+            log_info "--mod-payload is implied on this host (no effect)"
+        else
+            log_info "--mod-payload has no effect here; the payload contract applies"
+            log_info "where your printer's mod (Forge-X / Z-Mod) owns the UI"
+        fi
+    fi
+
+    # A payload root inside the mod's git tree does not survive a Forge-X
+    # OTA -- their update_manager is type: git_repo and git clean -fd removes
+    # .bin/helixscreen, which is untracked there.
+    # Only the payload contract can reach a mod-owned INSTALL_DIR
+    # (set_install_paths' install-dir gate refuses it otherwise), so this
+    # fires in payload mode and never else.
+    if host_path_is_mod_owned "${INSTALL_DIR:-}"; then
+        log_warn "This payload root lives inside the firmware mod's git tree."
+        log_warn "A Forge-X OTA removes it: their updater cleans untracked files"
+        log_warn "in the mod's repo. Prefer a root outside the tree:"
+        # The example must exist on THIS rig: the mod's data mount (/usr/data
+        # on the AD5X, /data on the AD5M), not the hard-coded AD5X path an
+        # AD5M operator would follow onto a partition their rig does not
+        # have. Unprobed corner (flag-armed, no chroot): fall back to the
+        # AD5X literal.
+        local od1_mount
+        od1_mount="$(host_mod_data_mount)"
+        [ -n "$od1_mount" ] || od1_mount="/usr/data"
+        log_warn "  --payload-root $od1_mount/helixscreen"
+    fi
+
+    if [ "${HELIX_MOD_PAYLOAD:-}" != "1" ]; then
+        # A self-managed install on a mod host is the operator's choice
+        # (--standalone, or an explicit INSTALL_DIR); it is not refused, but
+        # the service starts from the mod's chroot at boot, not from here.
+        if [ "${HOST_SERVICE_MECHANISM:-}" = "mod-managed" ]; then
+            log_warn "The firmware mod on this host owns the UI service."
+            log_warn "This standalone install will not be started automatically."
+            if [ "${STANDALONE_INSTALL:-}" = "1" ]; then
+                log_warn "Re-run without --standalone for the payload install."
+            else
+                log_warn "An explicit INSTALL_DIR picks the root, not the contract;"
+                log_warn "re-run without it, or name the root with --payload-root."
+            fi
+        fi
+        return 0
+    fi
+
+    if [ "$uninstall_mode" != true ]; then
+        # Capture what the PREVIOUS install recorded before this run's write
+        # replaces it: --clean must sweep the root that exists on disk, and
+        # its sweep runs after this block (clean_old_installation reads this
+        # capture, since the record now names THIS run's root instead).
+        # shellcheck disable=SC2034  # consumed by uninstall.sh (clean_old_installation sweeps it)
+        HELIX_PRIOR_PAYLOAD_ROOT=$(read_payload_root_record 2>/dev/null || true)
+        # Record where this payload install actually landed, so a later armed
+        # uninstall removes THIS root (its own --payload-root, else this
+        # record, else the probed default). Install runs only: an uninstall
+        # must not re-point the record on its way out the door.
+        record_payload_root "$INSTALL_DIR"
+
+        if [ "${MOD_PAYLOAD_FLAG_GIVEN:-}" = "1" ]; then
+            log_info "--mod-payload: replacing payload contents in place at $INSTALL_DIR"
+        else
+            log_info "Payload install (auto-detected): replacing contents in place at $INSTALL_DIR"
+        fi
+        log_info "Service installs into the mod's chroot; it starts at boot"
+    fi
+    if [ "${HOST_SERVICE_MECHANISM:-}" != "mod-managed" ]; then
+        log_warn "--payload-root names a root this host's profile did not find;"
+        log_warn "applying the in-place payload contract anyway."
+    fi
 }
 
 # Configure platform-specific settings before stopping competing UIs
 # (ForgeX display mode, stock UI disable, screen.sh patching)
 configure_platform() {
+    # The stock FlashForge UI's own files gate this, not the mod flavor: a
+    # mod-less AD5M (flavor stock) still ships /opt/auto_run.sh starting
+    # ffstartup-arm, and that UI fights us for the framebuffer whatever
+    # firmware is on the box. disable_stock_firmware_ui no-ops wherever those
+    # files are absent.
+    disable_stock_firmware_ui || true
+
     case "${AD5M_FIRMWARE:-}" in
         forge_x)
             configure_forgex_display || true
-            disable_stock_firmware_ui || true
+            dismiss_forgex_feather_promo || true
             patch_forgex_screen_sh || true
             patch_forgex_screen_drawing || true
             install_forgex_logged_wrapper || true
@@ -77,27 +443,8 @@ configure_platform() {
 # Deploy platform-specific hooks for the init script
 # Must be called after extract_release (hooks are in the release package)
 install_platform_hooks() {
-    local platform_hook=""
-    case "${AD5M_FIRMWARE:-}" in
-        forge_x)     platform_hook="ad5m-forgex" ;;
-        klipper_mod) platform_hook="ad5m-kmod" ;;
-        zmod)        platform_hook="ad5m-zmod" ;;
-    esac
-
-    # Platform hooks (pi32 shares Pi hooks). The AD5X used to share ad5m-zmod on
-    # the assumption that both ZMOD firmwares have the same layout; they do not.
-    # The AD5X runs inside a chroot at /usr/data/.mod/.zmod, installs to
-    # /srv/helixscreen, and has no /data at all, so the AD5M hook's
-    # HELIX_CACHE_DIR=/data/helixscreen/cache pointed at a path that is not there.
-    case "$platform" in
-        pi|pi32)       platform_hook="pi" ;;
-        k1)            platform_hook="k1" ;;
-        k2)            platform_hook="k2" ;;
-        cc1)           platform_hook="cc1" ;;
-        m1)            platform_hook="m1" ;;
-        ad5x)          platform_hook="ad5x" ;;
-        snapmaker-u1)  platform_hook="snapmaker-u1" ;;
-    esac
+    local platform_hook
+    platform_hook=$(resolve_platform_hook_key "$platform")
 
     if [ -n "$platform_hook" ]; then
         deploy_platform_hooks "$INSTALL_DIR" "$platform_hook"
@@ -111,7 +458,7 @@ install_platform_hooks() {
 # the friendly hardware label and reframe "pi" as the install package. Plain
 # "Detected platform: pi" reads as wrong to anyone whose printer says QIDI on
 # the lid — they see "pi" first and assume we mis-identified their device.
-# Actual Raspberry Pi owners keep the original ordering.
+# Actual Raspberry Pi owners get the platform-first ordering.
 #
 # All other platforms (k1, k2, ad5m, snapmaker-u1, x86, …) get the single
 # "Detected platform: X" line — there's no device-name ambiguity to clear up.
@@ -207,69 +554,16 @@ _refuse_if_firmware_managed() {
 
 # Main installation flow
 main() {
-    update_mode=false
-    uninstall_mode=false
-    clean_mode=false
-    ASSUME_YES=false
-    version=""
-    local_tarball=""
-    skip_kiauh_registration=false
+    # Probe the host once, before anything consults it: the mod-ownership
+    # guard backs set_install_paths' install-dir gate (and detect_tmp_dir's
+    # override branch), so HOST_MOD_ROOT must already be probed by then.
+    host_profile_probe
 
-    # Parse arguments
-    while [ $# -gt 0 ]; do
-        case $1 in
-            --update)
-                update_mode=true
-                shift
-                ;;
-            --uninstall)
-                uninstall_mode=true
-                shift
-                ;;
-            --clean)
-                clean_mode=true
-                shift
-                ;;
-            --yes|-y|--force)
-                # Explicit non-interactive consent for destructive prompts.
-                # ASSUME_YES is read by clean_old_installation (uninstall.sh);
-                # it is deliberately NOT inferred from a non-TTY stdin, since
-                # the documented `curl ... | sh` invocation always has one.
-                # shellcheck disable=SC2034  # consumed by uninstall.sh (clean_old_installation)
-                ASSUME_YES=true
-                shift
-                ;;
-            --version)
-                if [ -z "${2:-}" ]; then
-                    log_error "--version requires a version argument"
-                    exit 1
-                fi
-                version="$2"
-                shift 2
-                ;;
-            --local)
-                if [ -z "${2:-}" ]; then
-                    log_error "--local requires a file path argument"
-                    exit 1
-                fi
-                local_tarball="$2"
-                shift 2
-                ;;
-            --skip-kiauh-registration)
-                skip_kiauh_registration=true
-                shift
-                ;;
-            --help|-h)
-                usage
-                exit 0
-                ;;
-            *)
-                log_error "Unknown option: $1"
-                usage
-                exit 1
-                ;;
-        esac
-    done
+    # Parse arguments, then settle the payload contract BEFORE set_install_paths:
+    # its install-dir gate needs to know whether the mod's payload root is ours
+    # to write. Autodetect (probe) plus the operator's overrides decide.
+    parse_installer_args "$@"
+    mod_payload_autodetect
 
     # Self-delete safety guard runs as early as possible — before platform
     # detection, which exits on "unsupported" hardware and would otherwise
@@ -301,9 +595,11 @@ main() {
     print_platform_banner "$platform"
 
     # AD5X: refuse to run outside the ZMOD chroot — applies to fresh install,
-    # --update, --uninstall, and --local. Inside the chroot the check is a no-op.
+    # --update, --uninstall, and --local. Inside the chroot the check is a
+    # no-op, and a Forge-X host never trips it (its install is host-side into
+    # the mod's git tree, so the guard is inert there).
     if [ "$platform" = "ad5x" ]; then
-        ad5x_check_chroot_context
+        mod_check_chroot_context
     fi
 
     if [ "$platform" = "unsupported" ]; then
@@ -317,16 +613,25 @@ main() {
         exit 1
     fi
 
-    # For AD5M/K1, detect firmware variant and set appropriate paths
+    # For AD5M/AD5X/K1, detect the firmware/mod flavor and set appropriate paths.
+    # The FlashForge mods ship for both Adventurer platforms, so ad5m and ad5x
+    # share one detector — a Forge-X AD5X gets the Forge-X layout, not the
+    # ZMOD one the bare ad5x paths describe. AD5M_FIRMWARE is the compat alias
+    # for MOD_FLAVOR.
     local firmware=""
-    if [ "$platform" = "ad5m" ]; then
-        AD5M_FIRMWARE=$(detect_ad5m_firmware)
-        firmware="$AD5M_FIRMWARE"
+    if [ "$platform" = "ad5m" ] || [ "$platform" = "ad5x" ]; then
+        MOD_FLAVOR=$(detect_mod_flavor)
+        AD5M_FIRMWARE="$MOD_FLAVOR"
+        firmware="$MOD_FLAVOR"
     elif [ "$platform" = "k1" ]; then
         K1_FIRMWARE=$(detect_k1_firmware)
         firmware="$K1_FIRMWARE"
     fi
     set_install_paths "$platform" "$firmware"
+
+    # --mod-payload mode wiring (root precedence, OTA warning, mod-host
+    # notice) - after detection, before the requirements checks.
+    mod_payload_mode_block
 
     # Check permissions
     check_permissions "$platform"
@@ -342,8 +647,7 @@ main() {
 
     # Defensive: if uninstall_mode is still true at this point, the early
     # exit above is broken — fail loudly rather than running the install
-    # path, which is the failure mode that caused user reports of
-    # "--uninstall reinstalled HelixScreen".
+    # path, which REINSTALLS HelixScreen in answer to --uninstall.
     if [ "$uninstall_mode" = true ]; then
         log_error "internal error: install path entered with uninstall_mode=true"
         log_error "please report at https://github.com/${GITHUB_REPO}/issues"
@@ -431,8 +735,8 @@ main() {
     # Install KIAUH extension if KIAUH is detected
     install_kiauh_extension "$skip_kiauh_registration" || true
 
-    # K1: ensure SSH (dropbear) is running — recovers from #535 where disabling
-    # S99start_app also killed SSH. Runs on both fresh install and self-update.
+    # K1: ensure SSH (dropbear) is running — disabling S99start_app also stops
+    # SSH (#535). Runs on both fresh install and self-update.
     if [ "$platform" = "k1" ]; then
         ensure_k1_ssh
     fi
@@ -507,7 +811,7 @@ main() {
     printf '\n'
     echo "HelixScreen ${version} installed to ${INSTALL_DIR}"
     echo ""
-    print_post_install_commands
+    print_post_install_commands "${HOST_SERVICE_MECHANISM:-}"
     echo ""
 
     if [ "$platform" = "ad5m" ] || [ "$platform" = "k1" ] || [ "$platform" = "k2" ]; then

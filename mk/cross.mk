@@ -245,6 +245,9 @@ else ifeq ($(PLATFORM_TARGET),ad5m)
     HELIX_HAS_LABEL_PRINTER := 0
     HELIX_HAS_CFS := 0
     HELIX_HAS_IFS := 0
+    HELIX_HAS_ACE := 0
+    HELIX_HAS_QIDI := 0
+    HELIX_HAS_SNAPMAKER := 0
     # -Wl,--gc-sections: Remove unused sections during linking (works with -ffunction-sections)
     # -flto: Must match compiler flag for LTO to work
     # -static: Fully static binary - no runtime dependencies on system libs
@@ -282,6 +285,9 @@ else ifeq ($(PLATFORM_TARGET),ad5m-br)
     HELIX_HAS_LABEL_PRINTER := 0
     HELIX_HAS_CFS := 0
     HELIX_HAS_IFS := 0
+    HELIX_HAS_ACE := 0
+    HELIX_HAS_QIDI := 0
+    HELIX_HAS_SNAPMAKER := 0
     # No -static — buildroot wants dynamic linking against its sysroot
     TARGET_LDFLAGS := -Wl,--gc-sections -flto -lstdc++fs
     ENABLE_SSL := yes
@@ -315,6 +321,11 @@ else ifeq ($(PLATFORM_TARGET),ad5x)
     TARGET_CFLAGS := -march=mips32r5 -mtune=mips32r5 -mabi=32 -mnan=2008 -mfp64 \
         -Os -flto -ffunction-sections -fdata-sections -fno-omit-frame-pointer -funwind-tables \
         -Wno-error=conversion -Wno-error=sign-conversion -DHELIX_RELEASE_BUILD -DHELIX_PLATFORM_AD5X
+    # AMS: IFS stays ON - the AD5X's own filament system. Do NOT copy ad5m's IFS=0 here.
+    HELIX_HAS_CFS := 0
+    HELIX_HAS_ACE := 0
+    HELIX_HAS_QIDI := 0
+    HELIX_HAS_SNAPMAKER := 0
     # -Wl,--gc-sections: Remove unused sections during linking (works with -ffunction-sections)
     # -flto: Must match compiler flag for LTO to work
     TARGET_LDFLAGS := -Wl,--gc-sections -flto
@@ -357,6 +368,12 @@ else ifeq ($(PLATFORM_TARGET),cc1)
     TARGET_CFLAGS := -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard -mtune=cortex-a7 \
         -Os -flto -ffunction-sections -fdata-sections -funwind-tables \
         -Wno-error=conversion -Wno-error=sign-conversion -DHELIX_RELEASE_BUILD -DHELIX_PLATFORM_CC1
+    # AMS: Centauri Carbon has no vendor AMS. AFC/Happy Hare stay ON (user-installable).
+    HELIX_HAS_CFS := 0
+    HELIX_HAS_IFS := 0
+    HELIX_HAS_ACE := 0
+    HELIX_HAS_QIDI := 0
+    HELIX_HAS_SNAPMAKER := 0
     # -Wl,--gc-sections: Remove unused sections during linking (works with -ffunction-sections)
     # -flto: Must match compiler flag for LTO to work
     # -static: Fully static binary - no runtime dependencies on system libs
@@ -423,6 +440,11 @@ else ifneq ($(filter mips k1,$(PLATFORM_TARGET)),)
         -fno-omit-frame-pointer -funwind-tables \
         -fmerge-all-constants -fno-ident \
         -Wno-error=conversion -Wno-error=sign-conversion -DHELIX_RELEASE_BUILD -DHELIX_PLATFORM_MIPS
+    # AMS: CFS stays ON - K1/K1C/K1 Max all ship a 'with CFS' variant in the printer DB.
+    HELIX_HAS_IFS := 0
+    HELIX_HAS_ACE := 0
+    HELIX_HAS_QIDI := 0
+    HELIX_HAS_SNAPMAKER := 0
     # Linker flags:
     # -Wl,--gc-sections: Remove unused sections (works with -ffunction-sections)
     # -flto=auto: Match compiler LTO flag, uses all CPUs
@@ -465,6 +487,11 @@ else ifeq ($(PLATFORM_TARGET),k1-dynamic)
         -isystem include/compat \
         -Wno-error=conversion -Wno-error=sign-conversion \
         -DHELIX_RELEASE_BUILD -DHELIX_PLATFORM_K1
+    # AMS: CFS stays ON - see the mips block.
+    HELIX_HAS_IFS := 0
+    HELIX_HAS_ACE := 0
+    HELIX_HAS_QIDI := 0
+    HELIX_HAS_SNAPMAKER := 0
     # Dynamic linking with NaN2008 dynamic linker
     # NO -static flag! System libs resolved at runtime on the K1.
     TARGET_LDFLAGS := -Wl,--gc-sections -Wl,-O2 -Wl,--as-needed \
@@ -501,6 +528,11 @@ else ifeq ($(PLATFORM_TARGET),k2)
         -fno-omit-frame-pointer -funwind-tables \
         -fmerge-all-constants -fno-ident \
         -Wno-error=conversion -Wno-error=sign-conversion -DHELIX_RELEASE_BUILD -DHELIX_PLATFORM_K2
+    # AMS: CFS stays ON - the K2 series is the flagship CFS printer.
+    HELIX_HAS_IFS := 0
+    HELIX_HAS_ACE := 0
+    HELIX_HAS_QIDI := 0
+    HELIX_HAS_SNAPMAKER := 0
     TARGET_LDFLAGS := -Wl,--gc-sections -Wl,-O2 -Wl,--as-needed -flto=auto -static
     # HTTPS is required for the update check, R2 self-update download, telemetry,
     # and crash/debug-bundle upload. (Local Moonraker is plain HTTP and works
@@ -532,6 +564,11 @@ else ifeq ($(PLATFORM_TARGET),snapmaker-u1)
     TARGET_CFLAGS := -march=armv8-a -fno-omit-frame-pointer -funwind-tables -Os -flto -ffunction-sections -fdata-sections \
         -I/usr/include/libdrm \
         -Wno-error=conversion -Wno-error=sign-conversion -DHELIX_RELEASE_BUILD -DHELIX_PLATFORM_SNAPMAKER_U1
+    # AMS: SNAPMAKER stays ON - this build IS the U1 with SnapSwap.
+    HELIX_HAS_CFS := 0
+    HELIX_HAS_IFS := 0
+    HELIX_HAS_ACE := 0
+    HELIX_HAS_QIDI := 0
     TARGET_LDFLAGS := -Wl,--gc-sections -flto -static-libstdc++ -static-libgcc
     SNAPMAKER_SKIP_LIBINPUT := yes
     ENABLE_SSL := yes
@@ -924,12 +961,12 @@ ensure-ccache-dir = @mkdir -p "$(DOCKER_CCACHE_BASE)/$(1)"
 # Worktree cross-build support.
 # scripts/setup-worktree.sh symlinks lib/<submodule> to the main checkout (absolute
 # paths) so a worktree builds fast without duplicating ~GB of submodules. But Docker
-# only bind-mounts $(PWD) at /src, so those absolute symlinks dangle inside the
+# only bind-mounts $(CURDIR) at /src, so those absolute symlinks dangle inside the
 # container — the dependency check reports "LVGL not found" and relative LVGL includes
 # resolve to the wrong tree. When building from a worktree, also bind-mount the real
 # submodule tree at its own absolute path so every lib/* symlink resolves identically
 # inside and outside the container. Empty for a normal checkout, where lib/ already
-# lives under $(PWD). Detection: realpath of lib/lvgl is outside $(CURDIR).
+# lives under $(CURDIR). Detection: realpath of lib/lvgl is outside $(CURDIR).
 WORKTREE_LIB_REAL := $(patsubst %/,%,$(dir $(realpath lib/lvgl)))
 ifeq ($(findstring $(CURDIR)/,$(WORKTREE_LIB_REAL)/),)
 DOCKER_WORKTREE_MOUNT := $(if $(WORKTREE_LIB_REAL),-v "$(WORKTREE_LIB_REAL)":"$(WORKTREE_LIB_REAL)")
@@ -939,7 +976,7 @@ endif
 
 # Build provenance. The same mount boundary hides the git metadata: a worktree's
 # .git is a FILE reading "gitdir: $(MAIN)/.git/worktrees/<name>", and that path
-# is not under $(PWD), so git cannot resolve HEAD inside the container.
+# is not under $(CURDIR), so git cannot resolve HEAD inside the container.
 # scripts/gen-git-hash.sh fell back to "unknown" and the deployed binary could
 # not say which commit produced it — silently, because the build still succeeds.
 # Resolve it on the host, where git always works, and hand it to the container.
@@ -950,7 +987,7 @@ endif
 HELIX_GIT_HASH_HOST = $(or $(HELIX_GIT_HASH),$(shell git -c safe.directory='*' rev-parse --short HEAD 2>/dev/null))
 DOCKER_GIT_HASH_ENV = $(if $(HELIX_GIT_HASH_HOST),-e HELIX_GIT_HASH=$(HELIX_GIT_HASH_HOST))
 
-# Everything a container needs from the host beyond -v "$(PWD)":/src. Every
+# Everything a container needs from the host beyond -v "$(CURDIR)":/src. Every
 # `docker run` below must pass this — tests/shell/test_build_provenance.bats
 # fails the build if one does not, so a new platform target cannot regress
 # provenance or worktree support by omission.
@@ -1093,7 +1130,7 @@ pi-docker: ensure-docker
 		$(MAKE) docker-toolchain-pi; \
 	fi
 	$(call ensure-ccache-dir,pi)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi) helixscreen/toolchain-pi \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi) helixscreen/toolchain-pi \
 		make PLATFORM_TARGET=pi SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1108,7 +1145,7 @@ pi-asan-docker: ensure-docker
 		$(MAKE) docker-toolchain-pi; \
 	fi
 	$(call ensure-ccache-dir,pi-asan)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi-asan) helixscreen/toolchain-pi \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi-asan) helixscreen/toolchain-pi \
 		make PLATFORM_TARGET=pi SANITIZE=address SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1119,7 +1156,7 @@ pi-fbdev-docker: ensure-docker
 		$(MAKE) docker-toolchain-pi; \
 	fi
 	$(call ensure-ccache-dir,pi-fbdev)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi-fbdev) helixscreen/toolchain-pi \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi-fbdev) helixscreen/toolchain-pi \
 		make PLATFORM_TARGET=pi-fbdev SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1130,7 +1167,7 @@ pi-all-docker: ensure-docker
 		$(MAKE) docker-toolchain-pi; \
 	fi
 	$(call ensure-ccache-dir,pi)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi) helixscreen/toolchain-pi \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi) helixscreen/toolchain-pi \
 		make PLATFORM_TARGET=pi-both SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1141,7 +1178,7 @@ pi32-docker: ensure-docker
 		$(MAKE) docker-toolchain-pi32; \
 	fi
 	$(call ensure-ccache-dir,pi32)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi32) helixscreen/toolchain-pi32 \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi32) helixscreen/toolchain-pi32 \
 		make PLATFORM_TARGET=pi32 SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1156,7 +1193,7 @@ pi32-asan-docker: ensure-docker
 		$(MAKE) docker-toolchain-pi32; \
 	fi
 	$(call ensure-ccache-dir,pi32-asan)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi32-asan) helixscreen/toolchain-pi32 \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi32-asan) helixscreen/toolchain-pi32 \
 		make PLATFORM_TARGET=pi32 SANITIZE=address SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1167,7 +1204,7 @@ pi32-fbdev-docker: ensure-docker
 		$(MAKE) docker-toolchain-pi32; \
 	fi
 	$(call ensure-ccache-dir,pi32-fbdev)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi32-fbdev) helixscreen/toolchain-pi32 \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi32-fbdev) helixscreen/toolchain-pi32 \
 		make PLATFORM_TARGET=pi32-fbdev SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1178,7 +1215,7 @@ pi32-all-docker: ensure-docker
 		$(MAKE) docker-toolchain-pi32; \
 	fi
 	$(call ensure-ccache-dir,pi32)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi32) helixscreen/toolchain-pi32 \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,pi32) helixscreen/toolchain-pi32 \
 		make PLATFORM_TARGET=pi32-both SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1189,7 +1226,7 @@ ad5m-docker: ensure-docker
 		$(MAKE) docker-toolchain-ad5m; \
 	fi
 	$(call ensure-ccache-dir,ad5m)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,ad5m) helixscreen/toolchain-ad5m \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,ad5m) helixscreen/toolchain-ad5m \
 		make PLATFORM_TARGET=ad5m SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@# Extract CA certificates from Docker image for HTTPS verification on device
 	@mkdir -p build/ad5m/certs
@@ -1205,7 +1242,7 @@ ad5x-docker: ensure-docker
 		$(MAKE) docker-toolchain-ad5x; \
 	fi
 	$(call ensure-ccache-dir,ad5x)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,ad5x) helixscreen/toolchain-ad5x \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,ad5x) helixscreen/toolchain-ad5x \
 		make PLATFORM_TARGET=ad5x SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@# Extract CA certificates from Docker image for HTTPS verification on device
 	@mkdir -p build/ad5x/certs
@@ -1224,7 +1261,7 @@ cc1-docker: ensure-docker
 	@# Pass PLATFORM_TARGET=cc1 so cross.mk sets HELIX_LANG for the generator.
 	@$(MAKE) --no-print-directory PLATFORM_TARGET=cc1 $(TRANS_XML)
 	$(call ensure-ccache-dir,cc1)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,cc1) helixscreen/toolchain-cc1 \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,cc1) helixscreen/toolchain-cc1 \
 		make PLATFORM_TARGET=cc1 SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@# Extract CA certificates from Docker image for HTTPS verification on device
 	@mkdir -p build/cc1/certs
@@ -1247,7 +1284,7 @@ mips-docker: ensure-docker
 	fi
 	$(call ensure-ccache-dir,k1)
 	# Do not inherit host jobserver flags into containerized make.
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -e MAKEFLAGS= -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,k1) helixscreen/toolchain-k1 \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -e MAKEFLAGS= -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,k1) helixscreen/toolchain-k1 \
 		make PLATFORM_TARGET=mips SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@# Extract CA certificates from Docker image for HTTPS verification on device
 	@mkdir -p build/mips/certs
@@ -1266,7 +1303,7 @@ k1-dynamic-docker: ensure-docker
 		$(MAKE) docker-toolchain-k1-dynamic; \
 	fi
 	$(call ensure-ccache-dir,k1-dynamic)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,k1-dynamic) helixscreen/toolchain-k1-dynamic \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,k1-dynamic) helixscreen/toolchain-k1-dynamic \
 		make PLATFORM_TARGET=k1-dynamic SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1277,7 +1314,7 @@ k2-docker: ensure-docker
 		$(MAKE) docker-toolchain-k2; \
 	fi
 	$(call ensure-ccache-dir,k2)
-	$(Q)scripts/cross-compile-lock.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,k2) helixscreen/toolchain-k2 \
+	$(Q)scripts/cross-compile-lock.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,k2) helixscreen/toolchain-k2 \
 		make PLATFORM_TARGET=k2 SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1293,7 +1330,7 @@ ustreamer-k2: ensure-docker
 		echo "$(YELLOW)Docker image not found. Building toolchain first...$(RESET)"; \
 		$(MAKE) docker-toolchain-k2; \
 	fi
-	$(Q)scripts/cross-compile-lock.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src -e FORCE_REBUILD="$(FORCE_REBUILD)" helixscreen/toolchain-k2 \
+	$(Q)scripts/cross-compile-lock.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src -e FORCE_REBUILD="$(FORCE_REBUILD)" helixscreen/toolchain-k2 \
 		bash scripts/ustreamer/build-ustreamer-k2.sh
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1304,7 +1341,7 @@ snapmaker-u1-docker: ensure-docker
 		$(MAKE) docker-toolchain-snapmaker-u1; \
 	fi
 	$(call ensure-ccache-dir,snapmaker-u1)
-	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,snapmaker-u1) helixscreen/toolchain-snapmaker-u1 \
+	$(Q)scripts/cross-compile-lock.sh docker run --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,snapmaker-u1) helixscreen/toolchain-snapmaker-u1 \
 		make PLATFORM_TARGET=snapmaker-u1 SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@# Extract CA certificates from Docker image for HTTPS verification on device
 	@mkdir -p build/snapmaker-u1/certs
@@ -1320,7 +1357,7 @@ x86-docker: ensure-docker
 		$(MAKE) docker-toolchain-x86; \
 	fi
 	$(call ensure-ccache-dir,x86)
-	$(Q)scripts/cross-compile-lock.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,x86) helixscreen/toolchain-x86 \
+	$(Q)scripts/cross-compile-lock.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,x86) helixscreen/toolchain-x86 \
 		make PLATFORM_TARGET=x86 SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1331,7 +1368,7 @@ x86-fbdev-docker: ensure-docker
 		$(MAKE) docker-toolchain-x86; \
 	fi
 	$(call ensure-ccache-dir,x86-fbdev)
-	$(Q)scripts/cross-compile-lock.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,x86-fbdev) helixscreen/toolchain-x86 \
+	$(Q)scripts/cross-compile-lock.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,x86-fbdev) helixscreen/toolchain-x86 \
 		make PLATFORM_TARGET=x86-fbdev SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1342,7 +1379,7 @@ x86-all-docker: ensure-docker
 		$(MAKE) docker-toolchain-x86; \
 	fi
 	$(call ensure-ccache-dir,x86)
-	$(Q)scripts/cross-compile-lock.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(PWD)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,x86) helixscreen/toolchain-x86 \
+	$(Q)scripts/cross-compile-lock.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,x86) helixscreen/toolchain-x86 \
 		make PLATFORM_TARGET=x86-both SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
@@ -1831,20 +1868,37 @@ pi32-asan-test: pi32-asan-docker deploy-pi32-asan-fg
 # Example: make deploy-ad5m AD5M_HOST=192.168.1.100
 # Note: AD5M uses BusyBox and only has scp (no rsync), so we use scp -O for compatibility
 #
-# Deploy directory is auto-detected:
-#   - KlipperMod: /root/printer_software/helixscreen (if /root/printer_software exists)
-#   - Forge-X/Stock: /opt/helixscreen
+# Deploy directory, firmware flavor and platform hooks all come from the
+# INSTALLER's own detection, asked of the device by scripts/device-profile.sh.
 # Override with AD5M_DEPLOY_DIR if needed.
+#
+# This used to be hand-rolled here, a two-branch `if [ -d ... ]` sitting next to
+# the installer's four-way detect_mod_flavor(), and the two copies drifted: no
+# zmod branch at all (so hooks-ad5m-zmod.sh was unreachable from a deploy), the
+# /opt/config/mod/.root test placed BEFORE /ZMOD (so a ZMOD rig got the Forge-X
+# hooks), and only /root/printer_software vs /opt/helixscreen for the directory
+# (so it missed both ZMOD's /srv/helixscreen and the Forge-X payload root).
+# See the header of scripts/device-profile.sh.
 AD5M_HOST ?= ad5m.local
 AD5M_USER ?= root
 
 # Build SSH target for AD5M
 AD5M_SSH_TARGET := $(AD5M_USER)@$(AD5M_HOST)
 
-# Auto-detect deploy directory (KlipperMod vs Forge-X/Stock)
-# Can be overridden: make deploy-ad5m AD5M_DEPLOY_DIR=/custom/path
-AD5M_DEPLOY_DIR ?= $(shell ssh -o ConnectTimeout=5 $(AD5M_SSH_TARGET) \
-	"if [ -d /root/printer_software ]; then echo /root/printer_software/helixscreen; else echo /opt/helixscreen; fi" 2>/dev/null || echo /opt/helixscreen)
+# Lazily memoized: the $(eval) rewrites this to a simply-expanded variable on
+# FIRST use, so the ssh happens once per make run instead of once per mention
+# (AD5M_DEPLOY_DIR alone appears ~20 times in the recipes below), and not at all
+# for targets that never reference it -- a plain `make -j` must never phone the
+# printer.
+AD5M_PROFILE = $(eval AD5M_PROFILE := $(shell scripts/device-profile.sh $(AD5M_SSH_TARGET) -o ConnectTimeout=5 2>/dev/null))$(AD5M_PROFILE)
+
+# Pull one KEY=VALUE answer out of a device profile. $(1)=key, $(2)=profile.
+device-profile-value = $(patsubst $(1)=%,%,$(filter $(1)=%,$(2)))
+
+AD5M_DEPLOY_DIR ?= $(or $(call device-profile-value,INSTALL_DIR,$(AD5M_PROFILE)),/opt/helixscreen)
+AD5M_HOOK_KEY = $(call device-profile-value,PLATFORM_HOOK_KEY,$(AD5M_PROFILE))
+AD5M_MOD_FLAVOR = $(call device-profile-value,MOD_FLAVOR,$(AD5M_PROFILE))
+AD5M_SERVICE_MECHANISM = $(call device-profile-value,SERVICE_MECHANISM,$(AD5M_PROFILE))
 
 # =============================================================================
 # AD5M Deployment Targets
@@ -1857,6 +1911,7 @@ deploy-ad5m:
 	@test -f build/ad5m/bin/helix-screen || { echo "$(RED)Error: build/ad5m/bin/helix-screen not found. Run 'make remote-ad5m' first.$(RESET)"; exit 1; }
 	@test -f build/ad5m/bin/helix-splash || { echo "$(RED)Error: build/ad5m/bin/helix-splash not found. Run 'make remote-ad5m' first.$(RESET)"; exit 1; }
 	@echo "$(CYAN)Deploying HelixScreen to $(AD5M_SSH_TARGET):$(AD5M_DEPLOY_DIR)...$(RESET)"
+	@echo "$(DIM)  firmware=$(AD5M_MOD_FLAVOR) hooks=$(AD5M_HOOK_KEY) services=$(AD5M_SERVICE_MECHANISM)$(RESET)"
 	@# Generate pre-rendered images if missing
 	@if [ ! -f build/assets/images/prerendered/splash-logo-small.bin ]; then \
 		echo "$(DIM)Generating pre-rendered splash images...$(RESET)"; \
@@ -1902,24 +1957,25 @@ deploy-ad5m:
 		ssh $(AD5M_SSH_TARGET) "mkdir -p $(AD5M_DEPLOY_DIR)/certs"; \
 		cat build/ad5m/certs/ca-certificates.crt | ssh $(AD5M_SSH_TARGET) "cat > $(AD5M_DEPLOY_DIR)/certs/ca-certificates.crt"; \
 	fi
-	@# AD5M-specific: Deploy platform hooks (auto-detect firmware variant)
+	@# AD5M-specific: Deploy platform hooks. The key is whatever the installer's
+	@# own resolve_platform_hook_key() chose for this rig (via AD5M_PROFILE), so
+	@# a ZMOD box gets hooks-ad5m-zmod.sh and a Forge-X box hooks-ad5m-forgex.sh
+	@# without this makefile knowing one firmware from another.
 	@echo "$(DIM)Deploying platform hooks...$(RESET)"
-	@ssh $(AD5M_SSH_TARGET) '\
-		mkdir -p $(AD5M_DEPLOY_DIR)/platform; \
-		if [ -d /mnt/data/.klipper_mod ]; then \
-			HOOK="$(AD5M_DEPLOY_DIR)/assets/config/platform/hooks-ad5m-kmod.sh"; \
-		elif [ -d /opt/config/mod/.root ]; then \
-			HOOK="$(AD5M_DEPLOY_DIR)/assets/config/platform/hooks-ad5m-forgex.sh"; \
-		else \
-			HOOK=""; \
-		fi; \
-		if [ -n "$$HOOK" ] && [ -f "$$HOOK" ]; then \
-			cp "$$HOOK" "$(AD5M_DEPLOY_DIR)/platform/hooks.sh"; \
-			chmod +x "$(AD5M_DEPLOY_DIR)/platform/hooks.sh"; \
-			echo "Platform hooks deployed: $$HOOK"; \
-		else \
-			echo "No platform hooks to deploy"; \
-		fi'
+	@if [ -z "$(AD5M_HOOK_KEY)" ]; then \
+		echo "No platform hooks to deploy (device profile named no hook)"; \
+	else \
+		ssh $(AD5M_SSH_TARGET) '\
+			mkdir -p $(AD5M_DEPLOY_DIR)/platform; \
+			HOOK="$(AD5M_DEPLOY_DIR)/assets/config/platform/hooks-$(AD5M_HOOK_KEY).sh"; \
+			if [ -f "$$HOOK" ]; then \
+				cp "$$HOOK" "$(AD5M_DEPLOY_DIR)/platform/hooks.sh"; \
+				chmod +x "$(AD5M_DEPLOY_DIR)/platform/hooks.sh"; \
+				echo "Platform hooks deployed: $$HOOK"; \
+			else \
+				echo "Platform hook missing on device: $$HOOK"; \
+			fi'; \
+	fi
 	@# AD5M-specific: Update init script in /etc/init.d/ if it differs
 	@echo "$(DIM)Checking init script...$(RESET)"
 	@ssh $(AD5M_SSH_TARGET) '\

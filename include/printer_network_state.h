@@ -26,13 +26,14 @@ namespace helix {
  *
  * Extracted from PrinterState as part of god class decomposition.
  *
- * Subjects (6 total):
+ * Subjects (7 total):
  * - printer_connection_state_ (int) - ConnectionState enum values
  * - printer_connection_message_ (string, 128-byte buffer) - status message
  * - network_status_ (int) - NetworkStatus enum values
  * - klippy_state_ (int) - KlippyState enum values
  * - nav_buttons_enabled_ (int, derived) - 1 when connected AND klippy ready
  * - moonraker_connection_state_ (int, derived) - 1 when Moonraker WebSocket connected
+ * - moonraker_is_remote_ (int) - 1 when the connected Moonraker is NOT this host
  *
  * Additional state:
  * - was_ever_connected_ (bool) - tracks if ever successfully connected this session
@@ -100,6 +101,15 @@ class PrinterNetworkState {
      */
     void set_klippy_state_message(const std::string& message);
 
+    /**
+     * @brief Set remote-screen verdict (synchronous, must be on UI thread)
+     *
+     * Published by MoonrakerManager on each CONNECTED edge from the live
+     * websocket endpoint. 1 = the Moonraker we are talking to does not
+     * resolve to this host (remote screen); 0 = local/unknown.
+     */
+    void set_moonraker_is_remote_internal(bool remote);
+
     // ========================================================================
     // Subject accessors
     // ========================================================================
@@ -133,6 +143,11 @@ class PrinterNetworkState {
     /// Moonraker WebSocket connected (1 when WebSocket is up, independent of Klipper state)
     lv_subject_t* get_moonraker_connection_state_subject() {
         return &moonraker_connection_state_;
+    }
+
+    /// Remote-screen verdict (1 = connected Moonraker is not this host; 0 = local/unknown)
+    lv_subject_t* get_moonraker_is_remote_subject() {
+        return &moonraker_is_remote_;
     }
 
     /// Klipper state message (error/shutdown reason from webhooks, e.g. "Max force exceeded...")
@@ -180,6 +195,7 @@ class PrinterNetworkState {
     lv_subject_t klippy_state_{};               // Integer: KlippyState enum values
     lv_subject_t nav_buttons_enabled_{};        // Derived: 1 when connected AND klippy ready
     lv_subject_t moonraker_connection_state_{}; // Derived: 1 when Moonraker WebSocket connected
+    lv_subject_t moonraker_is_remote_{};        // 1 when connected Moonraker is not this host
 
     // String buffer for connection message
     char printer_connection_message_buf_[128];

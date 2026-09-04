@@ -153,12 +153,19 @@ TEST_CASE_METHOD(helix::ThermistorConfigFixture,
     wc.load();
     wc.save();
 
-    // No widget should have a "config" key since none was set
+    // "No config key anywhere" stopped being the invariant once the shipped
+    // default layout began attaching one to an anchor — print_status ships as
+    // Detailed in both orientations. What must still hold is the thing this
+    // test is named for: an EMPTY config is omitted rather than serialised as
+    // an empty object.
     auto& root = get_data()["printers"]["default"]["panel_widgets"]["home"];
     auto& saved = root["pages"][0]["widgets"];
     for (const auto& item : saved) {
         CAPTURE(item["id"].get<std::string>());
-        REQUIRE_FALSE(item.contains("config"));
+        if (item.contains("config")) {
+            REQUIRE(item["config"].is_object());
+            REQUIRE_FALSE(item["config"].empty());
+        }
     }
 }
 

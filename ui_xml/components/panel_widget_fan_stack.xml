@@ -2,6 +2,12 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <!--
+    Each fan row is [icon][name speed]. The name and speed live in their own
+    inner row so the outer row can flip to a column at taller authored sizes
+    (FanStackWidget::on_size_changed) and put the fan glyph ABOVE the pair
+    without breaking them onto separate lines.
+  -->
   <view name="panel_widget_fan_stack"
         extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" style_pad_left="#space_xs"
         style_pad_right="#space_xs" style_min_width="80" scrollable="false" flex_flow="column" style_pad_gap="#space_xs"
@@ -15,9 +21,14 @@
             style_flex_main_place="start" style_flex_cross_place="center" style_flex_track_place="center"
             style_pad_gap="#space_xs" clickable="false" event_bubble="true">
       <icon name="fan_stack_part_icon" src="fan" size="xs" variant="secondary" clickable="false" event_bubble="true"/>
-      <text_muted name="fan_stack_part_name" text="P" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
-      <text_small name="fan_stack_part_speed"
-                  style_text_color="#text" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
+      <lv_obj name="fan_stack_part_value"
+              width="content" height="content" style_pad_all="0" scrollable="false" flex_flow="row"
+              style_flex_main_place="start" style_flex_cross_place="center" style_flex_track_place="center"
+              style_pad_gap="#space_xs" clickable="false" event_bubble="true">
+        <text_muted name="fan_stack_part_name" text="P" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
+        <text_small name="fan_stack_part_speed"
+                    style_text_color="#text" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
+      </lv_obj>
     </lv_obj>
 
     <!-- Hotend fan row -->
@@ -26,9 +37,15 @@
             style_flex_main_place="start" style_flex_cross_place="center" style_flex_track_place="center"
             style_pad_gap="#space_xs" clickable="false" event_bubble="true">
       <icon name="fan_stack_hotend_icon" src="fan" size="xs" variant="secondary" clickable="false" event_bubble="true"/>
-      <text_muted name="fan_stack_hotend_name" text="H" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
-      <text_small name="fan_stack_hotend_speed"
-                  style_text_color="#text" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
+      <lv_obj name="fan_stack_hotend_value"
+              width="content" height="content" style_pad_all="0" scrollable="false" flex_flow="row"
+              style_flex_main_place="start" style_flex_cross_place="center" style_flex_track_place="center"
+              style_pad_gap="#space_xs" clickable="false" event_bubble="true">
+        <text_muted name="fan_stack_hotend_name"
+                    text="H" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
+        <text_small name="fan_stack_hotend_speed"
+                    style_text_color="#text" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
+      </lv_obj>
     </lv_obj>
 
     <!-- Aux fan row (hidden when no aux fan detected) -->
@@ -37,9 +54,14 @@
             style_flex_main_place="start" style_flex_cross_place="center" style_flex_track_place="center"
             style_pad_gap="#space_xs" clickable="false" event_bubble="true" hidden="true">
       <icon name="fan_stack_aux_icon" src="fan" size="xs" variant="secondary" clickable="false" event_bubble="true"/>
-      <text_muted name="fan_stack_aux_name" text="C" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
-      <text_small name="fan_stack_aux_speed"
-                  style_text_color="#text" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
+      <lv_obj name="fan_stack_aux_value"
+              width="content" height="content" style_pad_all="0" scrollable="false" flex_flow="row"
+              style_flex_main_place="start" style_flex_cross_place="center" style_flex_track_place="center"
+              style_pad_gap="#space_xs" clickable="false" event_bubble="true">
+        <text_muted name="fan_stack_aux_name" text="C" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
+        <text_small name="fan_stack_aux_speed"
+                    style_text_color="#text" style_text_font="#font_xs" clickable="false" event_bubble="true"/>
+      </lv_obj>
     </lv_obj>
   </view>
 </component>

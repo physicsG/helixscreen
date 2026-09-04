@@ -14,6 +14,7 @@
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -114,7 +115,97 @@ std::vector<std::pair<int, int>> coalesce_target_runs(const int16_t* buf, int fi
     return out;
 }
 
+// How many base ticks to advance between drawn X-axis labels so the labels do
+// not run into each other. Each of the tick_count labels gets an equal share of
+// plot_width; if that share is narrower than label_width + min_gap, only every
+// Nth label is drawn, which multiplies the share by N. Pure integer math (no
+// LVGL, no fonts) so it can be unit tested directly.
+//
+// Returns 1 (draw every tick) when there is nothing to thin or no width to
+// reason about, and never more than tick_count (thinning past that would drop
+// every label).
+int label_tick_stride(int32_t plot_width, int tick_count, int32_t label_width, int32_t min_gap) {
+    if (tick_count <= 1 || plot_width <= 0 || label_width <= 0)
+        return 1;
+
+    const int32_t share = plot_width / tick_count;
+    const int32_t needed = label_width + min_gap;
+
+    int stride = 1;
+    while (share * stride < needed && stride < tick_count)
+        stride++;
+    return stride;
+}
+
 } // namespace helix::temp_graph_internal
+
+// First tick at or after `leftmost`, snapped to a whole multiple of `interval`
+// counted from the epoch. Shared by the grid lines and the labels so a thinned
+// label cadence (a whole multiple of the grid interval) still lands on a line.
+static int64_t align_first_tick(int64_t leftmost, int64_t interval) {
+    if (interval <= 0)
+        return leftmost;
+    int64_t first = (leftmost / interval) * interval;
+    if (first < leftmost)
+        first += interval;
+    return first;
+}
+
+// Width the Y-axis labels actually need, measured with the axis font rather than
+// assumed from a size table. The font ladder scales per breakpoint (font_xs is
+// 10px on small screens and 20px at xxlarge), so a fixed 30px box holds "300°"
+// on one tier and wraps it onto two lines on another. The widest drawn label is
+// always at one end of the range - digit count grows with magnitude and only the
+// minimum can carry a sign - so measuring both endpoints bounds every label in
+// between. Falls back to the size-table floor when there is no font or no
+// increment to enumerate labels from.
+static int32_t measure_y_axis_width(const ui_temp_graph_t* graph) {
+    if (!graph)
+        return 0;
+    if (!graph->axis_font || graph->y_axis_increment <= 0)
+        return graph->y_axis_width_floor;
+
+    const float endpoints[2] = {graph->min_temp, graph->max_temp};
+    int32_t widest = 0;
+    for (float temp : endpoints) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%d°", static_cast<int>(temp));
+        lv_point_t size;
+        lv_text_get_size(&size, buf, graph->axis_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        if (size.x > widest)
+            widest = size.x;
+    }
+
+    // Small cushion so glyph-advance rounding can never leave the last character
+    // one pixel short of the box and wrap it.
+    widest += 2;
+    return LV_MAX(widest, graph->y_axis_width_floor);
+}
+
+// Re-derive the Y-axis label width and keep the chart's left padding in step with
+// it. Called from every path that can change the measurement: axis font, label
+// increment, and temperature range (the auto-range path moves both at runtime).
+static void refresh_y_axis_width(ui_temp_graph_t* graph) {
+    if (!graph || !graph->chart)
+        return;
+
+    int32_t width = measure_y_axis_width(graph);
+    if (width == graph->y_axis_width)
+        return;
+
+    graph->y_axis_width = width;
+
+    // Only own the left padding while the labels are drawn; with the Y-axis off,
+    // set_features has collapsed that padding deliberately.
+    if (graph->show_y_axis) {
+        int32_t space_sm = theme_manager_get_spacing("space_sm");
+        lv_obj_set_style_pad_left(graph->chart, width + space_sm, LV_PART_MAIN);
+    }
+
+    lv_obj_invalidate(graph->chart);
+    spdlog::trace("[TempGraph] Y-axis width measured: {}px (floor {}px)", width,
+                  graph->y_axis_width_floor);
+}
 
 // Helper: Create a muted (reduced opacity) version of a color
 // Since LVGL chart cursors don't support opacity, we blend toward the background
@@ -559,10 +650,10 @@ static bool gradient_skip_enabled() {
 // is ILLEGAL during an active render pass (disp->rendering_in_progress) — doing it
 // from the DRAW_MAIN_END draw callback produced an empty/undrawn buffer, so the
 // blit rendered nothing (the LVGL 9.5 gradient regression; same rule the filament
-// path layers obey, see ui_filament_path_layers.cpp). This runs as an lv_async_call
-// OUTSIDE the render pass, so the canvas layer round-trip is legal here.
-static void gradient_recompute_async(void* arg) {
-    ui_temp_graph_t* graph = static_cast<ui_temp_graph_t*>(arg);
+// path layers obey, see ui_filament_path_layers.cpp). This runs from the graph's
+// gradient_refresh timer, OUTSIDE the render pass, so the canvas layer round-trip
+// is legal here.
+static void gradient_recompute(ui_temp_graph_t* graph) {
     if (!graph || !graph->chart)
         return;
     if (!(graph->features & TEMP_GRAPH_FEATURE_GRADIENTS))
@@ -686,10 +777,11 @@ static void draw_gradient_cb(lv_event_t* e) {
     // Cache is stale, mis-sized, or not yet built. Draw straight into the event
     // layer this frame so the gradient is never invisible (the proven direct path,
     // L079), and schedule an out-of-render-pass recompute so subsequent frames hit
-    // the cheap blit path above. lv_async_call dedups on (cb, arg), so repeated
-    // dirty frames collapse to a single recompute.
+    // the cheap blit path above. This callback runs per drawn frame, so the
+    // request is leading-edge: frames that arrive while a recompute is pending
+    // ride the one already queued instead of allocating another timer for it.
     gradient_render_columns(graph, g, event_layer, g.cx1, g.cy1);
-    lv_async_call(gradient_recompute_async, graph);
+    graph->gradient_refresh.schedule_once([graph]() { gradient_recompute(graph); });
 }
 
 // Draw legend chips in the upper-left of the chart content area.
@@ -932,10 +1024,7 @@ temp_graph_time_axis_t temp_graph_time_axis(const ui_temp_graph_t* graph) {
         t.interval_ms = 2 * 60 * 1000;
     }
 
-    t.first_ms = (t.leftmost_ms / t.interval_ms) * t.interval_ms;
-    if (t.first_ms < t.leftmost_ms) {
-        t.first_ms += t.interval_ms;
-    }
+    t.first_ms = align_first_tick(t.leftmost_ms, t.interval_ms);
     return t;
 }
 
@@ -1161,14 +1250,43 @@ static void draw_x_axis_labels_cb(lv_event_t* e) {
     // Position below chart content with responsive gap
     int32_t label_y = coords.y2 - pad_bottom + space_xs;
 
-    const int64_t label_interval_ms = axis.interval_ms;
+    // The time axis picks its cadence from elapsed time alone, so on a narrow
+    // chart the ticks land closer together than the formatted times are wide and
+    // the labels collide ("5:20 PM5:25 PM"). Measure the widest label the base
+    // cadence would draw, then thin the labels to every Nth tick until each one
+    // owns enough width. The grid lines keep the base cadence; because the thinned
+    // interval is a whole multiple of it, every surviving label still sits on a
+    // grid line.
+    const int32_t label_gap = theme_manager_get_spacing("space_sm");
+    int32_t widest_label = 0;
+    int base_tick_count = 0;
+    for (int64_t tick_ms = axis.first_ms; tick_ms <= latest_ms; tick_ms += axis.interval_ms) {
+        base_tick_count++;
+        if (!graph->axis_font)
+            continue;
+        time_t tick_sec = static_cast<time_t>(tick_ms / 1000);
+        std::string tick_text = format_time(localtime(&tick_sec));
+        lv_point_t tick_size;
+        lv_text_get_size(&tick_size, tick_text.c_str(), graph->axis_font, 0, 0, LV_COORD_MAX,
+                         LV_TEXT_FLAG_NONE);
+        if (tick_size.x > widest_label)
+            widest_label = tick_size.x;
+    }
+
+    const int stride = helix::temp_graph_internal::label_tick_stride(content_width, base_tick_count,
+                                                                     widest_label, label_gap);
+    const int64_t label_interval_ms = axis.interval_ms * stride;
+    const int64_t first_label_ms = align_first_tick(leftmost_ms, label_interval_ms);
 
     // Track previous label to skip duplicates
     char prev_label[12] = ""; // Sized for 12H format: "12:30 PM"
+    // Right edge of the last label drawn, so a label pushed inward at the chart
+    // edge cannot end up on top of its neighbour.
+    int32_t prev_label_x2 = INT32_MIN;
 
     // Draw labels at regular time intervals, starting from the first tick on a
     // nice boundary at or after the left edge.
-    for (int64_t label_time_ms = axis.first_ms; label_time_ms <= latest_ms;
+    for (int64_t label_time_ms = first_label_ms; label_time_ms <= latest_ms;
          label_time_ms += label_interval_ms) {
         // Calculate X position for this time
         // Position is proportional: (time - leftmost) / total_display_time * width
@@ -1196,15 +1314,37 @@ static void draw_x_axis_labels_cb(lv_event_t* e) {
         if (strcmp(time_str, prev_label) == 0) {
             continue;
         }
-        strncpy(prev_label, time_str, sizeof(prev_label) - 1);
 
-        // Create label area (centered on label_x)
-        // Sized for 12H format like "12:30 PM" (wider than 24H "14:30")
+        // Box the label to its measured width and centre it on the tick. Nothing
+        // clips this draw, so an edge tick is nudged inward instead of spilling
+        // over the Y-axis labels or past the right edge of the chart.
+        lv_point_t text_size;
+        lv_text_get_size(&text_size, time_str, graph->axis_font, 0, 0, LV_COORD_MAX,
+                         LV_TEXT_FLAG_NONE);
+        int32_t text_w = text_size.x;
+
         lv_area_t label_area;
-        label_area.x1 = label_x - 40; // 80px width, centered (fits "12:30 PM")
+        label_area.x1 = label_x - text_w / 2;
+        label_area.x2 = label_area.x1 + text_w;
+        if (label_area.x2 > content_x2) {
+            label_area.x1 -= (label_area.x2 - content_x2);
+            label_area.x2 = content_x2;
+        }
+        if (label_area.x1 < content_x1) {
+            label_area.x2 += (content_x1 - label_area.x1);
+            label_area.x1 = content_x1;
+        }
         label_area.y1 = label_y;
-        label_area.x2 = label_x + 40;
         label_area.y2 = label_y + label_height;
+
+        // A nudged label can land on its predecessor even though the cadence had
+        // room for both - drop it rather than overprint.
+        if (prev_label_x2 != INT32_MIN && label_area.x1 < prev_label_x2 + label_gap) {
+            continue;
+        }
+
+        strncpy(prev_label, time_str, sizeof(prev_label) - 1);
+        prev_label_x2 = label_area.x2;
 
         label_dsc.text = time_str;
         lv_draw_label(layer, &label_dsc, &label_area);
@@ -1222,16 +1362,28 @@ static void draw_x_axis_labels_cb(lv_event_t* e) {
 
         // Only draw if different from last label
         if (strcmp(now_str, prev_label) != 0) {
-            // Sized for 12H format like "12:30 PM" (wider than 24H "14:30")
+            // Box ends on the right edge of the content area. The old fixed box
+            // ran 36px past it, and no ext_draw_size covers the overhang, so the
+            // tail of the time was clipped away.
+            lv_point_t now_size;
+            lv_text_get_size(&now_size, now_str, graph->axis_font, 0, 0, LV_COORD_MAX,
+                             LV_TEXT_FLAG_NONE);
+
             lv_area_t label_area;
-            label_area.x1 = content_x2 - 44; // 80px width, right-aligned
+            label_area.x2 = content_x2;
+            label_area.x1 = content_x2 - now_size.x;
+            if (label_area.x1 < content_x1)
+                label_area.x1 = content_x1;
             label_area.y1 = label_y;
-            label_area.x2 = content_x2 + 36;
             label_area.y2 = label_y + label_height;
 
-            label_dsc.text = now_str;
-            label_dsc.align = LV_TEXT_ALIGN_RIGHT; // Right-align the "now" label
-            lv_draw_label(layer, &label_dsc, &label_area);
+            // The last cadence label can reach far enough right to collide with
+            // "now"; the cadence math does not know about this extra label.
+            if (prev_label_x2 == INT32_MIN || label_area.x1 >= prev_label_x2 + label_gap) {
+                label_dsc.text = now_str;
+                label_dsc.align = LV_TEXT_ALIGN_RIGHT; // Right-align the "now" label
+                lv_draw_label(layer, &label_dsc, &label_area);
+            }
         }
     }
 }
@@ -1437,8 +1589,10 @@ ui_temp_graph_t* ui_temp_graph_create(lv_obj_t* parent) {
         return nullptr;
     }
 
+    // make_unique value-initializes, which zeroes every trivial member before
+    // running the members that have constructors. Blanket-memsetting the result
+    // would be redundant and would overwrite those constructed members.
     ui_temp_graph_t* graph = graph_ptr.get();
-    memset(graph, 0, sizeof(ui_temp_graph_t));
 
     // Initialize defaults
     graph->point_count = UI_TEMP_GRAPH_DEFAULT_POINTS;
@@ -1453,7 +1607,8 @@ ui_temp_graph_t* ui_temp_graph_create(lv_obj_t* parent) {
     graph->show_x_axis = true;
     graph->max_visible_temp = graph->min_temp + 1.0f; // Initialize to avoid zero gradient span
     graph->axis_font = theme_manager_get_font("font_small"); // Default axis label font
-    graph->y_axis_width = 40;                                // Default Y-axis label width
+    graph->y_axis_width_floor = 40;                          // Until set_axis_size picks a tier
+    graph->y_axis_width = graph->y_axis_width_floor;
 
     // Gradient cache (#979): zero-init the offscreen render target; first draw
     // lazily creates the canvas/buffer and computes the gradient once.
@@ -1593,10 +1748,10 @@ void ui_temp_graph_destroy(ui_temp_graph_t* graph) {
     // Transfer ownership to RAII wrapper - automatic cleanup
     std::unique_ptr<ui_temp_graph_t> graph_ptr(graph);
 
-    // Cancel any pending out-of-render-pass gradient recompute keyed on this graph
-    // (lv_async_call(gradient_recompute_async, graph)). Without this the async could
-    // fire after the struct below is freed → UAF. Keyed cancel matches (cb, arg).
-    lv_async_call_cancel(gradient_recompute_async, graph);
+    // Retract any pending out-of-render-pass gradient recompute. Without this it
+    // could fire after the struct below is freed → UAF. ~ui_temp_graph_t cancels
+    // the timer as well; this is the explicit half, ahead of the teardown below.
+    graph_ptr->gradient_refresh.cancel();
 
     // Drop this graph's over-range save slot so the keyed map doesn't retain a
     // stale key (the pointer is about to be freed).
@@ -2150,8 +2305,12 @@ void ui_temp_graph_set_temp_range(ui_temp_graph_t* graph, float min, float max) 
                             static_cast<int32_t>(min * TEMP_SCALE),
                             static_cast<int32_t>(max * TEMP_SCALE));
 
-    if (range_changed)
+    if (range_changed) {
         mark_gradient_cache_dirty(graph);
+        // A taller range means wider labels ("50°" -> "300°"); auto-range moves
+        // this at runtime, so the reserved width has to follow.
+        refresh_y_axis_width(graph);
+    }
 
     lv_obj_invalidate(graph->chart);
 
@@ -2216,6 +2375,9 @@ void ui_temp_graph_set_y_axis(ui_temp_graph_t* graph, float increment, bool show
     graph->y_axis_increment = increment;
     graph->show_y_axis = show;
 
+    // The increment decides which labels exist, so the measured width follows it.
+    refresh_y_axis_width(graph);
+
     // Force redraw to apply changes
     lv_obj_invalidate(graph->chart);
 
@@ -2232,20 +2394,24 @@ void ui_temp_graph_set_axis_size(ui_temp_graph_t* graph, const char* size) {
     // Map size name to font token using shared helper
     const char* font_token = theme_manager_size_to_font_token(size, "sm");
 
-    // Y-axis width varies by size (smaller fonts need less space)
-    int32_t y_axis_width = 40; // default for "sm"
+    // Floor for the Y-axis label width. The real width is measured against the
+    // resolved font below - this table only keeps a sane minimum, and stands in
+    // when there is no font or no label increment to measure.
+    int32_t y_axis_width_floor = 40; // default for "sm"
     if (size) {
         if (strcmp(size, "xs") == 0) {
-            y_axis_width = 30;
+            y_axis_width_floor = 30;
         } else if (strcmp(size, "md") == 0) {
-            y_axis_width = 45;
+            y_axis_width_floor = 45;
         } else if (strcmp(size, "lg") == 0) {
-            y_axis_width = 50;
+            y_axis_width_floor = 50;
         }
     }
 
     graph->axis_font = theme_manager_get_font(font_token);
-    graph->y_axis_width = y_axis_width;
+    graph->y_axis_width_floor = y_axis_width_floor;
+    graph->y_axis_width = measure_y_axis_width(graph);
+    int32_t y_axis_width = graph->y_axis_width;
 
     // Recalculate padding to match new font size
     int32_t space_xs = theme_manager_get_spacing("space_xs");
@@ -2305,6 +2471,11 @@ void ui_temp_graph_set_features(ui_temp_graph_t* graph, uint32_t features) {
     int32_t space_xs = theme_manager_get_spacing("space_xs");
     int32_t space_sm = theme_manager_get_spacing("space_sm");
     int32_t label_height = theme_manager_get_font_height(graph->axis_font);
+
+    // Re-measure before reserving: the caller may have set the range or the
+    // increment while the Y-axis was off, when refresh_y_axis_width leaves the
+    // padding alone.
+    graph->y_axis_width = measure_y_axis_width(graph);
 
     // Left padding: reserve space for Y-axis labels, or use minimal padding
     int32_t left_pad = want_y ? (graph->y_axis_width + space_sm) : space_xs;

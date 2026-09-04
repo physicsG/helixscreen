@@ -4,7 +4,7 @@ Give a selected exclude-object a white silhouette outline hugging its real shape
 G-code view, matching OrcaSlicer's selection treatment. Corner brackets stay as they are.
 Carry the renderer duplication cleanup that the feature touches, per the 1.1 quality process.
 
-Branch: `devel/1.1`. Status: design, pending implementation.
+Branch: `main`. Status: design, partly implemented.
 
 ---
 
@@ -21,23 +21,33 @@ This is the load-bearing fact for the whole design, and it is not what the docs 
 |----------|--------|----------|
 | `GCodeLayerRenderer` | the 2D isometric view, all platforms | everywhere |
 | `GCodeGLESRenderer` | the 3D view | `ENABLE_GLES_3D=yes` only: `pi`, `pi32`, `pi-both`, `pi32-both`, `x86`, `x86-both` |
-| `GCodeRenderer` (CPU wireframe) | **the 3D view on every embedded printer** | `ENABLE_GLES_3D=no`: `ad5m`, `ad5m-br`, `ad5x`, `cc1`, `k1-dynamic`, `k2`, `snapmaker-u1`, `pi-fbdev`, `pi32-fbdev`, `x86-fbdev`, `yocto` |
+| `GCodeRenderer` (CPU wireframe) | 3D only via `--render-3d` or a stale persisted setting; NOT user-selectable | `ENABLE_GLES_3D=no`: `ad5m`, `ad5m-br`, `ad5x`, `cc1`, `k1-dynamic`, `k2`, `snapmaker-u1`, `pi-fbdev`, `pi32-fbdev`, `x86-fbdev`, `yocto` |
 
-`GCodeRenderer` is often described as a dead fallback. It is not. `Makefile:422` filters out
-only `gcode_gles_renderer.cpp`, and on non-GLES builds `renderer_` **is** `GCodeRenderer`
-(`ui_gcode_viewer.cpp:32-38`). `is_using_2d_mode()` returns `render_mode_ != Render3D` in that
-build (`:390`), and `render_mode_` reaches `Render3D` through two live paths that do not go
-through `decide_render_mode()`:
+`GCodeRenderer` is often described as a dead fallback. It is not dead, but it is also not the
+fleet's 3D renderer, and an earlier draft of this spec had that wrong.
 
-- the user-facing setting, `/display/gcode_render_mode` = 1, via `ui_settings_printing.cpp:245`
-  and `ui_panel_settings.cpp:188`, applied at `ui_panel_print_status.cpp:810-812`
-- the CLI `--render-3d` (`cli_args.cpp:533`)
+What is true: `Makefile:422` filters out only `gcode_gles_renderer.cpp`, so this file compiles into
+every non-GLES build, and on those builds `renderer_` **is** `GCodeRenderer`
+(`ui_gcode_viewer.cpp:32-38`).
 
-both landing in `ui_gcode_viewer_set_render_mode()` (`ui_gcode_viewer.cpp:2102`).
+What is NOT true: that users reach it. `ui_settings_printing.cpp:186-200` removes the "3D View"
+entry from the dropdown under `#ifndef ENABLE_GLES_3D`, and `handle_gcode_mode_changed()` maps
+dropdown indices through `INDEX_TO_MODE[] = {0, 2, 3}` -- Auto, 2D Layers, Thumbnail Only. Mode 1
+(`Render3D`) is not producible from the UI there. The config default is 0/Auto (`config.cpp:92`).
 
-So on AD5M, AD5X, CC1, K1C, K2 Plus and Snapmaker U1, selecting "3D" renders through
-`GCodeRenderer`. **A silhouette that only lands in the GLES renderer would not appear on any
-printer we ship to.** Do not delete this file.
+That leaves two reachable paths on a non-GLES build, both off the normal user route:
+- the `--render-3d` developer flag (`cli_args.cpp:533`)
+- a `settings.json` carrying a persisted `gcode_render_mode: 1`, e.g. copied from a GLES build
+
+Both land in `ui_gcode_viewer_set_render_mode()` (`ui_gcode_viewer.cpp:2102`), and
+`is_using_2d_mode()` returns `render_mode_ != Render3D` in that build (`:390`), so the legacy
+renderer does then draw. So: **do not delete this file** -- deleting it would turn a dev flag and a
+stale config into a blank view. But do not prioritize feature work in it either.
+
+The consequence for this design: **the AD5M/AD5X/CC1/K1C/K2/U1 fleet does not run a 3D view at all.**
+Those machines lack the CPU and RAM for it, which is why GLES is off and the option is hidden. For
+them the isometric `GCodeLayerRenderer` view IS the G-code view, so the halo there is the entire
+feature as far as the printers are concerned. The GLES shell pass serves Pi and desktop only.
 
 ### Where the 2D isometric view actually renders
 
@@ -293,7 +303,7 @@ full-viewport post pass on every selection change, on hardware where we already 
   single selection; excluded dimming is persistent and multi-object, which is why they differ.)
 - **`ExcludeObjectMapView`**, the top-down plan map. It discards the excluded and current-object
   distinction once its canvas exists (`ui_exclude_object_map_view.cpp:659` on main). Note this
-  file already differs on `devel/1.1`, where `CoordMapper` was extracted to
+  file differs on the trunk, where `CoordMapper` was extracted to
   `include/bed_coord_mapper.h` and bed defaults centralized into `bed_dimensions_from_volume()`.
   Re-read it on the branch before touching.
 - **Corner brackets.** Geometry unchanged in all views: 24 arms via
@@ -333,7 +343,8 @@ Visual, per the platform matrix, because a desktop-only check would miss the pri
 - GLES build (`x86`): `demo print-status`, then `helix-screen ctl` to select an object. Verify
   against `stand_s.gcode` (the concave S is the whole point) and `calicat_calico.gcode`.
 - Non-GLES build (`x86-fbdev`) with render mode forced to 3D via `--render-3d`, exercising
-  `GCodeRenderer`. This is the path that ships to AD5M, AD5X, CC1, K1C, K2 and U1.
+  `GCodeRenderer`. This is a developer path, not a shipped one -- verify it does not regress rather
+  than treating it as a target. What ships to AD5M, AD5X, CC1, K1C, K2 and U1 is the isometric view.
 - Smallest panel, 480x272, for halo legibility.
 
 Judge geometry with `ctl geom` where possible; the outline itself needs eyes. Pin the socket and
@@ -393,16 +404,18 @@ mixed with a feature:
 2. DRY-3 (may change pixel output; own commit)
 3. DRY-4 through DRY-7
 4. Halo in the 2D isometric renderer
-5. Halo in the CPU wireframe 3D renderer
+5. Halo in the CPU wireframe 3D renderer -- OPTIONAL, last. Reachable only by `--render-3d` or
+   a stale persisted setting, so it buys almost nothing. Do it only if it falls out of the shared
+   helpers for free.
 6. GLES object runs, then the shell pass
 7. Doc corrections
 
 MAJOR work by the project's classification, so it goes in a worktree. Note
 `scripts/setup-worktree.sh` runs `git worktree add -b "$BRANCH"` with **no start point**
-(`:227`), so it would branch from the main tree's HEAD. Create the branch off `devel/1.1`
+(`:227`), so it would branch from the main tree's HEAD. Create the branch off `main`
 explicitly first:
 
 ```
-git branch feature/gcode-selection-silhouette devel/1.1
+git branch feature/gcode-selection-silhouette main
 scripts/setup-worktree.sh feature/gcode-selection-silhouette
 ```

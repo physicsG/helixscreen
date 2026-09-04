@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -49,19 +50,21 @@ TEST_CASE("NozzleTempsWidget: no hardware gate (visible to all printers)",
     REQUIRE(def->hardware_gate_subject == nullptr);
 }
 
-TEST_CASE("NozzleTempsWidget: default rowspan is 2 (1x2 preferred)",
+TEST_CASE("NozzleTempsWidget: default rowspan is two cells (1x2 preferred)",
           "[nozzle_temps][panel_widget]") {
     const auto* def = find_widget_def("nozzle_temps");
     REQUIRE(def != nullptr);
 
-    REQUIRE(def->colspan == 1);
-    REQUIRE(def->rowspan == 2);
+    // Tracks, not cells — a track is half a cell (GridLayout::TRACKS_PER_CELL),
+    // so one authored cell is 2 here.
+    REQUIRE(def->colspan == 2);
+    REQUIRE(def->rowspan == 4);
 
-    // Can scale from 1x1 to 2x3 (supports compact 1x1 and 2x1 layouts)
-    REQUIRE(def->effective_min_colspan() == 1);
-    REQUIRE(def->effective_min_rowspan() == 1);
-    REQUIRE(def->effective_max_colspan() == 2);
-    REQUIRE(def->effective_max_rowspan() == 3);
+    // Can scale from one cell to 2x3 cells (supports the compact and 2x1 layouts)
+    REQUIRE(def->effective_min_colspan() == 2);
+    REQUIRE(def->effective_min_rowspan() == 2);
+    REQUIRE(def->effective_max_colspan() == 4);
+    REQUIRE(def->effective_max_rowspan() == 6);
 }
 
 TEST_CASE("NozzleTempsWidget: not enabled by default (requires multi-tool)",

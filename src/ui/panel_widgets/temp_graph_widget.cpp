@@ -92,12 +92,9 @@ void TempGraphWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
 
     // Seed features from the measured 800x480 two-span (colspan=2/rowspan=2)
     // extents — a stand-in until the first real on_size_changed() call
-    // supplies this instance's actual pixel size. At 233x230 both width and
-    // height clear every threshold in features_for_size(), so this seed
-    // yields the full feature mask (LINES | TARGET_LINES | LEGEND | Y_AXIS |
-    // X_AXIS | GRADIENTS | READOUTS | TARGET_HISTORY, i.e. TEMP_GRAPH_ALL_FEATURES),
-    // where the old colspan=2/rowspan=2 default withheld READOUTS (needed
-    // colspan>=3). The difference never reaches the screen: PanelWidgetManager
+    // supplies this instance's actual pixel size. 233x230 against that panel's
+    // bands yields everything but READOUTS, which needs the widest band. The
+    // exact mask never reaches the screen: PanelWidgetManager
     // calls on_size_changed() with this instance's real pixel extents
     // immediately after attach() returns, in the same synchronous loop
     // iteration and before any paint (panel_widget_manager.cpp:862-868), so
@@ -135,11 +132,13 @@ void TempGraphWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         }
     }
 
-    // Match container bg to card (chart styling handled by controller)
-    if (controller_ && controller_->is_valid()) {
-        lv_obj_set_style_bg_color(widget_obj_, theme_manager_get_color("card_bg"), 0);
-        lv_obj_set_style_bg_opa(widget_obj_, LV_OPA_COVER, 0);
-    }
+    // The graph is `merges_into_card = false` — it reads as its own panel, not
+    // as one tile in a fused run — so it supplies its own surface. Use the
+    // shared Card style rather than painting card_bg directly: the raw fill
+    // this used to set had no radius, so it drew square corners wherever it sat
+    // against the rounded cards around it.
+    lv_obj_add_style(widget_obj_, ThemeManager::instance().get_style(StyleRole::Card),
+                     LV_PART_MAIN);
 
     spdlog::debug("[TempGraphWidget] Attached '{}' (seed {}x{}px)", instance_id_, SEED_WIDTH_PX,
                   SEED_HEIGHT_PX);
@@ -253,15 +252,19 @@ bool TempGraphWidget::on_edit_configure() {
 // ============================================================================
 
 uint32_t TempGraphWidget::features_for_size(int width_px, int height_px) {
+    return features_for_size(width_px, height_px, widget_size::current_breakpoint());
+}
+
+uint32_t TempGraphWidget::features_for_size(int width_px, int height_px, UiBreakpoint bp) {
     // Gradients always enabled — the draw callback auto-disables when >3 series visible
     uint32_t features = TEMP_GRAPH_FEATURE_LINES | TEMP_GRAPH_FEATURE_GRADIENTS;
 
-    if (width_px >= widget_size::W_NORMAL || height_px >= widget_size::H_TALL) {
+    if (width_px >= widget_size::w_normal(bp) || height_px >= widget_size::h_tall(bp)) {
         // Medium: add target lines (with history trace — time-varying dashed line)
         features |= TEMP_GRAPH_FEATURE_TARGET_LINES | TEMP_GRAPH_FEATURE_TARGET_HISTORY;
     }
 
-    if (height_px >= widget_size::H_TALL) {
+    if (height_px >= widget_size::h_tall(bp)) {
         // Tall: legend chips, Y-axis labels, and X-axis time labels — all
         // need vertical room (legend above/below curves, Y to the side,
         // X below). The 5-min window only renders 1–3 time labels so
@@ -271,7 +274,7 @@ uint32_t TempGraphWidget::features_for_size(int width_px, int height_px) {
         features |= TEMP_GRAPH_FEATURE_X_AXIS;
     }
 
-    if (width_px >= widget_size::W_WIDE && height_px >= widget_size::H_TALL) {
+    if (width_px >= widget_size::w_wide(bp) && height_px >= widget_size::h_tall(bp)) {
         // Extra large: add readouts
         features |= TEMP_GRAPH_FEATURE_READOUTS;
     }

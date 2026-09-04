@@ -56,9 +56,24 @@ FONTS_XLARGE := assets/fonts/noto_sans_24.c assets/fonts/noto_sans_32.c \
                 assets/fonts/mdi_icons_48.c assets/fonts/mdi_icons_64.c \
                 assets/fonts/mdi_icons_80.c
 
+# The 48/64 regular+bold and 32/40 light faces serve the high-DPI UI scale
+# factor (DisplayMetrics), which multiplies the XXLarge tier's authored sizes in
+# place rather than moving to another tier. A ~405 DPI phone asks for 1.578x, so
+# font_heading 40 needs 64, font_body 32 needs ~48, and font_small light_26 needs
+# ~40. Without them the layout would grow while the type stayed put, which looks
+# worse than not scaling at all.
+#
+# These are confined to XXLARGE on purpose: no printer platform in mk/cross.mk
+# declares the xxlarge tier (the roomiest is k2 at "large xlarge"), so the
+# constrained targets link none of them and pay nothing. Android builds via
+# android/app/jni/CMakeLists.txt, which globs assets/fonts/*.c, so it picks them
+# up without a tier declaration.
 FONTS_XXLARGE := assets/fonts/noto_sans_32.c assets/fonts/noto_sans_40.c \
+                 assets/fonts/noto_sans_48.c assets/fonts/noto_sans_64.c \
                  assets/fonts/noto_sans_bold_40.c \
+                 assets/fonts/noto_sans_bold_48.c assets/fonts/noto_sans_bold_64.c \
                  assets/fonts/noto_sans_light_20.c assets/fonts/noto_sans_light_26.c \
+                 assets/fonts/noto_sans_light_32.c assets/fonts/noto_sans_light_40.c \
                  assets/fonts/source_code_pro_20.c assets/fonts/source_code_pro_24.c \
                  assets/fonts/mdi_icons_32.c assets/fonts/mdi_icons_48.c \
                  assets/fonts/mdi_icons_64.c assets/fonts/mdi_icons_96.c \

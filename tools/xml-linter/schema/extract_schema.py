@@ -1216,6 +1216,9 @@ CPP_SIMPLE_WIDGETS: dict[str, dict[str, Any]] = {
     "ui_ams_mini_status.cpp": {
         "widgets": ["ams_mini_status"],
         "inherits": "lv_obj",
+        "extra_attrs": {
+            "card": {"type": "bool"},
+        },
     },
     "ui_spool_canvas.cpp": {
         "widgets": ["spool_canvas"],

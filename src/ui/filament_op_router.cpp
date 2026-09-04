@@ -112,4 +112,10 @@ std::string filament_unload_fallback_gcode() {
                        TIP_PULL_SPEED, UNLOAD_MM, UNLOAD_SPEED);
 }
 
+std::string filament_purge_fallback_gcode() {
+    constexpr int PURGE_FALLBACK_MM = 50;
+    constexpr int PURGE_FALLBACK_SPEED_MM_MIN = 10 * 60; // 10 mm/s → 600 mm/min
+    return fmt::format("M83\nG1 E{} F{}", PURGE_FALLBACK_MM, PURGE_FALLBACK_SPEED_MM_MIN);
+}
+
 } // namespace helix::ui

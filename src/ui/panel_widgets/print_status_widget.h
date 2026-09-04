@@ -160,18 +160,23 @@ class PrintStatusWidget : public PanelWidget {
         // only the formatter, so make sure those subjects are alive too — the
         // formatter writes to multi_tool_subject_ and tests assert on it.
         init_static_subjects();
-        if (s_formatter_refcount_++ == 0) {
-            s_formatter_ = std::make_unique<DetailedFormatter>();
-        }
+        acquire_formatter();
     }
     // Initializes the widget's static-inline subjects + their StaticSubjectRegistry
     // deinit callback. Idempotent — guarded by *_initialized_ flags inside.
     // Called from the ctor in production, AND from ensure_formatter_for_test so
     // tests that only construct the formatter still get the subjects.
     static void init_static_subjects();
+    // Take a reference on the shared DetailedFormatter, building it if this is
+    // the first. Shared by the ctor and ensure_formatter_for_test() so both go
+    // through the same replacement ordering (see the definition).
+    static void acquire_formatter();
 
+    // Floor at zero: destroy_formatter_for_test() zeroes the count outright, so a
+    // release_ that follows one would otherwise drive the count negative and leave
+    // the next acquire unable to recognise itself as the first.
     static void release_formatter_for_test() {
-        if (--s_formatter_refcount_ == 0) {
+        if (s_formatter_refcount_ > 0 && --s_formatter_refcount_ == 0) {
             s_formatter_.reset();
         }
     }
@@ -518,6 +523,13 @@ class PrintStatusWidget : public PanelWidget {
     // grid; if populate_page is mid-rebuild, grid_update reads freed track data
     // and SIGSEGVs (J2URYGSM AD5M / SY6JLLKJ / FFATPQWB Pi5).
     void defer_reset_print_card_to_idle();
+    // Schedule the active-print thumbnail write on the next LVGL tick. Same
+    // reasoning as defer_reset_print_card_to_idle() above — the observer body
+    // runs inside UpdateQueue::process_pending(), and lv_image_set_src there
+    // cascades into lv_obj_update_layout across a page grid populate_page may
+    // still be rebuilding. The path is copied because the subject can publish
+    // again before the tick fires.
+    void defer_apply_active_thumbnail(const char* path);
     void update_idle_compact_mode();
     void update_active_layout_mode();
     // Apply the imperative print-card row/column flex layout for is_column_.

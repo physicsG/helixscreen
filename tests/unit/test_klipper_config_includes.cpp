@@ -287,3 +287,41 @@ TEST_CASE("resolve_active_files - determines active config files", "[config][inc
         REQUIRE(active.count("test.cfg") == 0);
     }
 }
+
+// ============================================================================
+// Glob directory-separator semantics
+//
+// Klipper resolves includes with glob.glob(pattern, recursive=True)
+// (klippy/configfile.py:451). In Python that makes `**` cross directory
+// separators while a single `*` still never matches a '/'. Matching `/` with a
+// single star silently pulls sections from nested files into the parent
+// directory's include, so an edit lands in a file Klipper never read.
+// ============================================================================
+
+TEST_CASE("config_glob_match - single star stops at directory separator",
+          "[config][includes][glob]") {
+    SECTION("Single star does not cross a separator") {
+        CHECK(config_glob_match("conf.d/*.cfg", "conf.d/options.cfg"));
+        CHECK_FALSE(config_glob_match("conf.d/*.cfg", "conf.d/nested/deep.cfg"));
+    }
+
+    SECTION("Single star still matches within one path segment") {
+        CHECK(config_glob_match("*.cfg", "printer.cfg"));
+        CHECK_FALSE(config_glob_match("*.cfg", "conf.d/options.cfg"));
+    }
+
+    SECTION("Double star crosses separators") {
+        CHECK(config_glob_match("conf.d/**/*.cfg", "conf.d/nested/deep.cfg"));
+        CHECK(config_glob_match("conf.d/**.cfg", "conf.d/nested/deep.cfg"));
+    }
+
+    SECTION("Question mark does not match a separator") {
+        CHECK(config_glob_match("conf.d/a?c.cfg", "conf.d/abc.cfg"));
+        CHECK_FALSE(config_glob_match("a?c.cfg", "a/c.cfg"));
+    }
+
+    SECTION("Literal paths are unaffected") {
+        CHECK(config_glob_match("conf.d/options.cfg", "conf.d/options.cfg"));
+        CHECK_FALSE(config_glob_match("conf.d/options.cfg", "conf.d/other.cfg"));
+    }
+}

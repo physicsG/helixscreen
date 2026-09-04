@@ -40,6 +40,7 @@
  *   ui_filament_path_layers.cpp   canvas buffer management + async refresh
  */
 
+#include "ui_coalesced_timer.h"
 #include "ui_filament_path_canvas.h"
 
 #include "ams_types.h"
@@ -199,6 +200,13 @@ struct LayerState {
     bool overlay_dirty = true; // canvas needs repaint of state-tied content
     int32_t canvas_w = 0;      // current canvas buffer size — tracks widget resize
     int32_t canvas_h = 0;
+    // Carries the pending out-of-render-pass repaint. Leading-edge, so a state
+    // update that moves ten setters costs one repaint rather than ten, and the
+    // repaint still lands on the next tick however many setters follow. Owning
+    // it here is also what makes the repaint safe: this state dies with the
+    // widget's FilamentPathData, and ~CoalescedTimer cancels the timer, so a
+    // scheduled repaint can never reach a freed widget.
+    helix::ui::CoalescedTimer refresh_timer{0};
 };
 
 // Hit rectangles recorded by the renderer (absolute display coords) so the
@@ -272,7 +280,11 @@ struct FilamentPathData {
     bool show_bypass = true; // false = hide bypass path/spool entirely (e.g. tool changers)
 
     // Rendering mode
-    bool hub_only = false;   // true = stop rendering at hub (skip downstream)
+    bool hub_only = false; // true = stop rendering at hub (skip downstream)
+    // Hub co-located with the toolhead: the merge box sits just above the
+    // toolhead and the shared hub->nozzle run is a short stub (printers whose
+    // combiner mounts on the print head; the per-lane tubes run the whole way).
+    bool hub_on_toolhead = false;
     bool eject_mode = false; // true = allow segment to drop below LANE (past slot sensor)
 
     // Buffer element (TurtleNeck / eSpooler visualization)

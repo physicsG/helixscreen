@@ -26,8 +26,21 @@ class Ad5xIfsTestAccess;
 
 /// AMS backend for FlashForge Adventurer 5X IFS (Intelligent Filament Switching).
 ///
-/// IFS is a 4-lane filament switching system controlled by a separate STM32 MCU,
-/// driven through ZMOD's zmod_ifs.py Klipper module.
+/// IFS is a 4-lane filament switching system controlled by a separate STM32 MCU.
+/// Two firmware surfaces drive it, and this backend speaks whichever the
+/// printer publishes:
+///
+///   - ZMOD (ghzserg/zmod), via zmod_ifs.py — Adventurer5M.json polling,
+///     GET_ZCOLOR / IFS_STATUS scraping, the lessWaste/bambufy plugin
+///     save_variables, and the INSERT_PRUTOK_IFS / _IFS_REMOVE_CURRENT_PRUTOK
+///     macro family.
+///   - The standalone IFS module (the drop-in extracted from zmod; ships in
+///     Forge-X) — first-class `ifs` + `ifs_materials` get_status() objects,
+///     the `ifs_loaded` / `ifs_at_hub` save_variables the module's own macros
+///     maintain, and the IFS_LOAD / IFS_UNLOAD / IFS_EJECT / IFS_SET_MATERIAL
+///     / T0..T3 macro family. ifs_module_live_ latches on the first frame
+///     carrying either object; from then on the module owns state and every
+///     ZMOD-specific poll and write stands down.
 ///
 /// === Stock zMod vs plugin variants (IMPORTANT for Moonraker visibility) ===
 ///
@@ -177,12 +190,29 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     [[nodiscard]] AmsType get_type() const override {
         return AmsType::AD5X_IFS;
     }
+    // A LINEAR selector in the strict sense, but a passthrough one: four
+    // lines in, a camshaft-driven selector, four lines out - each lane's own
+    // tube continues through, unlike ERCF/Tradrack whose selector is itself
+    // the convergence onto one output tube.
     [[nodiscard]] PathTopology get_topology() const override {
         return PathTopology::LINEAR;
+    }
+
+    // The convergence the selector does NOT do is delegated to a combiner
+    // bolted just above the toolhead: four tubes run the whole way there and
+    // the shared path below it is centimetres. The canvas composes the two
+    // facts into one drawing.
+    [[nodiscard]] bool hub_on_toolhead() const override {
+        return true;
     }
     [[nodiscard]] PathSegment get_filament_segment() const override;
     [[nodiscard]] PathSegment get_slot_filament_segment(int slot_index) const override;
     [[nodiscard]] PathSegment infer_error_segment() const override;
+
+    /// The lessWaste tool -> port table, converted to 0-based heads. Ports are
+    /// 1-based and 5 is the unmapped sentinel. Falls back to lane-per-tool when
+    /// no _IFS_VARS have been seen (native zMod never populates the table).
+    [[nodiscard]] helix::FirmwareRouting firmware_default_routing() const override;
 
     [[nodiscard]] AmsSystemInfo get_system_info() const override;
     [[nodiscard]] SlotInfo get_slot_info(int slot_index) const override;
@@ -415,14 +445,19 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
                             bool persist) override;
     AmsError set_tool_mapping(int tool_number, int slot_index) override;
 
-    // Tool reassignment is only persistable when the lessWaste/bambufy plugin
-    // is loaded (has_ifs_vars_): `_IFS_VARS tools=...` writes save_variables
-    // that the plugin replays at print start. On native ZMOD the macro is
-    // absent and set_tool_mapping() can only mutate local state, which the
-    // firmware ignores — surface that as caps={false,false} so the print
-    // start path doesn't silently drop user-supplied remaps.
-    [[nodiscard]] helix::printer::ToolMappingCapabilities
-    get_tool_mapping_capabilities() const override;
+    // Restore the module's identity tool map (T<n> -> lane n+1). The wire
+    // table is the only mapping state, so resetting is one verb — no local
+    // table to unwind.
+    AmsError reset_tool_mappings() override;
+
+    // Answers from the tool_map_ register whichever adapter filled it: the
+    // Forge-X module's printer.ifs.tool_map echo, or the ZMOD plugin's
+    // save_variables table. set_tool_mapping() dispatches the same way —
+    // IFS_MAP_TOOL for the module, the _IFS_VARS tools= write for the plugin,
+    // with the wire table taking precedence when both signals exist. With
+    // neither there is no table to read and no verb to reach, which is what
+    // remap_ready() below reports, so the print-start path does not silently
+    // drop a user-supplied remap.
     [[nodiscard]] std::vector<int> get_tool_mapping() const override;
 
     // Explicit user-initiated override clear (e.g. "Clear slot metadata" button
@@ -462,6 +497,17 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     [[nodiscard]] RemapStrategy get_remap_strategy() const override {
         return RemapStrategy::Native;
     }
+
+    // Both gated on the SAME question: did one of the two firmware stacks
+    // that can carry a remap identify itself? Either the Forge-X [ifs] module
+    // publishing its live tool_map, or ZMOD with the lessWaste/bambufy
+    // plugin's _IFS_VARS macro (has_ifs_vars_). Native is what this backend
+    // is BUILT to do; with neither signal, set_tool_mapping() can only mutate
+    // local state the firmware ignores, and get_tool_mapping() returns
+    // nothing to build a topology from. Defined out-of-line because both
+    // latches live under mutex_.
+    [[nodiscard]] bool remap_ready() const override;
+    [[nodiscard]] bool owns_tool_mapping_table() const override;
 
     // IFS retracts filament from the extruder at end-of-print by default, so
     // the toolhead is expected to be empty at the next print-start. Suppresses
@@ -550,6 +596,17 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     friend class Ad5xPerSlotLoadedHelper;
 
     void parse_save_variables(const nlohmann::json& vars);
+    /// Fold a `printer.ifs` status object into the tool map. The module's
+    /// `tool_map` key is both the remap capability gate and the table itself
+    /// (string 0-based tool keys, 1-based lane values, complete table per
+    /// frame). Returns true when something we publish changed. Caller must
+    /// hold mutex_.
+    bool parse_ifs_tool_map_locked(const nlohmann::json& ifs_object);
+    /// Re-derive each lane's SlotInfo::mapped_tool from tool_map_ — the one
+    /// place the reverse direction is projected onto the slot model the UI
+    /// reads. Shared by both adapters' edges and set_tool_mapping(). Caller
+    /// must hold mutex_.
+    void rebuild_slot_tool_mapping_locked();
     void parse_port_sensor(int port_1based, bool detected);
     void parse_head_sensor(bool detected);
     // Belt-and-suspenders head-loaded derivation from GET_ZCOLOR's "Extruder:"
@@ -776,6 +833,27 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     /// @return true if the frame carried either object.
     bool apply_zmod_status_objects(const nlohmann::json& status);
 
+    /// Normalize a colour from the standalone module's `ifs_materials.slots`
+    /// ("#RRGGBB" or "#RGB", with or without the '#') into the bare 6-hex-digit
+    /// form colors_[] holds ("A03CF7"). Empty when the value is not a colour
+    /// (null / empty / malformed) - the caller treats that as "no reading".
+    static std::string normalize_module_color_hex(const std::string& value);
+
+    /// Read one `ifs_materials` status object into @p result. Its `slots` dict
+    /// (STRING keys - Moonraker serialises dict keys that way) carries the same
+    /// material/colour data the zmod_color slots array does, because both are
+    /// views onto the same Adventurer5M.json. Pure: no logging, no locking, no
+    /// member access.
+    /// @return true if the object carried usable slot content.
+    static bool read_ifs_materials_object(const nlohmann::json& obj, ZColorSilentResult& result);
+
+    /// Apply a status frame's `ifs` / `ifs_materials` objects (the standalone
+    /// IFS module) through the normal apply path, then refine system_info_
+    /// .action from the board's `activity`. Call with mutex_ RELEASED - it
+    /// locks internally.
+    /// @return true if the frame carried either object.
+    bool apply_ifs_module_objects(const nlohmann::json& status);
+
     // GET_ZCOLOR SILENT=1 primary-truth query. zmod's Adventurer5M.json
     // is a stale last-known-colors cache; SILENT=1 emits one line per
     // physically loaded slot (filtered by live per-port sensors) plus a
@@ -797,6 +875,8 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     /// port-indexed 4-entry payload truncates the arrays wholesale, #1247).
     /// `colors` selects which per-port array supplies each entry.
     std::string build_ifs_list_value(bool colors) const;
+    /// The `_IFS_VARS tools=` payload: the ZMOD plugin contract's whole-table
+    /// write (the macro replaces the array, not individual entries).
     std::string build_tool_map_value() const;
     /// Push a correctly-shaped `colors=`/`types=` pair into `_IFS_VARS` after
     /// parse_save_variables() observed a truncated lessWaste array (the
@@ -1144,6 +1224,15 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     // (read/written via Moonraker HTTP file API).
     bool has_ifs_vars_ = false;
 
+    // True once a printer.ifs status frame carried the tool_map key — the
+    // Forge-X [ifs] module's live slicer-tool -> lane table. That field is
+    // one of the two remap signals (the other is has_ifs_vars_) and, when
+    // live, the writer of tool_map_ and the path set_tool_mapping() takes:
+    // it emits IFS_MAP_TOOL and the echo frame promotes the mapping. The
+    // module publishes tool_map from construction, so a module that is
+    // present but predates the field never arms this. Guarded by mutex_.
+    bool ifs_tool_map_live_ = false;
+
     // Latch: starts TRUE (pessimistic) — cleared when a `gcode_macro
     // _ifs_vars` query returns a non-empty variables dict (real macro
     // present). Prevents the race where a notify_status_update with
@@ -1318,6 +1407,18 @@ class AmsBackendAd5xIfs : public AmsSubscriptionBackend {
     /// Chan block. Omitted means unchanged, so the reader re-supplies this
     /// rather than the block growing a second entry condition. Guarded by mutex_.
     std::optional<int> zmod_last_chan_;
+    /// Set once a status frame carries `ifs` or `ifs_materials` - the
+    /// standalone IFS module's objects. From then on the module owns the
+    /// printer: every ZMOD-specific poll (Adventurer5M.json HTTP, GET_ZCOLOR)
+    /// and write (write_adventurer_json / _IFS_VARS) stands down, and the ops
+    /// dispatch the module's own macros (IFS_LOAD / IFS_UNLOAD / IFS_EJECT /
+    /// IFS_SET_MATERIAL / T<n>). Mirrors zmod_status_live_: atomic because the
+    /// poll stand-down gates read it unlocked.
+    std::atomic<bool> ifs_module_live_{false};
+    /// Last `active_channel` an `ifs` frame actually carried (1-based; 0 =
+    /// none), re-supplied into Ports-only diff frames for the same reason
+    /// zmod_last_chan_ exists. Guarded by mutex_.
+    std::optional<int> module_last_chan_;
 
     // User-provided per-slot metadata (brand, spool name, spoolman IDs, remaining
     // weight, etc.) layered over firmware-reported state.

@@ -90,17 +90,17 @@ CheckResult warn_result(std::string title, std::string body, std::string proceed
 std::string build_empty_lane_message(const std::vector<std::pair<int, int>>& empty) {
     // Name the offending tool(s) and the AMS lane each routes to so the user
     // knows exactly which lane to load. Lane numbers are 1-based for display
-    // (slot 0 -> "Lane 1") to match the rest of the slot UI.
+    // (slot 0 -> "Slot 1") to match the rest of the slot UI.
     std::string message;
     if (empty.size() == 1) {
-        message = fmt::format(lv_tr("Tool {} → Lane {}: no filament loaded."), empty[0].first,
+        message = fmt::format(lv_tr("Tool {} → Slot {}: no filament loaded."), empty[0].first,
                               empty[0].second + 1);
     } else {
         message = lv_tr("These tools have no filament loaded:");
         message += "\n\n";
         for (const auto& [tool, slot] : empty) {
             message += fmt::format("  {} {} {} → {} {}\n", LV_SYMBOL_BULLET, lv_tr("Tool"), tool,
-                                   lv_tr("Lane"), slot + 1);
+                                   lv_tr("Slot"), slot + 1);
         }
     }
     message += "\n\n";
@@ -170,8 +170,8 @@ CheckResult gate_bypass_engaged_lane_print(const PrintStartContext& ctx) {
     }
     return warn_result(
         lv_tr("Bypass Is Active"),
-        lv_tr("Bypass is active, but this print uses AMS lanes. The printer may refuse "
-              "to load a lane while bypass filament is in the toolhead. Remove the "
+        lv_tr("Bypass is active, but this print uses AMS slots. The printer may refuse "
+              "to load a slot while bypass filament is in the toolhead. Remove the "
               "filament and turn bypass off before printing. Start anyway?"),
         lv_tr("Start Anyway"));
 }
@@ -196,9 +196,9 @@ CheckResult gate_unaccounted_toolhead_filament(const PrintStartContext& ctx) {
         return warn_result(
             lv_tr("Filament In The Toolhead"),
             clearable
-                ? lv_tr("The toolhead has filament but no AMS lane reports it loaded. The "
-                        "printer may refuse to load a lane until it is cleared. Start anyway?")
-                : lv_tr("The toolhead has filament but no AMS lane reports it loaded. "
+                ? lv_tr("The toolhead has filament but no AMS slot reports it loaded. The "
+                        "printer may refuse to load a slot until it is cleared. Start anyway?")
+                : lv_tr("The toolhead has filament but no AMS slot reports it loaded. "
                         "Pull it out manually before printing. Start anyway?"),
             lv_tr("Start Anyway"));
     }
@@ -258,7 +258,7 @@ CheckResult gate_unresolved_tools(const PrintStartContext& ctx) {
     }
 
     // Body ported verbatim from show_color_mismatch_warning (no static buffer:
-    // modal_show_confirmation copies the message string).
+    // modal_confirm copies the message string).
     std::string message = lv_tr("These tools have no matching filament loaded:");
     message += "\n\n";
     for (int tool_idx : unresolved) {
@@ -336,7 +336,7 @@ CheckResult gate_material_compatibility(const PrintStartContext& ctx) {
     }
 
     // Body ported verbatim from show_material_mismatch_warning (no static
-    // buffer: modal_show_confirmation copies the message string).
+    // buffer: modal_confirm copies the message string).
     std::string message;
 
     if (mismatches.size() == 1) {

@@ -25,25 +25,6 @@ class IMoonrakerAPI;
 namespace helix {
 
 // ============================================================================
-// URL Parsing Utilities (exposed for testing)
-// ============================================================================
-
-/**
- * @brief Check if a hostname represents localhost
- *
- * @param host Hostname to check (e.g., "localhost", "127.0.0.1", "::1")
- * @return true if the host is localhost
- */
-
-/**
- * @brief Extract hostname from a WebSocket URL
- *
- * @param url WebSocket URL (e.g., "ws://192.168.1.100:7125/websocket")
- * @return Extracted hostname, or empty string if parsing fails
- */
-[[nodiscard]] std::string extract_host_from_websocket_url(const std::string& url);
-
-// ============================================================================
 // Plugin Install State
 // ============================================================================
 

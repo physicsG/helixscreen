@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -56,8 +57,21 @@ struct ConfigEdit {
     std::string value; // ignored for REMOVE_KEY
 };
 
+/// True when every edit is an ADD_KEY, i.e. the whole list reads "make sure this
+/// key says X" and carries no assumption that the section already exists. An
+/// empty list is false — it asserts nothing about any section.
+bool all_add_key(const std::vector<ConfigEdit>& edits);
+
 class KlipperConfigEditor {
   public:
+    /// Cancels any in-flight FIRMWARE_RESTART health monitor and waits for it to
+    /// unwind. The monitor polls on an HttpExecutor::fast() worker while holding
+    /// `this` and the IMoonrakerAPI by reference, and this editor is a member of
+    /// InputShaperPanel / PIDCalibrationPanel — both destroyed by
+    /// StaticPanelRegistry::destroy_all() at shutdown, long before the executor
+    /// workers stop. Without this join the monitor keeps polling a freed editor.
+    ~KlipperConfigEditor();
+
     using SuccessCallback = std::function<void()>;
     using ErrorCallback = std::function<void(const std::string& error)>;
     using SectionMapCallback = std::function<void(std::map<std::string, SectionLocation>)>;
@@ -84,6 +98,13 @@ class KlipperConfigEditor {
     std::map<std::string, SectionLocation>
     resolve_includes(const std::map<std::string, std::string>& files, const std::string& root_file,
                      int max_depth = 5) const;
+
+    /// Append a new, empty [section] header to a file's content.
+    /// Inserted before the `#*# <--- SAVE_CONFIG` block when one is present,
+    /// since everything from that line down belongs to Klipper.
+    /// Returns modified content, or std::nullopt if the section already exists.
+    std::optional<std::string> add_section(const std::string& content,
+                                           const std::string& section) const;
 
     /// Comment out a key (prefix with #) — safer than deleting
     /// Returns modified content, or std::nullopt if key not found
@@ -150,6 +171,26 @@ class KlipperConfigEditor {
                          ErrorCallback on_error, int restart_timeout_ms = 15000);
 
   private:
+    /// Remember a freshly submitted health monitor so the destructor can wait
+    /// for it, and drop the futures of monitors that have already finished.
+    void track_restart_monitor(std::future<void> monitor);
+
+    /// Raise the cancel flag every live monitor polls, then wait (bounded) for
+    /// them to unwind. Called from the destructor.
+    void cancel_restart_monitors();
+
+    /// Raised when the editor is going away. Held by shared_ptr and captured BY
+    /// VALUE by each monitor, so the flag itself outlives the editor even if a
+    /// wait times out and a monitor is still between polls.
+    std::shared_ptr<std::atomic<bool>> monitor_cancel_ = std::make_shared<std::atomic<bool>>(false);
+
+    /// Futures of health monitors submitted to HttpExecutor::fast().
+    std::vector<std::future<void>> restart_monitors_;
+
+    /// Protects restart_monitors_ — monitors are armed from Moonraker callbacks
+    /// on background threads, while the destructor runs on the main thread.
+    std::mutex monitor_mutex_;
+
     /// Cached section map from last load_config_files()
     std::map<std::string, SectionLocation> section_map_;
 
@@ -158,16 +199,6 @@ class KlipperConfigEditor {
 
     /// Protects section_map_ and file_cache_
     mutable std::mutex cache_mutex_;
-
-    /// Download a file and all its includes recursively
-    /// @param api Moonraker API instance
-    /// @param file_path Path relative to config root
-    /// @param pending Shared counter of pending downloads
-    /// @param on_all_done Called when all downloads complete (pending reaches 0)
-    /// @param on_error Called on download failure
-    void download_with_includes(IMoonrakerAPI& api, const std::string& file_path,
-                                std::shared_ptr<std::atomic<int>> pending,
-                                std::function<void()> on_all_done, ErrorCallback on_error);
 };
 
 } // namespace helix::system

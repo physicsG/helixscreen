@@ -119,6 +119,10 @@ void GCodeParser::reset() {
     global_bounds_ = AABB();
     lines_parsed_ = 0;
     out_of_range_width_count_ = 0;
+    // Running counter, so it must clear with layers_ above: finalize() re-sums
+    // total_segments from the (now empty) layers, and a surviving drawable
+    // count would exceed it on the next parse.
+    drawable_segments_ = 0;
 
     // Layers will be created on-demand when segments are added
     // (see add_segment() which creates a layer if layers_ is empty)
@@ -586,13 +590,31 @@ void GCodeParser::parse_metadata_comment(const std::string& line) {
     }
     // Fallback: Parse single filament_colour if extruder_colour not yet found
     else if (contains_all({"filament", "col"}) && tool_color_palette_.empty()) {
-        // Check if it's a semicolon-separated list (multi-color)
-        if (value.find(';') != std::string::npos) {
+        // The shared palette parser owns every list form (';' and ','
+        // separated). Ask it: a value that parses into multiple entries is
+        // per-tool metadata, a single valid entry is a plain single color,
+        // and anything it rejects leaves the metadata untouched rather than
+        // storing an unvalidated blob in filament_color_hex.
+        std::vector<std::string> as_palette;
+        if (helix::gcode::parse_filament_color_palette(line, as_palette) && as_palette.size() > 1) {
             parse_extruder_color_metadata(line);
-        } else {
-            // Single color metadata
-            metadata_filament_color_ = value;
-            spdlog::trace("[GCode Parser] Parsed single filament color: {}", value);
+        } else if (const std::string* single = helix::gcode::first_named_color(as_palette)) {
+            // Single color metadata — the first entry that actually holds one,
+            // not index 0: a list like ",,#FF0000" parks an empty placeholder
+            // at slot 0, and storing that would drop the only color the file
+            // stated.
+            metadata_filament_color_ = *single;
+            spdlog::trace("[GCode Parser] Parsed single filament color: {}",
+                          metadata_filament_color_);
+        } else if (std::string_view cleaned = helix::gcode::clean_color_hex(value);
+                   !cleaned.empty()) {
+            // The list parser rejects this line (a colon-separated key form,
+            // say) but the value is still one real color token. Store the
+            // validated token — never the raw value, which is how a comma
+            // blob used to land here and paint everything in its first field.
+            metadata_filament_color_ = std::string(cleaned);
+            spdlog::trace("[GCode Parser] Parsed single filament color: {}",
+                          metadata_filament_color_);
         }
     } else if (contains_all({"filament", "type"})) {
         metadata_filament_type_ = value;
@@ -792,10 +814,13 @@ void GCodeParser::parse_extruder_color_metadata(const std::string& line) {
                          initial_tool_index_ < static_cast<int>(tool_color_palette_.size()) &&
                          !tool_color_palette_[initial_tool_index_].empty())
                             ? initial_tool_index_
-                            : 0;
-    if (fallback_tool < static_cast<int>(tool_color_palette_.size()) &&
-        !tool_color_palette_[fallback_tool].empty()) {
+                            : -1;
+    if (fallback_tool >= 0) {
         metadata_filament_color_ = tool_color_palette_[fallback_tool];
+    } else if (const std::string* first = helix::gcode::first_named_color(tool_color_palette_)) {
+        // No covered initial tool: the first color the file does state, not
+        // palette[0], which can be an empty placeholder for an unknown slot.
+        metadata_filament_color_ = *first;
     }
 }
 
@@ -932,6 +957,7 @@ FeatureType GCodeParser::parse_feature_type_value(const std::string& value) {
         {"Support material interface", FeatureType::Support},
         {"Support", FeatureType::Support},
         {"Wipe tower", FeatureType::WipeTower},
+        {"Prime tower", FeatureType::WipeTower},
         {"Ironing", FeatureType::TopSurface},
         {"Thin wall", FeatureType::InnerWall},
         // PrusaSlicer legacy names
@@ -1082,21 +1108,39 @@ void GCodeParser::add_segment(const glm::vec3& start, const glm::vec3& end, bool
     current_layer.segments.push_back(segment);
 
     // For bounding box: skip start position if this is the first segment ever
-    // (avoids including implicit (0,0,0) starting position in print bounds)
+    // (avoids including implicit (0,0,0) starting position in print bounds).
+    // Auxiliary geometry (purge, prime tower) stays out of the layer box for
+    // the same reason it stays out of the global one: the single-layer view
+    // and its centering frame against the print, not the scaffolding beside it.
     bool is_first_segment = (layers_.size() == 1 && current_layer.segments.size() == 1);
+    const bool auxiliary = is_auxiliary_geometry(current_feature_type_);
 
-    if (!is_first_segment) {
-        current_layer.bounding_box.expand(start);
+    // Count what the geometry builder will keep. Reads the SAME local the bbox
+    // guards below use, so the budget estimate and the builder's skip test the
+    // same predicate on the same value and cannot drift apart.
+    if (!auxiliary) {
+        ++drawable_segments_;
     }
-    current_layer.bounding_box.expand(end);
+
+    // Travels never frame a layer either: the approach and departure travels
+    // around a prime tower would inject its coordinates right back in. The
+    // global box has always been extrusion-only; this brings the layer box
+    // in line (a travel-only layer leaves the box empty, which fit_layer and
+    // the single-layer centering already handle with the plate fallback).
+    if (is_extrusion && !auxiliary) {
+        if (!is_first_segment) {
+            current_layer.bounding_box.expand(start);
+        }
+        current_layer.bounding_box.expand(end);
+    }
 
     // Global bounds only include extrusion moves — travel moves to homing/probing/
     // parking positions would inflate the viewport and make the model appear tiny.
-    // Also exclude purge/wipe-tower types so the auto-fit viewport zooms to the
-    // actual print object (parity with the streaming-mode filter in
-    // GCodeLayerRenderer::auto_fit).
+    // Auxiliary geometry (purge, prime tower) is excluded for the same reason:
+    // the auto-fit viewport zooms to the actual print object (parity with the
+    // streaming-mode filter in GCodeLayerRenderer::auto_fit).
     if (is_extrusion) {
-        if (!is_excluded_from_bounds(current_feature_type_)) {
+        if (!auxiliary) {
             if (!is_first_segment) {
                 global_bounds_.expand(start);
             }
@@ -1107,8 +1151,12 @@ void GCodeParser::add_segment(const glm::vec3& start, const glm::vec3& end, bool
         current_layer.segment_count_travel++;
     }
 
-    // Update object bounding box (only for extrusion moves, not travels)
-    if (!current_object_.empty() && objects_.count(current_object_) > 0 && is_extrusion) {
+    // Update object bounding box (only for extrusion moves, not travels, and
+    // never auxiliary geometry: an object box reaching into the tower region
+    // turns every pick footprint and selection bracket toward empty plate,
+    // and a tap there can long-press-exclude real printed geometry).
+    if (!current_object_.empty() && objects_.count(current_object_) > 0 && is_extrusion &&
+        !auxiliary) {
         objects_[current_object_].bounding_box.expand(start);
         objects_[current_object_].bounding_box.expand(end);
 
@@ -1201,6 +1249,7 @@ ParsedGCodeFile GCodeParser::finalize() {
     for (const auto& layer : result.layers) {
         result.total_segments += layer.segments.size();
     }
+    result.drawable_segments = drawable_segments_;
 
     // Transfer metadata
     result.slicer_name = metadata_slicer_name_;

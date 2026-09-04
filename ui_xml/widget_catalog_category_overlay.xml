@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Widget Catalog Category Sub-Page: the widgets inside one catalog category. -->
+<!-- Dived into from widget_catalog_overlay. Same 70% width as its parent so the
+     home grid stays visible behind it while you pick a widget.
+
+     back_button_callback is deliberately NOT set: it inherits overlay_panel's
+     default on_header_back_clicked -> NavigationManager::go_back(), which is the
+     same header contract every settings sub-page uses (cf. settings_safety_overlay).
+
+     The title is passed per dive as the `title`/`title_tag` props, so each
+     category page is created with its own name baked in at parse time. -->
+<component>
+  <api>
+    <prop name="title" type="string" default="Add Widget"/>
+    <prop name="title_tag" type="string" default=""/>
+  </api>
+  <view name="widget_catalog_category_overlay"
+        extends="overlay_panel" width="70%" title="$title" title_tag="$title_tag" bg_color="#screen_bg">
+    <lv_obj name="catalog_scroll"
+            width="100%" flex_grow="1" scrollable="true" flex_flow="column" style_pad_gap="#space_xs"
+            style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="#space_sm"
+            style_pad_bottom="#space_md">
+      <!-- Widget rows populated dynamically by C++ -->
+    </lv_obj>
+  </view>
+</component>

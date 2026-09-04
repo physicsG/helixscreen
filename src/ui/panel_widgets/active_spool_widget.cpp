@@ -142,7 +142,7 @@ void ActiveSpoolWidget::detach() {
 
 void ActiveSpoolWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int width_px,
                                         int /*height_px*/) {
-    bool wide = (width_px >= widget_size::W_NORMAL);
+    bool wide = (width_px >= widget_size::w_normal());
     if (wide == is_wide_)
         return;
     is_wide_ = wide;

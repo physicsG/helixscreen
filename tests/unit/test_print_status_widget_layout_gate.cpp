@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../helix_test_fixture.h"
 #include "../test_helpers/printer_state_test_access.h"
@@ -15,7 +16,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Layout gate: detailed below the normal width
                  "[print_status][layout_gate]") {
     PrintStatusWidget w;
     w.set_config({{"layout_style", "detailed"}});
-    w.on_size_changed(1, 2, W_NORMAL - 1, 400);
+    w.on_size_changed(1, 2, w_normal() - 1, 400);
     REQUIRE(lv_subject_get_int(PrintStatusWidget::layout_effective_subject_for_test()) == 0);
 }
 
@@ -23,7 +24,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Layout gate: detailed at the normal width ba
                  "[print_status][layout_gate]") {
     PrintStatusWidget w;
     w.set_config({{"layout_style", "detailed"}});
-    w.on_size_changed(2, 2, W_NORMAL, 400);
+    w.on_size_changed(2, 2, w_normal(), 400);
     REQUIRE(lv_subject_get_int(PrintStatusWidget::layout_effective_subject_for_test()) == 1);
     REQUIRE(lv_subject_get_int(PrintStatusWidget::show_filament_active_subject_for_test()) == 0);
 }
@@ -43,7 +44,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Layout gate: wide width band reveals filamen
 
     PrintStatusWidget w;
     w.set_config({{"layout_style", "detailed"}});
-    w.on_size_changed(3, 2, W_WIDE, 400);
+    w.on_size_changed(3, 2, w_wide(), 400);
     REQUIRE(lv_subject_get_int(PrintStatusWidget::layout_effective_subject_for_test()) == 1);
     REQUIRE(lv_subject_get_int(PrintStatusWidget::show_filament_active_subject_for_test()) == 1);
 }
@@ -53,10 +54,10 @@ TEST_CASE_METHOD(HelixTestFixture, "Layout gate: library stays library regardles
     PrintStatusWidget w;
     // Prime: a detailed widget at the wide width band sets effective=1
     w.set_config({{"layout_style", "detailed"}});
-    w.on_size_changed(3, 2, W_WIDE, 400);
+    w.on_size_changed(3, 2, w_wide(), 400);
     REQUIRE(lv_subject_get_int(PrintStatusWidget::layout_effective_subject_for_test()) == 1);
     // Switch to library — must revert to 0 regardless of width
     w.set_config({{"layout_style", "library"}});
-    w.on_size_changed(3, 3, W_WIDE, 600);
+    w.on_size_changed(3, 3, w_wide(), 600);
     REQUIRE(lv_subject_get_int(PrintStatusWidget::layout_effective_subject_for_test()) == 0);
 }

@@ -1,12 +1,13 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "detect_printer_cmd.h"
 #include "printer_detector.h"
 #include "printer_discovery.h"
 
+#include <algorithm>
+
 #include "catch_amalgamated.hpp"
 #include "hv/json.hpp"
-
-#include <algorithm>
 
 TEST_CASE("format_detect_verdict: confident match with runner-up", "[detect_cmd]") {
     PrinterDetectionResult r{"Qidi Q2", 90, "chamber"};
@@ -103,7 +104,8 @@ TEST_CASE("populate_discovery: non-object info is skipped", "[detect_cmd]") {
 
 TEST_CASE("populate_discovery: the raw object list reaches detection", "[detect_cmd][objects]") {
     nlohmann::json info = {{"hostname", "voron"}};
-    nlohmann::json cfg = {{"configfile", {{"settings", {{"printer", {{"kinematics", "corexy"}}}}}}}};
+    nlohmann::json cfg = {
+        {"configfile", {{"settings", {{"printer", {{"kinematics", "corexy"}}}}}}}};
 
     helix::PrinterDiscovery with_qgl;
     helix::detect::populate_discovery(
@@ -119,13 +121,13 @@ TEST_CASE("populate_discovery: the raw object list reaches detection", "[detect_
     // the same rig without it cannot score as high. Asserted comparatively so a
     // future database retune does not turn this into a maintenance chore.
     helix::PrinterDiscovery without_qgl;
-    helix::detect::populate_discovery(
-        without_qgl, nlohmann::json::array({"extruder", "heater_bed"}), info, cfg);
+    helix::detect::populate_discovery(without_qgl,
+                                      nlohmann::json::array({"extruder", "heater_bed"}), info, cfg);
 
     auto hit = PrinterDetector::auto_detect(with_qgl);
     auto miss = PrinterDetector::auto_detect(without_qgl);
-    INFO("with QGL: " << hit.type_name << " @" << hit.confidence << " / without: "
-                      << miss.type_name << " @" << miss.confidence);
+    INFO("with QGL: " << hit.type_name << " @" << hit.confidence << " / without: " << miss.type_name
+                      << " @" << miss.confidence);
     REQUIRE(hit.confidence > miss.confidence);
 }
 
@@ -137,7 +139,8 @@ TEST_CASE("populate_discovery: a macro_exclude heuristic actually excludes",
     // out entirely. With the object list dropped, neither heuristic can fire and
     // the stock entry wins by default - which is what our own AD5M did.
     nlohmann::json info = {{"hostname", "ad5m-pro"}};
-    nlohmann::json cfg = {{"configfile", {{"settings", {{"printer", {{"kinematics", "corexy"}}}}}}}};
+    nlohmann::json cfg = {
+        {"configfile", {{"settings", {{"printer", {{"kinematics", "corexy"}}}}}}}};
     nlohmann::json objects = nlohmann::json::array(
         {"extruder", "heater_bed", "mod_params", "gcode_macro SUPPORT_FORGE_X"});
 

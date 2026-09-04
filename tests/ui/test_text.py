@@ -49,6 +49,20 @@ def test_unknown_target_raises(helix_app):
         helix_app.text("definitely_not_a_widget")
 
 
+# Home-panel widgets that render no text at all, and cannot acquire a
+# descended label without being redesigned: `temp_graph` plots its series onto
+# a canvas, `ams_bars_container` draws filled bars, and a `divider_horizontal`
+# is a bare rule with no children. Several are listed because the anchor has to
+# survive a home-layout change — the widget this test used to key on lived
+# inside the idle print card, and vanished the moment that card was replaced.
+#
+# Leaf-ness cannot be derived from the `ls` listing instead: the walk emits only
+# *named* widgets while still recursing through unnamed ones, so a widget with
+# no listed children (`temp_text_label`, `idle_data_col`) can still own an
+# unnamed label and report its text.
+_NO_TEXT_HOME_ANCHORS = ("temp_graph", "ams_bars_container")
+
+
 def test_widget_with_no_text_raises_rather_than_returning_empty(helix_app):
     # An empty string and "this widget has no text" are different facts, and
     # conflating them makes an assertion silently vacuous.
@@ -57,17 +71,20 @@ def test_widget_with_no_text_raises_rather_than_returning_empty(helix_app):
     listing = helix_app.ls()
     containers = [w for w in listing["widgets"]
                   if w.get("name") and w.get("type") == "obj"]
-    # A `divider_horizontal` is a bare rule with no children by construction,
-    # so it can never turn up a descended label the way a big layout
-    # container (which wraps the whole panel) reliably would. There is no
-    # arbitrary fallback here on purpose: `containers[0]` on this screen is
-    # `app_layout_0`, which wraps the entire panel and genuinely does have a
-    # descended label — silently falling back to it would turn this into a
-    # false failure on *correct* code instead of testing the no-text case.
-    divider = next((w for w in containers if "divider" in w["name"]), None)
-    if divider is None:
-        pytest.fail("no divider_horizontal-style anchor found on the home panel — "
-                     "pick a different verified no-text widget rather than falling "
-                     "back to an arbitrary container (see comment above)")
-    with pytest.raises(HelixCtlError):
-        helix_app.text(divider["name"])
+    # There is no arbitrary fallback here on purpose: `containers[0]` on this
+    # screen is `app_layout_0`, which wraps the entire panel and genuinely does
+    # have a descended label — silently falling back to it would turn this into
+    # a false failure on *correct* code instead of testing the no-text case.
+    anchor = next((w for w in containers
+                   if w["name"] in _NO_TEXT_HOME_ANCHORS or "divider" in w["name"]),
+                  None)
+    if anchor is None:
+        pytest.fail("none of the known no-text anchors are on the home panel "
+                    f"({', '.join(_NO_TEXT_HOME_ANCHORS)}, or a divider) — add a "
+                    "different verified no-text widget rather than falling back "
+                    "to an arbitrary container (see comment above)")
+    # Matching the reason, not just the type: an anchor that stopped resolving
+    # would raise "Widget not found" and satisfy a bare `raises(HelixCtlError)`
+    # without ever exercising the no-text path.
+    with pytest.raises(HelixCtlError, match="has no text"):
+        helix_app.text(anchor["name"])

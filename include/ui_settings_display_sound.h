@@ -93,6 +93,7 @@ class DisplaySoundSettingsOverlay : public OverlayBase {
     void handle_brightness_commit(int value);
     void handle_widget_labels_changed(bool enabled);
     void handle_page_scroll_buttons_changed(bool enabled);
+    void handle_ui_scale_changed(int index);
     void handle_bed_mesh_mode_changed(int mode);
     void handle_dim_changed(int index);
     void handle_sleep_changed(int index);
@@ -138,6 +139,7 @@ class DisplaySoundSettingsOverlay : public OverlayBase {
     void init_dim_dropdown();
     void init_sleep_dropdown();
     void init_sleep_while_printing_toggle();
+    void init_ui_scale_dropdown();
     void init_bed_mesh_dropdown();
     void init_theme_preset_dropdown(lv_obj_t* root);
 
@@ -205,6 +207,7 @@ class DisplaySoundSettingsOverlay : public OverlayBase {
     static void on_brightness_commit(lv_event_t* e);
     static void on_widget_labels_changed(lv_event_t* e);
     static void on_page_scroll_buttons_changed(lv_event_t* e);
+    static void on_ui_scale_changed(lv_event_t* e);
     static void on_bed_mesh_mode_changed(lv_event_t* e);
     static void on_dim_changed(lv_event_t* e);
     static void on_sleep_changed(lv_event_t* e);

@@ -16,6 +16,21 @@ static bool is_mock_kalico() {
     return env && std::string(env) == "1";
 }
 
+// Configfile sections for the resolved chamber heater, so
+// TemperatureController::ensure_limits sees a real ceiling in --test.
+// VENDOR_OK: the mock simulates a dragonbreath-equipped printer; the 75 C
+// configfile ceiling is part of that vendor simulation (mirror of the schema
+// knowledge in chamber_heater_backend_dragonbreath.cpp). Empty when the
+// resolved chamber heater runs no backend that reports one.
+static json chamber_heater_configfile_sections(const MoonrakerClientMock* self) {
+    json sections = json::object();
+    const auto hw = self->hardware();
+    if (hw.has_chamber_heater() && hw.chamber_heater_backend_id() == "dragonbreath") {
+        sections[hw.chamber_heater_name()] = {{"max_temp", 75.0}};
+    }
+    return sections;
+}
+
 json get_mock_gcode_macro_config() {
     json cfg;
     cfg["gcode_macro clean_nozzle"] = {
@@ -307,6 +322,20 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                         {"pid_kd", 1194.093}}}}},
                     {"config", config_section}};
 
+                // Chamber heater section (settings + config) — e.g. the
+                // dragonbreath trio's max_temp 75 from HELIX_MOCK_OBJECTS.
+                const json chamber_sections = chamber_heater_configfile_sections(self);
+                status_obj["configfile"]["settings"].merge_patch(chamber_sections);
+                status_obj["configfile"]["config"].merge_patch(chamber_sections);
+
+                // Whether a SAVE_CONFIG is owed, and for what. Klipper publishes
+                // these on configfile itself, not under settings/config, and
+                // anything routed through configfile.set() - here
+                // SAVE_TOOL_PARAMETER - sets them.
+                status_obj["configfile"]["save_config_pending"] = self->save_config_pending();
+                status_obj["configfile"]["save_config_pending_items"] =
+                    self->save_config_pending_items();
+
                 // [bed_mesh] probe_count — the print-start collector's
                 // entry-time query reads this to size the mesh denominator.
                 if (const auto* probe_count = self->config_bed_mesh_probe_count()) {
@@ -395,6 +424,24 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                     }
                     status_obj[key] = mcu_obj;
                 }
+            }
+
+            // Per-tool objects. Needed here and not only in subscribe: the
+            // subscribe snapshot lands before ToolState has built its tool list
+            // and is dropped, so ToolState re-asks through this path once the
+            // tools exist (ToolState::query_tool_z_offsets).
+            for (auto it = objects.begin(); it != objects.end(); ++it) {
+                const std::string& key = it.key();
+                if (key.rfind("tool ", 0) != 0) {
+                    continue;
+                }
+                const std::string tool_suffix = key.substr(5); // after "tool "
+                int tool_number = 0;
+                if (tool_suffix.size() >= 2 && tool_suffix[0] == 'T' &&
+                    std::isdigit(static_cast<unsigned char>(tool_suffix[1]))) {
+                    tool_number = tool_suffix[1] - '0';
+                }
+                status_obj[key] = {{"gcode_z_offset", self->tool_z_offset(tool_number)}};
             }
         }
 
@@ -634,12 +681,22 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                             }
                         }
                     }
+                    int tool_number = 0;
+                    if (tool_suffix.size() >= 2 && tool_suffix[0] == 'T' &&
+                        std::isdigit(static_cast<unsigned char>(tool_suffix[1]))) {
+                        tool_number = tool_suffix[1] - '0';
+                    }
                     status_obj[it.key()] = {{"active", false},
                                             {"mounted", true},
                                             {"detect_state", "OK"},
                                             {"gcode_x_offset", 0.0},
                                             {"gcode_y_offset", 0.0},
-                                            {"gcode_z_offset", 0.0},
+                                            // Distinct per tool, and live: a
+                                            // SET_TOOL_PARAMETER earlier in the
+                                            // session must be reflected here,
+                                            // or a reconnect would silently
+                                            // revert what the user set.
+                                            {"gcode_z_offset", self->tool_z_offset(tool_number)},
                                             {"extruder", extruder_for_tool},
                                             {"fan", "fan"}};
                 }
@@ -765,7 +822,26 @@ void register_object_handlers(std::unordered_map<std::string, MethodHandler>& re
                          cfg.merge_patch(get_mock_probe_config());
                          return cfg;
                      }()}};
+
+                // Chamber heater section — e.g. the dragonbreath trio's
+                // max_temp 75 from HELIX_MOCK_OBJECTS.
+                const json chamber_sections = chamber_heater_configfile_sections(self);
+                status_obj["configfile"]["settings"].merge_patch(chamber_sections);
+                status_obj["configfile"]["config"].merge_patch(chamber_sections);
+
+                // Whether a SAVE_CONFIG is owed, and for what. Klipper publishes
+                // these on configfile itself, not under settings/config, and
+                // anything routed through configfile.set() - here
+                // SAVE_TOOL_PARAMETER - sets them.
+                status_obj["configfile"]["save_config_pending"] = self->save_config_pending();
+                status_obj["configfile"]["save_config_pending_items"] =
+                    self->save_config_pending_items();
             }
+
+            // Chamber backend diagnostics + filter pin initial state (e.g.
+            // dragonbreath trio via HELIX_MOCK_OBJECTS), limited to the
+            // objects this subscription asked for.
+            self->append_chamber_backend_status(status_obj, 0.0, &objects);
         }
 
         if (success_cb) {

@@ -108,6 +108,21 @@ So padding stays tight (the panel really is only 320px wide) while buttons becom
 
 Background: prestonbrown/helixscreen#1209.
 
+### Tiers pick the design; the UI scale sizes it physically
+
+Tiers are chosen from **pixels**, which treats resolution as a stand-in for physical size. That works across printer panels and breaks on phone-class ones — a 1080x2400 handset at ~405 DPI lands on XXLARGE and draws a grid cell measuring 12mm rather than the ~30mm the tier means.
+
+A separate scale factor fixes the physical size without touching tier selection. Two things follow for you as a contributor:
+
+- **Author px values exactly as you do now**, against the 160 DPI reference. Every `<px>` token is multiplied by the scale at registration — responsive and non-suffixed alike — so you never write a scaled number by hand.
+- **A non-suffixed token is not exempt.** `icon_badge_size`, `chip_height`, `swatch_size` and friends are fixed-size boxes holding scaled text, so they scale too. The only exemption is a name ending `_opacity`, which holds an 0-255 alpha rather than a length.
+
+Every shipping printer measures at or below the deadband (221 DPI at the top), so the scale is exactly 1.0 on all of them and this changes nothing you can see on real hardware. Reach for `--dpi <n>` to exercise it: `./build/bin/helix-screen --test -s 1080x2400 --dpi 405`.
+
+One consequence worth knowing when you size a widget: the scale shrinks the **track count**, because tracks get bigger while the panel does not. At 1080x2400 the home grid goes from 12x24 tracks to 6x14. A widget pinned to a fixed span (`min == max` in the registry) can therefore be handed far less absolute room than you assumed when you authored it, so prefer a scalable span where the content allows.
+
+Mechanism, the DPI trust rules, and why the kernel is never believed: [THEME_SYSTEM.md § The high-DPI UI scale factor](THEME_SYSTEM.md#the-high-dpi-ui-scale-factor).
+
 ### How it works
 
 In `globals.xml`, you define the suffixed variants of each token:

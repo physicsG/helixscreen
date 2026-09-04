@@ -1,0 +1,135 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    The FlowGuard bar itself, at content height, with no opinion about how it
+    is placed (#1017).
+
+    Split out of clog_bar_page.xml so the Buffer Status modal can embed the
+    same bar: the page is height="100%" for the carousel cell it fills, and a
+    height="content" dialog cannot host that. Everything below is the bar; the
+    page is now just a centring shell around this.
+
+    One job per slot, and no slot repeats another: the source on the top left,
+    its severity as a glyph on the top right, the reading underneath, and end
+    labels only in Flowguard, where the two directions mean opposite faults.
+    Everything but the glyph comes straight off the AmsState subjects.
+
+    UiClogBar owns only what has to be measured: the fill, the value marker,
+    the peak tick and the danger shading, all positioned inside clog_bar_track.
+    It finds them by name, so it works under any parent that contains this.
+
+    Named objects UiClogBar expects: clog_bar, clog_bar_track, clog_bar_fill,
+    clog_bar_marker, clog_bar_peak, clog_bar_danger_lo, clog_bar_danger_hi,
+    clog_bar_threshold_lo, clog_bar_threshold_hi.
+  -->
+  <view name="clog_bar_body"
+        extends="lv_obj" width="100%" height="content" style_pad_all="0" style_pad_row="0" style_pad_column="0"
+        scrollable="false" flex_flow="column" clickable="false" event_bubble="true">
+    <lv_obj name="clog_bar"
+            width="100%" height="content" style_pad_all="0" style_pad_row="#space_xs" style_pad_column="0"
+            scrollable="false" flex_flow="column" style_flex_cross_place="center" clickable="false" event_bubble="true">
+      <bind_flag_if_eq subject="clog_meter_mode" flag="hidden" ref_value="0"/>
+
+      <!-- What is measuring on the left, how worried it is on the right. The
+           severity is a glyph rather than a word: it is the one slot whose
+           meaning is the same in all three modes, it is already carried by the
+           fill colour, and a picture costs a third of the width of "Warning".
+           One label per ClogMeterStatus, only the matching one visible. -->
+      <lv_obj width="100%"
+              height="content" style_pad_all="0" scrollable="false" flex_flow="row"
+              style_flex_main_place="space_between" style_flex_cross_place="center" clickable="false"
+              event_bubble="true">
+        <text_tiny name="clog_bar_mode_text"
+                   bind_text="clog_meter_mode_text" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
+        <lv_obj name="clog_bar_status"
+                width="content" height="content" style_pad_all="0" scrollable="false" clickable="false"
+                event_bubble="true">
+          <lv_label name="clog_bar_status_ok"
+                    align="center" text="#icon_check_circle" style_text_font="mdi_icons_16" style_text_color="#primary"
+                    clickable="false" event_bubble="true">
+            <bind_flag_if_not_eq subject="clog_meter_status" flag="hidden" ref_value="0"/>
+          </lv_label>
+          <lv_label name="clog_bar_status_warning"
+                    align="center" text="#icon_alert" style_text_font="mdi_icons_16" style_text_color="#warning"
+                    clickable="false" event_bubble="true">
+            <bind_flag_if_not_eq subject="clog_meter_status" flag="hidden" ref_value="1"/>
+          </lv_label>
+          <lv_label name="clog_bar_status_fault"
+                    align="center" text="#icon_filament_alert" style_text_font="mdi_icons_16" style_text_color="#danger"
+                    clickable="false" event_bubble="true">
+            <bind_flag_if_not_eq subject="clog_meter_status" flag="hidden" ref_value="2"/>
+          </lv_label>
+        </lv_obj>
+      </lv_obj>
+
+      <!-- End label, scale, end label. -->
+      <lv_obj width="100%"
+              height="content" style_pad_all="0" style_pad_column="#space_xs" scrollable="false" flex_flow="row"
+              style_flex_cross_place="center" clickable="false" event_bubble="true">
+        <!-- Only Flowguard's ends mean different things (tangle one way, clog
+             the other). A linear mode fills from nothing toward its danger
+             band, which the shading already says, so the labels come off and
+             the track takes their width. -->
+        <text_tiny name="clog_bar_label_left"
+                   bind_text="clog_meter_label_left" style_text_color="#text_muted" clickable="false"
+                   event_bubble="true">
+          <bind_flag_if_not_eq subject="clog_meter_mode" flag="hidden" ref_value="2"/>
+        </text_tiny>
+        <lv_obj name="clog_bar_track"
+                height="#meter_track_h" flex_grow="1" style_pad_all="0" style_bg_color="#overlay_bg" style_bg_opa="255"
+                style_radius="#border_radius" style_border_width="0" style_clip_corner="true" scrollable="false"
+                clickable="false" event_bubble="true">
+          <!-- Order is z-order: shading behind the fill, ticks on top. -->
+          <!-- The shaded zone plus a hard edge where it starts. The shading is
+               danger at 30%, and a warning fill is drawn in danger too, so at
+               a fault the two merged and "how far past the threshold" became
+               unreadable exactly when it mattered. The edge is #warning, which
+               no fill ever uses, so it stays visible through one. -->
+          <lv_obj name="clog_bar_danger_lo"
+                  width="0" height="100%" y="0" style_pad_all="0" style_bg_color="#danger" style_bg_opa="77"
+                  style_radius="0" style_border_width="2" style_border_side="right" style_border_color="#warning"
+                  style_border_opa="255" scrollable="false" clickable="false" event_bubble="true"/>
+          <lv_obj name="clog_bar_danger_hi"
+                  width="0" height="100%" y="0" style_pad_all="0" style_bg_color="#danger" style_bg_opa="77"
+                  style_radius="0" style_border_width="2" style_border_side="left" style_border_color="#warning"
+                  style_border_opa="255" scrollable="false" clickable="false" event_bubble="true"/>
+          <lv_obj name="clog_bar_fill"
+                  width="0" height="100%" y="0" style_pad_all="0" style_bg_opa="255" style_radius="#border_radius"
+                  style_border_width="0" scrollable="false" clickable="false" event_bubble="true"/>
+          <!-- Where the danger zone starts, drawn over the fill rather than
+               under it. The shading below is danger at 30% and a warning fill
+               is danger too, so at a fault the two merged into one red block
+               and "how far past the threshold" was unreadable exactly when it
+               mattered most. These are #warning, which no fill ever uses. -->
+          <lv_obj name="clog_bar_threshold_lo"
+                  width="0" height="100%" y="0" style_pad_all="0" style_bg_color="#warning" style_bg_opa="255"
+                  style_radius="0" style_border_width="0" scrollable="false" clickable="false" event_bubble="true"/>
+          <lv_obj name="clog_bar_threshold_hi"
+                  width="0" height="100%" y="0" style_pad_all="0" style_bg_color="#warning" style_bg_opa="255"
+                  style_radius="0" style_border_width="0" scrollable="false" clickable="false" event_bubble="true"/>
+          <lv_obj name="clog_bar_peak"
+                  width="2" height="100%" y="0" style_pad_all="0" style_bg_color="#text_muted" style_bg_opa="255"
+                  style_radius="0" style_border_width="0" scrollable="false" clickable="false" event_bubble="true"/>
+          <lv_obj name="clog_bar_marker"
+                  width="2" height="100%" y="0" style_pad_all="0" style_bg_color="#text" style_bg_opa="255"
+                  style_radius="0" style_border_width="0" scrollable="false" clickable="false" event_bubble="true"/>
+        </lv_obj>
+        <text_tiny name="clog_bar_label_right"
+                   bind_text="clog_meter_label_right" style_text_color="#text_muted" clickable="false"
+                   event_bubble="true">
+          <bind_flag_if_not_eq subject="clog_meter_mode" flag="hidden" ref_value="2"/>
+        </text_tiny>
+      </lv_obj>
+
+      <!-- The reading, and nothing when there is not one. What used to be a
+           blank line under a bare track is now answered by the status glyph
+           above: clog_meter_status folds in clog_meter_is_safe(), so the same
+           state the arc stands a check icon in for reads OK here. A second
+           check down here would just be the first one twice. -->
+      <text_small name="clog_bar_center_text"
+                  bind_text="clog_meter_center_text" style_text_align="center" clickable="false" event_bubble="true"/>
+    </lv_obj>
+  </view>
+</component>

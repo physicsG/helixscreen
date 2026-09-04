@@ -45,6 +45,8 @@ void PrinterCapabilitiesState::init_subjects(bool register_xml) {
     INIT_SUBJECT_INT(printer_bed_moves, 0, subjects_, register_xml); // 0=gantry moves, 1=bed moves
     INIT_SUBJECT_INT(printer_has_chamber_sensor, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(printer_has_chamber_heater, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(printer_has_chamber_heater_diagnostics, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(printer_has_chamber_filter_fan, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(printer_has_chamber, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(printer_has_screws_tilt, 0, subjects_, register_xml);
     INIT_SUBJECT_INT(printer_has_webcam, 0, subjects_, register_xml);
@@ -121,12 +123,26 @@ void PrinterCapabilitiesState::set_hardware(const PrinterDiscovery& hardware,
     set_capability_int(printer_has_accelerometer_, hardware.has_accelerometer() ? 1 : 0);
 
     // Install M300 (Klipper gcode beeper) backend now that we know whether
-    // the printer's Klipper config actually has a beeper output_pin. This
-    // MUST happen before flipping printer_has_speaker_ so any UI/handlers
-    // observing the subject see a working backend. SoundManager no-ops if
-    // a real audio backend (SDL/ALSA/PWM) is already installed.
-    if (hardware.has_speaker()) {
-        SoundManager::instance().try_install_m300_backend();
+    // the printer answers M300 — a beeper output_pin or an M300 macro in the
+    // Klipper config (has_speaker covers both) — or the user forced the
+    // speaker capability on for a buzzer neither signal detects (e.g. firmware
+    // with native M300 handling and no Klipper object at all). Without the
+    // override arm, that forced-on setting silently no-ops: the sound settings
+    // appear, but nothing ever installs a backend.
+    // This MUST happen before flipping printer_has_speaker_ so any UI/handlers
+    // observing the subject see a working backend. Real detection
+    // (has_speaker) additionally takes the buzzer channel away from the PWM
+    // sysfs backend: klippy's tone_player writes that same channel for every
+    // M300/TONE it handles, so the two backends fight — klippy becomes the
+    // single writer. The forced override alone never displaces an installed
+    // backend (M300 may be unhandled there → the "!! Unknown command:M300"
+    // feedback loop). A DISABLE override means "this printer has no speaker",
+    // so it keeps the M300 backend out too rather than installing a beeper
+    // the user disowned.
+    const OverrideState speaker_override = overrides.get_override(capability::SPEAKER);
+    if (speaker_override != OverrideState::DISABLE &&
+        (hardware.has_speaker() || speaker_override == OverrideState::ENABLE)) {
+        SoundManager::instance().try_install_m300_backend(hardware.has_speaker());
     }
 
     // Speaker capability — uses override system so presets can disable it
@@ -238,6 +254,16 @@ void PrinterCapabilitiesState::set_has_chamber_sensor(bool available) {
 void PrinterCapabilitiesState::set_has_chamber_heater(bool available) {
     set_capability_int(printer_has_chamber_heater_, available ? 1 : 0);
     update_has_chamber();
+}
+
+// Diagnostics / filter-fan capabilities are independent of the combined
+// printer_has_chamber_ flag: they gate backend-specific surfaces only.
+void PrinterCapabilitiesState::set_has_chamber_heater_diagnostics(bool available) {
+    lv_subject_set_int(&printer_has_chamber_heater_diagnostics_, available ? 1 : 0);
+}
+
+void PrinterCapabilitiesState::set_has_chamber_filter_fan(bool available) {
+    lv_subject_set_int(&printer_has_chamber_filter_fan_, available ? 1 : 0);
 }
 
 void PrinterCapabilitiesState::update_has_chamber() {

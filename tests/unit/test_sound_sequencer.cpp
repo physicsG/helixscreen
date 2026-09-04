@@ -45,6 +45,14 @@ class MockBackend : public SoundBackend {
     std::vector<SilenceEvent> silence_events;
     bool amp_support = true;
 
+    // Sequencer tick interval to report (drives its sleep): set above 1.0 to
+    // emulate a floor-limited backend like PWM (20) or M300 (50).
+    float min_tick_ms_value = 1.0f;
+
+    float min_tick_ms() const override {
+        return min_tick_ms_value;
+    }
+
     void set_tone(float freq_hz, float amplitude, float duty_cycle) override {
         std::lock_guard<std::mutex> lock(mutex);
         tone_events.push_back({freq_hz, amplitude, duty_cycle, std::chrono::steady_clock::now()});
@@ -305,6 +313,73 @@ TEST_CASE("SoundSequencer: pause step produces silence", "[sound][sequencer][slo
     CHECK(has_2000);
 
     seq.shutdown();
+}
+
+// ============================================================================
+// 3b. Audible floor: steps shorter than min_tick_ms are stretched to the tick
+// ============================================================================
+
+// The sequencer can only advance a step on a tick, and it sleeps the
+// backend's min_tick_ms() between ticks — so every step sounds for at least
+// one full tick interval. That quantization IS the audible floor the PWM
+// backend leans on (its min_tick_ms is the floor): without it, a sub-floor
+// tone+rest pair would be a click, not a beep. This pins the mechanism with
+// mock floors, so a refactor that decouples step advancement from the tick
+// interval goes red here before the piezo regresses on hardware.
+TEST_CASE("SoundSequencer: sub-floor steps are stretched to the min_tick_ms interval",
+          "[sound][sequencer][slow]") {
+    auto run_sub_floor_pair = [](float floor_ms) {
+        auto backend = std::make_shared<MockBackend>();
+        backend->min_tick_ms_value = floor_ms;
+        SoundSequencer seq(backend);
+        seq.start();
+
+        // 10 ms tone + 10 ms rest: both steps below every floor used here.
+        SoundDefinition def;
+        def.name = "sub_floor";
+        def.repeat = 1;
+
+        SoundStep tone;
+        tone.freq_hz = 1000;
+        tone.duration_ms = 10;
+        tone.velocity = 0.8f;
+        tone.envelope = {0, 0, 1.0f, 0};
+        def.steps.push_back(tone);
+
+        SoundStep rest;
+        rest.is_pause = true;
+        rest.duration_ms = 10;
+        rest.freq_hz = 0;
+        rest.envelope = {0, 0, 0, 0};
+        def.steps.push_back(rest);
+
+        seq.play(def);
+        REQUIRE(wait_until_done(seq, 10000));
+        seq.shutdown();
+
+        auto tones = backend->get_tones();
+        auto silences = backend->get_silences();
+        REQUIRE(tones.size() > 0);
+        REQUIRE(silences.size() > 0);
+
+        // The tone rings from its first set_tone until the first silence
+        // (the rest step's advance_step). With steps advancing only on
+        // ticks, that span is at least one tick interval, minus scheduling
+        // slack for the wake lateness a loaded runner adds.
+        auto span_ms = std::chrono::duration_cast<std::chrono::milliseconds>(silences[0].timestamp -
+                                                                             tones[0].timestamp)
+                           .count();
+        return static_cast<float>(span_ms);
+    };
+
+    // The PWM floor: a 10 ms tone rings for ~a full 20 ms tick.
+    float span_at_20 = run_sub_floor_pair(20.0f);
+    CHECK(span_at_20 >= 15.0f);
+
+    // Control: raising the floor must stretch the same tone further — this
+    // is what fails if step advancement stops tracking the tick interval.
+    float span_at_50 = run_sub_floor_pair(50.0f);
+    CHECK(span_at_50 >= 45.0f);
 }
 
 // ============================================================================
@@ -694,9 +769,8 @@ TEST_CASE("SoundSequencer: EVENT priority replaces UI sound", "[sound][sequencer
     auto ui_sound = make_tone(500.0f, 1000.0f);
     seq.play(ui_sound, SoundPriority::UI);
 
-    // Wait for it to start playing
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    REQUIRE(seq.is_playing());
+    // The sequencer picks the request up on its own thread; wait for it.
+    REQUIRE(UITest::wait_until([&] { return seq.is_playing(); }));
 
     // Interrupt with EVENT priority
     auto event_sound = make_tone(2000.0f, 100.0f);
@@ -732,9 +806,9 @@ TEST_CASE("SoundSequencer: UI priority does NOT replace EVENT sound", "[sound][s
     auto event_sound = make_tone(2000.0f, 300.0f);
     seq.play(event_sound, SoundPriority::EVENT);
 
-    // Wait for it to start
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    REQUIRE(seq.is_playing());
+    // The EVENT sound must be established before the UI sound is offered,
+    // otherwise both are queued together and no priority decision is exercised.
+    REQUIRE(UITest::wait_until([&] { return seq.is_playing(); }));
 
     // Try to play UI sound - should be dropped
     backend->clear();
@@ -766,8 +840,7 @@ TEST_CASE("SoundSequencer: ALARM replaces EVENT sound", "[sound][sequencer][slow
     auto event_sound = make_tone(2000.0f, 1000.0f);
     seq.play(event_sound, SoundPriority::EVENT);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    REQUIRE(seq.is_playing());
+    REQUIRE(UITest::wait_until([&] { return seq.is_playing(); }));
 
     // Interrupt with ALARM
     auto alarm = make_tone(3000.0f, 100.0f);
@@ -830,15 +903,12 @@ TEST_CASE("SoundSequencer: stop halts playback and silences", "[sound][sequencer
     auto sound = make_tone(1000.0f, 2000.0f); // 2 second sound
     seq.play(sound);
 
-    // Let it play briefly
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    REQUIRE(seq.is_playing());
+    REQUIRE(UITest::wait_until([&] { return seq.is_playing(); }));
 
     seq.stop();
 
-    // Should stop within a few ms
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    CHECK_FALSE(seq.is_playing());
+    // stop() only raises a flag; the sequencer thread halts on its next pass.
+    CHECK(UITest::wait_until([&] { return !seq.is_playing(); }));
 
     // Backend should have been silenced
     CHECK(backend->silence_count() > 0);
@@ -860,9 +930,7 @@ TEST_CASE("SoundSequencer: is_playing reflects playback state", "[sound][sequenc
     auto sound = make_tone(1000.0f, 200.0f);
     seq.play(sound);
 
-    // Give the sequencer thread time to pick it up
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    CHECK(seq.is_playing());
+    CHECK(UITest::wait_until([&] { return seq.is_playing(); }));
 
     REQUIRE(wait_until_done(seq));
     CHECK_FALSE(seq.is_playing());
@@ -936,6 +1004,10 @@ TEST_CASE("SoundSequencer: empty sequence does not crash", "[sound][sequencer][s
     SoundSequencer seq(backend);
     seq.start();
 
+    // The loop parks the device before its first tick, so a suspend proves the
+    // sequencer thread is running and will see whatever is queued next.
+    REQUIRE(UITest::wait_until([&] { return backend->suspend_calls.load() >= 1; }));
+
     SoundDefinition empty;
     empty.name = "empty";
     empty.repeat = 1;
@@ -943,11 +1015,14 @@ TEST_CASE("SoundSequencer: empty sequence does not crash", "[sound][sequencer][s
 
     seq.play(empty);
 
-    // Should not crash, should not play
+    // An empty definition produces no backend traffic and leaves no state to
+    // observe, so there is no barrier to wait on and this window is
+    // best-effort. It rests on the wait above: the loop is already running and
+    // play() signals its condition variable, so a sequencer that mishandled an
+    // empty step list would reach the backend well inside this window.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    CHECK_FALSE(seq.is_playing());
 
-    // No tone events should have been generated
+    CHECK_FALSE(seq.is_playing());
     CHECK(backend->tone_count() == 0);
 
     seq.shutdown();
@@ -1012,11 +1087,12 @@ TEST_CASE("SoundSequencer: parks the device before any sound plays",
     SoundSequencer seq(backend);
     seq.start();
 
-    // Give the loop a few ticks; it must park without being asked to play.
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // The loop must park without ever being asked to play.
+    REQUIRE(UITest::wait_until([&] { return backend->suspend_calls.load() >= 1; }));
 
-    CHECK(backend->suspend_calls.load() >= 1);
-    CHECK(backend->resume_calls.load() == 0); // nothing has needed the device yet
+    // The park is the barrier for this one: it has happened, and no sound has
+    // been requested, so a resume here would be the device being held open.
+    CHECK(backend->resume_calls.load() == 0);
 
     seq.shutdown();
 }
@@ -1026,10 +1102,9 @@ TEST_CASE("SoundSequencer: wakes the device to play and parks it again after",
     auto backend = std::make_shared<MockBackend>();
     SoundSequencer seq(backend);
     seq.start();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    REQUIRE(UITest::wait_until([&] { return backend->suspend_calls.load() >= 1; }));
 
     const int suspends_before = backend->suspend_calls.load();
-    REQUIRE(suspends_before >= 1);
 
     auto sound = make_tone(1000.0f, 60.0f);
     seq.play(sound);
@@ -1040,8 +1115,7 @@ TEST_CASE("SoundSequencer: wakes the device to play and parks it again after",
     CHECK(backend->tone_count() > 0);
 
     // ...and parked again once the queue drained.
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    CHECK(backend->suspend_calls.load() > suspends_before);
+    CHECK(UITest::wait_until([&] { return backend->suspend_calls.load() > suspends_before; }));
 
     seq.shutdown();
 }

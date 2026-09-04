@@ -8,6 +8,7 @@
 #include "lvgl/lvgl.h"
 
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <utility>
@@ -78,56 +79,77 @@ struct GridPlacement {
 /// and breakpoint adaptation.
 class GridLayout {
   public:
-    /// Number of defined breakpoints
-    static constexpr int NUM_BREAKPOINTS = 6;
+    /// Number of defined breakpoints. One per UiBreakpoint tier, XXLarge
+    /// included — a short table here does not fail to compile, it silently
+    /// clamps the top tier onto the one below and the grid stops growing.
+    static constexpr int NUM_BREAKPOINTS = 7;
 
-    /// Target cell WIDTH in pixels. ULTRAWIDE and PORTRAIT divide screen width
-    /// by this to derive a column count.
-    static constexpr int TARGET_CELL_W_PX = 160;
-
-    /// Target cell HEIGHT in pixels. PORTRAIT divides screen height by this to
-    /// derive a row count.
+    /// Number of grid tracks that make up one authored cell.
     ///
-    /// 120, not 160: ultrawide has always kept the fixed 4-row table on a 480px
-    /// panel, i.e. a 120px row, so 120 is the row height the dashboard is
-    /// actually authored against. Portrait used to reuse the 160px WIDTH target
-    /// for both axes, which made its rows 164px tall — the tall screen got
-    /// fewer, chunkier cells than the wide one (#1215). A 320x1480 panel now
-    /// yields 12 rows instead of 9.
-    static constexpr int TARGET_CELL_H_PX = 120;
+    /// Authored spans — in the registry, in default_layout.json and in a saved
+    /// layout — are expressed in cells. The grid lays out tracks. Every site
+    /// that converts between the two reads this, so a widget that is not
+    /// allowed to occupy half a cell can never be placed straddling one.
+    static constexpr int TRACKS_PER_CELL = 2;
 
-    /// Clamp range for dynamically computed grid dimensions
-    static constexpr int MIN_DYNAMIC_COLS = 4;
-    static constexpr int MAX_DYNAMIC_COLS = 16;
-    static constexpr int MIN_DYNAMIC_ROWS = 3;
-
-    /// Row cap for dynamically computed grids.
+    /// Target track edge in px, per breakpoint tier, indexed by UiBreakpoint.
     ///
-    /// 16 mirrors MAX_DYNAMIC_COLS and covers the tallest panels in the wild at
-    /// the 120px row target: 320x1480 lands on 12, and a 480x1920 ultratall
-    /// lands exactly on 16. Past that a taller screen gets taller cells rather
-    /// than more tracks — every extra row is a real LVGL grid track that costs
-    /// descriptor memory and a layout pass whether or not a widget occupies it,
-    /// and a 17th row on a 2-column grid buys cells no widget is authored for.
-    static constexpr int MAX_DYNAMIC_ROWS = 16;
-
-    /// Column floor for portrait, below the landscape floor of 4.
+    /// A track is half a cell, so a widget's authored colspan and rowspan are
+    /// the same physical unit and it is authored once for every panel and
+    /// orientation. Dividing each screen axis by the same number is what makes
+    /// the cell square: a rotated panel transposes its grid exactly.
     ///
-    /// A portrait panel is narrow by definition: 320px against MIN_DYNAMIC_COLS
-    /// would give 80px cells, half of TARGET_CELL_W_PX, and every widget that
-    /// branches on `colspan >= 2` would read as compact no matter how much of
-    /// the screen it actually covers. Two columns keeps cells at their intended
-    /// size and lets a full-width widget genuinely be full width.
-    static constexpr int MIN_PORTRAIT_COLS = 2;
+    /// The XXLarge rung has to exist. While this table was six long, XXLarge
+    /// clamped onto XLarge and a 1080p panel drew a 144px cell — the same
+    /// physical widget size as a 1280x720 panel — while the font and icon
+    /// ladders, which do carry a real xxlarge rung, scaled up 1.6x around it.
+    /// 96 keeps the cell growing at the same 1.6x from Large that font_body
+    /// does (20 -> 32px), so type stays proportionate to the box holding it.
+    static constexpr int GRID_CELL[NUM_BREAKPOINTS] = {34, 40, 40, 60, 60, 72, 96};
+    static_assert(std::size(GRID_CELL) == static_cast<size_t>(to_int(UiBreakpoint::XXLarge)) + 1,
+                  "GRID_CELL must carry one track edge per UiBreakpoint tier");
 
-    /// Get grid dimensions for a given breakpoint
-    static GridDimensions get_dimensions(UiBreakpoint bp);
+    /// Degenerate-display guard, in tracks. Reached only by a content box that
+    /// is empty or has not been laid out yet; the narrowest shipping content
+    /// box is 264px against a 68px cell, which gives 8 tracks.
+    ///
+    /// A whole number of cells, so clamping cannot produce an odd track count.
+    static constexpr int MIN_TRACKS = 4;
 
-    /// Get the number of columns for a breakpoint
-    static int get_cols(UiBreakpoint bp);
+    /// Ceiling on track count. High enough that no plausible content box
+    /// reaches it — a lower cap would stretch the track and break the
+    /// square-cell invariant instead of merely capping memory. The cost is
+    /// descriptor entries, not objects: a 64x64 grid is 130 int32 values
+    /// (cols+1 plus rows+1) in the LVGL grid descriptor.
+    ///
+    /// A whole number of cells, so clamping cannot produce an odd track count.
+    static constexpr int MAX_TRACKS = 64;
 
-    /// Get the number of rows for a breakpoint
-    static int get_rows(UiBreakpoint bp);
+    /// Track counts for a content rectangle at a given breakpoint.
+    ///
+    /// `content_w` and `content_h` are the container's CONTENT box — what the
+    /// tracks are actually laid out inside — not the panel resolution. Panel
+    /// chrome takes a different bite out of each axis and out of each
+    /// orientation, so dividing the panel extent sizes every track against a
+    /// rectangle the grid never occupies.
+    ///
+    /// Each axis is quantised to the NEAREST whole cell rather than the
+    /// largest that fits. Flooring throws away up to a full cell and spreads it
+    /// across the survivors, which on some panels stretches a track by a
+    /// quarter of its target; rounding keeps the delivered track within half a
+    /// cell of GRID_CELL on both axes, which is what keeps the cell square.
+    /// The result is a whole number of cells, so the track count is always even.
+    ///
+    /// A zero or negative extent yields the MIN_TRACKS floor, deliberately and
+    /// identically on both axes, rather than a plausible-looking grid derived
+    /// from nothing.
+    static GridDimensions get_dimensions(UiBreakpoint bp, int content_w, int content_h);
+
+    /// Column track count for a content rectangle. See get_dimensions().
+    static int get_cols(UiBreakpoint bp, int content_w, int content_h);
+
+    /// Row track count for a content rectangle. See get_dimensions().
+    static int get_rows(UiBreakpoint bp, int content_w, int content_h);
 
     /// Inter-track gap the home grid is built with, in px.
     ///
@@ -138,16 +160,22 @@ class GridLayout {
     /// not been styled yet.
     static int gutter_px();
 
-    /// Generate LVGL column descriptor array for a breakpoint.
+    /// Generate an LVGL column descriptor array of `ncols` equal tracks.
     /// Returns vector of int32_t values terminated by LV_GRID_TEMPLATE_LAST.
-    static std::vector<int32_t> make_col_dsc(UiBreakpoint bp);
+    static std::vector<int32_t> make_col_dsc(int ncols);
 
-    /// Generate LVGL row descriptor array for a breakpoint.
+    /// Generate an LVGL row descriptor array of `nrows` equal tracks.
     /// Returns vector of int32_t values terminated by LV_GRID_TEMPLATE_LAST.
-    static std::vector<int32_t> make_row_dsc(UiBreakpoint bp);
+    static std::vector<int32_t> make_row_dsc(int nrows);
 
-    /// Construct a GridLayout for a specific breakpoint
-    explicit GridLayout(UiBreakpoint bp);
+    /// Construct a GridLayout for placement on a grid of the given size.
+    ///
+    /// The size is supplied rather than derived: it is a property of the
+    /// container being subdivided, and a caller that has already built a
+    /// descriptor must place widgets against the same track counts that
+    /// descriptor was built with. Callers holding a container get `dims` from
+    /// get_dimensions(); GridEditMode reads them off the live descriptor.
+    GridLayout(UiBreakpoint bp, GridDimensions dims);
 
     /// Get the breakpoint this layout was constructed for
     UiBreakpoint breakpoint() const {
@@ -171,11 +199,23 @@ class GridLayout {
 
     /// Find first available position for a widget of given size.
     /// Scans top-to-bottom, left-to-right (row-major order).
-    std::optional<std::pair<int, int>> find_available(int colspan, int rowspan) const;
+    ///
+    /// `col_step` / `row_step` are the track boundaries the origin may land on
+    /// — TRACKS_PER_CELL for a widget that must occupy whole cells, 1 for an
+    /// axis it declares half-cell support on. They default to a whole cell:
+    /// half-cell placement is opt-in everywhere else, and a search that walked
+    /// every track seated whole-cell widgets straddling two of them whenever a
+    /// half-cell neighbour had left an odd-aligned gap (#1126).
+    std::optional<std::pair<int, int>> find_available(int colspan, int rowspan,
+                                                      int col_step = TRACKS_PER_CELL,
+                                                      int row_step = TRACKS_PER_CELL) const;
 
     /// Find first available position scanning bottom-to-top, right-to-left.
     /// Used by auto-placement to pack widgets toward the bottom of the grid.
-    std::optional<std::pair<int, int>> find_available_bottom(int colspan, int rowspan) const;
+    /// `col_step` / `row_step` as for find_available().
+    std::optional<std::pair<int, int>> find_available_bottom(int colspan, int rowspan,
+                                                             int col_step = TRACKS_PER_CELL,
+                                                             int row_step = TRACKS_PER_CELL) const;
 
     /// Why a flexible placement attempt failed.
     enum class PlacementFailure {
@@ -209,7 +249,9 @@ class GridLayout {
     ///
     /// `failure` distinguishes "no space left" from "larger than the whole
     /// grid" so the caller can say which condition actually failed.
-    SpanPlacement find_available_bottom_min(int min_colspan, int min_rowspan) const;
+    SpanPlacement find_available_bottom_min(int min_colspan, int min_rowspan,
+                                            int col_step = TRACKS_PER_CELL,
+                                            int row_step = TRACKS_PER_CELL) const;
 
     /// Short, user-facing phrase naming a placement failure. Kept next to the
     /// enum so the toast and the log cannot drift apart.
@@ -217,13 +259,19 @@ class GridLayout {
 
     /// A placed widget's growth goal — the span its definition authors, which
     /// is where grow_to_targets() tries to get it back to.
+    ///
+    /// The steps are the same per-axis track boundaries find_available() takes:
+    /// growth moves an origin as well as a span, so a widget that may not
+    /// straddle a cell must grow a whole cell at a time or not at all (#1126).
     struct GrowthTarget {
         std::string widget_id;
         int colspan;
         int rowspan;
+        int col_step = TRACKS_PER_CELL;
+        int row_step = TRACKS_PER_CELL;
     };
 
-    /// Expand one already-placed widget by a single row or column toward
+    /// Expand one already-placed widget by a single growth step toward
     /// `target_colspan` x `target_rowspan`. Returns true when the placement
     /// changed.
     ///
@@ -236,7 +284,11 @@ class GridLayout {
     ///
     /// The target is a ceiling, never a floor: a widget already at or past its
     /// target does not move.
-    bool grow_once(const std::string& widget_id, int target_colspan, int target_rowspan);
+    ///
+    /// One step is `col_step` tracks horizontally and `row_step` vertically —
+    /// a whole cell unless the widget declared half-cell support on that axis.
+    bool grow_once(const std::string& widget_id, int target_colspan, int target_rowspan,
+                   int col_step = TRACKS_PER_CELL, int row_step = TRACKS_PER_CELL);
 
     /// Round-robin expansion toward every target: each pass offers every widget
     /// in `targets` ONE growth step, and passes repeat until one changes
@@ -257,10 +309,10 @@ class GridLayout {
         return placements_;
     }
 
-    /// Check which placements from a list fit within this layout's grid.
+    /// Check which placements from a list fit within a grid of the given size.
     /// Returns two vectors: (fits, does_not_fit)
     static std::pair<std::vector<GridPlacement>, std::vector<GridPlacement>>
-    filter_for_breakpoint(UiBreakpoint bp, const std::vector<GridPlacement>& placements);
+    filter_for_grid(GridDimensions dims, const std::vector<GridPlacement>& placements);
 
     /// Clear all placements
     void clear();
@@ -277,6 +329,7 @@ class GridLayout {
     GridPlacement* find_placement_mut(const std::string& widget_id);
 
     UiBreakpoint breakpoint_;
+    GridDimensions dims_;
     std::vector<GridPlacement> placements_;
 };
 

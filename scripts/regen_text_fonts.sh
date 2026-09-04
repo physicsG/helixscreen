@@ -159,9 +159,18 @@ if [ -n "$RUNTIME_CJKCHARS" ]; then
 fi
 
 # Font sizes
-SIZES_REGULAR="8 10 11 12 14 16 18 20 24 26 28 32 40"
-SIZES_LIGHT="10 11 12 14 16 18 20 26"
-SIZES_BOLD="14 16 18 20 24 28 32 40"
+#
+# The faces above 40 (and light above 26) exist only for the high-DPI UI scale
+# factor, which multiplies the XXLarge tier's authored sizes rather than moving
+# to another tier. At the 1.578x a ~405 DPI phone asks for, font_heading 40
+# needs 64, font_body 32 needs ~48, and font_small light_26 needs ~40. Without
+# these the layout would scale up while the type stayed put.
+#
+# They cost the printers nothing: FONTS_XXLARGE in mk/fonts.mk is where they are
+# listed, and no printer platform in mk/cross.mk includes the xxlarge tier.
+SIZES_REGULAR="8 10 11 12 14 16 18 20 24 26 28 32 40 48 64"
+SIZES_LIGHT="10 11 12 14 16 18 20 26 32 40"
+SIZES_BOLD="14 16 18 20 24 28 32 40 48 64"
 
 echo ""
 echo "Regenerating Noto Sans text fonts for LVGL..."

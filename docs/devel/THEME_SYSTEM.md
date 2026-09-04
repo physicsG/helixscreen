@@ -189,6 +189,54 @@ On a landscape display the narrow axis usually *is* the height, which is why "he
 
 Full explanation, worked example, and the rule for classifying a new token: [UI_CONTRIBUTOR_GUIDE.md § Screen Breakpoints](UI_CONTRIBUTOR_GUIDE.md#2-screen-breakpoints). Background: prestonbrown/helixscreen#1209.
 
+### The high-DPI UI scale factor
+
+Breakpoints are chosen from **pixel** counts, so resolution stands in for physical size. That proxy holds across printer panels and fails on phone-class ones: a 1080x2400 handset at ~405 DPI picks XXLARGE and draws a 192px grid cell, which measures 12mm instead of the ~30mm the tier intends. Proportions stay right while everything shrinks physically in lockstep.
+
+`DisplayMetrics` (`include/display_metrics.h`) resolves an effective DPI and turns it into a multiplicative scale applied **on top of** the tier ladder. Breakpoint selection itself still runs on raw pixels, so no panel can change tier and a regression is structurally impossible rather than merely unlikely.
+
+```
+scale = 1.0                            for dpi <= 225
+scale = 1.0 + (dpi - 225) * 0.0032118  above, capped at 2.0
+```
+
+The deadband covers every measured printer (CC1 131, SonicPad 170, CB1 187, Pi 206, K1C/K2+ 218, AD5M 221 true DPI), so all of them resolve to exactly 1.0 and are bit-identical to an unscaled build. A 405 DPI phone resolves to 1.578.
+
+**What the scale multiplies**
+
+| Thing | Where |
+|-------|-------|
+| Every `<px>` token, responsive and static alike | `theme_manager_scale_px_token()`, shared by both registration paths |
+| Grid cell track edge | `GridLayout::get_dimensions()` |
+| Font tokens | remapped to the nearest **larger** linked face by `DisplayMetrics::scaled_font_name()` |
+
+Static (non-suffixed) tokens scale too. They are fixed-size boxes — icon badges, chips, swatches, column widths — holding scaled text, so exempting them just makes glyphs overflow their containers. The one exemption is any token whose name ends `_opacity`: those are declared `<px>` but hold an 0-255 alpha, and multiplying one sails past opaque.
+
+**LVGL's own DPI**
+
+`Application` sets `lv_display_set_dpi()` to `LV_DPI_DEF * scale` — never a kernel-reported value. LVGL derives its internal padding from DPI via `LV_DPX`, so this keeps its chrome (and the handful of `lv_dpx()` call sites in `src/`) growing in step with the design tokens. The two paths are disjoint — tokens reach widgets as style attributes, `LV_DPX` only feeds LVGL's own theme — so they add rather than compound. At scale 1.0 the expression is exactly `LV_DPI_DEF`.
+
+**Why the kernel is never trusted**
+
+Reported physical size is wrong or absent on 6 of the 8 devices in the test fleet, and the wrong ones look plausible: the Raspberry Pi rig reports `154x86mm`, the exact published active area of the official 7" touchscreen, for a panel that is really ~115mm. `simpledrm` synthesizes exactly 96 DPI when the bootloader gives it nothing. No connector in the fleet exposes EDID at all.
+
+So DPI is resolved from trusted sources only, most trusted first:
+
+| Source | Notes |
+|--------|-------|
+| `--dpi <n>` / stored override | Always wins; ignored if outside the 60-700 plausibility band |
+| Platform measurement | Android only (`SDL_GetDisplayDPI`), still plausibility-checked |
+| Known-panel table | Integrated panels keyed on platform: `ad5m`, `cc1`, `k1`, `k2`. Platforms driving a user-chosen display (`pi`, `pi32`, `x86`) deliberately have no entry |
+| Fallback | The 160 DPI authoring reference, i.e. scale 1.0 |
+
+Startup logs which source won: `[Application] Display metrics: dpi=... (source=...) -> ui_scale=..., lvgl_dpi=...`.
+
+**Fonts above the authored ladder**
+
+The tier ladder tops out at `noto_sans_40` (26 for light), so the scale needs larger faces to step into: `noto_sans_48/64`, `noto_sans_bold_48/64`, `noto_sans_light_32/40`. These live in `FONTS_XXLARGE` only (`mk/fonts.mk`), and no printer platform in `mk/cross.mk` declares the xxlarge tier, so the constrained targets link none of them. Android builds via CMake, which globs `assets/fonts/*.c`, and picks them up automatically. A scaled face is adopted only after `lv_xml_get_font_silent()` confirms it is linked, so a build that pruned them degrades to the unscaled tier font rather than losing text.
+
+Testing note: `[content_fits]` cannot cover the scale, because the scale is process-wide while the sweep varies geometry per row. Verify scaled rendering against a running instance: `-s 1080x2400 --dpi 405`.
+
 ### Spacing Tokens
 
 Defined in `ui_xml/globals.xml`:

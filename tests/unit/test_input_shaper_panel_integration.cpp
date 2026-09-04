@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -47,7 +48,10 @@
 
 using namespace helix;
 using namespace helix::calibration;
-using helix::ui::InputShaperPanelTestAccess;
+// Qualified, not a using-declaration: `ui_panel_input_shaper.h` also declares a
+// global ::InputShaperPanelTestAccess (the save-path friend), and pulling the
+// helix::ui one into this scope collides with it.
+namespace ispta = helix::ui;
 
 // ============================================================================
 // Calibrator state machine basics (no API attached)
@@ -81,15 +85,15 @@ TEST_CASE("Shaper type explanation mapping", "[input_shaper][panel][results]") {
     // Every type the results card can be handed maps to its own sentence
     // (src/ui/ui_panel_input_shaper.cpp:1296). A missing arm silently degrades
     // to the generic fallback, which reads plausible and says nothing.
-    CHECK(std::string(InputShaperPanelTestAccess::shaper_explanation("zv")) ==
+    CHECK(std::string(ispta::InputShaperPanelTestAccess::shaper_explanation("zv")) ==
           "Fast but minimal smoothing — best for well-built printers");
-    CHECK(std::string(InputShaperPanelTestAccess::shaper_explanation("mzv")) ==
+    CHECK(std::string(ispta::InputShaperPanelTestAccess::shaper_explanation("mzv")) ==
           "Good balance of speed and vibration reduction");
-    CHECK(std::string(InputShaperPanelTestAccess::shaper_explanation("ei")) ==
+    CHECK(std::string(ispta::InputShaperPanelTestAccess::shaper_explanation("ei")) ==
           "Strong vibration reduction with moderate speed impact");
-    CHECK(std::string(InputShaperPanelTestAccess::shaper_explanation("2hump_ei")) ==
+    CHECK(std::string(ispta::InputShaperPanelTestAccess::shaper_explanation("2hump_ei")) ==
           "Heavy smoothing — significant vibration issues detected");
-    CHECK(std::string(InputShaperPanelTestAccess::shaper_explanation("3hump_ei")) ==
+    CHECK(std::string(ispta::InputShaperPanelTestAccess::shaper_explanation("3hump_ei")) ==
           "Maximum smoothing — consider checking mechanical issues");
 
     SECTION("Kalico smooth shapers get their own explanations") {
@@ -99,17 +103,18 @@ TEST_CASE("Shaper type explanation mapping", "[input_shaper][panel][results]") {
         for (const char* type : {"smooth_zv", "smooth_mzv", "smooth_ei", "smooth_2hump_ei",
                                  "smooth_zvd_ei", "smooth_si"}) {
             INFO("type: " << type);
-            CHECK(std::string(InputShaperPanelTestAccess::shaper_explanation(type)) != fallback);
+            CHECK(std::string(ispta::InputShaperPanelTestAccess::shaper_explanation(type)) !=
+                  fallback);
         }
     }
 
     SECTION("An unknown type falls back to the generic wording") {
-        CHECK(std::string(InputShaperPanelTestAccess::shaper_explanation("not_a_shaper")) ==
+        CHECK(std::string(ispta::InputShaperPanelTestAccess::shaper_explanation("not_a_shaper")) ==
               "Vibration compensation active");
-        CHECK(std::string(InputShaperPanelTestAccess::shaper_explanation("")) ==
+        CHECK(std::string(ispta::InputShaperPanelTestAccess::shaper_explanation("")) ==
               "Vibration compensation active");
         // Klipper's names are lowercase; the lookup is exact, not case-folded.
-        CHECK(std::string(InputShaperPanelTestAccess::shaper_explanation("MZV")) ==
+        CHECK(std::string(ispta::InputShaperPanelTestAccess::shaper_explanation("MZV")) ==
               "Vibration compensation active");
     }
 }
@@ -119,22 +124,22 @@ TEST_CASE("Vibration quality thresholds", "[input_shaper][panel][results]") {
     // 1=good (5-15%), 2=fair (15-25%), 3=poor (>=25%)
     // (src/ui/ui_panel_input_shaper.cpp:1326). Assert the boundaries, since an
     // off-by-one in a `<` vs `<=` is exactly what mis-colours a card.
-    CHECK(InputShaperPanelTestAccess::vibration_quality(0.0f) == 0);
-    CHECK(InputShaperPanelTestAccess::vibration_quality(4.9f) == 0);
-    CHECK(InputShaperPanelTestAccess::vibration_quality(5.0f) == 1);
-    CHECK(InputShaperPanelTestAccess::vibration_quality(14.9f) == 1);
-    CHECK(InputShaperPanelTestAccess::vibration_quality(15.0f) == 2);
-    CHECK(InputShaperPanelTestAccess::vibration_quality(24.9f) == 2);
-    CHECK(InputShaperPanelTestAccess::vibration_quality(25.0f) == 3);
-    CHECK(InputShaperPanelTestAccess::vibration_quality(100.0f) == 3);
+    CHECK(ispta::InputShaperPanelTestAccess::vibration_quality(0.0f) == 0);
+    CHECK(ispta::InputShaperPanelTestAccess::vibration_quality(4.9f) == 0);
+    CHECK(ispta::InputShaperPanelTestAccess::vibration_quality(5.0f) == 1);
+    CHECK(ispta::InputShaperPanelTestAccess::vibration_quality(14.9f) == 1);
+    CHECK(ispta::InputShaperPanelTestAccess::vibration_quality(15.0f) == 2);
+    CHECK(ispta::InputShaperPanelTestAccess::vibration_quality(24.9f) == 2);
+    CHECK(ispta::InputShaperPanelTestAccess::vibration_quality(25.0f) == 3);
+    CHECK(ispta::InputShaperPanelTestAccess::vibration_quality(100.0f) == 3);
 
     SECTION("The prose description switches on the same boundaries") {
         // Two independent ladders over the same thresholds; a change to one
         // that misses the other shows a green card with "Poor" text.
         for (float v : {0.0f, 4.9f, 5.0f, 14.9f, 15.0f, 24.9f, 25.0f, 100.0f}) {
             INFO("vibrations: " << v);
-            const int quality = InputShaperPanelTestAccess::vibration_quality(v);
-            const std::string desc = InputShaperPanelTestAccess::quality_description(v);
+            const int quality = ispta::InputShaperPanelTestAccess::vibration_quality(v);
+            const std::string desc = ispta::InputShaperPanelTestAccess::quality_description(v);
             const char* expected[] = {"Excellent", "Good", "Fair", "Poor"};
             CHECK(desc.rfind(expected[quality], 0) == 0);
         }
@@ -155,11 +160,12 @@ namespace {
 class InputShaperDeltaFixture : public LVGLUITestFixture {
   public:
     InputShaperDeltaFixture() : mock_client_(MoonrakerClientMock::PrinterType::VORON_24) {
-        // A previous test's mock run may have left the calibration CSVs in
-        // /tmp; the marker-line injection below keys off the X file appearing,
-        // so both must start absent.
-        std::remove("/tmp/calibration_data_x_mock.csv");
-        std::remove("/tmp/calibration_data_y_mock.csv");
+        // A previous test's mock run in THIS process may have left the
+        // calibration CSVs behind; the marker-line injection below keys off the
+        // X file appearing, so both must start absent. Scoped to our own PID -
+        // on the old fixed path this deleted the fixture of whichever
+        // concurrent shard happened to be mid-parse.
+        MoonrakerClientMock::remove_shaper_csvs();
 
         // Live-before config staged per-test (mock default is mzv@36.7/ei@47.6;
         // the staged pair deliberately differs so a leaked default fails loud).
@@ -205,6 +211,10 @@ class InputShaperDeltaFixture : public LVGLUITestFixture {
         lv_obj_delete(view_);
         helix::ui::UpdateQueue::instance().drain();
         api_.reset();
+
+        // Do not strand this process's CSVs in /tmp: the path carries our PID,
+        // so nothing else will ever overwrite them.
+        MoonrakerClientMock::remove_shaper_csvs();
     }
 
     /// Widget by name inside the panel view (fails loud when the XML drops it)
@@ -499,7 +509,7 @@ TEST_CASE_METHOD(InputShaperDeltaFixture, "InputShaperPanel current config subje
         config.shaper_type_y = "ei";
         config.shaper_freq_y = 47.6f;
 
-        InputShaperPanelTestAccess::populate_current_config(*panel_, config);
+        ispta::InputShaperPanelTestAccess::populate_current_config(*panel_, config);
         helix::ui::UpdateQueue::instance().drain();
 
         CHECK(subject_int("is_shaper_configured") == 1);
@@ -523,11 +533,11 @@ TEST_CASE_METHOD(InputShaperDeltaFixture, "InputShaperPanel current config subje
         configured.shaper_freq_x = 36.7f;
         configured.shaper_type_y = "ei";
         configured.shaper_freq_y = 47.6f;
-        InputShaperPanelTestAccess::populate_current_config(*panel_, configured);
+        ispta::InputShaperPanelTestAccess::populate_current_config(*panel_, configured);
         helix::ui::UpdateQueue::instance().drain();
         REQUIRE(subject_string("is_current_x_type") == "MZV");
 
-        InputShaperPanelTestAccess::populate_current_config(*panel_, InputShaperConfig{});
+        ispta::InputShaperPanelTestAccess::populate_current_config(*panel_, InputShaperConfig{});
         helix::ui::UpdateQueue::instance().drain();
 
         CHECK(subject_int("is_shaper_configured") == 0);
@@ -560,7 +570,7 @@ TEST_CASE_METHOD(InputShaperDeltaFixture, "Per-axis result population",
     // 1.6% < 5% -> quality 0, and the explanation is mzv's, not the fallback.
     CHECK(subject_int("is_result_x_quality") == 0);
     CHECK(subject_string("is_result_x_explanation") ==
-          std::string("* ") + InputShaperPanelTestAccess::shaper_explanation("mzv"));
+          std::string("* ") + ispta::InputShaperPanelTestAccess::shaper_explanation("mzv"));
 
     // The comparison table lists all five fits and marks the recommended row.
     CHECK(subject_int("is_x_num_shapers") == 5);

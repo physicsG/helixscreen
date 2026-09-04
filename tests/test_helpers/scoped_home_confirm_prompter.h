@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // tests/test_helpers/scoped_home_confirm_prompter.h
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once

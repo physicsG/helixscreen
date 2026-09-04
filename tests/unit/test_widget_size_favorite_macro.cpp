@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -47,14 +48,14 @@ TEST_CASE_METHOD(LVGLUITestFixture, "favorite_macro badge/icon/name follow pixel
 
     // Neither flag: large span, sub-threshold pixels on both axes. A
     // span-reading implementation would go tall/wide here; pixels must win.
-    h.resize(4, 4, W_NORMAL - 1, H_TALL - 1);
+    h.resize(4, 4, w_normal() - 1, h_tall() - 1);
     REQUIRE(lv_obj_get_width(badge) == 48);
     REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_32);
     REQUIRE(lv_obj_get_style_text_font(name, LV_PART_MAIN) == theme_manager_get_font("font_xs"));
 
     // `tall` alone: span 1x1 (would read compact under the old predicate),
     // height at threshold, width still sub-threshold.
-    h.resize(1, 1, W_NORMAL - 1, H_TALL);
+    h.resize(1, 1, w_normal() - 1, h_tall());
     REQUIRE(lv_obj_get_width(badge) == 64);
     REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_48);
     REQUIRE(lv_obj_get_style_text_font(name, LV_PART_MAIN) == theme_manager_get_font("font_small"));
@@ -62,7 +63,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "favorite_macro badge/icon/name follow pixel
     // `wide` alone: width at threshold, height still sub-threshold. Proves
     // wide and tall are not conflated — badge/icon must stay compact while
     // the name label (driven by tall || wide) goes to font_small.
-    h.resize(1, 1, W_NORMAL, H_TALL - 1);
+    h.resize(1, 1, w_normal(), h_tall() - 1);
     REQUIRE(lv_obj_get_width(badge) == 48);
     REQUIRE(lv_obj_get_style_text_font(icon, LV_PART_MAIN) == &mdi_icons_32);
     REQUIRE(lv_obj_get_style_text_font(name, LV_PART_MAIN) == theme_manager_get_font("font_small"));

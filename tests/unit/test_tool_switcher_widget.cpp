@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -48,21 +49,23 @@ TEST_CASE("ToolSwitcherWidget: no hardware gate (visible to all printers)",
     REQUIRE(def->hardware_gate_subject == nullptr);
 }
 
-TEST_CASE("ToolSwitcherWidget: supports scaling from 1x1 to 2x2", "[tool_switcher][panel_widget]") {
+TEST_CASE("ToolSwitcherWidget: supports scaling from one cell to 2x2 cells",
+          "[tool_switcher][panel_widget]") {
     const auto* def = find_widget_def("tool_switcher");
     REQUIRE(def != nullptr);
 
-    // Default is 1x1 (compact)
-    REQUIRE(def->colspan == 1);
-    REQUIRE(def->rowspan == 1);
+    // Tracks, not cells — a track is half a cell (GridLayout::TRACKS_PER_CELL).
+    // Default is one whole cell (compact).
+    REQUIRE(def->colspan == 2);
+    REQUIRE(def->rowspan == 2);
 
-    // Can scale up to 2x2
-    REQUIRE(def->effective_max_colspan() == 2);
-    REQUIRE(def->effective_max_rowspan() == 2);
+    // Can scale up to 2x2 cells
+    REQUIRE(def->effective_max_colspan() == 4);
+    REQUIRE(def->effective_max_rowspan() == 4);
 
-    // Minimum is 1x1
-    REQUIRE(def->effective_min_colspan() == 1);
-    REQUIRE(def->effective_min_rowspan() == 1);
+    // Minimum is one whole cell
+    REQUIRE(def->effective_min_colspan() == 2);
+    REQUIRE(def->effective_min_rowspan() == 2);
 
     REQUIRE(def->is_scalable());
 }

@@ -4,7 +4,7 @@
 
 **HelixScreen**: LVGL 9.5 touchscreen UI for Klipper 3D printers. XML engine in `lib/helix-xml/` — our own MIT fork of the engine LVGL removed in 9.5, and its own repo ([prestonbrown/helix-xml](https://github.com/prestonbrown/helix-xml)), so a fresh clone needs `git submodule update --init --recursive`. Pattern: XML → Subjects → C++.
 
-**Before compiling:** Check for existing build processes (`pgrep -x -d' ' 'make|cc1plus'`, or `ps -eo pid,args | grep '[m]ake -j'`) — concurrent compilations thrash the machine. Never `pgrep -f` here: it matches the checking command's own line, so it always reports a false hit, and in a wait loop it never exits. And `pgrep` takes ONE pattern: `pgrep -x make cc1plus` errors with "only one pattern can be provided", so with stderr suppressed it prints nothing and reads as an all-clear. Use the alternation form above, or one `pgrep -x` per name. **Check `free -h`'s Mem AND Swap rows together:** the `helix-tests` link is gated by memory headroom, not cores, and neither row decides on its own. An exhausted swap row is NOT a throttle signal while `Mem:` `available` is still tens of GB: a full `make -j6` built clean at 80Gi available with 14Mi free swap. The failure case is both tight at once, low `available` *and* swap near 0, where `-j8` dies mid-link with *no* `oom-kill` line while load average still looks healthy. `-j6` clears it. Dying at the *same* step twice **can** be a resource ceiling, but rule out a peer first: a second `make` in the SAME tree deletes your freshly linked binary, because `prune-orphan-test-objs` (`mk/tests.mk`) runs `rm -f $(TEST_BIN)` whenever it finds one orphan object, and it is a *sibling* prerequisite of the link, so `-j` gives them no order. The tell is in the log: `[LD] helix-tests` followed by `✓ Unit test binary ready` and NO `✗ Test linking failed!` means the linker exited 0 and something else removed the output. Every shard then reports `No such file or directory` and the suite reads RED with nothing wrong in your code. Memory is not the cause there - a starved link fails loudly and stops make.
+**Before compiling:** Check for existing build processes (`pgrep -x -d' ' 'make|cc1plus'`, or `ps -eo pid,args | grep '[m]ake -j'`) — concurrent compilations thrash the machine. Never `pgrep -f` here: it matches the checking command's own line, so it always reports a false hit, and in a wait loop it never exits. And `pgrep` takes ONE pattern: `pgrep -x make cc1plus` errors with "only one pattern can be provided", so with stderr suppressed it prints nothing and reads as an all-clear. Use the alternation form above, or one `pgrep -x` per name. **Check `free -h`'s Mem AND Swap rows together:** the `helix-tests` link is gated by memory headroom, not cores, and neither row decides on its own. An exhausted swap row is NOT a throttle signal while `Mem:` `available` is still tens of GB: a full `make -j6` built clean at 80Gi available with 14Mi free swap. The failure case is both tight at once, low `available` *and* swap near 0, where `-j8` dies mid-link with *no* `oom-kill` line while load average still looks healthy. `-j6` clears it. Dying at the *same* step twice **can** be a resource ceiling, but rule out a peer first: a second `make` in the SAME tree deletes your freshly linked binary, because `prune-orphan-test-objs` (`mk/tests.mk`) runs `rm -f $(TEST_BIN)` whenever it finds one orphan object, and it is a *sibling* prerequisite of the link, so `-j` gives them no order. The tell is in the log: `[LD] helix-tests` followed by `✓ Unit test binary ready` and NO `✗ Test linking failed!` means the linker exited 0 and something else removed the output. Every shard then reports `No such file or directory` and the suite reads RED with nothing wrong in your code. Memory is not the cause there - a starved link fails loudly and stops make. Under pressure, the peer is often another Claude session you can TALK to, not just a `pgrep` hit: `ListAgents` lists the other Claude sessions on this machine (the name is the address) and `SendMessage` asks directly — which tree, what target, how long — so you coordinate (wait for theirs, drop to `-j2`, take turns at the link) instead of racing blind; send with `notify_when_idle: true` to get ONE notice when that session goes idle instead of polling `free -h`. The symmetric duty: when the box is yours — no peer build, `available` in the tens of GB — MAXIMIZE. `-j` at full `nproc`, every core and all headroom spent, nothing rationed out of caution, and ramp back to full the moment a peer finishes. A stale `-j2` left running after pressure clears is just a slower way to waste the same machine.
 
 ```bash
 make -j                              # Build ONLY the program binary (NOT tests)
@@ -27,6 +27,10 @@ make pi-test                         # Build on thelio + deploy + run
 
 # Worktrees — MUST use for MAJOR work. Always in .worktrees/ (project root).
 scripts/setup-worktree.sh feature/my-branch  # Symlinks deps, builds fast
+#   Also writes .claude/settings.local.json (gitignored) with PROJECT_DIR set to
+#   the MAIN tree, so claude-recall writes lessons and stats there instead of to
+#   a per-worktree .claude-recall/ that `git worktree remove` would discard.
+#   A worktree made by hand (plain `git worktree add`) does NOT get this.
 ```
 
 **XML changes need no rebuild:** `ui_xml/*.xml` is loaded at runtime — edit XML, then **relaunch** the binary to see changes (no `make` needed). Better: hot reload is **on by default for native dev builds** (cross-compiled release builds default it off) — the running app re-registers components within ~500ms of a save and rebuilds the active panel/overlay/modal in place. `HELIX_HOT_RELOAD=1`/`0` overrides the default either way. Invalid XML (mid-write truncation, syntax errors) is silently skipped on the polling thread — the existing UI stays live and the next poll retries.
@@ -76,6 +80,7 @@ Most commonly needed:
 | `docs/devel/LVGL9_XML_GUIDE.md` | XML layouts, widgets, bindings, observer cleanup |
 | `docs/devel/MODAL_SYSTEM.md` | Modal architecture: ui_dialog, modal_button_row, Modal pattern |
 | `docs/devel/FILAMENT_MANAGEMENT.md` | AMS, AFC, Happy Hare, ACE, AD5X IFS, CFS, Tool Changer |
+| `docs/devel/CHAMBER_HEATER.md` | Chamber heaters: backends, discovery, diagnostics, ceiling rules |
 | `docs/devel/REVIEW_RUBRIC.md` | Reviewing a change: crash families, silent-failure traps, what the gates already cover |
 | `docs/devel/ENVIRONMENT_VARIABLES.md` | Runtime env vars |
 | `docs/devel/MOCK_ENVIRONMENT_VARIABLES.md` | Mock printer config for `--test` runs (`HELIX_MOCK_*`, replay) |
@@ -106,16 +111,66 @@ Features, refactors, new panels/widgets/managers — **scope AFTER investigating
 | **Observer factory** | Static callback + `lv_observer_get_user_data()` | `observe_int_sync<Panel>()` from `observer_factory.h` |
 | **Icon sync** | Add icon, forget fonts | `include/ui_icon_codepoints.h` + `make regen-fonts` + rebuild |
 | **Formatting** | Manual formatting | Let pre-commit hook (clang-format) fix |
-| **Doc citations** | Hand-writing the markdown link, or hand-fixing a `:123` line number after moving code | Write the plain backticked citation (`src/printer/printer_state.cpp:622`), then `make regen-doc-links`. Both halves are derived: `scripts/doc_cite_anchors.py` re-pins the line number from a committed content hash of the cited line (so moved code self-heals across every scanned doc, not just the guide), then `scripts/gen_doc_links.py` derives the link URL in `docs/devel/architecture/` from the citation text. `quality-checks.sh` fails a doc that is out of date with either, and the pre-commit hook repairs it in place — re-stage and commit. The one thing you must fix by hand: a cited line whose **own text changed**, which is a hard error because the sentence may no longer be true. |
+| **Doc citations** | Citing a line number (`src/printer/printer_state.cpp:638`), or hand-writing the markdown link | Cite a PLACE: `` `src/printer/printer_state.cpp#update_from_status` `` - a path, then a `#` fragment naming the enclosing scopes. Line numbers are never committed; `scripts/doc_anchors.py` resolves the name to a line on demand, so code that moves rots nothing. `make check-doc-anchors` reports any citation whose name no longer resolves (advisory - `.githooks/pre-push` runs it and never blocks on it), and `make docs-pinned` renders every doc with real line numbers into `build/docs-pinned/` for reading. `quality-checks.sh` still fails a doc citing a file that does not exist. The one thing you must fix by hand: a RENAMED symbol, because the sentence around the citation may no longer be true. **Never write a bare `` `:NNN` ``** (a line number with no path, meaning "and also line N of whatever file this sentence just named") - it carries nothing a reader or a tool can check, and `--check` reports it. Name the thing instead. |
 | **No auto-mock** | `if(!start()) return Mock()` | Check `RuntimeConfig::should_mock_*()` |
 | **JSON include** | `#include <nlohmann/json.hpp>` | `#include "hv/json.hpp"` (libhv's bundled version) |
 | **Build system** | `cmake`, `ninja` | `make -j` (pure Makefile) |
 | **No RTTI** | `dynamic_cast`, `typeid`, `std::type_index`, `any.type()` | `helix::type_tag<T>()` keys, virtual kind queries (`HELIX_CONTEXT_MENU_KIND`), pointer-form `any_cast`. Firmware builds `-fno-rtti`; lint-gated, escape hatch `// RTTI_OK: <reason>` |
 | **Bug commits** | Filing an issue just so the commit can cite one | Cite the issue when one already exists: `fix(scope): thing (prestonbrown/helixscreen#123)`. No issue? `fix(scope): thing` is complete on its own — the commit body carries the explanation. |
+| **Unproven tests** | Claiming "tests pass" as evidence the change is tested | `make mutate-diff` (reverts each hunk, looks for red) and one line in the commit body naming the mutation. A green suite is not evidence: 11 changes in one release range revert green. See `tests/CLAUDE.md` § "Proving a test can fail" |
 | **Commit body length** | 3-paragraph Tests / Verification / Mutation essay | Subject + ~4-line paragraph (cf. `feat(z-offset)` 25e1505e7). Reserve the long form for genuine state-machine fixes that touch multiple subsystems (cf. `fix(ams): DRY unload API` 504905a2). |
+| **Comment archaeology** | `// unlike the three widgets 3d0875bff fixed`, `// this used to memcpy the whole canvas`, `// #1401 grew the offset to 2.515mm`, `// pre-fix the stream wrote into freed memory` | State the constraint, not the history: `// Invalidating here freezes a fullscreen view the user is watching`. See § "Comments describe the code, not its past" |
 | **Submodule mods** | Edit `lib/lvgl/...` / `lib/libhv/...` directly | Add/amend `patches/*.patch` — `mk/patches.mk` auto-applies. **Exception: `lib/helix-xml/` is our own submodule** ([prestonbrown/helix-xml](https://github.com/prestonbrown/helix-xml)) — edit it directly, commit and push *in the submodule*, then commit the bumped pointer in this repo. Never write a patch for it. A worktree gets its own checkout of it (not a symlink), so engine edits stay in that branch. |
 
 **ALWAYS:** Search the SAME FILE you're editing for similar patterns before implementing.
+
+### Comments describe the code, not its past
+
+A comment earns its place by helping someone understand the code **as it is now**.
+Development history — what it used to do, which commit changed it, what bug prompted
+it, what a review found, what a mutation run proved — belongs in the commit message,
+which is exactly where `git log` and `git blame` will surface it when someone asks
+"why is this here?". Putting it in the source means every future reader pays for it
+forever, and it rots: the commit gets squashed, the issue gets closed, the "recent"
+fix becomes ancient, and the comment now misleads.
+
+**The deletion test.** Cut the historical clause. Does the comment still explain the
+code to someone reading this file for the first time who will never look at git
+history? If yes, the clause was archaeology — leave it cut. If the sentence collapses,
+you were relying on history to carry an explanation that should stand on its own, so
+rewrite it as a present-tense fact about the code.
+
+| Keep — a constraint that still binds | Cut — how we got here |
+|---|---|
+| `// Invalidating here freezes a fullscreen view the user is watching` | `// unlike the three widgets 3d0875bff fixed` |
+| `// The piezo demodulates a duty-modulated carrier as static, so PWM is tone-only` | `// Originally disabled 2026-04 for exactly that starvation` |
+| `// A wrapper existing does not prove it persists anything` | `// #1401 grew a probe offset 0.060 -> 2.515mm over five save cycles` |
+| `// Rows arriving with no scan pending would accumulate unbounded` | `// this file used to have several data races` |
+
+Specific forms that are almost always archaeology: a commit SHA; `used to`,
+`previously`, `originally`, `before this`, `no longer`, `pre-fix`; a narrated issue
+(`#123 found that…`) as opposed to a bare cite; "the bug where…"; and in tests, a
+recap of what a review or mutation run discovered.
+
+**This applies to tests, shell scripts, gates and Makefiles too**, not just C++. A
+bats file's header comment is the most common offender — describe what the gate
+checks and why that matters, not the sweep that motivated writing it.
+
+**The legitimate need is real, and it is narrower than it feels.** When a
+counter-intuitive line exists because the obvious alternative is wrong, say what
+breaks — in the present tense, as a property of the system. "Do not invalidate here:
+a token the running stream already captured never recovers" is a constraint the next
+reader must respect. "3d0875bff invalidates here but we can't" is trivia about a
+different file.
+
+**Issue references are welcome — keep them short.** `(prestonbrown/helixscreen#1394)`
+appended to a sentence that already stands on its own is exactly right: it points at
+the full story for anyone who wants it, costs one reader half a second, and cannot
+rot. Do not strip these. What to avoid is *narrating* the issue inline — the cite is
+a pointer, not a summary:
+
+- ✅ `// A wrapper existing does not prove it persists anything (prestonbrown/helixscreen#1401)`
+- ❌ `// #1401: a Helper-Script box folded the offset into the probe, SAVE_CONFIG restarted klipper, and the boot gcode re-applied it, growing 0.060 -> 2.515mm over five cycles`
 
 **Submodule patch workflow** — third-party submodules ONLY (`lib/lvgl/`, `lib/libhv/`, …). **Never run it on `lib/helix-xml/`**: that repo is ours, its edits are meant to be committed, and the `git restore .` below would destroy them.
 
@@ -127,7 +182,7 @@ Edit the file under `lib/<sub>/`, then `cd lib/<sub> && git diff -- <the files y
 
 **DATA in C++, APPEARANCE in XML, Subjects connect them.**
 
-**Absolute for new code.** The tree still has 379 sites that break these rules
+**Absolute for new code.** The tree still has 367 sites that break these rules
 (`scripts/check_imperative_ui.py --list`). Some were deliberate pragmatism from when the XML
 engine could not express what was needed; some are plain mistakes that got through review.
 Both are debt, tracked in prestonbrown/helixscreen#1140 and being ported. **Existing imperative
@@ -154,7 +209,7 @@ count may fall, never rise.
 | `LV_EVENT_DELETE` cleanup, draw hooks (`DRAW_MAIN`/`DRAW_POST`), `SIZE_CHANGED`, gestures/scroll | No declarative equivalent exists |
 | Measured layout and computed fonts (`decide_nozzle_layout()`, breakpoint fonts) | Depends on runtime pixel measurement — see rule 8 |
 | Widgets created in C++ (`lv_*_create`) — canvas and procedural rendering | Never had an XML layer |
-| Per-item payload on generated collections | `lv_obj_set_user_data()` on a `ui_button` overwrites `UiButtonData*` (`temperature_service.cpp:669`) |
+| Per-item payload on generated collections | `lv_obj_set_user_data()` on a `ui_button` overwrites `UiButtonData*` (`src/ui/temperature_service.cpp#setup_panel`) |
 | `helix-screen ctl` remote control (`remote_control_server.cpp`) | Its job is reaching into an arbitrary live widget tree on command |
 | CLI stdout (`cli_args.cpp`, `detect_printer_cmd.cpp`, `helix_splash.cpp`) | stdout *is* the product there; spdlog is for logging |
 | Widget pool recycling, chart data, animations | Churn or per-frame data that a subject would not model |
@@ -262,7 +317,7 @@ for all normal cleanup, never `release()` (#579). Every `init_subjects()` self-r
 | Overlays | `NavigationManager::instance().push_overlay(root)` / `.go_back()` (`ui_nav_manager.h`) — pair every push with `register_overlay_instance(root, this)` or `on_deactivate()` never fires (tests abort; `HELIX_STRICT_OVERLAY_CHECK=1`) | `src/ui/ui_settings_safety.cpp` |
 | Modals (simple) | `Modal::show("component_name")` / `Modal::hide(dialog)` | `src/ui/ui_job_queue_modal.cpp` |
 | Modals (subclass) | Extend `Modal`, implement `get_name()` + `component_name()`, override `on_ok()`/`on_cancel()` | `include/ui_info_qr_modal.h` + `src/ui/ui_info_qr_modal.cpp` (42 + 62 lines — the whole pattern, nothing else) |
-| Confirmation dialog | `modal_show_confirmation(title, msg, severity, btn_text, on_confirm, on_cancel, data)` (in `helix::ui`) | `src/ui/ui_panel_macros.cpp:370` |
+| Confirmation dialog | `modal_confirm(title, msg, severity, btn_text, on_confirm, ConfirmOptions)` (in `helix::ui`) for new code - `std::function` throughout, closes its own dialog; the options struct carries `on_cancel`/`cancel_text`/`on_dismiss`/`owner_token`, and `owner_token` gates **all three** callbacks. The `lv_event_cb_t` spellings (`modal_show_confirmation()`/`modal_show_alert()`) are gone. All are owned, so a dismissal (backdrop tap, ESC, hot-reload rebuild) reaches `on_dismiss` - **pass it whenever the caller holds a guard/flag/pending entry the buttons were meant to clear**, or that state leaks | `src/ui/ui_change_host_modal.cpp#show_connection_failed_modal`; subclass form: `include/lan_client_auth_router.h` |
 | Modal buttons (XML) | `<modal_button_row primary_text="Save" primary_callback="on_save"/>` | `ui_xml/bed_mesh_rename_modal.xml` |
 | Home-panel widget | Subclass `PanelWidget`; `attach()` + `on_size_changed()`. Instances are **recycled** across rebuilds, so any imperative apply must run from `attach()` too, not only on size change | `src/ui/panel_widgets/motion_widget.cpp` (64 lines) |
 | Background → UI | Never touch LVGL off the main thread; `ui_queue_update()` or `tok.defer()` | `src/printer/printer_state.cpp` `set_*_internal()` |
@@ -272,7 +327,7 @@ for all normal cleanup, never `release()` (#579). Every `init_subjects()` self-r
 ## Where Things Live
 
 **Singletons** (classic `::instance()` unless noted):
-`SettingsManager` (persistent settings), `NavigationManager` (panel/overlay stack), `UpdateQueue` (thread-safe UI updates), `SoundManager`, `DisplayManager`, `ModalStack`, `ToolState` (multi-tool tracking), `AmsState` (multi-backend filament systems). Two look like singletons but are not: `PrinterState` (all printer data/subjects) is a Meyers singleton reached via `get_printer_state()` (`app_globals.h:149`) — there is no `PrinterState::instance()`; `PrinterDetector` (printer DB + capabilities) is a static class, no instance exists. Full census (76 `::instance()` singletons plus four other access shapes): `docs/devel/architecture/05-printer-state.md`.
+`SettingsManager` (persistent settings), `NavigationManager` (panel/overlay stack), `UpdateQueue` (thread-safe UI updates), `SoundManager`, `DisplayManager`, `ModalStack`, `ToolState` (multi-tool tracking), `AmsState` (multi-backend filament systems). Two look like singletons but are not: `PrinterState` (all printer data/subjects) is a Meyers singleton reached via `get_printer_state()` (`include/app_globals.h#get_printer_state`) — there is no `PrinterState::instance()`; `PrinterDetector` (printer DB + capabilities) is a static class, no instance exists. Full census (76 `::instance()` singletons plus four other access shapes): `docs/devel/architecture/05-printer-state.md`.
 
 `TemperatureController` — single authority for ALL nozzle/bed/chamber target sends (NOT a `::instance()` singleton: owned by `SubjectInitializer`, reached via `get_temperature_controller()` in `app_globals.h`). New temp-setting UI MUST call `TemperatureController::set_target()`, never raw `MoonrakerAPI::set_temperature()` — lint-enforced by `tests/shell/test_code_lint.bats`. See the TemperatureController section of `docs/devel/architecture/05-printer-state.md`.
 

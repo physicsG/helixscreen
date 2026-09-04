@@ -10,6 +10,7 @@
 #include "ams_backend_ad5x_ifs.h"
 #endif
 #include "app_globals.h"
+#include "chamber_heater_backend.h"
 #include "config.h"
 #include "helix_version.h"
 #include "humidity_sensor_types.h"
@@ -21,9 +22,12 @@
 #include "moonraker_api.h"
 #include "moonraker_client.h"
 #include "power_device_state.h"
+#include "print_start_profile.h"
+#include "printer_detector.h"
 #include "printer_state.h"
 #include "probe_sensor_manager.h"
 #include "sensor_state.h"
+#include "tool_offsets.h"
 #include "toolchanger_addon.h"
 #include "unit_conversions.h"
 #include "webcam_service_health.h"
@@ -244,6 +248,15 @@ void MoonrakerDiscoverySequence::discover_sensors() {
         });
 }
 
+// The model string wins over the host's own name: a firmware that publishes one
+// is naming the machine, while printer.info reports whatever the rootfs was
+// imaged with, which on a stock vendor image is a distro default shared by every
+// unit of every model.
+void MoonrakerDiscoverySequence::publish_identity_locked() {
+    hardware_.set_hostname(reported_machine_name_.empty() ? reported_hostname_
+                                                          : reported_machine_name_);
+}
+
 // Read the hardware fields HelixScreen keeps out of a machine.system_info
 // response. The same response also carries the camera service_state that
 // detect_webcam() cross-checks, which is why one query feeds both.
@@ -274,6 +287,23 @@ void MoonrakerDiscoverySequence::parse_system_info(const json& sys_response) {
             hardware_.set_cpu_arch(cpu_arch);
         }
         spdlog::debug("[Moonraker Client] CPU architecture: {}", cpu_arch);
+    }
+
+    // Vendor forks publish the machine's own model name here; upstream
+    // Moonraker does not send the field at all, so its absence is the norm.
+    if (sys_response.contains("result") && sys_response["result"].contains("system_info") &&
+        sys_response["result"]["system_info"].contains("machine_name") &&
+        sys_response["result"]["system_info"]["machine_name"].is_string()) {
+        std::string machine_name =
+            sys_response["result"]["system_info"]["machine_name"].get<std::string>();
+        if (!machine_name.empty()) {
+            {
+                std::lock_guard<std::mutex> lock(hardware_mutex_);
+                reported_machine_name_ = machine_name;
+                publish_identity_locked();
+            }
+            spdlog::info("[Moonraker Client] Machine name: {}", machine_name);
+        }
     }
 }
 
@@ -770,7 +800,8 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
                         auto software_version = result.value("software_version", "unknown");
                         {
                             std::lock_guard<std::mutex> lock(hardware_mutex_);
-                            hardware_.set_hostname(hostname);
+                            reported_hostname_ = hostname;
+                            publish_identity_locked();
                             hardware_.set_software_version(software_version);
                         }
                         std::string state = result.value("state", "");
@@ -1465,6 +1496,22 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
         subscription_objects[obj] = nullptr;
     }
 
+    // Firmware that keeps a z-offset PER TOOL needs whatever object stores it.
+    // Empty for klipper-toolchanger, whose offsets ride on the `tool T*`
+    // objects requested above; a machine keeping all four on one macro needs
+    // that macro, and without it its selector would show nothing forever.
+    // See include/tool_offsets.h.
+    for (const auto& obj : helix::tool_offsets::required_status_objects(hw)) {
+        subscription_objects[obj] = nullptr;
+    }
+
+    // Chamber-heater backend surfaces (diagnostics object + filter fan pin).
+    // See include/chamber_heater_backend.h.
+    for (const auto& obj : helix::chamber::required_status_objects(hw.chamber_diagnostics_object(),
+                                                                   hw.chamber_filter_fan_pin())) {
+        subscription_objects[obj] = nullptr;
+    }
+
     // ACE (Anycubic ACE Pro — ValgACE/BunnyACE/DuckACE Klipper drivers, native
     // GoKlipper `filament_hub`, or the Kobra S1 mainline-Python fork's
     // `ace_instance_N` objects, #1107). Subscribe the real detected object
@@ -1587,6 +1634,24 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
     subscription_objects["gcode_macro START_PRINT"] = json::array({"preparation_done"});
     subscription_objects["gcode_macro _HELIX_STATE"] = json::array({"print_started"});
 
+    // The active print-start profile may declare a status object that carries
+    // structured pre-print phase state. The profile owns which object (and
+    // field) that is — this only subscribes whatever it asks for, so a
+    // firmware that publishes its phases that way needs a JSON edit, not a
+    // code change.
+    {
+        const std::string printer_type = get_printer_state().get_printer_type();
+        if (!printer_type.empty()) {
+            const std::string profile_name = PrinterDetector::get_print_start_profile(printer_type);
+            if (!profile_name.empty()) {
+                auto profile = PrintStartProfile::load(profile_name);
+                for (const auto& object : profile->required_status_objects()) {
+                    subscription_objects[object] = nullptr;
+                }
+            }
+        }
+    }
+
     // MCUs — PerformanceState (MoonrakerPerformanceSource) reads
     // last_stats.mcu_awake for the load % and last_stats.bytes_retransmit
     // for the link-health counter. Subscribing to last_stats pulls the whole
@@ -1615,6 +1680,20 @@ void MoonrakerDiscoverySequence::complete_discovery_subscription(uint64_t seq) {
     // helper builds the full objects map; per-section logging stays here.
     json subscription_objects = build_subscription_objects(hw, heaters_, sensors_, fans_, leds_,
                                                            afc_objects_, filament_sensors_, mcus_);
+
+    // A matched z-offset persistence provider (ZMOD, Forge-X, Helper-Script's
+    // save-zoffset) owns offset storage. "Save Z Offset" must stand down or
+    // its probe fold double-applies on every restart
+    // (prestonbrown/helixscreen#1401). One capability question - no vendor
+    // name reaches this file.
+    if (helix::zoffset::firmware_persists_z_offset(hw)) {
+        get_printer_state().set_z_offset_external_persistence(
+            helix::zoffset::persistence_provider_name(hw));
+    } else {
+        // A previously-matched provider since uninstalled: restore the
+        // type-derived strategy. No-op when the flag was never set.
+        get_printer_state().clear_z_offset_external_persistence();
+    }
 
     if (!mcus_.empty()) {
         spdlog::info("[Moonraker Client] Subscribing to {} MCU object(s): {}", mcus_.size(),

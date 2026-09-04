@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "ui_breakpoint.h"
+
 #include <string>
 #include <vector>
 
@@ -31,6 +33,21 @@ struct PanelWidgetEntry {
     /// Returns true if this entry has explicit grid coordinates
     bool has_grid_position() const {
         return col >= 0 && row >= 0;
+    }
+
+    /// Turn this entry off AND surrender its grid cell.
+    ///
+    /// These belong together. save() persists col/row for every entry whether
+    /// it is enabled or not, so a disabled entry that keeps coordinates leaves
+    /// a claim on a cell nothing is drawing in - and the anchored pass, which
+    /// looks entries up by id, could then hand that cell to a widget the
+    /// manager synthesizes (the temporary firmware_restart tile), knocking a
+    /// user-anchored widget off its saved rectangle (#1414). Three call sites
+    /// wrote this rule by hand; one of them forgot the coordinates.
+    void disable_and_unplace() {
+        enabled = false;
+        col = -1;
+        row = -1;
     }
 };
 
@@ -138,8 +155,72 @@ class PanelWidgetConfig {
     /// Remove an entry entirely from ANY page (first match).
     void delete_entry(const std::string& id);
 
-    /// Generate default grid layout, placing enabled widgets sequentially in 1x1 cells.
-    static std::vector<PanelWidgetEntry> build_default_grid();
+    /// Generate the default layout for a measured grid.
+    ///
+    /// @p grid_cols / @p grid_rows are the track counts the layout will be
+    /// placed on, or 0 when they are not known yet — which is every caller that
+    /// runs before the widget container has been measured, config load
+    /// included.
+    ///
+    /// Knowing the grid changes two things. A placement may be keyed by the
+    /// grid it was authored for ("xxlarge@6x14") and that entry beats the bare
+    /// tier key, because a breakpoint names a panel while the UI scale gives
+    /// that same panel a different track count per scale. And an anchor that
+    /// does not fit is dropped to auto-placement instead of being handed to
+    /// clamp_to_grid, which would shove its origin back until the span fitted
+    /// and seat it on top of a neighbour looking deliberate.
+    static std::vector<PanelWidgetEntry> build_default_grid(int grid_cols = 0, int grid_rows = 0);
+
+    /// True while this layout is the default set with its anchors not yet
+    /// applied, because no grid had been measured when it was built.
+    ///
+    /// build_defaults() runs at config load, where the widget container does
+    /// not exist and therefore neither does its content box - and the content
+    /// box, not the panel extent, is what the track count divides (1042x2141
+    /// against 1080x2400 on a scaled phone, 6x14 tracks against 8x16). So the
+    /// anchors cannot be chosen there. PanelWidgetManager applies them at the
+    /// first measured populate and clears the tag.
+    ///
+    /// A positive tag, written only by the defaults path, so a layout that
+    /// predates this or that a user has since arranged reads as "already
+    /// placed" and is never overwritten.
+    bool has_pending_anchors() const {
+        return pending_anchors_;
+    }
+
+    /// Grid signature the saved coordinates are expressed in ("6x14"), or ""
+    /// when the layout predates per-grid storage and has not been stamped yet.
+    const std::string& grid_signature() const {
+        return grid_signature_;
+    }
+
+    /// Make @p cols x @p rows the active grid.
+    ///
+    /// A saved layout is coordinates in TRACKS, and a track means nothing
+    /// without the grid it counts against. The grid is no longer fixed per
+    /// device: the UI scale multiplies the cell edge, so one panel yields a
+    /// different track count per scale, and restoring a config onto other
+    /// hardware moves it too. Rewriting one stored layout each time the grid
+    /// changed destroyed the arrangement - the write-back in populate_widgets()
+    /// persists computed positions, so the degraded copy became the only copy
+    /// and switching back had nothing to restore.
+    ///
+    /// So each grid keeps its own arrangement. The active one stays exactly
+    /// where it always was, which leaves every existing reader untouched; the
+    /// rest are parked beside it. Switching parks the outgoing layout, then
+    /// restores this grid's if it has one, or seeds it by remapping the
+    /// outgoing one - the arrangement the user was just looking at is the
+    /// closest thing to their intent that exists, and port_legacy_layout()
+    /// makes it fit by construction.
+    ///
+    /// A layout with no recorded grid is stamped and otherwise left alone:
+    /// which grid it was arranged on is unrecoverable, and reseating it on a
+    /// guess would discard a real arrangement. No-op when already active.
+    void switch_to_grid(int cols, int rows);
+
+    /// Apply the default anchors for a now-known grid, then persist and clear
+    /// the tag. No-op unless has_pending_anchors().
+    void apply_pending_anchors(int grid_cols, int grid_rows);
 
     /// Check if config uses grid format (has any entries with col/row fields)
     bool is_grid_format() const;
@@ -164,6 +245,29 @@ class PanelWidgetConfig {
     /// Set per-widget config for a given widget ID (searches all pages), then save
     void set_widget_config(const std::string& id, const nlohmann::json& config);
 
+    /// True while these coordinates are still counts of cells in the pre-v22
+    /// home grid rather than tracks of the square-cell one (#1126).
+    ///
+    /// Set by the v22 migration, which cannot convert them itself: it runs at
+    /// config load, with no screen size settled and none recorded. The first
+    /// grid build has both, so PanelWidgetManager ports the layout there and
+    /// clears the tag. Until it does, the coordinates must not be read as
+    /// tracks — they name a grid with different dimensions and a different unit.
+    bool has_legacy_units() const {
+        return legacy_units_;
+    }
+
+    /// Row count the pre-v22 grid was known to have reached, 0 when unknown.
+    /// The old grid sized its row axis from the widgets in use, so this is the
+    /// floor its cache held for widgets whose hardware gate had not yet fired.
+    int legacy_rows() const {
+        return legacy_rows_;
+    }
+
+    /// Drop the legacy-units tag and persist. Call once the port has run, so a
+    /// layout already in track units is never ported a second time.
+    void clear_legacy_units();
+
   private:
     std::string panel_id_;
     Config& config_;
@@ -171,8 +275,22 @@ class PanelWidgetConfig {
     size_t main_page_index_ = 0;
     int next_page_id_ = 1;
     bool loaded_ = false;
+    bool pending_anchors_ = false;
+    std::string grid_signature_;
+    /// Arrangements for grids that are not active, keyed by signature. Each
+    /// value has the same shape as the active layout's persisted form.
+    nlohmann::json parked_grids_ = nlohmann::json::object();
+    bool legacy_units_ = false;
+    int legacy_rows_ = 0;
 
     static std::vector<PanelWidgetEntry> build_defaults();
+
+    /// The pages payload as it is persisted. Shared by save() and by
+    /// switch_to_grid(), which parks exactly what save() would have written.
+    nlohmann::json serialize_pages() const;
+
+    /// Replace pages_ from a payload produced by serialize_pages().
+    void restore_pages(const nlohmann::json& payload);
 
     /// Parse a JSON array of widget entries into a vector, applying migrations.
     /// If append_registry_defaults is true, appends missing registry widgets.
@@ -193,5 +311,13 @@ class PanelWidgetConfig {
     /// Returns true if any page was mutated.
     bool migrate_stuck_ams_filament_swap();
 };
+
+/// Most specific breakpoint key present in @p by_bp, or nullptr.
+///
+/// Both the per-anchor `placements` map and a variant's `disabled` map are keyed
+/// by breakpoint name and resolve through the same chain theme_manager uses.
+/// Exported so the shipped-table tests resolve keys through the same function
+/// the loader uses instead of carrying a copy of the fallback chain.
+const char* choose_breakpoint_key(const nlohmann::json& by_bp, UiBreakpoint breakpoint);
 
 } // namespace helix

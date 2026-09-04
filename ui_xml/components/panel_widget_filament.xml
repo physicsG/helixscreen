@@ -4,17 +4,20 @@
 <component>
   <view name="panel_widget_filament"
         extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
-        style_flex_cross_place="center" style_flex_track_place="center" scrollable="false">
-    <!-- Hardware gate (filament_sensor_count) checked in C++ populate_widgets() -->
-    <filament_sensor_indicator size="#icon_size"/>
-    <text_tiny text="Loaded" translation_tag="Loaded" style_text_align="center">
-      <bind_flag_if_not_eq subject="filament_runout_detected" flag="hidden" ref_value="1"/>
+        style_flex_cross_place="center" style_flex_track_place="center" scrollable="false" clickable="true">
+    <event_cb trigger="clicked" callback="filament_widget_clicked_cb"/>
+    <!-- Hardware gate (filament_sensor_count) checked in C++ populate_widgets().
+         filament_tile_state mirrors whichever role subject the user selected;
+         it is owned by FilamentSensorWidget. -->
+    <filament_sensor_indicator size="#icon_size" subject="filament_tile_state" clickable="false" event_bubble="true"/>
+    <text_tiny text="Loaded" translation_tag="Loaded" style_text_align="center" clickable="false" event_bubble="true">
+      <bind_flag_if_not_eq subject="filament_tile_state" flag="hidden" ref_value="1"/>
     </text_tiny>
-    <text_tiny text="Empty" translation_tag="Empty" style_text_align="center">
-      <bind_flag_if_not_eq subject="filament_runout_detected" flag="hidden" ref_value="0"/>
+    <text_tiny text="Empty" translation_tag="Empty" style_text_align="center" clickable="false" event_bubble="true">
+      <bind_flag_if_not_eq subject="filament_tile_state" flag="hidden" ref_value="0"/>
     </text_tiny>
-    <text_tiny text="Off" translation_tag="Off" style_text_align="center">
-      <bind_flag_if_not_eq subject="filament_runout_detected" flag="hidden" ref_value="2"/>
+    <text_tiny text="Off" translation_tag="Off" style_text_align="center" clickable="false" event_bubble="true">
+      <bind_flag_if_not_eq subject="filament_tile_state" flag="hidden" ref_value="2"/>
     </text_tiny>
   </view>
 </component>

@@ -70,7 +70,7 @@ On printers with multiple extruders, an extruder selector appears at the top of 
 - Toolchanger printers show tool names (T0, T1) rather than "Nozzle 1", "Nozzle 2"
 - The selector only appears when Klipper reports more than one extruder
 
-Single-extruder printers are unaffected — the panel works exactly as before.
+On a single-extruder printer none of this appears — there is no selector and the panel simply shows your one nozzle.
 
 ---
 
@@ -81,7 +81,17 @@ If your printer has a chamber heater or chamber temperature sensor configured in
 - **Heated chambers** (`heater_generic chamber`): Full control panel with current/target temperature, presets, and a live temperature graph with a green trace
 - **Sensor-only chambers** (`temperature_sensor chamber`): Monitoring mode — shows the current chamber temperature and graph, with a "Monitoring" status instead of heating controls. Presets and target input are hidden since there's no heater to control.
 
-The chamber panel works identically to the nozzle and bed panels, just with chamber-specific presets and colors.
+Chamber mode works like the nozzle and bed modes of the same overlay, just with chamber-specific presets and colors.
+
+### Chamber Heater Diagnostics
+
+Some add-on chamber heaters — currently the BIGTREETECH Panda Breath (with either the stock firmware binding or the DragonBreath firmware) — also report their health. When yours does, a **diagnostics card** appears below the temperature graph in chamber mode:
+
+- **Heater element temperature** — how hot the heating element itself is (usually a bit above chamber air temperature while heating)
+- **Filter fan** — the current filter-fan speed, and a toggle to turn the filtration fan on or off without heating
+- **Fault banner** — when the heater reports a problem (over-temperature, sensor failure, communications loss), a red banner shows the reason with a **Reset** button to clear a latched fault
+
+The card only appears when the heater provides diagnostics; printers with a plain heated chamber see no change.
 
 **Heating vs. Maintaining vs. Off:** On printers that coordinate the chamber heater and a cooling fan (such as the Creality K2), the chamber status shows one of three states:
 

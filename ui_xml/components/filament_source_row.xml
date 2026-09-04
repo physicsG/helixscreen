@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  One selectable row in the Filament Sensor tile's source picker. The check icon
+  shows when filament_tile_source equals this row's value
+  (0=Auto 1=Runout 2=Toolhead 3=Entry); that subject is owned by
+  FilamentSensorWidget and registered globally (see filament_sensor_widget.cpp)
+  so this component - a different one from the picker - can still bind it.
+-->
+<component>
+  <api>
+    <prop name="label" type="string" default=""/>
+    <prop name="value" type="int" default="0"/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm"
+        style_pad_all="#space_sm">
+    <event_cb trigger="clicked" callback="on_filament_source_selected" user_data="$value"/>
+    <icon src="check" size="xs" variant="primary" clickable="false" event_bubble="true">
+      <bind_flag_if_not_eq subject="filament_tile_source" flag="hidden" ref_value="$value"/>
+    </icon>
+    <text_body text="$label" translation_tag="$label" clickable="false" event_bubble="true"/>
+  </view>
+</component>

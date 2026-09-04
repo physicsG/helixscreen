@@ -14,10 +14,12 @@
 #include "ui_utils.h"
 
 #include "app_globals.h"
+#include "grid_layout.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
 #include "panel_widget_size.h"
 #include "printer_state.h"
+#include "stacked_row_layout.h"
 #include "temperature_service.h"
 #include "theme_manager.h"
 
@@ -43,6 +45,11 @@ void register_temp_stack_widget() {
 } // namespace helix
 
 namespace {
+// Text size tier for the stacked icon-above-temperature layout, and the tier
+// the fit is measured at. One name so the measurement and the applied font can
+// never drift apart.
+constexpr const char* SIZE_STACKED = "md";
+
 // Make all children of a page pass events through (not clickable, bubble to parent)
 void make_children_passthrough(lv_obj_t* parent) {
     if (!parent)
@@ -237,13 +244,51 @@ void TempStackWidget::attach_carousel(lv_obj_t* widget_obj) {
     spdlog::debug("[TempStackWidget] Attached carousel with {} pages", page_count);
 }
 
-void TempStackWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int /*width_px*/,
+void TempStackWidget::on_size_changed(int /*colspan*/, int rowspan, int /*width_px*/,
                                       int height_px) {
     if (!widget_obj_ || is_carousel_mode())
         return;
 
-    // Determine size tier based on vertical space
-    const char* size = (height_px >= widget_size::H_TALL) ? "sm" : "xs";
+    static_assert(ICON_ABOVE_MIN_ROWSPAN == GridLayout::TRACKS_PER_CELL + 1,
+                  "The stacked layout starts one track above a whole authored cell");
+
+    // Collect the rows up front: the layout decision needs the visible count
+    // before anything can be applied. A hidden row - chamber on a printer with
+    // no sensor - takes up no height, so it must not be budgeted for.
+    lv_obj_t* rows[3] = {};
+    int row_count = 0;
+    int visible_rows = 0;
+    for (const char* row_name :
+         {"temp_stack_nozzle_row", "temp_stack_bed_row", "temp_stack_chamber_row"}) {
+        lv_obj_t* row = lv_obj_find_by_name(widget_obj_, row_name);
+        if (!row)
+            continue;
+        rows[row_count++] = row;
+        if (!lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN))
+            visible_rows++;
+    }
+
+    const int icon_gap_px = static_cast<int>(theme_manager_get_spacing("space_xxs"));
+    const int row_gap_px = static_cast<int>(theme_manager_get_spacing("space_xs"));
+
+    // Measure the layout being considered, not the one on screen. Stacking
+    // buys its vertical room back as type, so the question is whether the
+    // LARGER text fits - asking it at the current font would promote sizes
+    // that then overflow the moment the type grows with them.
+    const lv_font_t* tall_text_font =
+        theme_manager_get_font(theme_manager_size_to_font_token(SIZE_STACKED, "xs"));
+    const StackedRowMetrics tall_row{
+        static_cast<int>(mdi_icons_24.line_height),
+        tall_text_font ? static_cast<int>(tall_text_font->line_height) : 0, icon_gap_px};
+
+    const bool icon_above =
+        wants_icon_above(rowspan, height_px, visible_rows, tall_row, row_gap_px);
+
+    // Text tier. Stacking goes a rung further than the two-cell height band
+    // does on its own - the point of putting the icon on its own line is the
+    // room it frees for the number underneath it.
+    const bool tall_pixels = height_px >= widget_size::h_tall();
+    const char* size = icon_above ? SIZE_STACKED : (tall_pixels ? "sm" : "xs");
 
     // Get text font for this size tier
     const char* font_token = theme_manager_size_to_font_token(size, "xs");
@@ -251,16 +296,23 @@ void TempStackWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int /*wi
     if (!text_font)
         return;
 
-    // Icon font: xs=16px, sm=24px
-    const lv_font_t* icon_font = (height_px >= widget_size::H_TALL) ? &mdi_icons_24 : &mdi_icons_16;
+    // Icon font: xs=16px, sm/md=24px. The glyph does not follow the text a
+    // third rung up - a 32px icon over a body-size number reads as an icon
+    // with a caption, not a temperature with a label.
+    const lv_font_t* icon_font = (icon_above || tall_pixels) ? &mdi_icons_24 : &mdi_icons_16;
 
-    // Update temp_display fonts and icon fonts in all rows
-    const char* row_names[] = {"temp_stack_nozzle_row", "temp_stack_bed_row",
-                               "temp_stack_chamber_row"};
-    for (const char* row_name : row_names) {
-        lv_obj_t* row = lv_obj_find_by_name(widget_obj_, row_name);
-        if (!row)
-            continue;
+    for (int r = 0; r < row_count; r++) {
+        lv_obj_t* row = rows[r];
+
+        // DECLARATIVE_OK: measured layout. Which way a row flows depends on
+        // the resolved font line heights and the pixel height the grid handed
+        // us, neither of which XML can express - the same exception
+        // decide_nozzle_layout() runs under. The row-mode values here restore
+        // exactly what panel_widget_temp_stack.xml authors.
+        lv_obj_set_flex_flow(row, icon_above ? LV_FLEX_FLOW_COLUMN : LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_gap(row, icon_above ? icon_gap_px : row_gap_px, 0);
+
+        // Update temp_display fonts and icon fonts in this row
         for (uint32_t i = 0; i < lv_obj_get_child_count(row); i++) {
             lv_obj_t* child = lv_obj_get_child(row, static_cast<int32_t>(i));
             if (ui_temp_display_is_valid(child)) {
@@ -270,7 +322,7 @@ void TempStackWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int /*wi
                     lv_obj_set_style_text_font(label, text_font, 0);
                 }
             } else if (lv_obj_get_child_count(child) > 0) {
-                // Icon component (nozzle_icon/heater_icon wrapper) — the
+                // Icon component (nozzle_icon/heater_icon wrapper) - the
                 // glyph is its first child, whether or not that wrapper also
                 // carries a tool badge (nozzle_icon.xml, heater_icon.xml).
                 lv_obj_t* glyph = lv_obj_get_child(child, 0);
@@ -280,7 +332,10 @@ void TempStackWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int /*wi
         }
     }
 
-    spdlog::debug("[TempStackWidget] on_size_changed height_px={} -> size {}", height_px, size);
+    spdlog::debug("[TempStackWidget] on_size_changed rowspan={} height_px={} visible_rows={} "
+                  "-> size {} layout {}",
+                  rowspan, height_px, visible_rows, size,
+                  icon_above ? "icon-above" : "icon-beside");
 }
 
 void TempStackWidget::detach() {

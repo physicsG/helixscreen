@@ -23,6 +23,20 @@ class AsyncLifetimeGuard;
  */
 [[nodiscard]] bool toolhead_is_homed(const PrinterState& ps);
 
+enum class Axis { X, Y, Z };
+
+/**
+ * @brief Whether one axis reports homed.
+ *
+ * Reads the same live `homed_axes` subject as toolhead_is_homed(). Use this
+ * rather than ControlsPanel's x_homed/y_homed/z_homed subjects — those are owned
+ * by that panel's SubjectManager, and MotionPanel already had to make prefixed
+ * copies to avoid colliding with them.
+ *
+ * @warning Main thread only. This reads an LVGL subject.
+ */
+[[nodiscard]] bool axis_is_homed(const PrinterState& ps, Axis axis);
+
 /**
  * @brief Home the toolhead if needed, then run a continuation.
  *

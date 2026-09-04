@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../src/ui/wizard_step_registry.h"
 #include "../helix_test_fixture.h"

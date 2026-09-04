@@ -46,17 +46,45 @@
 set -e
 
 # Co-hosted-with-Klipper detection — used below (just before exec) to decide
-# whether to nice the UI down. Defined here, called late, so platform hooks
-# and the init script's platform_wait_for_services have had time to bring
-# Klipper / Moonraker up before we look for them.
+# whether to nice the UI down and hand helix-screen a higher OOM score. Defined
+# here, called late, so platform hooks and the init script's
+# platform_wait_for_services have had time to bring Klipper / Moonraker up
+# before we look for them.
+#
+# Reads /proc/<pid>/cmdline directly instead of shelling out to pgrep. pgrep is
+# absent entirely on some BusyBox rootfs — Forge-X on the AD5M ships none — and
+# where BusyBox does provide it, `-f` matching is unreliable. A socket probe
+# alone is not enough either: Forge-X's klippy socket is /tmp/uds and its
+# Moonraker has none, so the socket checks below are only a fallback.
+#
+# Reading the files also avoids the pgrep self-match trap: nothing is spawned
+# with the search pattern on its own command line.
+#
+# HELIX_PROC_ROOT exists so the tests can point the scan at a fixture tree.
+: "${HELIX_PROC_ROOT:=/proc}"
 helix_klipper_co_hosted() {
-    if command -v pgrep >/dev/null 2>&1; then
-        pgrep -f '[k]lippy\.py'    >/dev/null 2>&1 && return 0
-        pgrep -f '[m]oonraker\.py' >/dev/null 2>&1 && return 0
-    fi
-    # Fallback for systems without pgrep -f: check default unix sockets.
+    # Patterns are deliberately narrow. A bare *moonraker* would also match a
+    # standalone kiosk started as `helix-screen --moonraker ws://host:7125`,
+    # which is precisely the not-co-hosted case that must stay at nice 0.
+    for _hkc_f in "$HELIX_PROC_ROOT"/[0-9]*/cmdline; do
+        [ -r "$_hkc_f" ] || continue
+        # argv is NUL-separated; fold to spaces for substring matching. A
+        # process that exits mid-scan makes tr fail — that is not an error.
+        _hkc_cmd=$(tr '\0' ' ' < "$_hkc_f" 2>/dev/null) || _hkc_cmd=""
+        case " ${_hkc_cmd} " in
+            *klippy.py*|*moonraker.py*|*moonraker-env*|*" -m moonraker"*)
+                unset _hkc_f _hkc_cmd
+                return 0
+                ;;
+        esac
+    done
+    unset _hkc_f _hkc_cmd
+
+    # Fallback for hosts where /proc is unreadable or Klipper lives in another
+    # PID namespace. /tmp/uds is Forge-X's klippy socket on the AD5M.
     [ -S /tmp/klippy_uds ]      && return 0
     [ -S /tmp/moonraker.sock ]  && return 0
+    [ -S /tmp/uds ]             && return 0
     return 1
 }
 
@@ -292,10 +320,26 @@ if [ "$_arch" = "armv7l" ] && echo "$_kernel" | grep -q "ad5m\|5.4.61"; then
     fi
 fi
 
-# AD5X (MIPS, ZMOD on Flashforge AD5X — Ingenic X2600).
-if [ "$_arch" = "mips" ] && [ -d /usr/data ] && { [ -d /usr/prog ] || [ -f /ZMOD ]; }; then
+# AD5X (MIPS — ZMOD or Forge-X mod tree on FlashForge AD5X, Ingenic X2600).
+# ZMOD hosts carry the /ZMOD marker or FlashForge's own /usr/prog dir; a
+# Forge-X chroot has neither — and no /usr/data either, since the chroot binds
+# /usr/data at /opt — but the mod's git tree stays reachable and
+# .shell/platform.sh in it is the evidence. K1 shares mips and carries none of
+# the four markers, so the arch alone never arms this. Same rule as
+# helix::ad5x_mod_layout_present(). Probes resolve under
+# HELIX_AD5X_PROBE_ROOT (default /) so the bats suite can point the predicate
+# at a sandbox root instead of touching the real filesystem.
+_ad5x_root="${HELIX_AD5X_PROBE_ROOT:-/}"
+_ad5x_root="${_ad5x_root%/}"
+if [ "$_arch" = "mips" ] && {
+     [ -f "${_ad5x_root}/ZMOD" ] ||
+     [ -d "${_ad5x_root}/usr/prog" ] ||
+     [ -f "${_ad5x_root}/opt/config/mod/.shell/platform.sh" ] ||
+     [ -f "${_ad5x_root}/usr/data/config/mod/.shell/platform.sh" ]
+   }; then
     _enable_heap_diag=1
 fi
+unset _ad5x_root
 
 if [ "$_enable_heap_diag" = "1" ]; then
     [ -z "${MALLOC_CHECK_:-}" ] && export MALLOC_CHECK_=3
@@ -409,12 +453,12 @@ fi
 # hooks export HELIX_LOG_DEST / HELIX_LOG_FILE from platform_pre_start
 # (ad5m-zmod, ad5m-forgex, ad5m-kmod, k1, k2, cc1) to steer the app log onto a
 # partition that is persistent AND captured by that firmware's log archiver.
-# Resolving before platform_pre_start ran read an unset variable, so
-# --log-dest/--log-file never reached the binary and the app log fell back to
-# auto-detection (syslog on Linux). helixscreen.init happens to call
-# platform_pre_start itself before exec'ing us, which masked this on a normal
-# boot — but NOT for `make deploy-*` restarts, hand-started launchers, or any
-# third-party init script that leaves the hook to us. See issue #1249.
+# Resolved any earlier, those variables are unset: --log-dest/--log-file never
+# reach the binary and the app log falls back to auto-detection (syslog on
+# Linux). A normal boot hides that, because helixscreen.init calls
+# platform_pre_start before exec'ing us — `make deploy-*` restarts,
+# hand-started launchers, and third-party init scripts that leave the hook to
+# us do not.
 DEBUG_MODE="${CLI_DEBUG:-${HELIX_DEBUG:-0}}"
 LOG_DEST="${CLI_LOG_DEST:-${HELIX_LOG_DEST:-auto}}"
 LOG_FILE="${CLI_LOG_FILE:-${HELIX_LOG_FILE:-}}"
@@ -532,6 +576,31 @@ if helix_klipper_co_hosted; then
         fi
     fi
     unset _helix_nice
+
+    # Volunteer helix-screen as the kernel's first OOM victim. Co-hosted means
+    # Klipper is on this board, and Klipper cannot be restarted mid-print
+    # without ruining the job, while helix-screen has helix-watchdog sitting
+    # behind it. Measured on an AD5M (110MB total): every process sat at
+    # oom_score_adj 0, leaving the kill order Moonraker (score 156), Klipper
+    # (92), helix-screen (69) — exactly backwards.
+    #
+    # Exported rather than applied here, because oom_score_adj is inherited
+    # across fork and preserved across exec: setting it on the launcher would
+    # mark this shell and helix-watchdog too, and killing the watchdog is what
+    # stops helix-screen from coming back. helix-screen applies it to
+    # /proc/self instead, so only the process actually holding the memory
+    # volunteers. Raising the value is unprivileged, so this works as the
+    # non-root service user; only lowering below 0 needs CAP_SYS_RESOURCE.
+    #
+    # Not gated on RAM size: if Klipper is on this box then losing the UI is
+    # the cheaper outcome no matter how much memory the board has.
+    # Override with HELIX_OOM_SCORE_ADJ=<n> in helixscreen.env (0 disables).
+    _helix_oom="${HELIX_OOM_SCORE_ADJ:-300}"
+    if [ "${_helix_oom}" != "0" ]; then
+        export HELIX_OOM_SCORE_ADJ="${_helix_oom}"
+        log "Co-hosted with Klipper/Moonraker — helix-screen oom_score_adj +${_helix_oom}"
+    fi
+    unset _helix_oom
 fi
 
 # Runtime crash fallback predicate. Defined before the run loop so it is

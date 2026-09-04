@@ -1,7 +1,10 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 #include "ui_update_queue.h"
+
+#include "lvgl/src/misc/lv_timer_private.h"
 
 #include <vector>
 
@@ -69,6 +72,15 @@ class UpdateQueueTestAccess {
     static bool queue_empty(UpdateQueue& q) {
         std::lock_guard<std::mutex> lock(q.mutex_);
         return q.pending_.empty();
+    }
+
+    /// Period of the drain timer, in milliseconds.
+    ///
+    /// lv_timer_handler() answers with the shortest time until any live timer is
+    /// next due, and the main loop sleeps for that long, so this timer's period
+    /// is a floor on how often the whole loop wakes up.
+    static uint32_t timer_period(UpdateQueue& q) {
+        return q.timer_ != nullptr ? q.timer_->period : 0;
     }
 
     /// Drain repeatedly until the queue is fully empty (handles nested queue_update calls)

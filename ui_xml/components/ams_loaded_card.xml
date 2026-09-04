@@ -10,8 +10,12 @@
     - ams_current_weight_text: Remaining weight (e.g., "750g")
     - ams_current_has_weight: Show/hide weight (0 = hidden)
     - clog_meter_mode: 0=hidden, 1=encoder, 2=flowguard, 3=afc_buffer
-    - clog_meter_value_text: Flow rate or status text
-    - clog_meter_mode_text: Detection mode text
+    - clog_meter_center_text: the reading (headroom mm, +/-%, distance mm)
+    - clog_meter_mode_text: which source is measuring
+
+    The meter column is content-sized and capped, because it shares a flex row
+    with the material name: an unbounded column grows to fit its longest string
+    and clips "Polymaker" to "Polymak".
 
     Slot info is shown in the section header above (bound to ams_current_slot_text).
     Color swatch updated by C++ via lv_obj_find_by_name(sidebar, "loaded_swatch").
@@ -32,7 +36,10 @@
             height="content" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
             style_flex_cross_place="start" style_pad_gap="0" scrollable="false" flex_grow="1">
       <!-- Material name -->
-      <text_small name="loaded_material" width="100%" bind_text="ams_current_material_text" long_mode="scroll_circular"/>
+      <!-- Wrapped, not marquee'd: the whole name is readable at once instead of
+           on a delay, and a card that animates forever never settles for a
+           screenshot. The card is height="content", so it grows to fit. -->
+      <text_small name="loaded_material" width="100%" bind_text="ams_current_material_text" long_mode="wrap"/>
       <!-- Weight (hidden when not available) -->
       <text_tiny name="loaded_weight" bind_text="ams_current_weight_text" style_text_color="#text_muted">
         <bind_flag_if_eq subject="ams_current_has_weight" flag="hidden" ref_value="0"/>
@@ -48,12 +55,22 @@
       <lv_obj name="clog_arc_container" style_pad_all="0" scrollable="false">
         <!-- Main arc — see clog_meter_page.xml for the migration note. -->
         <helix_progress_arc name="clog_arc" align="center"/>
-        <!-- Center: flow value -->
-        <text_tiny name="clog_value_text" align="center" bind_text="clog_meter_value_text" style_text_align="center"/>
+        <!-- Stands in for the arc when there is nothing to report. UiClogMeter
+             swaps the two; it looks this up by name in both of its parents, so
+             the page and this card each have to author one. -->
+        <lv_label name="clog_safe_icon"
+                  hidden="true" align="center" text="#icon_check_circle" style_text_font="mdi_icons_16"
+                  style_text_color="#primary" clickable="false"/>
       </lv_obj>
+      <!-- The reading sits under the arc rather than inside it: this arc is
+           sized off the card width and lands around 36px, which "11.8mm" does
+           not fit in — it drew clipped to "1.8mm", a wrong number rather than
+           an ugly one. -->
+      <text_tiny name="clog_value_text" bind_text="clog_meter_center_text" style_text_align="center"/>
       <!-- Mode label below arc -->
       <text_tiny name="clog_mode_text"
-                 bind_text="clog_meter_mode_text" style_text_color="#text_muted" style_text_align="center"/>
+                 width="100%" bind_text="clog_meter_mode_text" style_text_color="#text_muted" style_text_align="center"
+                 long_mode="wrap"/>
     </lv_obj>
   </view>
 </component>

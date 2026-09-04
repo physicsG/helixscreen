@@ -41,6 +41,11 @@ extern lv_font_t noto_sans_26;
 extern lv_font_t noto_sans_28;
 extern lv_font_t noto_sans_32;
 extern lv_font_t noto_sans_40;
+// 48/64 exist only for the high-DPI UI scale factor, which steps the XXLarge
+// tier's face up rather than moving tier. Linked on the xxlarge tier only, so
+// no printer build carries them (see FONTS_XXLARGE in mk/fonts.mk).
+extern lv_font_t noto_sans_48;
+extern lv_font_t noto_sans_64;
 
 // Noto Sans - Light weight with extended Unicode (for text_small)
 extern lv_font_t noto_sans_light_10;
@@ -51,6 +56,9 @@ extern lv_font_t noto_sans_light_16;
 extern lv_font_t noto_sans_light_18;
 extern lv_font_t noto_sans_light_20;
 extern lv_font_t noto_sans_light_26;
+// High-DPI scale rungs — see the noto_sans_48/64 note above.
+extern lv_font_t noto_sans_light_32;
+extern lv_font_t noto_sans_light_40;
 
 // Noto Sans - Bold weight with extended Unicode
 extern lv_font_t noto_sans_bold_14;
@@ -61,6 +69,9 @@ extern lv_font_t noto_sans_bold_24;
 extern lv_font_t noto_sans_bold_28;
 extern lv_font_t noto_sans_bold_32;
 extern lv_font_t noto_sans_bold_40;
+// High-DPI scale rungs — see the noto_sans_48/64 note above.
+extern lv_font_t noto_sans_bold_48;
+extern lv_font_t noto_sans_bold_64;
 
 // Source Code Pro - Monospace (for console/terminal displays)
 LV_FONT_DECLARE(source_code_pro_8);

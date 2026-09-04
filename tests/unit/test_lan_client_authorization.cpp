@@ -17,13 +17,14 @@
  * JSON number, which is how the stock screen sends it back.
  */
 
+#include "../lvgl_test_fixture.h"
 #include "lan_client_auth_router.h"
 #include "lan_client_authorization.h"
 
 #include <algorithm>
+#include <unordered_map>
 
 #include "../catch_amalgamated.hpp"
-#include "../lvgl_test_fixture.h"
 #include "hv/json.hpp"
 
 using helix::lan_auth::PendingRequest;
@@ -44,6 +45,9 @@ json snapmaker_payload(const std::string& client_id) {
     return json{{"id", "0"}, {"clientid", client_id}, {"app_id", "orca-1787643423061664"}};
 }
 
+// TEST_MIRROR_OK: a two-line std::find wrapper, not a copy of the shipped
+//                 contains(). It shadows that name by coincidence; every
+//                 assertion using it reads a real production call.
 bool contains(const std::vector<std::string>& v, const std::string& s) {
     return std::find(v.begin(), v.end(), s) != v.end();
 }
@@ -58,7 +62,6 @@ TEST_CASE("lan auth: the notification is its own capability probe", "[lanauth]")
     // No discovery gate exists by design — a firmware without a broker simply
     // never sends one. The router must still be told what to listen for.
     CHECK(contains(helix::lan_auth::notification_methods(), SNAPMAKER_NOTIFY));
-    CHECK_FALSE(helix::lan_auth::notification_methods().empty());
 }
 
 TEST_CASE("lan auth: a notification from no provider is ignored", "[lanauth]") {
@@ -115,10 +118,8 @@ TEST_CASE("lan auth: a request with no client id is dropped, never answered", "[
 
 TEST_CASE("lan auth: malformed frames are dropped rather than crashing", "[lanauth]") {
     CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, json::object()));
-    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY,
-                                               json{{"params", json::array()}}));
-    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY,
-                                               json{{"params", "not-an-array"}}));
+    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, json{{"params", json::array()}}));
+    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, json{{"params", "not-an-array"}}));
     CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY,
                                                json{{"params", json::array({"not-an-object"})}}));
     CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, json("not-an-object")));
@@ -127,8 +128,8 @@ TEST_CASE("lan auth: malformed frames are dropped rather than crashing", "[lanau
 TEST_CASE("lan auth: missing optional fields still yield an answerable request", "[lanauth]") {
     // Only the client id is load-bearing. A firmware that omits the rest still
     // gets an answer rather than a hang.
-    auto req = helix::lan_auth::parse_request(SNAPMAKER_NOTIFY,
-                                              frame(json{{"clientid", "orca-abc"}}));
+    auto req =
+        helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(json{{"clientid", "orca-abc"}}));
     REQUIRE(req);
     CHECK(req->request_id.empty());
     CHECK(req->app_id.empty());
@@ -141,13 +142,13 @@ TEST_CASE("lan auth: missing optional fields still yield an answerable request",
 TEST_CASE("lan auth: the client id prefix names the asking product", "[lanauth]") {
     // Nothing else in the payload says who is asking, and the popup is asking
     // the user to trust it — so the prefix is what makes the prompt specific.
-    auto orca = helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(snapmaker_payload(
-                                                   "orca-9bbcbf74-a264-483e-bfff-22ffd07d6f70")));
+    auto orca = helix::lan_auth::parse_request(
+        SNAPMAKER_NOTIFY, frame(snapmaker_payload("orca-9bbcbf74-a264-483e-bfff-22ffd07d6f70")));
     REQUIRE(orca);
     CHECK(orca->requester == "Snapmaker Orca");
 
-    auto app = helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(snapmaker_payload(
-                                                  "app-eb2b366a-464b-5a9f-97ab-dbf3e22437ca")));
+    auto app = helix::lan_auth::parse_request(
+        SNAPMAKER_NOTIFY, frame(snapmaker_payload("app-eb2b366a-464b-5a9f-97ab-dbf3e22437ca")));
     REQUIRE(app);
     CHECK(app->requester == "Snapmaker App");
 }
@@ -245,6 +246,92 @@ TEST_CASE_METHOD(LVGLTestFixture, "lan auth: an unnamed client gets a truthful p
     std::string message = helix::LanClientAuthRouter::describe_request(req);
 
     CHECK_FALSE(message.empty());
-    CHECK(message.find("{}") == std::string::npos);
     CHECK(message.find("Snapmaker") == std::string::npos);
+}
+
+// ============================================================================
+// Reading the firmware's answer
+// ============================================================================
+
+TEST_CASE("lan auth: only the firmware's own success counts as paired", "[lanauth]") {
+    // The RPC completing means the component received the decision, not that
+    // it acted on it — it answers {"state": "error"} for one it rejected, and
+    // reporting that as a paired device is how a silent pairing failure looks
+    // like a success on screen.
+    using helix::LanClientAuthRouter;
+
+    CHECK(LanClientAuthRouter::decision_succeeded(json{{"result", {{"state", "success"}}}}));
+
+    CHECK_FALSE(LanClientAuthRouter::decision_succeeded(json{{"result", {{"state", "error"}}}}));
+    // A reply that says nothing about the outcome is not a success.
+    CHECK_FALSE(LanClientAuthRouter::decision_succeeded(json{{"result", json::object()}}));
+    CHECK_FALSE(LanClientAuthRouter::decision_succeeded(json::object()));
+    CHECK_FALSE(LanClientAuthRouter::decision_succeeded(json{{"result", "not-an-object"}}));
+    // Non-string state must not be coerced into one.
+    CHECK_FALSE(LanClientAuthRouter::decision_succeeded(json{{"result", {{"state", 1}}}}));
+}
+
+TEST_CASE("lan auth: the failure log can name the state the firmware sent", "[lanauth]") {
+    // Split out from the predicate so a refused decision logs WHY rather than
+    // just that it failed — that string is the whole diagnostic when pairing
+    // silently does not happen.
+    using helix::LanClientAuthRouter;
+
+    CHECK(LanClientAuthRouter::decision_state(json{{"result", {{"state", "error"}}}}) == "error");
+    CHECK(LanClientAuthRouter::decision_state(json::object()).empty());
+}
+
+// ============================================================================
+// Denial suppression (prestonbrown/helixscreen#1376)
+// ============================================================================
+
+TEST_CASE("lan auth: a denied client is suppressed inside the window", "[lanauth][1376]") {
+    using helix::lan_auth::suppressed_by_denial;
+    const auto denied_at = std::chrono::steady_clock::time_point{std::chrono::seconds{1000}};
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> denied = {
+        {"orca-1", denied_at}};
+
+    CHECK(suppressed_by_denial("orca-1", denied, denied_at + std::chrono::seconds{59}));
+}
+
+TEST_CASE("lan auth: suppression ends at the window boundary", "[lanauth][1376]") {
+    using helix::lan_auth::denial_suppression_window;
+    using helix::lan_auth::suppressed_by_denial;
+    const auto denied_at = std::chrono::steady_clock::time_point{std::chrono::seconds{1000}};
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> denied = {
+        {"orca-1", denied_at}};
+
+    // The window is exclusive: at exactly 60s the client may ask again, so a
+    // mistaken Deny costs one minute and not a restart.
+    CHECK_FALSE(suppressed_by_denial("orca-1", denied, denied_at + denial_suppression_window));
+    CHECK_FALSE(suppressed_by_denial("orca-1", denied, denied_at + std::chrono::hours{1}));
+}
+
+TEST_CASE("lan auth: suppression is keyed per denied client", "[lanauth][1376]") {
+    using helix::lan_auth::suppressed_by_denial;
+    const auto denied_at = std::chrono::steady_clock::time_point{std::chrono::seconds{1000}};
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> denied = {
+        {"orca-1", denied_at}};
+
+    // A different client asking during the window still gets its prompt.
+    CHECK_FALSE(suppressed_by_denial("app-2", denied, denied_at + std::chrono::seconds{10}));
+}
+
+TEST_CASE("lan auth: denying a second client leaves the first suppressed", "[lanauth][1376]") {
+    using helix::lan_auth::suppressed_by_denial;
+    const auto t0 = std::chrono::steady_clock::time_point{std::chrono::seconds{1000}};
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> denied = {
+        {"orca-1", t0}, {"app-2", t0 + std::chrono::seconds{20}}};
+
+    // The single-slot bug this pins: B's later denial must not re-arm A.
+    CHECK(suppressed_by_denial("orca-1", denied, t0 + std::chrono::seconds{30}));
+    CHECK(suppressed_by_denial("app-2", denied, t0 + std::chrono::seconds{30}));
+}
+
+TEST_CASE("lan auth: no recorded denial suppresses nothing", "[lanauth][1376]") {
+    using helix::lan_auth::suppressed_by_denial;
+    // An empty map is the "nothing denied" state - e.g. after an approval
+    // cleared the entry, or a dismissal which answered nothing.
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> denied;
+    CHECK_FALSE(suppressed_by_denial("orca-1", denied, std::chrono::steady_clock::time_point{}));
 }

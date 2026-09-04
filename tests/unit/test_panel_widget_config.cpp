@@ -2,16 +2,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../test_helpers/config_test_access.h"
+#include "../test_helpers/scoped_breakpoint.h"
 #include "config.h"
-#include "grid_layout.h"
+#include "data_root_resolver.h"
 #include "panel_widget_config.h"
 #include "panel_widget_registry.h"
 #include "theme_manager.h"
 
+#include <algorithm>
+#include <fstream>
 #include <set>
 #include <utility>
 
 #include "../catch_amalgamated.hpp"
+#include "hv/json.hpp"
 
 using namespace helix;
 
@@ -19,6 +23,24 @@ using namespace helix;
 /// build_default_grid() includes ALL defs (multi-instance widgets appear once as base ID).
 static size_t default_grid_widget_count() {
     return get_all_widget_defs().size();
+}
+
+/// The enabled state build_default_grid() actually produces for `id`.
+///
+/// Deliberately not the registry's default_enabled. Two things legitimately
+/// override it: bed_temperature is flipped on when no AMS is present, and the
+/// shipped layout's per-breakpoint "disabled" map switches a widget off on a
+/// tier with no room for it. A test that means "config loading did not disturb
+/// this widget" therefore has to compare against the defaults builder, not the
+/// registry table — comparing against the registry only ever worked because the
+/// shipped layout did not yet disable anything.
+static bool default_enabled_for(const std::string& id) {
+    for (const auto& e : PanelWidgetConfig::build_default_grid()) {
+        if (e.id == id) {
+            return e.enabled;
+        }
+    }
+    return false;
 }
 
 // ============================================================================
@@ -154,7 +176,7 @@ TEST_CASE_METHOD(
                 if (def.id != std::string("bed_temperature")) {
                     // bed_temperature enabled state overridden by build_default_grid()
                     if (def.id != std::string("bed_temperature")) {
-                        REQUIRE(entry.enabled == def.default_enabled);
+                        REQUIRE(entry.enabled == default_enabled_for(def.id));
                     }
                 }
                 found = true;
@@ -458,7 +480,7 @@ TEST_CASE_METHOD(
             if (entry.id == def.id) {
                 // bed_temperature enabled state overridden by build_default_grid()
                 if (def.id != std::string("bed_temperature")) {
-                    REQUIRE(entry.enabled == def.default_enabled);
+                    REQUIRE(entry.enabled == default_enabled_for(def.id));
                 }
                 found = true;
                 break;
@@ -561,7 +583,7 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
             if (entry.id == def.id) {
                 // bed_temperature enabled state overridden by build_default_grid()
                 if (def.id != std::string("bed_temperature")) {
-                    REQUIRE(entry.enabled == def.default_enabled);
+                    REQUIRE(entry.enabled == default_enabled_for(def.id));
                 }
                 found = true;
                 break;
@@ -659,6 +681,112 @@ TEST_CASE("PanelWidgetRegistry: always-available widgets have no gate subject",
         REQUIRE(def != nullptr);
         REQUIRE(def->hardware_gate_subject == nullptr);
     }
+}
+
+// ============================================================================
+// Registry tests — category taxonomy
+// ============================================================================
+
+TEST_CASE("PanelWidgetRegistry: every def has a valid category", "[panel_widget][widget_config]") {
+    const auto& defs = get_all_widget_defs();
+    for (const auto& def : defs) {
+        CAPTURE(def.id);
+        REQUIRE(find_widget_category(def.category) != nullptr);
+    }
+}
+
+TEST_CASE("PanelWidgetRegistry: category table fields are non-null and non-empty",
+          "[panel_widget][widget_config]") {
+    for (const auto& cat : get_widget_categories()) {
+        REQUIRE(cat.display_name != nullptr);
+        REQUIRE(cat.translation_tag != nullptr);
+        REQUIRE(cat.icon != nullptr);
+        CAPTURE(cat.display_name);
+        REQUIRE(std::string_view(cat.display_name).size() > 0);
+        REQUIRE(std::string_view(cat.translation_tag).size() > 0);
+        REQUIRE(std::string_view(cat.icon).size() > 0);
+    }
+}
+
+TEST_CASE("PanelWidgetRegistry: category table has no duplicate id or display name",
+          "[panel_widget][widget_config]") {
+    std::set<int> ids;
+    std::set<std::string> names;
+    for (const auto& cat : get_widget_categories()) {
+        CAPTURE(cat.display_name);
+        REQUIRE(ids.insert(static_cast<int>(cat.id)).second);
+        REQUIRE(names.insert(cat.display_name).second);
+    }
+    REQUIRE(ids.size() == get_widget_categories().size());
+}
+
+TEST_CASE("PanelWidgetRegistry: every category has at least one widget",
+          "[panel_widget][widget_config]") {
+    const auto& defs = get_all_widget_defs();
+    for (const auto& cat : get_widget_categories()) {
+        CAPTURE(cat.display_name);
+        auto count = std::count_if(defs.begin(), defs.end(), [&cat](const PanelWidgetDef& def) {
+            return def.category == cat.id;
+        });
+        REQUIRE(count > 0);
+    }
+}
+
+TEST_CASE("PanelWidgetRegistry: per-category counts sum to the full def count",
+          "[panel_widget][widget_config]") {
+    const auto& defs = get_all_widget_defs();
+    size_t total = 0;
+    for (const auto& cat : get_widget_categories()) {
+        total += static_cast<size_t>(
+            std::count_if(defs.begin(), defs.end(),
+                          [&cat](const PanelWidgetDef& def) { return def.category == cat.id; }));
+    }
+    REQUIRE(total == widget_def_count());
+}
+
+TEST_CASE("PanelWidgetRegistry: known widgets keep their category",
+          "[panel_widget][widget_config]") {
+    struct Expected {
+        const char* id;
+        WidgetCategory category;
+    };
+    // Spot pins — a careless re-shuffle of the table should trip at least one.
+    const Expected pinned[] = {
+        {"print_status", WidgetCategory::PrintStatus},
+        {"control_buttons", WidgetCategory::PrintStatus},
+        {"temperature", WidgetCategory::Temperature},
+        {"preheat", WidgetCategory::Temperature},
+        // Fans fold into Temperature & Cooling rather than carrying a
+        // two-widget category of their own.
+        {"fan_stack", WidgetCategory::Temperature},
+        {"fan", WidgetCategory::Temperature},
+        {"ams", WidgetCategory::Filament},
+        // Humidity reads as a filament-drying concern, not a climate one.
+        {"humidity", WidgetCategory::Filament},
+        // LEDs are something you actuate, so they live with the other controls.
+        {"led", WidgetCategory::Controls},
+        {"macros", WidgetCategory::Controls},
+        {"clock", WidgetCategory::System},
+        {"shutdown", WidgetCategory::System},
+    };
+    for (const auto& e : pinned) {
+        CAPTURE(e.id);
+        const auto* def = find_widget_def(e.id);
+        REQUIRE(def != nullptr);
+        REQUIRE(def->category == e.category);
+    }
+}
+
+TEST_CASE("PanelWidgetRegistry: find_widget_category returns the matching entry",
+          "[panel_widget][widget_config]") {
+    for (const auto& cat : get_widget_categories()) {
+        const auto* found = find_widget_category(cat.id);
+        REQUIRE(found != nullptr);
+        REQUIRE(found->id == cat.id);
+        REQUIRE(std::string_view(found->display_name) == cat.display_name);
+    }
+    // An out-of-range value resolves to nothing rather than the first entry.
+    REQUIRE(find_widget_category(static_cast<WidgetCategory>(9999)) == nullptr);
 }
 
 // ============================================================================
@@ -781,7 +909,7 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
             if (entry.id == def.id) {
                 // bed_temperature enabled state overridden by build_default_grid()
                 if (def.id != std::string("bed_temperature")) {
-                    REQUIRE(entry.enabled == def.default_enabled);
+                    REQUIRE(entry.enabled == default_enabled_for(def.id));
                 }
                 found = true;
                 break;
@@ -839,7 +967,7 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
             if (entry.id == def.id) {
                 // bed_temperature enabled state overridden by build_default_grid()
                 if (def.id != std::string("bed_temperature")) {
-                    REQUIRE(entry.enabled == def.default_enabled);
+                    REQUIRE(entry.enabled == default_enabled_for(def.id));
                 }
                 found = true;
                 break;
@@ -1053,8 +1181,8 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture, "PanelWidgetConfig: missing grid coor
     REQUIRE(power);
     REQUIRE(power->col == -1);
     REQUIRE(power->row == -1);
-    REQUIRE(power->colspan == 1);
-    REQUIRE(power->rowspan == 1);
+    REQUIRE(power->colspan == 2); // registry default for shutdown
+    REQUIRE(power->rowspan == 2);
     REQUIRE_FALSE(power->has_grid_position());
 }
 
@@ -1145,28 +1273,36 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
     auto grid = PanelWidgetConfig::build_default_grid();
     REQUIRE(grid.size() == default_grid_widget_count());
 
-    // Anchor widgets (printer_image, print_status, tips, temperature, bed_temperature)
-    // get explicit grid positions. All other widgets get col=-1, row=-1 (auto-place).
-    const std::set<std::string> anchors = {"printer_image", "print_status", "tips", "temperature",
-                                           "bed_temperature"};
+    // Which ids the shipped table anchors is per-tier and belongs to the table,
+    // not to this test — it used to hardcode five and broke the moment the
+    // landscape layout was re-authored. What must hold everywhere: the two
+    // widgets every tier anchors are placed, a disabled widget never is, and no
+    // entry comes back half-placed.
+    for (const char* id : {"printer_image", "print_status"}) {
+        const auto it = std::find_if(grid.begin(), grid.end(),
+                                     [&](const PanelWidgetEntry& e) { return e.id == id; });
+        INFO("widget " << id);
+        REQUIRE(it != grid.end());
+        REQUIRE(it->has_grid_position());
+    }
     for (const auto& entry : grid) {
         INFO("Widget " << entry.id << " enabled=" << entry.enabled << " col=" << entry.col
                        << " row=" << entry.row);
-        if (anchors.count(entry.id)) {
-            REQUIRE(entry.has_grid_position());
-        } else {
+        if (!entry.enabled) {
             REQUIRE_FALSE(entry.has_grid_position());
+        }
+        if (!entry.has_grid_position()) {
+            REQUIRE(entry.col == -1);
+            REQUIRE(entry.row == -1);
         }
     }
 }
 
 TEST_CASE("PanelWidgetConfig: build_default_grid produces correct layout",
           "[panel_widget][widget_config][grid]") {
-    // Force tiny breakpoint (0) — a prior test may have set it to a larger value
-    lv_subject_t* bp = theme_manager_get_breakpoint_subject();
-    if (bp) {
-        lv_subject_set_int(bp, 0);
-    }
+    // Pin the breakpoint this layout is asserted against. Through the guard, so
+    // it is put back: a bare set left every later test building a Micro grid.
+    helix::test::ScopedBreakpoint bp(UiBreakpoint::Micro);
     auto entries = PanelWidgetConfig::build_default_grid();
 
     // Should include all registry widgets
@@ -1192,88 +1328,79 @@ TEST_CASE("PanelWidgetConfig: build_default_grid produces correct layout",
         return nullptr;
     };
 
-    // Printer image: top-left, 2×2
+    // The micro landscape table: printer image 3x2 cells top-left, six 1x1
+    // readouts filling the rest of the top two rows, print_status full width
+    // below. Tracks are half-cells, so a cell span of 3x2 reads as 6x4.
     auto* pi = find_entry("printer_image");
     REQUIRE(pi);
     REQUIRE(pi->enabled);
     REQUIRE(pi->col == 0);
     REQUIRE(pi->row == 0);
-    REQUIRE(pi->colspan == 2);
-    REQUIRE(pi->rowspan == 2);
+    REQUIRE(pi->colspan == 6);
+    REQUIRE(pi->rowspan == 4);
 
-    // Print status: right of the printer image, taking the rest of the top band.
+    // Print status spans the full 12-track width of the micro grid.
     auto* ps = find_entry("print_status");
     REQUIRE(ps);
     REQUIRE(ps->enabled);
-    REQUIRE(ps->col == 2);
-    REQUIRE(ps->row == 0);
-    REQUIRE(ps->colspan == 4);
-    REQUIRE(ps->rowspan == 2);
+    REQUIRE(ps->col == 0);
+    REQUIRE(ps->row == 4);
+    REQUIRE(ps->colspan == 12);
+    REQUIRE(ps->rowspan == 4);
 
-    // Tips: one full-width band along the bottom. It used to be 2x2 beside the
-    // printer image, which on a 6-column grid left the right-hand third
-    // unreachable — a 480x400 panel lost a quarter of its dashboard to it.
-    auto* tips = find_entry("tips");
-    REQUIRE(tips);
-    REQUIRE(tips->enabled);
-    REQUIRE(tips->col == 0);
-    REQUIRE(tips->row == 3);
-    REQUIRE(tips->colspan == 6);
-    REQUIRE(tips->rowspan == 1);
+    // tips and temp_graph are switched off on the 480-class tiers: four cell
+    // rows only pay for the image block plus a two-cell print_status, and the
+    // graph's axis labels collide at a 68px cell.
+    for (const char* id : {"tips", "temp_graph"}) {
+        auto* off = find_entry(id);
+        REQUIRE(off);
+        INFO("widget " << id);
+        REQUIRE_FALSE(off->enabled);
+        REQUIRE_FALSE(off->has_grid_position());
+    }
 
-    // The anchors must leave exactly enough free cells for the widgets that
-    // auto-place, and no more. This is the assertion the old geometry would have
-    // failed: it is what "the tier fills its grid" means, and checking only the
-    // anchor coordinates let a quarter of the grid sit dead without complaint.
+    // Positions are all-or-nothing. Which ids the shipped table anchors is the
+    // table's business and differs per tier; a half-placed entry is a bug.
+    for (const auto& e : entries) {
+        INFO("Widget " << e.id << " at (" << e.col << "," << e.row << ")");
+        if (e.has_grid_position()) {
+            REQUIRE(e.col >= 0);
+            REQUIRE(e.row >= 0);
+        } else {
+            REQUIRE(e.col == -1);
+            REQUIRE(e.row == -1);
+        }
+    }
+
+    // The readout block: nozzle and bed lead the top row beside the image.
+    auto* nozzle = find_entry("temperature");
+    REQUIRE(nozzle);
+    REQUIRE(nozzle->enabled);
+    REQUIRE(nozzle->col == 6);
+    REQUIRE(nozzle->row == 0);
+    auto* bed_anchor = find_entry("bed_temperature");
+    REQUIRE(bed_anchor);
+    REQUIRE(bed_anchor->col == 8);
+    REQUIRE(bed_anchor->row == 0);
+
+    // Anchors must not overlap each other. Two entries claiming the same
+    // track read as two chosen positions and only one of them survives
+    // placement. (main asserted this alongside a free-cell count against a
+    // fixed per-tier grid; that half does not carry over — the square-cell
+    // grid derives its track counts from the measured content box.)
     {
-        const int cols = GridLayout::get_cols(UiBreakpoint::Tiny);
-        const int rows = GridLayout::get_rows(UiBreakpoint::Tiny);
         std::set<std::pair<int, int>> occupied;
-        int auto_placed = 0;
         for (const auto& e : entries) {
-            if (!e.enabled)
+            if (!e.enabled || !e.has_grid_position())
                 continue;
-            if (!e.has_grid_position()) {
-                ++auto_placed;
-                continue;
-            }
             for (int dc = 0; dc < e.colspan; ++dc) {
                 for (int dr = 0; dr < e.rowspan; ++dr) {
                     INFO("anchor " << e.id << " covers " << (e.col + dc) << "," << (e.row + dr));
-                    REQUIRE(e.col + dc < cols);
-                    REQUIRE(e.row + dr < rows);
-                    // Anchors must not overlap each other either.
                     REQUIRE(occupied.insert({e.col + dc, e.row + dr}).second);
                 }
             }
         }
-        const int free_cells = cols * rows - static_cast<int>(occupied.size());
-        INFO("free cells " << free_cells << " vs auto-placed widgets " << auto_placed);
-        REQUIRE(free_cells == auto_placed);
     }
-
-    // Non-anchor enabled widgets should NOT have grid positions (auto-placed at populate time)
-    const std::set<std::string> anchors = {"printer_image", "print_status", "tips", "temperature",
-                                           "bed_temperature"};
-    for (const auto& e : entries) {
-        if (anchors.count(e.id))
-            continue;
-        INFO("Widget " << e.id << " at (" << e.col << "," << e.row << ")");
-        REQUIRE_FALSE(e.has_grid_position());
-    }
-
-    // Heaters lead the status row, nozzle then bed, left to right — the same
-    // reading order every other tier uses. They were stacked at (2,2)/(2,3) when
-    // print_status and tips only reached column 2.
-    auto* nozzle = find_entry("temperature");
-    REQUIRE(nozzle);
-    REQUIRE(nozzle->enabled);
-    REQUIRE(nozzle->col == 0);
-    REQUIRE(nozzle->row == 2);
-    auto* bed_anchor = find_entry("bed_temperature");
-    REQUIRE(bed_anchor);
-    REQUIRE(bed_anchor->col == 1);
-    REQUIRE(bed_anchor->row == 2);
 
     // Disabled widgets should have no grid position
     for (const auto& e : disabled) {
@@ -1285,11 +1412,15 @@ TEST_CASE("PanelWidgetConfig: build_default_grid produces correct layout",
     auto* fs = find_entry("fan_stack");
     REQUIRE(fs);
 
-    // notifications must be enabled (default_enabled, no gate) but NOT placed
+    // notifications is enabled (default_enabled, no gate) and, since the
+    // landscape rework, anchored top-right of the readout block rather than
+    // left to auto-place.
     auto* notif = find_entry("notifications");
     REQUIRE(notif);
     REQUIRE(notif->enabled);
-    REQUIRE_FALSE(notif->has_grid_position());
+    REQUIRE(notif->has_grid_position());
+    REQUIRE(notif->col == 10);
+    REQUIRE(notif->row == 0);
 
     // bed_temperature: default_enabled=false in registry, but build_default_grid()
     // overrides to enabled when no AMS present (which is the case in tests).
@@ -1938,4 +2069,72 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
     REQUIRE(ams->col == -1);
     REQUIRE(fil->enabled);
     REQUIRE(fil->col == 3);
+}
+
+// =============================================================================
+// Preset seed layouts: every placed widget fits the grid and none overlap.
+// Presets ship on 800x480 = medium = 12x8 tracks.
+// =============================================================================
+
+TEST_CASE("preset seeds: placed widgets fit the medium grid", "[panel_widget_config][preset]") {
+    // Medium 800x480 = 12 cols x 8 rows (measured, see test_grid_square_cells.cpp)
+    const int cols = 12, rows = 8;
+    for (const char* preset : {"ad5x", "ad5x_zmod", "cc1"}) {
+        std::string rel = std::string("panel_widgets/") + preset + "/home.json";
+        std::ifstream in(find_readable(rel));
+        INFO("preset " << preset);
+        REQUIRE(in.is_open());
+        nlohmann::json seed = nlohmann::json::parse(in);
+        REQUIRE(seed.contains("pages"));
+        for (const auto& page : seed["pages"]) {
+            REQUIRE(page.contains("widgets"));
+            for (const auto& w : page["widgets"]) {
+                int col = w.value("col", -1);
+                int row = w.value("row", -1);
+                if (col < 0 || row < 0)
+                    continue;
+                INFO("preset " << preset << " widget " << w.value("id", std::string{}));
+                CHECK(col + w.value("colspan", 1) <= cols);
+                CHECK(row + w.value("rowspan", 1) <= rows);
+            }
+        }
+    }
+}
+
+TEST_CASE("preset seeds: placed widgets do not overlap", "[panel_widget_config][preset]") {
+    for (const char* preset : {"ad5x", "ad5x_zmod", "cc1"}) {
+        std::ifstream in(find_readable(std::string("panel_widgets/") + preset + "/home.json"));
+        REQUIRE(in.is_open());
+        nlohmann::json seed = nlohmann::json::parse(in);
+        INFO("preset " << preset);
+        // Guarded rather than seed["pages"][0]["widgets"]: const operator[] on a
+        // missing key is only JSON_ASSERT-guarded, so under NDEBUG a renamed or
+        // truncated preset dereferences end() instead of failing the test.
+        REQUIRE(seed.contains("pages"));
+        REQUIRE(seed["pages"].is_array());
+        REQUIRE_FALSE(seed["pages"].empty());
+        REQUIRE(seed["pages"][0].contains("widgets"));
+        struct Rect {
+            int col, row, colspan, rowspan;
+        };
+        std::vector<Rect> placed;
+        for (const auto& w : seed["pages"][0]["widgets"]) {
+            int col = w.value("col", -1);
+            int row = w.value("row", -1);
+            if (col < 0 || row < 0 || !w.value("enabled", false))
+                continue;
+            placed.push_back({col, row, w.value("colspan", 1), w.value("rowspan", 1)});
+        }
+        for (size_t i = 0; i < placed.size(); i++) {
+            for (size_t j = i + 1; j < placed.size(); j++) {
+                const auto& a = placed[i];
+                const auto& b = placed[j];
+                bool overlap = !(a.col + a.colspan <= b.col || b.col + b.colspan <= a.col ||
+                                 a.row + a.rowspan <= b.row || b.row + b.rowspan <= a.row);
+                INFO("preset " << preset << " widgets at (" << a.col << "," << a.row << ") and ("
+                               << b.col << "," << b.row << ")");
+                CHECK_FALSE(overlap);
+            }
+        }
+    }
 }

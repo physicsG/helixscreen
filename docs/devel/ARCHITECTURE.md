@@ -166,3 +166,7 @@ the remaining imperative-UI debt and the ratchet gate that keeps it shrinking.
   code patterns ("how", where the chapters are "why")
 - [REVIEW_RUBRIC.md](REVIEW_RUBRIC.md) — what to check in review, and which
   crash families the gates already cover
+- [CHAMBER_HEATER.md](CHAMBER_HEATER.md) — the chamber-heater backend
+  registry: how integrated (K2-style) and external-appliance (Panda Breath /
+  DragonBreath) heaters are discovered, diagnosed, and ceiling-capped behind
+  one interface

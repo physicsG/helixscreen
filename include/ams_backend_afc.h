@@ -168,6 +168,16 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
 
     // State queries
     [[nodiscard]] AmsSystemInfo get_system_info() const override;
+
+    // An AFC_buffer configured `type: FPS_PSF` reads an analog filament
+    // pressure sensor, which get_system_info() maps onto sync_feedback_bias.
+    // The docs used to say AFC had no proportional data at all; that was only
+    // ever true of the switched TurtleNeck buffer, which still returns false
+    // here via the -1.5 sentinel.
+    [[nodiscard]] bool
+    supports_sync_feedback_visualization(const AmsSystemInfo& info) const override {
+        return info.sync_feedback_bias > -1.5f;
+    }
     [[nodiscard]] AmsType get_type() const override;
     [[nodiscard]] bool is_afc_system() const override {
         return true;
@@ -348,6 +358,11 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
         return RemapStrategy::Native;
     }
 
+    /// AFC owns the lane->tool map (SET_MAP) and get_tool_mapping() returns it.
+    [[nodiscard]] bool owns_tool_mapping_table() const override {
+        return true;
+    }
+
     [[nodiscard]] bool has_firmware_spool_persistence() const override {
         return true; // AFC uses SET_SPOOL_ID gcode for persistence
     }
@@ -416,16 +431,6 @@ class AmsBackendAfc : public AmsSubscriptionBackend {
     AmsError reset_tool_mappings() override;
 
     // Tool Mapping support
-    /**
-     * @brief Get tool mapping capabilities for AFC
-     *
-     * AFC supports per-lane tool assignment via SET_MAP G-code.
-     *
-     * @return Capabilities with supported=true, editable=true
-     */
-    [[nodiscard]] helix::printer::ToolMappingCapabilities
-    get_tool_mapping_capabilities() const override;
-
     /**
      * @brief Get current tool-to-slot mapping
      *

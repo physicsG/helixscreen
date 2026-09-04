@@ -19,6 +19,7 @@
 #include "app_globals.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "printer_state.h"
 #include "static_panel_registry.h"
 #include "theme_manager.h"
 #include "thumbnail_cache.h"
@@ -654,19 +655,10 @@ void TimelapseVideosOverlay::detect_playback_capability() {
     can_play_ = cached_can_play;
     player_command_ = cached_player;
 
-    // Check if we're running on the same host as Moonraker (may change between
-    // connections). Both halves are shared: extract_host_from_websocket_url()
-    // already handles the [::1] bracket form this parse got wrong, and
-    // is_moonraker_on_same_host() answers for a host named by hostname or LAN IP,
-    // not just a loopback literal — playback works whenever the file is on this
-    // machine, however the host happens to be spelled.
-    if (api_) {
-        const std::string host = helix::extract_host_from_websocket_url(api_->get_websocket_url());
-        // Empty means we could not name the host at all; that is not evidence of
-        // locality, and is_moonraker_on_same_host() reads "" as the localhost
-        // default.
-        is_local_moonraker_ = !host.empty() && helix::is_moonraker_on_same_host(host);
-    }
+    // Remote vs same-host playback path follows the live connection verdict
+    // (moonraker_is_remote subject) — replaces the hand-rolled websocket-URL
+    // parse + loopback-literal check this function used to carry.
+    is_local_moonraker_ = !get_printer_state().is_moonraker_remote();
 
     spdlog::debug("[{}] Playback capability: can_play={} player='{}' local={}", get_name(),
                   can_play_, player_command_, is_local_moonraker_);
@@ -765,57 +757,49 @@ void TimelapseVideosOverlay::confirm_delete(const std::string& filename) {
 
     std::string message = fmt::format(lv_tr("Delete {}?"), filename);
 
-    delete_confirmation_dialog_ = helix::ui::modal_show_confirmation(
+    // The modal closes itself on a button press and deletes itself after any
+    // close, so every path here nulls the stored handle rather than hiding the
+    // dialog; cancel and dismissal also clear the staged filename so it cannot
+    // leak into a later delete.
+    auto drop_staged = [this] {
+        delete_confirmation_dialog_ = nullptr;
+        pending_delete_filename_.clear();
+    };
+    helix::ui::ConfirmOptions opts;
+    opts.on_cancel = drop_staged;
+    opts.on_dismiss = drop_staged;
+    opts.owner_token = lifetime_.token();
+    delete_confirmation_dialog_ = helix::ui::modal_confirm(
         lv_tr("Delete Video"), message.c_str(), ModalSeverity::Warning, lv_tr("Delete"),
-        on_delete_confirmed, on_delete_cancelled, this);
-}
-
-void TimelapseVideosOverlay::on_delete_confirmed(lv_event_t* e) {
-    auto* self = static_cast<TimelapseVideosOverlay*>(lv_event_get_user_data(e));
-    if (!self || !g_timelapse_videos)
-        return;
-
-    // Hide the dialog
-    if (self->delete_confirmation_dialog_) {
-        helix::ui::modal_hide(self->delete_confirmation_dialog_);
-        self->delete_confirmation_dialog_ = nullptr;
-    }
-
-    if (!self->api_ || self->pending_delete_filename_.empty())
-        return;
-
-    std::string full_path = "timelapse/" + self->pending_delete_filename_;
-    auto tok = self->lifetime_.token();
-
-    spdlog::info("[Timelapse Videos] Deleting video: {}", self->pending_delete_filename_);
-
-    self->api_->files().delete_file(
-        full_path,
-        [self, tok]() {
-            if (tok.expired())
+        [this] {
+            delete_confirmation_dialog_ = nullptr;
+            if (!g_timelapse_videos || !api_ || pending_delete_filename_.empty()) {
+                pending_delete_filename_.clear();
                 return;
-            tok.defer([self]() {
-                spdlog::info("[Timelapse Videos] Video deleted, refreshing list");
-                self->fetch_video_list();
-            });
+            }
+
+            std::string full_path = "timelapse/" + pending_delete_filename_;
+            auto tok = lifetime_.token();
+
+            spdlog::info("[Timelapse Videos] Deleting video: {}", pending_delete_filename_);
+
+            api_->files().delete_file(
+                full_path,
+                [this, tok]() {
+                    if (tok.expired())
+                        return;
+                    tok.defer([this]() {
+                        spdlog::info("[Timelapse Videos] Video deleted, refreshing list");
+                        fetch_video_list();
+                    });
+                },
+                [](const MoonrakerError& error) {
+                    spdlog::error("[Timelapse Videos] Failed to delete video: {}", error.message);
+                });
+
+            pending_delete_filename_.clear();
         },
-        [](const MoonrakerError& error) {
-            spdlog::error("[Timelapse Videos] Failed to delete video: {}", error.message);
-        });
-
-    self->pending_delete_filename_.clear();
-}
-
-void TimelapseVideosOverlay::on_delete_cancelled(lv_event_t* e) {
-    auto* self = static_cast<TimelapseVideosOverlay*>(lv_event_get_user_data(e));
-    if (!self)
-        return;
-
-    if (self->delete_confirmation_dialog_) {
-        helix::ui::modal_hide(self->delete_confirmation_dialog_);
-        self->delete_confirmation_dialog_ = nullptr;
-    }
-    self->pending_delete_filename_.clear();
+        opts);
 }
 
 // ============================================================================

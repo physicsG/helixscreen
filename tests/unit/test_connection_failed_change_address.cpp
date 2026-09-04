@@ -67,10 +67,9 @@ class ReconnectCountingClient : public helix::IMoonrakerClient {
                                   std::function<void(const json&)>) override {
         return 0;
     }
-    helix::RequestId
-    send_jsonrpc(const std::string&, const json&, std::function<void(const json&)>,
-                 std::function<void(const MoonrakerError&)>, uint32_t, bool,
-                 std::optional<helix::rpc_error_policy::CallerIntent>) override {
+    helix::RequestId send_jsonrpc(const std::string&, const json&, std::function<void(const json&)>,
+                                  std::function<void(const MoonrakerError&)>, uint32_t, bool,
+                                  std::optional<helix::rpc_error_policy::CallerIntent>) override {
         return 0;
     }
     int gcode_script(const std::string&) override {
@@ -87,8 +86,7 @@ class ReconnectCountingClient : public helix::IMoonrakerClient {
     }
     void parse_objects(const json&) override {}
     void clear_discovery_cache() override {}
-    void set_on_hardware_discovered(std::function<void(const helix::PrinterDiscovery&)>) override {
-    }
+    void set_on_hardware_discovered(std::function<void(const helix::PrinterDiscovery&)>) override {}
     void set_on_discovery_complete(
         std::function<void(const helix::PrinterDiscovery&, const json&)>) override {}
     void set_bed_mesh_callback(std::function<void(const json&)>) override {}
@@ -299,6 +297,43 @@ TEST_CASE_METHOD(ConnFailedFixture,
     UpdateQueue::instance().drain();
     CHECK(client.reconnect_calls() == 1);
     CHECK(Modal::get_top() == nullptr);
+
+    cfg->set<std::string>(key, prev);
+    helix::invalidate_host_identity_cache();
+}
+
+TEST_CASE_METHOD(ConnFailedFixture, "A never-connected remote host still offers Change Address",
+                 "[modal][connection][change_host]") {
+    // moonraker_is_remote settles only on a CONNECTED edge, and this prompt
+    // fires exactly when there was none — so the subject still sits at its
+    // default (local) here. The locality verdict must come from the ATTEMPTED
+    // host instead, or every remote screen with an unreachable printer gets
+    // the OK-only alert and loses its primary recovery path. 192.0.2.1 is
+    // TEST-NET-1 (RFC 5737): guaranteed never to be one of our interfaces.
+    Config* cfg = Config::get_instance();
+    REQUIRE(cfg != nullptr);
+    const std::string key = cfg->df() + "moonraker_host";
+    const std::string prev = cfg->get<std::string>(key, "");
+    cfg->set<std::string>(key, "192.0.2.1");
+    helix::invalidate_host_identity_cache();
+
+    helix::ui::show_connection_failed_modal("Connection Failed",
+                                            "Unable to reach printer at 192.0.2.1:7125.");
+    UpdateQueue::instance().drain();
+    REQUIRE(Modal::get_top() != nullptr);
+
+    // Confirmation-style dialog, not the alert the same-host path shows:
+    // primary is Reconnect, and Change Address survives as the secondary
+    // action (the merge of the reconnect-first flow moved it off primary).
+    const char* primary_text = static_cast<const char*>(
+        lv_subject_get_pointer(helix::ui::modal_get_primary_text_subject()));
+    REQUIRE(primary_text != nullptr);
+    CHECK(std::string(primary_text).find("Reconnect") != std::string::npos);
+    const char* cancel_text = static_cast<const char*>(
+        lv_subject_get_pointer(helix::ui::modal_get_cancel_text_subject()));
+    REQUIRE(cancel_text != nullptr);
+    CHECK(std::string(cancel_text).find("Change Address") != std::string::npos);
+    CHECK(lv_subject_get_int(helix::ui::modal_get_show_cancel_subject()) == 1);
 
     cfg->set<std::string>(key, prev);
     helix::invalidate_host_identity_cache();

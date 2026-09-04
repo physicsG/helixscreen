@@ -83,8 +83,8 @@ void WidthSensorWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int wi
     if (!widget_obj_)
         return;
 
-    bool wide = (width_px >= widget_size::W_NORMAL);
-    bool tall = (height_px >= widget_size::H_TALL);
+    bool wide = (width_px >= widget_size::w_normal());
+    bool tall = (height_px >= widget_size::h_tall());
 
     // Scale icon when tall or wide
     const lv_font_t* icon_font = (tall || wide) ? &mdi_icons_32 : &mdi_icons_24;

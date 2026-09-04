@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "app_globals.h"
 #include "async_lifetime_guard.h"
@@ -28,6 +29,32 @@ TEST_CASE("toolhead_is_homed reads the live homed_axes subject", "[homing][toolh
     SECTION("z-only is NOT homed") {
         lv_subject_copy_string(ps.get_homed_axes_subject(), "z");
         CHECK_FALSE(helix::toolhead_is_homed(ps));
+    }
+}
+
+TEST_CASE("axis_is_homed reads each axis independently", "[homing][toolhead]") {
+    LVGLTestFixture fixture;
+    helix::PrinterState ps;
+    ps.init_subjects(false); // false = skip XML registration (test default)
+
+    SECTION("xy homed leaves z unhomed") {
+        lv_subject_copy_string(ps.get_homed_axes_subject(), "xy");
+        CHECK(helix::axis_is_homed(ps, helix::Axis::X));
+        CHECK(helix::axis_is_homed(ps, helix::Axis::Y));
+        CHECK_FALSE(helix::axis_is_homed(ps, helix::Axis::Z));
+        CHECK_FALSE(helix::toolhead_is_homed(ps));
+    }
+    SECTION("empty homed_axes means nothing is homed") {
+        lv_subject_copy_string(ps.get_homed_axes_subject(), "");
+        CHECK_FALSE(helix::axis_is_homed(ps, helix::Axis::X));
+        CHECK_FALSE(helix::axis_is_homed(ps, helix::Axis::Y));
+        CHECK_FALSE(helix::axis_is_homed(ps, helix::Axis::Z));
+    }
+    SECTION("xyz homed reports all three axes") {
+        lv_subject_copy_string(ps.get_homed_axes_subject(), "xyz");
+        CHECK(helix::axis_is_homed(ps, helix::Axis::X));
+        CHECK(helix::axis_is_homed(ps, helix::Axis::Y));
+        CHECK(helix::axis_is_homed(ps, helix::Axis::Z));
     }
 }
 

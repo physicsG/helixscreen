@@ -15,7 +15,7 @@
  *
  * Drives BOTH consumers off the SAME underlying PrinterState chamber subjects
  * (chamber_temp / chamber_effective_target / chamber_mode) that production XML
- * binds them to (see chamber_temp_panel.xml, temp_graph_overlay.xml,
+ * binds them to (see temp_graph_overlay.xml,
  * controls_panel.xml), so a divergence here means the two code paths actually
  * disagree — not that the test wired them up differently.
  */
@@ -91,8 +91,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     REQUIRE(binder.bind(icon_root, state(), HeaterType::Chamber));
 
     // Label side: a real <temp_display>, bound the same way production XML
-    // binds the chamber card (chamber_temp_panel.xml,
-    // temp_graph_overlay.xml) — against the SAME PrinterState chamber
+    // binds the chamber card (temp_graph_overlay.xml) — against the SAME PrinterState chamber
     // subjects the icon binder above reads.
     lv_obj_t* container = lv_obj_create(test_screen());
     const char* attrs[] = {

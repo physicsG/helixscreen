@@ -1,3 +1,4 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
@@ -8,19 +9,19 @@
  * `job_list_container` on every call (no memo, no `widget_obj_` guard).
  *
  * The old predicate required a 3-span on *either* axis for "expanded" (mode
- * 2), given both axes already clear the 2-span floor. `W_WIDE` is the width
+ * 2), given both axes already clear the 2-span floor. `w_wide()` is the width
  * analogue of that 3-span floor, but there was no height analogue among the
  * three widget_size.h constants — the measured tier table only
- * derives a rowspan>=2 threshold (`H_TALL`), not rowspan>=3. The smallest
+ * derives a rowspan>=2 threshold (`h_tall()`), not rowspan>=3. The smallest
  * measured 3-row height across all eight tiers is 197.5px (Micro
  * 480x272).
  *
- * `H_TALLER` (197, just below that measured minimum) is added to
- * panel_widget_size.h as the height counterpart to `W_WIDE`, following the
- * same ">= admits the smallest measured extent" rule as the other three
- * constants — the option that preserves today's OR-of-two-axes behavior.
- * Reusing `W_WIDE` (205) for the height bound would drop Micro's 3-row case
- * (197px truncated < 205px) out of mode 2 — a real regression, not a
+ * `h_taller()` (Small rung 197, just below that measured minimum) is the
+ * height counterpart to `w_wide()` in panel_widget_size.h, following the same
+ * ">= admits the smallest measured extent" rule as the other three bands — the
+ * option that preserves the OR-of-two-axes behavior. Reusing `w_wide()` (Small
+ * rung 205) for the height bound would drop Micro's 3-row case out of mode 2 —
+ * a real regression, not a
  * cosmetic threshold shift. Leaving mode 1 unbounded on height would drop
  * the height-only expansion path entirely — a tall-but-narrow queue that
  * reaches mode 2 today via rowspan alone would be stuck in mode 1.
@@ -113,7 +114,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     // --- Mode 0 (compact): both axes below floor. Contradicting span: 4x4
     // (old predicate: colspan>=2 && rowspan>=2, not both <=2 -> mode 2).
-    h.resize(4, 4, W_NORMAL - 1, H_TALL - 1);
+    h.resize(4, 4, w_normal() - 1, h_tall() - 1);
     process_lvgl(30);
 
     CHECK(jq_size_mode() == 0);
@@ -122,7 +123,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     // --- Mode 1 (normal): both axes at/over their floor but below the wide
     // bands. Contradicting span: 1x1 (old predicate: colspan<2 -> mode 0).
-    h.resize(1, 1, W_NORMAL, H_TALL);
+    h.resize(1, 1, w_normal(), h_tall());
     process_lvgl(30);
 
     CHECK(jq_size_mode() == 1);
@@ -131,10 +132,10 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // Mode 1 rows show only the filename — no time-in-queue label.
     CHECK(lv_obj_get_child_count(lv_obj_get_child(container, 0)) == 1);
 
-    // --- Mode 2 via width alone: width at/over W_WIDE, height still short of
-    // H_TALLER (at H_TALL only) — isolates the width term of the OR from the
+    // --- Mode 2 via width alone: width at/over w_wide(), height still short of
+    // h_taller() (at h_tall() only) — isolates the width term of the OR from the
     // height term. Contradicting span: 1x1 (old predicate -> mode 0).
-    h.resize(1, 1, W_WIDE, H_TALL);
+    h.resize(1, 1, w_wide(), h_tall());
     process_lvgl(30);
 
     CHECK(jq_size_mode() == 2);
@@ -143,10 +144,10 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // Mode 2 rows add the time-in-queue label alongside the filename.
     CHECK(lv_obj_get_child_count(lv_obj_get_child(container, 0)) == 2);
 
-    // --- Mode 2 via height alone: height at/over H_TALLER, width still
-    // short of W_WIDE (at W_NORMAL only) — isolates the height term.
+    // --- Mode 2 via height alone: height at/over h_taller(), width still
+    // short of w_wide() (at w_normal() only) — isolates the height term.
     // Contradicting span: 1x1 (old predicate -> mode 0).
-    h.resize(1, 1, W_NORMAL, H_TALLER);
+    h.resize(1, 1, w_normal(), h_taller());
     process_lvgl(30);
 
     CHECK(jq_size_mode() == 2);

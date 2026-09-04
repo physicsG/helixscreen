@@ -169,6 +169,7 @@
 #ifdef HELIX_ENABLE_SCREENSAVER
 #include "screensaver.h"
 #endif
+#include "display_metrics.h"
 #include "led/ui_led_control_overlay.h"
 #include "platform_info.h"
 #include "printer_detector.h"
@@ -669,6 +670,15 @@ int Application::run(int argc, char** argv) {
     spdlog::debug("[Application] DPI: {}{}", (m_args.dpi > 0 ? m_args.dpi : LV_DPI_DEF),
                   (m_args.dpi > 0 ? " (custom)" : " (default)"));
 
+    // Volunteer as the kernel's first OOM victim when helix-launcher.sh found
+    // Klipper co-hosted on this board. No-op when the variable is unset.
+    //
+    // Placed after init_logging() rather than at the top of run(): anything
+    // logged before Phase 3 is dropped, and on a printer this line is the only
+    // way to confirm the handoff happened at all. Still ahead of LVGL, the
+    // display, the printer database, and every large allocation.
+    helix::apply_oom_score_adj_from_env();
+
     // Headless one-shot: detect printer via Moonraker REST, print JSON verdict, exit.
     // Must run after logging init but before any display/LVGL init.
     if (m_args.detect_printer) {
@@ -914,9 +924,7 @@ int Application::run(int argc, char** argv) {
                 } else {
                     spdlog::info(
                         "[Application] Previous crash detected — showing crash report dialog");
-                    auto* modal = new CrashReportModal();
-                    modal->set_report(report);
-                    modal->show_modal(lv_screen_active());
+                    CrashReportModal::show_owned(report);
                 }
             }
         }
@@ -1479,12 +1487,21 @@ bool Application::init_display() {
     });
 #endif
 
+    // Android is the one platform whose reported DPI can be trusted: OEMs must
+    // declare it and SDL reads it straight from DisplayMetrics. Every Linux
+    // target is excluded on purpose — a survey of the eight test devices found
+    // the reported physical size wrong or absent on six, including a Pi that
+    // reports the official 7" panel's exact active area for a ~115mm screen.
+    std::optional<double> measured_dpi;
 #ifdef __ANDROID__
     {
         float ddpi = 0, hdpi = 0, vdpi = 0;
         if (SDL_GetDisplayDPI(0, &ddpi, &hdpi, &vdpi) == 0) {
             spdlog::info("[Application] Android display DPI: diagonal={:.0f} h={:.0f} v={:.0f}",
                          ddpi, hdpi, vdpi);
+            if (ddpi > 0) {
+                measured_dpi = static_cast<double>(ddpi);
+            }
         }
         spdlog::info("[Application] Android screen: {}x{} (DPI-aware sizing via SDL)",
                      m_screen_width, m_screen_height);
@@ -1506,11 +1523,46 @@ bool Application::init_display() {
     // its MAX(.., 1) safeguard. Result: dropdown / input padding visually
     // disappears. Forcing dpi here (after the driver has had its chance) makes
     // the UI immune to lying kernel drivers.
-    int32_t effective_dpi = (m_args.dpi > 0) ? m_args.dpi : LV_DPI_DEF;
+    // Resolve the panel's physical DPI and turn it into a UI scale factor. The
+    // scale is flat (exactly 1.0) through 225 DPI, which covers every shipping
+    // printer measured, so this is an identity everywhere except phone-class
+    // panels.
+    const helix::ResolvedDpi resolved = helix::DisplayMetrics::resolve_dpi(
+        m_args.dpi, measured_dpi, UpdateChecker::get_platform_key());
+    const double auto_scale = helix::DisplayMetrics::ui_scale_for_dpi(resolved.dpi);
+    helix::DisplayMetrics::set_auto_scale(auto_scale);
+
+    // The stored UI Scale setting wins over the measurement, which is the
+    // whole point of exposing it: a panel we scale wrongly, or a user who
+    // simply wants larger type, has a way out that does not need a rebuild.
+    // Config rather than DisplaySettingsManager because this runs inside
+    // init_display(), before that manager's subjects exist — both read the
+    // same key. `--dpi` stays upstream of this, overriding the measurement
+    // that Automatic then follows.
+    const int scale_setting = Config::get_instance()->get<int>(
+        "/display/ui_scale_percent", helix::DisplayMetrics::kScaleSettingAutomatic);
+    const double ui_scale = helix::DisplayMetrics::scale_for_setting(scale_setting, auto_scale);
+    helix::DisplayMetrics::set_active_scale(ui_scale);
+
+    // What LVGL gets is LV_DPI_DEF scaled by the SAME factor — never a
+    // kernel-derived number. LVGL turns its DPI into padding via LV_DPX_CALC,
+    // so this makes its internal chrome (and the four lv_dpx() call sites in
+    // our own code) grow in step with the design tokens theme_manager scales.
+    // The two paths are disjoint, so they add rather than compound. At scale
+    // 1.0 this is exactly LV_DPI_DEF, i.e. byte-identical to the previous
+    // behaviour, which is what keeps a lying kernel driver from reaching the
+    // UI at all (a sun4i-drm CB1 reports 23 DPI and would collapse padding to
+    // 1px via LV_DPX's MAX(..,1) floor).
+    int32_t effective_dpi = static_cast<int32_t>(std::lround(LV_DPI_DEF * ui_scale));
     int32_t pre_set_dpi = lv_display_get_dpi(m_display->display());
     lv_display_set_dpi(m_display->display(), effective_dpi);
-    spdlog::debug("[Application] Display DPI applied: {} (was {} before set)", effective_dpi,
-                  pre_set_dpi);
+    spdlog::info("[Application] Display metrics: dpi={:.0f} (source={}) → ui_scale={:.3f} "
+                 "(auto={:.3f}, setting={}), lvgl_dpi={} (was {} before set)",
+                 resolved.dpi, helix::dpi_source_name(resolved.source), ui_scale, auto_scale,
+                 scale_setting == helix::DisplayMetrics::kScaleSettingAutomatic
+                     ? std::string("automatic")
+                     : std::to_string(scale_setting) + "%",
+                 effective_dpi, pre_set_dpi);
     if (pre_set_dpi < 50 && m_args.dpi == 0) {
         spdlog::warn("[Application] Display reported dpi={} before set — backend lost LV_DPI_DEF "
                      "between create and theme init. Fix-forward applied (forced to {}).",
@@ -1911,11 +1963,10 @@ bool Application::init_panel_subjects() {
                                               lv_tr("Spaghetti detected — print paused"), 8000);
                 return;
             }
-            // DeferToSource: show the response modal. The modal self-deletes via its
-            // on_hide() override (async_call(delete this)) — LVGL/ModalStack cleanup
-            // never calls Modal::~Modal, so dropping this pointer is intentional and
-            // does NOT leak.
-            auto* modal = new SpaghettiDetectionModal();
+            // DeferToSource: show the response modal. Stack-owned via
+            // Modal::show_owned() (#1382): ModalStack frees the instance when
+            // its entry goes, on every teardown path.
+            auto modal = std::make_unique<SpaghettiDetectionModal>();
             // TODO(detection): attach latest camera frame when a stream is active
             modal->set_detection(e.message, nullptr);
             modal->set_on_resume([] {
@@ -1932,7 +1983,7 @@ bool Application::init_panel_subjects() {
                     nlohmann::json{{"script", "DEFECT_DETECTION_CONFIG NOODLE_SENSITIVITY=low"}},
                     nullptr, nullptr);
             });
-            modal->show(lv_screen_active());
+            Modal::show_owned(std::move(modal), lv_screen_active());
         });
     }
 
@@ -2438,9 +2489,9 @@ bool show_demo_overlay(const std::string& name) {
         empty.slot_present = false;
         empty.severity = helix::ToolCheck::Severity::EmptySlot;
         pf.checks = {ok, color, empty};
-        auto* modal = new helix::ui::PreflightCheckModal();
+        auto modal = std::make_unique<helix::ui::PreflightCheckModal>();
         modal->set_checks(pf);
-        modal->show(screen);
+        Modal::show_owned(std::move(modal), screen);
         return true;
     }
 
@@ -2461,9 +2512,8 @@ bool show_demo_overlay(const std::string& name) {
         message += lv_tr("Load the required filaments or start anyway?");
         static char demo_message[1024];
         snprintf(demo_message, sizeof(demo_message), "%s", message.c_str());
-        helix::ui::modal_show_confirmation(lv_tr("Color Mismatch"), demo_message,
-                                           ModalSeverity::Warning, lv_tr("Start Anyway"), nullptr,
-                                           nullptr, nullptr);
+        helix::ui::modal_confirm(lv_tr("Color Mismatch"), demo_message, ModalSeverity::Warning,
+                                 lv_tr("Start Anyway"), nullptr);
         return true;
     }
 
@@ -2471,6 +2521,10 @@ bool show_demo_overlay(const std::string& name) {
         auto* modal = new RunoutGuidanceModal();
         modal->set_autofeed_capable(false);
         modal->set_resume_blocked(false);
+        // A runout is a warning, and this token screenshots the runout dialog —
+        // state it rather than inheriting whatever ran last, same rule every
+        // other show site follows (RunoutGuidanceModal::set_advisory()).
+        modal->set_advisory(false);
         modal->show(screen);
         return true;
     }
@@ -2686,57 +2740,55 @@ void Application::launch_deferred_hardware_setup() {
 }
 
 void Application::prompt_deferred_hardware_setup(std::vector<helix::wizard::StepId> steps) {
-    // The steps to run are captured for the confirm callback. modal_show_confirmation
-    // takes a single void* user_data, so park them on the Application instance the
-    // callbacks already receive rather than heap-allocating a context.
+    // The steps to run are parked on the Application instance for the confirm
+    // callback's timer to consume (launch_deferred_hardware_setup() reads them
+    // from there). on_dismiss clears them too, so a backdrop tap or ESC cannot
+    // strand the offer.
     m_pending_hardware_setup_steps = std::move(steps);
     spdlog::info("[Application] Offering deferred hardware setup ({} step(s))",
                  m_pending_hardware_setup_steps.size());
 
-    helix::ui::modal_show_confirmation(
+    helix::ui::ConfirmOptions opts;
+    opts.on_cancel = [this] {
+        m_pending_hardware_setup_steps.clear();
+        // Declining is final for this printer. The offer is for optional
+        // role assignments the app already has working defaults for, the
+        // snapshot was written regardless so nothing is flagged either way,
+        // and re-asking on every boot is the exact nag the surrounding
+        // reconfig-wizard code records declines to avoid. `--wizard` still
+        // re-runs setup, and a saved role that later breaks still routes to
+        // the targeted reconfig wizard on its own.
+        settle_deferred_hardware_setup();
+        spdlog::info("[Application] Deferred hardware setup declined");
+    };
+    opts.cancel_text = lv_tr("Not now");
+    opts.on_dismiss = [this] { m_pending_hardware_setup_steps.clear(); };
+    opts.owner_token = m_async_lifetime.token();
+
+    helix::ui::modal_confirm(
         lv_tr("Printer hardware detected"),
         lv_tr("Your printer was offline during setup, so hardware options were skipped. "
               "Set them up now?"),
         ModalSeverity::Info, lv_tr("Set up"),
-        [](lv_event_t* e) {
-            LVGL_SAFE_EVENT_CB_BEGIN("[Application] deferred_hardware_setup_confirm");
-            auto* app = static_cast<Application*>(lv_event_get_user_data(e));
-            Modal::hide(Modal::get_top());
+        [this] {
             // Settle first: the wizard tears itself down asynchronously, and a
             // crash mid-run must not leave the offer pending forever.
-            app->settle_deferred_hardware_setup();
+            settle_deferred_hardware_setup();
             // Build the wizard AFTER the modal's exit animation, not inside the
-            // click that started it: Modal::hide() only marks the backdrop
-            // exiting, so creating the full-screen wizard here would put it
-            // underneath a still-fading backdrop. The pending step list lives on
-            // the Application instance until the timer consumes it.
+            // click that started it: the dialog's own close only marks the
+            // backdrop exiting, so creating the full-screen wizard here would
+            // put it underneath a still-fading backdrop. The pending step list
+            // lives on the Application instance until the timer consumes it.
             lv_timer_t* launch = lv_timer_create(
                 [](lv_timer_t* t) {
                     auto* self = static_cast<Application*>(lv_timer_get_user_data(t));
                     lv_timer_delete(t);
                     self->launch_deferred_hardware_setup();
                 },
-                300, app);
+                300, this);
             lv_timer_set_repeat_count(launch, 1);
-            LVGL_SAFE_EVENT_CB_END();
         },
-        [](lv_event_t* e) {
-            LVGL_SAFE_EVENT_CB_BEGIN("[Application] deferred_hardware_setup_decline");
-            auto* app = static_cast<Application*>(lv_event_get_user_data(e));
-            Modal::hide(Modal::get_top());
-            app->m_pending_hardware_setup_steps.clear();
-            // Declining is final for this printer. The offer is for optional
-            // role assignments the app already has working defaults for, the
-            // snapshot was written regardless so nothing is flagged either way,
-            // and re-asking on every boot is the exact nag the surrounding
-            // reconfig-wizard code records declines to avoid. `--wizard` still
-            // re-runs setup, and a saved role that later breaks still routes to
-            // the targeted reconfig wizard on its own.
-            app->settle_deferred_hardware_setup();
-            spdlog::info("[Application] Deferred hardware setup declined");
-            LVGL_SAFE_EVENT_CB_END();
-        },
-        this, lv_tr("Not now"));
+        opts);
 }
 
 void Application::settle_type_mismatch_warning() {
@@ -2796,18 +2848,17 @@ void Application::maybe_warn_type_mismatch(const helix::PrinterDiscovery& hardwa
         cfg->get<std::string>(cfg->df() + helix::wizard::TYPE_MISMATCH_SHOWN_FOR, ""));
 
     auto detected = PrinterDetector::auto_detect(hardware);
-    const auto decision = detected.detected()
-                              ? PrinterDetector::classify_type_mismatch(saved, detected.type_name,
-                                                                        detected.confidence, flag)
-                              : PrinterDetector::MismatchDecision::NoDetection;
+    const auto decision = PrinterDetector::classify_type_mismatch(saved, detected, flag);
     if (decision != PrinterDetector::MismatchDecision::Warn) {
         // info, not debug: this runs once per discovery pass, and it is the line
         // that answers "why was there no prompt?" in a bundle.
         spdlog::info("[Application] No type mismatch prompt: detected '{}' at {}% (runner-up '{}' "
-                     "at {}%), saved '{}', dismissed-for '{}', need >={}% - {}",
+                     "at {}%, margin {}, {} tied), saved '{}', dismissed-for '{}', need >={}% and "
+                     "margin >={} - {}",
                      detected.type_name, detected.confidence, detected.runner_up_type_name,
-                     detected.runner_up_confidence, saved, flag,
-                     PrinterDetector::MISMATCH_MIN_CONFIDENCE,
+                     detected.runner_up_confidence, detected.margin(), detected.tied_count, saved,
+                     flag, PrinterDetector::MISMATCH_MIN_CONFIDENCE,
+                     PrinterDetector::DETECT_MIN_MARGIN,
                      PrinterDetector::mismatch_decision_name(decision));
         return;
     }
@@ -2817,52 +2868,49 @@ void Application::maybe_warn_type_mismatch(const helix::PrinterDiscovery& hardwa
     spdlog::info("[Application] Printer type mismatch: saved '{}' but detected '{}' ({}%)", saved,
                  detected.type_name, detected.confidence);
 
-    // modal_show_confirmation takes a plain const char* — compose the
-    // parameterized body first (fmt::runtime: the format string is the
-    // translated handle, not a compile-time literal).
+    // modal_confirm takes a plain const char* - compose the parameterized body
+    // first (fmt::runtime: the format string is the translated handle, not a
+    // compile-time literal).
     const std::string body =
         fmt::format(fmt::runtime(lv_tr("This printer looks like a {} ({}% confidence), but it is "
                                        "set up as a {}. A wrong type applies incorrect pre-print "
                                        "options and presets.")),
                     detected.type_name, detected.confidence, saved);
 
-    helix::ui::modal_show_confirmation(
-        lv_tr("Printer type mismatch"), body.c_str(), ModalSeverity::Warning, lv_tr("Re-identify"),
-        [](lv_event_t* e) {
-            LVGL_SAFE_EVENT_CB_BEGIN("[Application] type_mismatch_confirm");
-            auto* app = static_cast<Application*>(lv_event_get_user_data(e));
-            Modal::hide(Modal::get_top());
+    helix::ui::ConfirmOptions opts;
+    opts.on_cancel = [this] {
+        // Declining is final for this saved type. Keeping the type is a
+        // deliberate choice (a heavily modified printer can legitimately
+        // outvote a heuristic), and the persisted flag stops the
+        // prompt from re-appearing every boot. The model picker remains
+        // available from Printer Manager and the full `--wizard` run.
+        settle_type_mismatch_warning();
+        spdlog::info("[Application] Type mismatch warning declined");
+    };
+    opts.cancel_text = lv_tr("Keep current");
+    opts.owner_token = m_async_lifetime.token();
+
+    helix::ui::modal_confirm(
+        lv_tr("Printer type mismatch"), body.c_str(), ModalSeverity::Warning, lv_tr("Choose Model"),
+        [this] {
             // Settle first: the wizard tears itself down asynchronously, and a
             // crash mid-run must not leave the prompt pending forever.
-            app->settle_type_mismatch_warning();
+            settle_type_mismatch_warning();
             // Build the wizard AFTER the modal's exit animation, not inside the
-            // click that started it: Modal::hide() only marks the backdrop
-            // exiting, so creating the full-screen wizard here would put it
-            // underneath a still-fading backdrop (same 300 ms one-shot as
-            // launch_deferred_hardware_setup).
+            // click that started it: the dialog's own close only marks the
+            // backdrop exiting, so creating the full-screen wizard here would
+            // put it underneath a still-fading backdrop (same 300 ms one-shot
+            // as launch_deferred_hardware_setup).
             lv_timer_t* launch = lv_timer_create(
                 [](lv_timer_t* t) {
                     auto* self = static_cast<Application*>(lv_timer_get_user_data(t));
                     lv_timer_delete(t);
                     self->launch_type_reidentify_wizard();
                 },
-                300, app);
+                300, this);
             lv_timer_set_repeat_count(launch, 1);
-            LVGL_SAFE_EVENT_CB_END();
         },
-        [](lv_event_t* e) {
-            LVGL_SAFE_EVENT_CB_BEGIN("[Application] type_mismatch_decline");
-            Modal::hide(Modal::get_top());
-            // Declining is final for this saved type. Keeping the type is a
-            // deliberate choice (a heavily modified printer can legitimately
-            // outvote a 70% heuristic), and the persisted flag stops the
-            // prompt from re-appearing every boot. Re-identify remains
-            // available via the full `--wizard` run.
-            static_cast<Application*>(lv_event_get_user_data(e))->settle_type_mismatch_warning();
-            spdlog::info("[Application] Type mismatch warning declined");
-            LVGL_SAFE_EVENT_CB_END();
-        },
-        this, lv_tr("Keep current"));
+        opts);
 }
 
 void Application::launch_type_reidentify_wizard() {
@@ -3000,14 +3048,17 @@ void Application::setup_discovery_callbacks() {
             crash_handler::breadcrumb::note("disc", "post_init_fans",
                                             static_cast<long>(hw.fans().size()));
 
-            // Turn on the firmware's own z-offset persistence once per session,
-            // only when idle. Some firmwares store the offset themselves but ship
-            // with reload-at-print-start off, so adjustments made here would not
-            // survive. Which printers need it, and what to send, lives in
-            // include/z_offset_persistence.h. The print_active subject is not yet
-            // applied from this discovery's status (see the reconfig-wizard gate
-            // below), so consult status_snapshot directly to avoid injecting gcode
-            // over a live print.
+            // Turn on the firmware's own z-offset persistence, at most once per
+            // printer and only when idle. Some firmwares store the offset
+            // themselves and re-apply it at print start only when their own
+            // setting says to, so with that setting off an adjustment made here
+            // does not survive. Whether to send, what to send, and recording that
+            // it went out all live behind claim_persistence_enable() in
+            // include/z_offset_persistence.h.
+            //
+            // The print_active subject is not yet applied from this discovery's
+            // status (see the reconfig-wizard gate below), so consult
+            // status_snapshot directly to avoid injecting gcode over a live print.
             {
                 bool print_active =
                     lv_subject_get_int(get_printer_state().get_print_active_subject()) != 0;
@@ -3017,9 +3068,9 @@ void Application::setup_discovery_callbacks() {
                 }
                 const std::string enable_gcode =
                     helix::zoffset::persistence_enable_gcode(api->hardware());
-                if (helix::zoffset::should_enable_persistence(!enable_gcode.empty(), print_active,
-                                                              app->m_zoffset_persistence_enabled)) {
-                    app->m_zoffset_persistence_enabled = true;
+                if (!enable_gcode.empty() && helix::zoffset::claim_persistence_enable(
+                                                 Config::get_instance(), api->hardware(),
+                                                 status_snapshot.get(), print_active)) {
                     spdlog::info("[ZOffset] Enabling firmware z-offset persistence ({})",
                                  helix::zoffset::persistence_provider_name(api->hardware()));
                     // Fire-and-forget: callbacks are LOG-ONLY and capture nothing that
@@ -3435,6 +3486,21 @@ void Application::setup_discovery_callbacks() {
                                                                          std::string log_context) {
                 helix::ui::queue_update([spool, try_assign_active_spool_to_tool,
                                          log_context = std::move(log_context)]() {
+                    // Tool-changer auto-assign runs BEFORE the bypass gate, not
+                    // after it. The gate passes only when
+                    // active_spool_describes_bypass() is true, which is
+                    // `no backend || any_bypass_active()` — and every backend that
+                    // answers supports_per_tool_spool_assignment() (TOOL_CHANGER,
+                    // SNAPMAKER) hardcodes is_bypass_active() to false. Downstream
+                    // of the gate the assign therefore required "a backend exists"
+                    // and "no backend exists" at once, so it never ran on a real
+                    // changer. The two concerns are independent: the gate is about
+                    // which slot owns the EXTERNAL spool record, this is about
+                    // which spool is mounted on the active TOOL. Its own guards
+                    // (per-tool support, assignments loaded, valid index, not
+                    // already assigned) are what decide whether it acts.
+                    try_assign_active_spool_to_tool(spool);
+
                     // An AMS slot assignment sets Moonraker's global active spool
                     // too, so mirroring it onto the bypass unconditionally used to
                     // overwrite the bypass with whichever lane was assigned last.
@@ -3466,7 +3532,6 @@ void Application::setup_discovery_callbacks() {
                     // Hare all read as the bare filament name.
                     apply_spool_to_slot(slot, spool);
                     AmsState::instance().set_external_spool_info(slot);
-                    try_assign_active_spool_to_tool(spool);
                     spdlog::info("[Application] External spool {}: {} (id={})", log_context,
                                  slot.spool_name, slot.spoolman_id);
                 });
@@ -4444,7 +4509,7 @@ void Application::show_screensaver_migration_notice_if_pending() {
 
     spdlog::info("[Application] Showing one-time screensaver migration notice");
 
-    helix::ui::modal_show_alert(
+    helix::ui::modal_alert(
         lv_tr("Screensaver disabled"),
         lv_tr("The animated screensaver has been turned off on this device to prevent "
               "it from interfering with prints. You can re-enable it in "
@@ -5077,8 +5142,10 @@ void Application::shutdown() {
     }
 
     // Clear SoundManager's client ref so the M300 sequencer thread
-    // won't call gcode_script() on a dangling pointer (#714).
-    SoundManager::instance().set_moonraker_client(nullptr);
+    // won't call gcode_script() on a dangling pointer (#714). No host
+    // recovery: SoundManager::shutdown() runs below in this same teardown, so
+    // re-opening audio hardware here would only be torn down again.
+    SoundManager::instance().set_moonraker_client(nullptr, /*host_recovery=*/false);
 
     // Clear app_globals references BEFORE destroying managers to prevent
     // destructors (e.g., PrintSelectPanel) from accessing destroyed objects

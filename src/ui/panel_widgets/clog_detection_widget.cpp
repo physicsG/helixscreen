@@ -4,7 +4,7 @@
 
 #include "ui_buffer_meter.h"
 #include "ui_carousel.h"
-#include "ui_clog_meter.h"
+#include "ui_clog_bar.h"
 #include "ui_update_queue.h"
 
 #include "ams_state.h"
@@ -60,15 +60,15 @@ void ClogDetectionWidget::build_carousel_pages() {
     if (!carousel_)
         return;
 
-    // Page 1: Clog arc meter (always added; UiClogMeter auto-hides when mode=0)
-    clog_page_ = static_cast<lv_obj_t*>(lv_xml_create(lv_scr_act(), "clog_meter_page", nullptr));
+    // Page 1: the FlowGuard bar (always added; the page's own bind_flag_if_eq
+    // hides it when mode=0)
+    clog_page_ = static_cast<lv_obj_t*>(lv_xml_create(lv_scr_act(), "clog_bar_page", nullptr));
     if (!clog_page_) {
-        spdlog::error("[ClogDetectionWidget] Failed to create clog_meter_page XML component");
+        spdlog::error("[ClogDetectionWidget] Failed to create clog_bar_page XML component");
         return;
     }
 
-    clog_meter_ = std::make_unique<ui::UiClogMeter>(clog_page_);
-    clog_meter_->set_fill_mode(true);
+    clog_bar_ = std::make_unique<ui::UiClogBar>(clog_page_);
     ui_carousel_add_item(carousel_, clog_page_);
 
     // Page 2: Buffer meter (only if Happy Hare sync feedback bias is available)
@@ -109,7 +109,7 @@ void ClogDetectionWidget::detach() {
         auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
         helix::ui::UpdateQueue::instance().drain();
         buffer_meter_.reset();
-        clog_meter_.reset();
+        clog_bar_.reset();
     }
 
     carousel_ = nullptr;
@@ -125,8 +125,8 @@ void ClogDetectionWidget::detach() {
 
 void ClogDetectionWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int /*width_px*/,
                                           int /*height_px*/) {
-    if (clog_meter_)
-        clog_meter_->resize_arc();
+    if (clog_bar_)
+        clog_bar_->relayout();
     if (buffer_meter_)
         buffer_meter_->resize();
 }

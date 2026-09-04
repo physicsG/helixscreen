@@ -1401,3 +1401,93 @@ TEST_CASE_METHOD(TempGraphTestFixture,
 
     ui_temp_graph_destroy(graph);
 }
+
+// ============================================================================
+// X-axis label cadence (label_tick_stride)
+//
+// The time axis picks its tick interval from elapsed time alone, so on a narrow
+// chart the formatted times are wider than the space between ticks and the
+// labels overprint each other. label_tick_stride decides how many base ticks to
+// skip between drawn labels. Pure integer math - no LVGL, no fonts.
+// ============================================================================
+
+// Forward declaration of the function under test (defined in ui_temp_graph.cpp).
+namespace helix::temp_graph_internal {
+int label_tick_stride(int32_t plot_width, int tick_count, int32_t label_width, int32_t min_gap);
+}
+
+TEST_CASE("label_tick_stride: draws every tick when the labels already fit",
+          "[temp_graph][x_axis]") {
+    using helix::temp_graph_internal::label_tick_stride;
+    // 4 labels across 400px = 100px each, a 40px label plus a 6px gap fits.
+    REQUIRE(label_tick_stride(400, 4, 40, 6) == 1);
+    // Exactly enough room is still enough.
+    REQUIRE(label_tick_stride(400, 4, 94, 6) == 1);
+}
+
+TEST_CASE("label_tick_stride: thins the labels until each one has room", "[temp_graph][x_axis]") {
+    using helix::temp_graph_internal::label_tick_stride;
+    // 5 labels across 200px = 40px each; "12:30 PM" at 56px + 6px gap needs 62px,
+    // so every other label (80px) is the first cadence that fits.
+    REQUIRE(label_tick_stride(200, 5, 56, 6) == 2);
+    // Twice as many ticks in the same width needs one more step of thinning.
+    REQUIRE(label_tick_stride(200, 8, 56, 6) == 3);
+}
+
+TEST_CASE("label_tick_stride: never thins past the tick count", "[temp_graph][x_axis]") {
+    using helix::temp_graph_internal::label_tick_stride;
+    // Hopeless case (2px per label): thin to a single label rather than none.
+    REQUIRE(label_tick_stride(10, 5, 500, 6) == 5);
+}
+
+TEST_CASE("label_tick_stride: degenerate inputs fall back to every tick", "[temp_graph][x_axis]") {
+    using helix::temp_graph_internal::label_tick_stride;
+    REQUIRE(label_tick_stride(0, 4, 40, 6) == 1);   // chart not laid out yet
+    REQUIRE(label_tick_stride(-10, 4, 40, 6) == 1); // nonsense width
+    REQUIRE(label_tick_stride(400, 1, 40, 6) == 1); // single label cannot collide
+    REQUIRE(label_tick_stride(400, 0, 40, 6) == 1); // no ticks at all
+    REQUIRE(label_tick_stride(400, 4, 0, 6) == 1);  // unmeasurable label
+}
+
+// ============================================================================
+// Y-axis label width
+//
+// The reserved width is measured against the resolved axis font instead of read
+// from a per-size constant, because the font ladder scales per breakpoint while
+// the constants do not - a 30px reservation wraps "300°" once font_xs resolves
+// to 20px. The size table survives only as a floor.
+// ============================================================================
+
+TEST_CASE_METHOD(TempGraphTestFixture, "ui_temp_graph: Y-axis width is measured, not tabulated",
+                 "[temp_graph][y_axis]") {
+    ui_temp_graph_t* graph = ui_temp_graph_create(screen);
+    REQUIRE(graph != nullptr);
+
+    ui_temp_graph_set_axis_size(graph, "xs"); // 30px table entry
+    ui_temp_graph_set_temp_range(graph, 0.0f, 300.0f);
+    ui_temp_graph_set_y_axis(graph, 100.0f, true);
+
+    int32_t narrow = graph->y_axis_width;
+    lv_point_t narrow_text;
+    lv_text_get_size(&narrow_text, "300°", graph->axis_font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    REQUIRE(narrow >= narrow_text.x); // widest label fits on one line
+    REQUIRE(narrow >= 30);            // table entry is still the floor
+
+    // Labels the table width could never hold must widen the reservation, and it
+    // has to be re-derived when the range moves (the auto-range path does that
+    // at runtime, long after set_axis_size ran).
+    ui_temp_graph_set_temp_range(graph, 0.0f, 1000000.0f);
+    ui_temp_graph_set_y_axis(graph, 500000.0f, true);
+
+    lv_point_t wide_text;
+    lv_text_get_size(&wide_text, "1000000°", graph->axis_font, 0, 0, LV_COORD_MAX,
+                     LV_TEXT_FLAG_NONE);
+    REQUIRE(graph->y_axis_width >= wide_text.x);
+    REQUIRE(graph->y_axis_width > narrow);
+
+    // Left padding follows the measurement, so the labels never sit under the plot.
+    lv_obj_t* chart = ui_temp_graph_get_chart(graph);
+    REQUIRE(lv_obj_get_style_pad_left(chart, LV_PART_MAIN) >= graph->y_axis_width);
+
+    ui_temp_graph_destroy(graph);
+}

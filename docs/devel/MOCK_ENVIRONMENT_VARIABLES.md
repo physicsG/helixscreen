@@ -88,6 +88,44 @@ When set truthy, the mock calls its normal `start_print_internal()` on connect (
 HELIX_MOCK_AUTO_PRINT=1 ./build/bin/helix-screen --test -vv
 ```
 
+### `HELIX_MOCK_REMOTE_PRINTER`
+
+**Remote-screen simulation:** Forces the `moonraker_is_remote` subject to 1 in `--test` runs.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `1` / any non-empty, non-`0` value to enable |
+| **Default** | unset (verdict derived from the live websocket endpoint) |
+| **File** | `include/runtime_config.h` (`should_mock_remote_printer()`); consumed in `src/application/moonraker_manager.cpp` |
+
+The mock client connects over loopback, which always reads as same-host — this flag makes remote-gated UI (print-status camera button, remote video playback paths) appear and behave as if HelixScreen were a remote screen.
+
+```bash
+HELIX_MOCK_REMOTE_PRINTER=1 ./build/bin/helix-screen --test -vv
+```
+
+#### Seeing the Adaptive Bed Mesh toggle
+
+Adaptive bed mesh is a property of the **single** Bed Mesh pre-print option (on a
+print file's detail view), not a separate row and not behind an active print.
+When the printer's `pre_print_options.bed_mesh` entry declares an `adaptive_param`,
+the firmware exposes `[exclude_object]`, and there is no custom
+`calibration.bed_mesh_gcode` template, the one bed-mesh toggle is **relabeled**
+from "Auto Bed Mesh" to **"Adaptive Bed Mesh"**. The default Voron 2.4 mock has
+**no** pre-print options, so use the FlashForge AD5M mock (which ships
+`pre_print_options` incl. `bed_mesh` with `adaptive_param: "ADAPTIVE"`, and is also
+the load-cell-probe demo printer):
+
+```bash
+HELIX_MOCK_PRINTER=ad5m ./build/bin/helix-screen --test -vv
+```
+
+Then open a print file, tap a file to reach its detail view, and look in the
+**PRINT OPTIONS** card: the bed-mesh row reads **"Adaptive Bed Mesh"**. Enabling
+it makes the print-start emit `SKIP_LEVELING=0 ADAPTIVE=1` on the `START_PRINT`
+invocation. On a non-adaptive printer the same row reads "Auto Bed Mesh" and
+behaves exactly as before.
+
 #### Seeing the Adaptive Bed Mesh toggle
 
 Adaptive bed mesh is a property of the **single** Bed Mesh pre-print option (on a
@@ -154,7 +192,7 @@ Select the mock AMS topology/type.
 
 | Property | Value |
 |----------|-------|
-| **Values** | `none`, `afc`, `toolchanger` / `tc`, `mixed`, `multi`, `torture`, `vivid`, `ifs`, `htlf`, `snapmaker`, `medusahc` / `medusahc-fork` |
+| **Values** | `none`, `afc`, `toolchanger` / `tc`, `mixed`, `multi`, `torture`, `vivid`, `ifs`, `htlf`, `snapmaker`, `medusahc` / `medusahc-fork`, `ifs-module` |
 | **Default** | Happy Hare, LINEAR, 4 slots |
 | **File** | `src/printer/ams_backend.cpp` |
 
@@ -173,6 +211,7 @@ Select the mock AMS topology/type.
 | `snapmaker` | 1 | Snapmaker U1, 4 slots, PARALLEL, non-editable mapping. Aliases: `snapswap`, `u1` |
 | `medusahc` | 1 | **MedusaHC hotend changer - mock HARDWARE, real backend.** Irbis3D controller. Aliases: `medusa`, `mhc`. See below |
 | `medusahc-fork` | 1 | MedusaHC as driven by topi314's fork. Alias: `medusa-fork` |
+| `ifs-module` | 1 | **Standalone AD5X IFS module - mock HARDWARE, real backend.** The Forge-X drop-in's `ifs`/`ifs_materials` objects + stock-named sensors. Aliases: `ifs_module`, `ad5x-module`. See below |
 
 ```bash
 # Simulate AFC Box Turtle
@@ -242,6 +281,25 @@ separate status frames rather than collapsing into one update. `SELECT_TOOL`,
 
 The default `mmu` object is suppressed in these modes - it would detect Happy Hare and
 stand a second AMS backend up alongside the changer.
+
+#### `ifs-module` - mock hardware, real backend
+
+Same rule as the MedusaHC modes: no `AmsBackendMock` is built. The mock publishes the
+standalone IFS module's objects (`ifs`, `ifs_materials`, `save_variables` with
+`ifs_loaded`) plus its stock-named sensors (`filament_switch_sensor lane1..4`,
+`filament_switch_sensor toolhead`), so real discovery sets `AmsType::AD5X_IFS` and the
+production `AmsBackendAd5xIfs` runs its module path — detection, subscription, the frame
+parse, `IFS_SET_MATERIAL` writes and the `T<n>`/`IFS_*` op dispatch all get exercised at
+runtime, not only in the unit tests. The default `mmu` object is suppressed (it would
+win detection over the IFS objects).
+
+`gcode_script()` handles `T<n>`, `IFS_SELECT`/`IFS_LOAD` (slot loads), `IFS_UNLOAD`,
+`IFS_EJECT` (clears the lane's presence) and `IFS_SET_MATERIAL` (updates the slot
+registry), with the result published on the next status notification:
+
+```bash
+HELIX_MOCK_AMS=ifs-module ./build/bin/helix-screen --test -vv
+```
 
 **Multi-extruder and tool testing:** Setting `HELIX_MOCK_AMS=toolchanger` also creates multiple tool definitions and extruders in the mock environment. Multiple extruders (extruder, extruder1, etc.) and tools are auto-discovered from Klipper objects at runtime, so no separate env var is needed to control extruder count. The toolchanger mock provides a complete multi-tool, multi-extruder test environment.
 
@@ -366,6 +424,25 @@ Enable or disable mock Spoolman integration. When disabled, `get_spoolman_status
 ```bash
 # Disable mock Spoolman to test "no Spoolman" scenarios
 HELIX_MOCK_SPOOLMAN=0 ./build/bin/helix-screen --test
+```
+
+### `HELIX_MOCK_SPOOLMAN_SPOOLS`
+
+Pad the mock Spoolman inventory with deterministic synthetic spools, so search/filter
+cost in the spool pickers can be measured at realistic inventory sizes. The hand-written
+inventory tops out at 19 spools; real Spoolman databases run to hundreds. Padding only
+extends the inventory - the curated spools the mock backends link against keep their ids
+(`tests/unit/test_mock_spool_consistency.cpp` pins those).
+
+| Property | Value |
+|----------|-------|
+| **Values** | integer target count (clamped to 5000) |
+| **Default** | 19 (unset - no padding) |
+| **File** | `src/api/moonraker_api_mock.cpp` (`init_mock_spools`) |
+
+```bash
+# Measure picker search cost against a 300-spool inventory
+HELIX_MOCK_SPOOLMAN_SPOOLS=300 ./build/bin/helix-screen --test -vv
 ```
 
 ### `HELIX_MOCK_FILAMENT_SENSORS`
@@ -524,9 +601,31 @@ Append additional Klipper objects to the mock's advertised object list, so capab
 # Add a chamber temperature_fan and a generic heater
 HELIX_MOCK_OBJECTS="temperature_fan chamber heater_generic chamber_heater" \
   ./build/bin/helix-screen --test -vv
+
+# Materialize the dragonbreath chamber-heater trio: heater, diagnostics
+# object, and filter-fan output pin (drives status frames, SET_PIN
+# round-trip, and a configfile max_temp of 75)
+HELIX_MOCK_OBJECTS="heater_generic dragonbreath dragonbreath output_pin dragonbreath_filter" \
+  ./build/bin/helix-screen --test -vv
 ```
 
-**Two-word object names are reassembled by prefix.** The parser splits on whitespace, then treats a token starting with `heater_generic`, `temperature_fan`, or `temperature_sensor` as the start of a *new* object and glues any following tokens onto the current one. So `temperature_fan chamber` becomes the single object `temperature_fan chamber`. An object whose type prefix is not in that list cannot carry a name — it will be glued onto whatever preceded it. Each accepted object is logged as `[MoonrakerClientMock] Added mock object: <name>`.
+**Two-word object names are reassembled by prefix.** The parser splits on whitespace, then treats a token starting with `heater_generic`, `temperature_fan`, `temperature_sensor`, or `output_pin` as the start of a *new* object and glues any following tokens onto the current one. So `temperature_fan chamber` becomes the single object `temperature_fan chamber`. A token that is not a prefix glues onto the current object — with one exception: a token that exactly names a chamber-heater backend's diagnostics object (e.g. the bare `dragonbreath` after a completed `heater_generic dragonbreath`) starts a new standalone object instead of appending. A chamber heater accepted from this list also replaces the mock profile's built-in chamber heater. Each accepted object is logged as `[MoonrakerClientMock] Added mock object: <name>`.
+
+### `HELIX_MOCK_DRAGONBREATH_FAULT`
+
+Latch a fault into every synthesized dragonbreath status frame — the diagnostics object reports `fault: true` with a `fault_reason` instead of the nominal healthy payload. Pairs with the `HELIX_MOCK_OBJECTS` dragonbreath trio to exercise fault UI paths without hardware.
+
+| Property | Value |
+|----------|-------|
+| **Values** | Exactly `1` |
+| **Default** | Unset — nominal frame (`fault: false`, null `fault_reason`) |
+| **File** | `src/api/moonraker_client_mock.cpp` |
+
+```bash
+# Faulted dragonbreath chamber heater
+HELIX_MOCK_OBJECTS="heater_generic dragonbreath dragonbreath output_pin dragonbreath_filter" \
+  HELIX_MOCK_DRAGONBREATH_FAULT=1 ./build/bin/helix-screen --test -vv
+```
 
 ### `HELIX_MOCK_KALICO`
 

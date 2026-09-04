@@ -12,16 +12,36 @@
 
 #include "ui_temperature_utils.h"
 
+#include "chamber_heater_backend.h"
 #include "klipper_extruder_naming.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "state/subject_macros.h"
 #include "unit_conversions.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 
 namespace helix {
+
+/// Generic fault kind -> translated UI phrase. The banner binds this; the raw
+/// vendor code behind the kind goes to the log, never the screen.
+static const char* chamber_fault_reason_text(chamber::FaultReason kind) {
+    switch (kind) {
+    case chamber::FaultReason::Overtemp:
+        return lv_tr("Heater over-temperature");
+    case chamber::FaultReason::SensorFault:
+        return lv_tr("Heater sensor fault");
+    case chamber::FaultReason::CommsLoss:
+        return lv_tr("Heater connection lost");
+    case chamber::FaultReason::Other:
+        return lv_tr("Heater fault");
+    case chamber::FaultReason::None:
+        break;
+    }
+    return "";
+}
 
 void PrinterTemperatureState::init_subjects(bool register_xml) {
     if (subjects_initialized_) {
@@ -64,6 +84,33 @@ void PrinterTemperatureState::init_subjects(bool register_xml) {
     INIT_SUBJECT_INT(chamber_mode, helix::ChamberMode::Off, subjects_, register_xml);
     chamber_mode_lifetime_ = std::make_shared<bool>(true);
 
+    // Chamber-heater diagnostics subjects (backend-provided; ints that can be
+    // legitimately absent default to -1 "unknown", flags to 0, strings to "").
+    INIT_SUBJECT_INT(chamber_heater_fault, 0, subjects_, register_xml);
+    chamber_heater_fault_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_INT(chamber_heater_inhibited, 0, subjects_, register_xml);
+    chamber_heater_inhibited_lifetime_ = std::make_shared<bool>(true);
+    // Translated UI text derived from the backend's generic FaultReason kind —
+    // vendor codes die at the backend border and only surface in logs.
+    INIT_SUBJECT_STRING(chamber_heater_fault_reason_text, "", subjects_, register_xml);
+    chamber_heater_fault_reason_text_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_INT(chamber_filter_fan_on, -1, subjects_, register_xml);
+    chamber_filter_fan_on_lifetime_ = std::make_shared<bool>(true);
+    // Display strings written alongside the raw ints — XML has no deci/percent
+    // formatter (bind_text-fmt prints the raw int), and the fan toggle needs a
+    // translated On/Off label, so the parse block owns the formatting.
+    INIT_SUBJECT_STRING(chamber_heater_element_temp_text, "--", subjects_, register_xml);
+    chamber_heater_element_temp_text_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_STRING(chamber_filter_fan_percent_text, "--", subjects_, register_xml);
+    chamber_filter_fan_percent_text_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_STRING(chamber_filter_fan_on_text, lv_tr("Filter Fan: Off"), subjects_,
+                        register_xml);
+    chamber_filter_fan_on_text_lifetime_ = std::make_shared<bool>(true);
+    // Icon-name subject for the compact portrait card's icon-button toggle
+    // (bind_icon); mirrors chamber_filter_fan_on_text, set from the same pin.
+    INIT_SUBJECT_STRING(chamber_filter_fan_icon, "fan_off", subjects_, register_xml);
+    chamber_filter_fan_icon_lifetime_ = std::make_shared<bool>(true);
+
     // Extruder version subject (bumped when extruder list changes)
     INIT_SUBJECT_INT(extruder_version, 0, subjects_, register_xml);
 
@@ -102,6 +149,30 @@ void PrinterTemperatureState::deinit_subjects() {
     if (chamber_mode_lifetime_)
         *chamber_mode_lifetime_ = false;
     chamber_mode_lifetime_.reset();
+    if (chamber_heater_fault_lifetime_)
+        *chamber_heater_fault_lifetime_ = false;
+    chamber_heater_fault_lifetime_.reset();
+    if (chamber_heater_inhibited_lifetime_)
+        *chamber_heater_inhibited_lifetime_ = false;
+    chamber_heater_inhibited_lifetime_.reset();
+    if (chamber_heater_fault_reason_text_lifetime_)
+        *chamber_heater_fault_reason_text_lifetime_ = false;
+    chamber_heater_fault_reason_text_lifetime_.reset();
+    if (chamber_filter_fan_on_lifetime_)
+        *chamber_filter_fan_on_lifetime_ = false;
+    chamber_filter_fan_on_lifetime_.reset();
+    if (chamber_heater_element_temp_text_lifetime_)
+        *chamber_heater_element_temp_text_lifetime_ = false;
+    chamber_heater_element_temp_text_lifetime_.reset();
+    if (chamber_filter_fan_percent_text_lifetime_)
+        *chamber_filter_fan_percent_text_lifetime_ = false;
+    chamber_filter_fan_percent_text_lifetime_.reset();
+    if (chamber_filter_fan_on_text_lifetime_)
+        *chamber_filter_fan_on_text_lifetime_ = false;
+    chamber_filter_fan_on_text_lifetime_.reset();
+    if (chamber_filter_fan_icon_lifetime_)
+        *chamber_filter_fan_icon_lifetime_ = false;
+    chamber_filter_fan_icon_lifetime_.reset();
     for (auto& [name, info] : extruders_) {
         if (info.temp_lifetime)
             *info.temp_lifetime = false;
@@ -144,6 +215,18 @@ void PrinterTemperatureState::register_xml_subjects() {
     // chamber_target / chamber_fan_target intentionally omitted — internal inputs only.
     lv_xml_register_subject(nullptr, "chamber_effective_target", &chamber_effective_target_);
     lv_xml_register_subject(nullptr, "chamber_mode", &chamber_mode_);
+    lv_xml_register_subject(nullptr, "chamber_heater_fault", &chamber_heater_fault_);
+    lv_xml_register_subject(nullptr, "chamber_heater_inhibited", &chamber_heater_inhibited_);
+    lv_xml_register_subject(nullptr, "chamber_heater_fault_reason_text",
+                            &chamber_heater_fault_reason_text_);
+    // on_chamber_filter_fan_clicked() reads this one by name to compute the toggle.
+    lv_xml_register_subject(nullptr, "chamber_filter_fan_on", &chamber_filter_fan_on_);
+    lv_xml_register_subject(nullptr, "chamber_heater_element_temp_text",
+                            &chamber_heater_element_temp_text_);
+    lv_xml_register_subject(nullptr, "chamber_filter_fan_percent_text",
+                            &chamber_filter_fan_percent_text_);
+    lv_xml_register_subject(nullptr, "chamber_filter_fan_on_text", &chamber_filter_fan_on_text_);
+    lv_xml_register_subject(nullptr, "chamber_filter_fan_icon", &chamber_filter_fan_icon_);
     lv_xml_register_subject(nullptr, "extruder_version", &extruder_version_);
 }
 
@@ -453,6 +536,54 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
                 spdlog::trace("[PrinterTemperatureState] Chamber cooling-fan target: {}.{}C",
                               target_deci / 10, target_deci % 10);
             }
+        }
+    }
+
+    // Chamber-heater diagnostics (backend-provided, capability-gated). Absent
+    // object in a delta frame = no news: subjects keep their last value.
+    // Vendor schema translation lives in the backend (chamber_heater_backend.h).
+    if (!chamber_diagnostics_object_.empty() && status.contains(chamber_diagnostics_object_)) {
+        const auto* backend = chamber::backend_by_id(chamber_backend_id_);
+        if (backend) {
+            if (auto d = backend->parse_diagnostics(status[chamber_diagnostics_object_])) {
+                lv_subject_set_int(&chamber_heater_fault_, d->fault ? 1 : 0);
+                lv_subject_set_int(&chamber_heater_inhibited_, d->inhibited ? 1 : 0);
+                lv_subject_copy_string(&chamber_heater_fault_reason_text_,
+                                       chamber_fault_reason_text(d->fault_reason_kind));
+                if (!d->fault_reason.empty()) {
+                    // Vendor code is log-only — the UI shows the translated kind.
+                    spdlog::debug(
+                        "[PrinterTemperatureState] Chamber heater fault: backend={} reason={}",
+                        backend->id(), d->fault_reason);
+                }
+                if (std::isnan(d->element_temp_c)) {
+                    lv_subject_copy_string(&chamber_heater_element_temp_text_, "--");
+                } else {
+                    // Canonical decimal-drop rule (one decimal <100°C, whole
+                    // degrees at/above) — format_temperature_f wraps
+                    // format_temp_number plus the unit.
+                    helix::ui::temperature::format_temperature_f(
+                        static_cast<float>(d->element_temp_c),
+                        chamber_heater_element_temp_text_buf_,
+                        sizeof(chamber_heater_element_temp_text_buf_));
+                    lv_subject_copy_string(&chamber_heater_element_temp_text_,
+                                           chamber_heater_element_temp_text_buf_);
+                }
+                lv_subject_copy_string(&chamber_filter_fan_percent_text_,
+                                       d->filter_fan_percent < 0
+                                           ? "--"
+                                           : fmt::format("{}%", d->filter_fan_percent).c_str());
+            }
+        }
+    }
+    if (!chamber_filter_fan_pin_.empty() && status.contains(chamber_filter_fan_pin_)) {
+        const auto& pin = status[chamber_filter_fan_pin_];
+        if (pin.contains("value") && pin["value"].is_number()) {
+            int on = pin["value"].get<double>() > 0.5 ? 1 : 0;
+            lv_subject_set_int(&chamber_filter_fan_on_, on);
+            lv_subject_copy_string(&chamber_filter_fan_on_text_,
+                                   on ? lv_tr("Filter Fan: On") : lv_tr("Filter Fan: Off"));
+            lv_subject_copy_string(&chamber_filter_fan_icon_, on ? "fan" : "fan_off");
         }
     }
 

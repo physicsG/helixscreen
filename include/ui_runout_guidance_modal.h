@@ -73,6 +73,30 @@ class RunoutGuidanceModal : public Modal {
     }
 
     /**
+     * @brief Say whether this showing is advisory or a real runout.
+     *
+     * Drives the component-scoped `runout_is_advisory` subject the header icons
+     * bind to: 0 picks the `alert` warning icon, 1 the neutral `filament` icon.
+     * A deliberate tap on the home Filament tile is advisory; a runout that
+     * paused a print is not.
+     *
+     * EVERY show site must state its own value rather than inheriting the
+     * previous one's. The subject is static and component-scoped (it survives
+     * show/hide and outlives any one modal instance), so a surface that only
+     * sets it in the advisory direction latches the neutral icon on for the rest
+     * of the session and silently downgrades the warning affordance on the next
+     * real runout dialog.
+     *
+     * Main thread only.
+     *
+     * @param advisory true for a user-initiated informational show, false for a
+     *                 real runout
+     */
+    void set_advisory(bool advisory) {
+        lv_subject_set_int(&advisory_subject_, advisory ? 1 : 0);
+    }
+
+    /**
      * @brief Gate the Resume button on first-gate (port) filament presence (#991).
      *
      * Drives the component-scoped `runout_resume_blocked` subject the XML binds
@@ -95,6 +119,14 @@ class RunoutGuidanceModal : public Modal {
     /// show/hide). Never null after construction (init_subjects runs in ctor).
     static lv_subject_t* resume_blocked_subject() {
         return &resume_blocked_subject_;
+    }
+
+    /// The advisory subject set_advisory() drives. Same storage rules as
+    /// resume_blocked_subject(): component-scoped, static, never null after
+    /// construction. Exposed so a caller (or a test) can read the current form
+    /// without going through an XML scope lookup.
+    static lv_subject_t* advisory_subject() {
+        return &advisory_subject_;
     }
 
     /**
@@ -153,6 +185,33 @@ class RunoutGuidanceModal : public Modal {
         on_ok_dismiss_ = std::move(cb);
     }
 
+    /// @name Which handlers are currently installed
+    ///
+    /// Every on_*() below null-checks its callback and then hide()s (or stays
+    /// open) regardless, so an unwired button is indistinguishable from a wired
+    /// one at the UI: it closes the dialog and does nothing. That shipped once —
+    /// the home tile's paused modal showed a live "Resume Print" that never
+    /// resumed. These predicates let a test pin "this surface wired what its
+    /// visible buttons promise" instead of asserting on a dialog that always
+    /// looks correct.
+    /// @{
+    [[nodiscard]] bool has_load_filament_handler() const {
+        return static_cast<bool>(on_load_filament_);
+    }
+    [[nodiscard]] bool has_unload_filament_handler() const {
+        return static_cast<bool>(on_unload_filament_);
+    }
+    [[nodiscard]] bool has_purge_handler() const {
+        return static_cast<bool>(on_purge_);
+    }
+    [[nodiscard]] bool has_resume_handler() const {
+        return static_cast<bool>(on_resume_);
+    }
+    [[nodiscard]] bool has_cancel_print_handler() const {
+        return static_cast<bool>(on_cancel_print_);
+    }
+    /// @}
+
   protected:
     /**
      * @brief Called after modal is created and visible
@@ -189,13 +248,28 @@ class RunoutGuidanceModal : public Modal {
     /**
      * @brief Called when user clicks Cancel Print button
      *
-     * Invokes the cancel print callback if set, then hides the modal.
+     * Invokes the cancel print callback if set. Does NOT hide the modal - the
+     * callback owns that, and only on the confirmed path.
+     *
+     * Cancel Print raises a confirmation (helix::ui::dispatch_cancel_print), so
+     * this press no longer decides anything; it asks a question. Hiding here put
+     * the dialog into its exit animation while the confirmation was still going
+     * up, so declining left a bare screen - and on the runout path it did not
+     * come back: check_and_show_runout_guidance() early-returns on
+     * runout_modal_shown_for_pause_, which clears only on a transition to
+     * Printing/Idle/Complete/Cancelled/Error. A user who reconsidered a cancel
+     * mid-pause lost Load, Unload, Purge and Resume for the rest of that pause.
+     *
+     * Both callers pass dispatch_cancel_print() an `on_confirmed` that closes
+     * this dialog, so an accepted cancel still tears it down. A caller that wires
+     * on_cancel_print_ without closing anything leaves the dialog open on press;
+     * that is only reachable where the XML shows btn_cancel_print at all, i.e.
+     * print_state_enum == 2.
      */
     void on_tertiary() override {
         if (on_cancel_print_) {
             on_cancel_print_();
         }
-        hide();
     }
 
     /**
@@ -255,6 +329,13 @@ class RunoutGuidanceModal : public Modal {
     // Default 0 so non-auto-feed / unknown backends are never gated.
     // Component-scoped like autofeed_capable_subject_.
     static inline lv_subject_t resume_blocked_subject_{};
+    // Header-icon subject: 1 = advisory (neutral filament icon), 0 = real runout
+    // (alert icon). Lives here, with the modal's other two component-scoped
+    // subjects, rather than on any one consumer — it describes THIS dialog, and
+    // an owner-specific home made it look like one surface's private state when
+    // all three share it. Default 0: a caller that forgets set_advisory() gets
+    // the warning icon, which is the safe direction to fail.
+    static inline lv_subject_t advisory_subject_{};
     static inline bool subjects_initialized_ = false;
 
     static void init_subjects() {
@@ -264,11 +345,13 @@ class RunoutGuidanceModal : public Modal {
 
         lv_subject_init_int(&autofeed_capable_subject_, 0);
         lv_subject_init_int(&resume_blocked_subject_, 0);
+        lv_subject_init_int(&advisory_subject_, 0);
 
         auto* scope = lv_xml_component_get_scope("runout_guidance_modal");
         if (scope) {
             lv_xml_register_subject(scope, "runout_autofeed_capable", &autofeed_capable_subject_);
             lv_xml_register_subject(scope, "runout_resume_blocked", &resume_blocked_subject_);
+            lv_xml_register_subject(scope, "runout_is_advisory", &advisory_subject_);
         } else {
             spdlog::warn("[RunoutGuidanceModal] Component scope not found — "
                          "ensure runout_guidance_modal.xml is registered first");
@@ -279,6 +362,7 @@ class RunoutGuidanceModal : public Modal {
                 return;
             lv_subject_deinit(&autofeed_capable_subject_);
             lv_subject_deinit(&resume_blocked_subject_);
+            lv_subject_deinit(&advisory_subject_);
             subjects_initialized_ = false;
         });
     }

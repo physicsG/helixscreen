@@ -39,6 +39,45 @@ namespace helix::ui {
 void dispatch_prepared_resume(IMoonrakerAPI* api, std::string log_prefix,
                               std::function<void()> on_failure = {});
 
+/// Confirm, then cancel the running print through the configured Cancel
+/// StandardMacro.
+///
+/// **Raises a confirmation dialog and returns immediately** — the macro is sent
+/// only if the user accepts, from the confirm callback. Nothing is dispatched
+/// synchronously, so a caller must not treat the return as "the print is
+/// cancelling". Copy and severity match print_cancel_confirm_modal.xml, the
+/// confirmation the print-status panel's Stop button raises, because both
+/// cancel the same print.
+///
+/// Cancelling a print is destructive and unrecoverable; both callers reach it
+/// from a dialog whose other buttons are all harmless, which is exactly the
+/// shape a misplaced tap ruins a print with.
+///
+/// Refuses up front, before confirming, with a "Cancel macro not configured"
+/// warning toast when the slot is empty — skipping that check makes the button
+/// silently do nothing. Send errors surface as a NOTIFY_ERROR toast.
+///
+/// Both the runout guidance dialog and the home Filament tile's paused modal
+/// call this, so the confirmation cannot diverge between two dialogs that render
+/// the same buttons. PrintControlButtons' Stop button is a separate path
+/// (PrintCancelModal → AbortManager) that has always confirmed.
+///
+/// Main thread only — it shows a modal.
+///
+/// @param api          Moonraker API for macro execution. A null api is a no-op
+///                     (logged), matching the guard both call sites already had.
+/// @param log_prefix   Spdlog tag, e.g. `"[FilamentRunoutHandler]"`. By value so
+///                     the confirmation context owns its copy.
+/// @param on_confirmed Optional. Run on the main thread when the user accepts,
+///                     before the macro is sent, and never if they decline.
+///                     Both callers use it to close the dialog the Cancel Print
+///                     button lives in — that dialog must stay up behind the
+///                     confirmation so declining returns to it, so closing it is
+///                     this callback's job rather than the button hook's. Guard
+///                     it with a lifetime token like any retained callback.
+void dispatch_cancel_print(IMoonrakerAPI* api, std::string log_prefix,
+                           std::function<void()> on_confirmed = {});
+
 /// Show the "Print Was Terminated — Restart from the beginning?" modal.
 /// Exposed so post-resume backstops (e.g. AmsBackendSnapmaker) can surface it
 /// after a silent RESUME no-op, not just the up-front prepare_for_resume gate.

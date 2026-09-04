@@ -39,8 +39,16 @@
     <lv_obj width="100%"
             height="content" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="#space_lg"
             style_pad_bottom="#space_sm" flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm">
-      <!-- Warning icon (always shown - runout is a warning condition) -->
-      <icon name="icon_warning" src="alert" size="md" variant="warning"/>
+      <!-- Runout is a warning; a deliberate tap from the home tile is not.
+           runout_is_advisory is owned by RunoutGuidanceModal and every show
+           site states its own value via set_advisory() - the subject is static
+           and outlives any one show, so inheriting would latch. -->
+      <icon name="icon_warning" src="alert" size="md" variant="warning">
+        <bind_flag_if_eq subject="runout_is_advisory" flag="hidden" ref_value="1"/>
+      </icon>
+      <icon name="icon_advisory" src="filament" size="md" variant="primary">
+        <bind_flag_if_not_eq subject="runout_is_advisory" flag="hidden" ref_value="1"/>
+      </icon>
       <!-- Title -->
       <text_heading name="dialog_title" text="$title" translation_tag="$title" style_text_align="left" flex_grow="1"/>
     </lv_obj>
@@ -79,7 +87,10 @@
     <lv_obj name="manual_action_row"
             width="100%" height="content" style_pad_all="#space_lg" style_pad_top="#space_sm" flex_flow="row"
             style_flex_main_place="space_between" style_pad_gap="#space_sm">
-      <bind_flag_if_eq subject="runout_autofeed_capable" flag="hidden" ref_value="1"/>
+      <!-- Hidden when the backend recovers on Resume (autofeed), and while a
+           print is actively running - Load/Unload/Purge mid-print destroys the
+           print. Paused (2) deliberately keeps them: that is the runout case. -->
+      <bind_flag_if cond="runout_autofeed_capable eq 1 or print_state_enum eq 1" flag="hidden"/>
       <!-- Load button (wired programmatically by RunoutGuidanceModal::on_show → wire_ok_button) -->
       <ui_button name="btn_load_filament" flex_grow="1" icon="arrow_down" text="Load" translation_tag="Load"/>
       <!-- Unload button (wired programmatically by RunoutGuidanceModal::on_show → wire_quaternary_button) -->

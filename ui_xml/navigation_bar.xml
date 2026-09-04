@@ -9,6 +9,8 @@
     <px name="nav_width_small" value="76"/>
     <px name="nav_width_medium" value="104"/>
     <px name="nav_width_large" value="132"/>
+    <px name="nav_width_xlarge" value="148"/>
+    <px name="nav_width_xxlarge" value="176"/>
   </consts>
   <view extends="lv_obj"
         width="#nav_width" height="100%" style_pad_top="#space_xl" style_pad_bottom="#space_xl" style_pad_left="0"

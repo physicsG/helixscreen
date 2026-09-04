@@ -50,7 +50,7 @@ Recorded once per application launch.
 | `event` | string | Always `"session"` |
 | `device_id` | string | Double-hashed anonymous device identifier (64-char hex) |
 | `timestamp` | string | ISO 8601 UTC timestamp (e.g., `"2026-02-08T14:30:00Z"`) |
-| `app.version` | string | HelixScreen software version (e.g., `"1.0.0"`) |
+| `app.version` | string | HelixScreen software version (e.g., `"0.99.111"`) |
 | `app.platform` | string | Hardware platform (e.g., `"rpi4"`, `"rpi5"`, `"x86_64"`) |
 | `app.display` | string | Display resolution (e.g., `"800x480"`) |
 

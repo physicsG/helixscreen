@@ -118,13 +118,16 @@ void ui_gcode_viewer_set_load_callback(lv_obj_t* obj, gcode_viewer_load_callback
                                        void* user_data);
 
 /**
- * @brief Register a one-shot callback that fires when the viewer produces its
- *        first complete rendered frame (after VBO upload / parse, not on a
+ * @brief Register a one-shot callback that fires when the viewer first has
+ *        real content on its canvas (not during VBO upload / parse, not on a
  *        skipped or failed frame).
  *
- * Callers that overlay a thumbnail behind the viewer use this to defer hiding
- * the thumbnail until the viewer actually has pixels to show, avoiding a gray
- * flash during the load-to-render gap.
+ * In 2D mode that is the ghost copy landing on the canvas — the progressive
+ * solid build keeps drawing visibly afterwards. In 3D mode it is the first
+ * complete GPU render.
+ *
+ * Callers that overlay a thumbnail on top of the viewer use this to defer
+ * hiding the thumbnail until the viewer actually has pixels to show.
  *
  * The callback is invoked deferred (UpdateQueue), not inside the draw pass, so
  * it may safely write subjects and hide widgets. Pass a null callback to
@@ -133,12 +136,28 @@ void ui_gcode_viewer_set_load_callback(lv_obj_t* obj, gcode_viewer_load_callback
  * dangling by the time the next frame renders.
  *
  * @param obj       Viewer widget
- * @param callback  Fires once with success=true when the first frame renders,
- *                  or nullptr to unregister
+ * @param callback  Fires once with success=true when the first real content
+ *                  renders, or nullptr to unregister
  * @param user_data Passed through to the callback
  */
 void ui_gcode_viewer_set_first_frame_callback(lv_obj_t* obj, gcode_viewer_load_callback_t callback,
                                               void* user_data);
+
+/**
+ * @brief Frame this viewer's render the way the slicer thumbnail beside it is
+ *        framed (THUMBNAIL_PARITY, include/gcode_projection.h).
+ *
+ * Parity fits the model into the square the thumbnail occupies — lifted 12%,
+ * model centre at 55% — so swapping thumbnail for render is not a visible
+ * jump in size or position, and the metadata strip neither shrinks nor shifts
+ * the model. Set before the first load; takes effect on the renderers' next
+ * fit. The print-file detail view enables this; the print-status preview card
+ * keeps STANDARD framing.
+ *
+ * @param obj     Viewer widget
+ * @param enabled true for THUMBNAIL_PARITY framing, false for STANDARD
+ */
+void ui_gcode_viewer_set_thumbnail_parity(lv_obj_t* obj, bool enabled);
 
 /**
  * @brief Clear loaded G-code
@@ -492,6 +511,35 @@ void ui_gcode_viewer_register(void);
  * For 2D: replaces tool_palette_ entries; resolves at render time.
  */
 void ui_gcode_viewer_set_tool_colors(lv_obj_t* obj, const std::vector<uint32_t>& colors);
+
+/**
+ * @brief Drop the per-tool AMS overrides and go back to the file's own colors
+ * @param obj Viewer widget
+ *
+ * The retraction counterpart of ui_gcode_viewer_set_tool_colors(). It needs its
+ * own entry point because an empty color vector means "nothing knowable" to
+ * every layer below - and each one deliberately ignores it, so that a first
+ * apply with no AMS data leaves the slicer palette alone instead of painting
+ * over it. Passing {} therefore cannot express "stop overriding".
+ *
+ * For 2D: rebuilds the palette from the parsed file.
+ * For 3D: restores the palette snapshot the renderer took before its first
+ * override, since overrides are written into the baked palette in place.
+ *
+ * No-op when no overrides are applied.
+ */
+void ui_gcode_viewer_clear_tool_colors(lv_obj_t* obj);
+
+/**
+ * @brief The per-tool AMS color overrides currently applied to this viewer
+ * @param obj Viewer widget
+ * @return RGB colors indexed by tool (0xRRGGBB); empty when the renderers are
+ *         on the file's own slicer palette
+ *
+ * This is the viewer's record of what it pushed at the renderers, and therefore
+ * what ui_gcode_viewer_clear_tool_colors() retracts.
+ */
+std::vector<uint32_t> ui_gcode_viewer_get_tool_colors(lv_obj_t* obj);
 
 /**
  * @brief Apply AMS filament colors to the viewer from AmsState

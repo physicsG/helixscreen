@@ -163,7 +163,7 @@ void TipsWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int width_px,
         return;
 
     // Below wide-tier width, use smaller text and icon
-    bool compact = (width_px < widget_size::W_WIDE);
+    bool compact = (width_px < widget_size::w_wide());
     const char* font_token = compact ? "font_body" : "font_heading";
     const lv_font_t* text_font = theme_manager_get_font(font_token);
     if (!text_font)
@@ -322,8 +322,8 @@ void TipsWidget::handle_tip_text_clicked() {
     spdlog::info("[TipsWidget] Tip text clicked - showing detail dialog");
 
     // Use alert helper which auto-handles OK button to close
-    helix::ui::modal_show_alert(current_tip_.title.c_str(), current_tip_.content.c_str(),
-                                ModalSeverity::Info);
+    helix::ui::modal_alert(current_tip_.title.c_str(), current_tip_.content.c_str(),
+                           ModalSeverity::Info);
 }
 
 void TipsWidget::handle_tip_rotation_timer() {

@@ -50,6 +50,8 @@ sh /tmp/install.sh --local /tmp/helixscreen-ad5x.zip --update
 
 Your settings (`settings.json`), environment overrides (`helixscreen.env`), and custom files (custom printer images, etc.) are automatically preserved across updates.
 
+> **One thing that can change: your home screen arrangement.** If an update changes how the home grid is sized, saved widget positions no longer point at the right cells, so HelixScreen re-places every widget on the new grid. Which widgets you have and how they are configured is kept — only the positions and sizes are recomputed. See [What Happens on Upgrade](guide/home-panel.md#what-happens-on-upgrade).
+
 ---
 
 ## If the Setup Wizard Keeps Appearing

@@ -149,11 +149,21 @@ Below the two palettes, a theme can also set:
 | `border_radius_size` | 0–7 (index) | 3 | Corner roundness preset. 0 = sharp, 7 = fully rounded. Try 2 for classic, 4 for modern-soft, 6 for bubbly. |
 | `border_width` | 0–4 (px) | 1 | Width of borders in pixels. 0 disables borders entirely. |
 | `border_opacity` | 0–255 | 40 | How opaque borders are (0 = transparent, 255 = fully opaque). The default 40 is ≈16%, i.e. subtle; low values (20–60) keep borders faint. |
-| `shadow_intensity` | px | 0 | Blur radius of drop shadows, in pixels (not a 0–100 scale). 0 disables. |
+| `shadow_intensity` | px | 0 | Blur radius of drop shadows, in pixels (not a 0–100 scale). 0 disables them. It also tunes how deep the on-screen keyboard's keycaps sit — and there 0 means *default* depth, not off (see the note below). |
 | `shadow_opa` | 0–100 | 0 | Opacity of drop shadows. 0 disables. Shadows need both intensity AND opa to show. |
 | `shadow_offset_y` | int | 2 | Vertical shadow offset in pixels. |
 
 These are global to the theme — they apply to both dark and light palettes.
+
+**`shadow_intensity` and the on-screen keyboard.** Keyboard keys are drawn with a
+keycap edge whose depth this property scales, mapped onto single-digit pixels
+(roughly `intensity / 10`, clamped to 1–3 px). Zero is read as "default depth"
+rather than "flat", because 16 of the 18 shipped themes leave it at 0 and reading
+it literally would flatten the keyboard for nearly everyone. There is no way for a
+theme to ask for flat keys; that decision belongs to the hardware, which drops to a
+cheaper treatment on constrained devices (`docs/devel/ENVIRONMENT_VARIABLES.md`
+§ `HELIX_KEY_DEPTH`). The key colours themselves derive from `elevated_bg`, not
+from any shadow property.
 
 ---
 

@@ -65,8 +65,8 @@ using ActiveFilesWithContentCallback =
 
 /// Async wrapper: lists config directory via Moonraker, downloads printer.cfg and
 /// all included files, then resolves the active file set.
-/// Unlike KlipperConfigEditor::download_with_includes, this handles glob includes
-/// by cross-referencing the full file listing.
+/// Handles glob includes by cross-referencing the full file listing — the
+/// pattern names files that are unknowable until Moonraker lists the directory.
 void resolve_active_config_files(IMoonrakerAPI& api, ActiveFilesCallback on_complete,
                                  ErrorCallback on_error);
 

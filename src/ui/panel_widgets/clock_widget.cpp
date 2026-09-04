@@ -179,11 +179,11 @@ void ClockWidget::on_size_changed(int colspan, int rowspan, int width_px, int he
     // Determine size mode from physical pixels: 0=compact, 1=normal,
     // 2=expanded, 3=large
     int mode;
-    if (width_px < widget_size::W_NORMAL && height_px < widget_size::H_TALL) {
+    if (width_px < widget_size::w_normal() && height_px < widget_size::h_tall()) {
         mode = 0; // compact: time only
-    } else if (height_px < widget_size::H_TALL) {
+    } else if (height_px < widget_size::h_tall()) {
         mode = 1; // normal: time + date
-    } else if (width_px >= widget_size::W_WIDE) {
+    } else if (width_px >= widget_size::w_wide()) {
         mode = 3; // large: big time + date + uptime
     } else {
         mode = 2; // expanded: time + date + uptime

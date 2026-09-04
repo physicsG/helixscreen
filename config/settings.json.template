@@ -1,5 +1,5 @@
 {
-  "config_version": 23,
+  "config_version": 24,
   "_config_version_comment": "Config schema version. MUST be present and current: Config::init treats a missing version as 0, reads that as a tarball default, and will restore a rolling backup over this file. Pinned by tests/unit/test_settings_template_contract.cpp.",
   "dark_mode": true,
   "brightness": 80,
@@ -38,8 +38,6 @@
     "eth_ip": ""
   },
   "gcode_viewer": {
-    "shading_model": "smooth",
-    "_shading_comment": "Shading model for G-code 3D preview. Options: 'flat' (faceted, lowest cost), 'smooth' (Gouraud/per-vertex, default), 'phong' (per-pixel, highest quality)",
     "tube_sides": 4,
     "_tube_sides_comment": "Number of sides for tube cross-section. Options: 4 (diamond, fastest, default), 8 (octagonal, balanced), 16 (circular, highest quality, matches OrcaSlicer)",
     "streaming_mode": "auto",

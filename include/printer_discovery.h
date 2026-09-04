@@ -14,8 +14,9 @@
  */
 
 #include "ams_types.h"
-#include "macro_patterns.h"   // Shared macro-name tables (nozzle clean, ...)
-#include "printer_detector.h" // For BuildVolume struct
+#include "chamber_heater_backend.h" // For chamber::match — heater candidate scoring
+#include "macro_patterns.h"         // Shared macro-name tables (nozzle clean, ...)
+#include "printer_detector.h"       // For BuildVolume struct
 
 #include <spdlog/spdlog.h>
 
@@ -99,16 +100,22 @@ class PrinterDiscovery {
         // type_weight breaks ties between equal-keyword candidates.
         auto try_set_chamber_heater = [&](const std::string& full_name,
                                           const std::string& object_name, int type_weight) {
-            int keyword = chamber_keyword_confidence(object_name);
-            if (keyword == 0) {
+            // Registry first: appliance backends (dragonbreath, panda_breath)
+            // claim their names at 95; generic carries the keyword tiers.
+            // chamber_keyword_confidence is kept for sensor/cooling-fan paths.
+            chamber::MatchResult m = chamber::match(object_name);
+            if (m.confidence == 0) {
                 return; // not a chamber-named object — never a heater candidate
             }
-            int conf = keyword * 10 + type_weight;
+            int conf = m.confidence * 10 + type_weight;
             if (conf > best_chamber_heater_conf) {
                 has_chamber_heater_ = true;
                 chamber_heater_name_ = full_name;
                 chamber_heater_object_name_ = object_name;
                 best_chamber_heater_conf = conf;
+                chamber_heater_backend_id_ = std::string(m.backend->id());
+                chamber_diagnostics_object_ = std::string(m.backend->diagnostics_object());
+                chamber_filter_fan_pin_ = std::string(m.backend->filter_fan_pin());
             }
         };
         auto try_set_chamber_sensor = [&](const std::string& full_name,
@@ -408,6 +415,13 @@ class PrinterDiscovery {
             //   1. lessWaste plugin:  "filament_switch_sensor _ifs_port_sensor_N"
             //   2. Native ZMOD (old): "filament_motion_sensor _ifs_motion_sensor_N"
             //   3. Native ZMOD:       "filament_motion_sensor ifs_motion_sensor"
+            //   4. Standalone IFS module (the Forge-X drop-in): the `ifs` /
+            //      `ifs_materials` get_status objects themselves. Its sensors
+            //      register under stock filament_switch_sensor names the
+            //      client-side bucketing already subscribes ("lane1".."lane4",
+            //      "toolhead"), so no sensor pattern is needed for it - and
+            //      these two names must NOT go into filament_sensor_names_,
+            //      which FilamentSensorManager reads as sensors.
             else if (!has_mmu_ &&
                      (name.rfind("filament_switch_sensor _ifs_port_sensor_", 0) == 0 ||
                       name.rfind("filament_motion_sensor _ifs_motion_sensor_", 0) == 0 ||
@@ -415,6 +429,16 @@ class PrinterDiscovery {
                 has_mmu_ = true;
                 mmu_type_ = AmsType::AD5X_IFS;
                 filament_sensor_names_.push_back(name);
+            }
+            // The standalone module's objects, on their own: an [ifs] section
+            // with no sensors configured, or [ifs_materials] on a machine whose
+            // IFS board is unplugged (deliberately readable without the board -
+            // the UI should still show the slot registry and report
+            // not-connected). Either name alone is unambiguous: neither is a
+            // stock Klipper object and no other known firmware defines them.
+            else if (!has_mmu_ && (name == "ifs" || name == "ifs_materials")) {
+                has_mmu_ = true;
+                mmu_type_ = AmsType::AD5X_IFS;
             }
             // QIDI Box detection — custom Klipper extension on Plus 4 / Q2 / Max 4
             // registers `box_stepper slot<N>` per physical slot (4 per box,
@@ -487,6 +511,13 @@ class PrinterDiscovery {
                 std::string upper_macro = to_upper(macro_name);
 
                 macros_.insert(upper_macro);
+                // Klipper keeps the CONFIG case for the status object key
+                // ("gcode_macro Tool_Offset") and for SET_GCODE_VARIABLE's
+                // MACRO= mux key, while the callable command is the uppercased
+                // alias. Code that has to name the object or write a variable
+                // therefore cannot use the uppercased key we match on - see
+                // macro_config_name().
+                macro_config_names_.emplace(upper_macro, macro_name);
 
                 // Check for HelixScreen helper macros
                 if (upper_macro.rfind("HELIX_", 0) == 0) {
@@ -496,6 +527,19 @@ class PrinterDiscovery {
                 // Check for Klippain Shake&Tune
                 if (upper_macro == "AXES_SHAPER_CALIBRATION") {
                     has_klippain_shaketune_ = true;
+                }
+
+                // An M300 macro is the printer's tone command and the direct
+                // proof it answers M300 gcode. Some buzzer setups have no
+                // output_pin object at all (Z-Mod's AD5X config shells out to
+                // a buzzer helper from an M300 macro), so the output_pin-based
+                // speaker detection in the branch above never fires there.
+                // Stronger signal than a beeper-named pin, too: a printer
+                // defining the macro cannot answer M300 with
+                // "Unknown command", which is the feedback loop the M300
+                // backend's lazy install guards against.
+                if (upper_macro == "M300") {
+                    has_speaker_ = true;
                 }
 
                 // Check for common macro patterns and cache them
@@ -835,6 +879,7 @@ class PrinterDiscovery {
 
         // Macros
         macros_.clear();
+        macro_config_names_.clear();
         host_restarting_macros_.clear();
         host_halting_macros_.clear();
         helix_macros_.clear();
@@ -860,6 +905,9 @@ class PrinterDiscovery {
         chamber_sensor_name_.clear();
         chamber_heater_name_.clear();
         chamber_heater_object_name_.clear();
+        chamber_heater_backend_id_.clear();
+        chamber_diagnostics_object_.clear();
+        chamber_filter_fan_pin_.clear();
         chamber_cooling_fan_name_.clear();
         chamber_fan_resting_deci_ = 0;
         fan_max_power_.clear();
@@ -994,6 +1042,19 @@ class PrinterDiscovery {
 
     [[nodiscard]] const std::string& chamber_heater_object_name() const {
         return chamber_heater_object_name_;
+    }
+
+    /// Matched chamber-heater backend id ("" when no chamber heater).
+    [[nodiscard]] const std::string& chamber_heater_backend_id() const {
+        return chamber_heater_backend_id_;
+    }
+    /// Diagnostics status object bound by the backend ("" when none).
+    [[nodiscard]] const std::string& chamber_diagnostics_object() const {
+        return chamber_diagnostics_object_;
+    }
+    /// Filter-fan output_pin bound by the backend ("" when none).
+    [[nodiscard]] const std::string& chamber_filter_fan_pin() const {
+        return chamber_filter_fan_pin_;
     }
 
     /// Full object name of the chamber cooling temperature_fan (empty if none).
@@ -1222,6 +1283,28 @@ class PrinterDiscovery {
      */
     [[nodiscard]] bool has_macro(const std::string& name) const {
         return macros_.count(to_upper(name)) > 0;
+    }
+
+    /**
+     * @brief The macro's name AS WRITTEN in printer.cfg, given any casing
+     *
+     * has_macro() is deliberately case-insensitive, because the gcode command a
+     * macro registers is its uppercased alias and that is what users type. Two
+     * things are NOT uppercased, though, and both bite silently:
+     *
+     *   - the status object key, which is the config section verbatim
+     *     ("gcode_macro Tool_Offset"), so a subscription or a status lookup
+     *     spelled in caps simply never matches; and
+     *   - SET_GCODE_VARIABLE's MACRO= value, registered as a mux key on the
+     *     config-case name (klippy/extras/gcode_macro.py registers `name`, not
+     *     `self.alias`), so a capitalised MACRO= is rejected outright.
+     *
+     * Anything naming a macro to Klipper rather than calling it must go through
+     * here. Empty when no such macro exists.
+     */
+    [[nodiscard]] std::string macro_config_name(const std::string& name) const {
+        auto it = macro_config_names_.find(to_upper(name));
+        return it == macro_config_names_.end() ? std::string{} : it->second;
     }
 
     /// Record the macros whose bodies reach SAVE_CONFIG / FIRMWARE_RESTART and
@@ -1638,6 +1721,9 @@ class PrinterDiscovery {
 
     // Macros
     std::unordered_set<std::string> macros_;
+    /// UPPERCASE macro name -> the name as written in printer.cfg. See
+    /// macro_config_name().
+    std::unordered_map<std::string, std::string> macro_config_names_;
     std::unordered_set<std::string> host_restarting_macros_; ///< Macros that reach a host restart
     std::unordered_set<std::string> host_halting_macros_;    ///< Macros that reach a host halt
     std::unordered_set<std::string> helix_macros_;
@@ -1663,6 +1749,9 @@ class PrinterDiscovery {
     std::string chamber_sensor_name_;
     std::string chamber_heater_name_;        ///< Full object name (e.g., "heater_generic chamber")
     std::string chamber_heater_object_name_; ///< Object name only (e.g., "chamber")
+    std::string chamber_heater_backend_id_;  ///< "" none, "generic", appliance id
+    std::string chamber_diagnostics_object_; ///< status object with diagnostics, "" none
+    std::string chamber_filter_fan_pin_;     ///< binary filter fan output_pin, "" none
     std::string chamber_cooling_fan_name_;   ///< Full object name of the chamber temperature_fan
                                              ///< (e.g., "temperature_fan chamber_fan"). Recorded
                                              ///< independent of the heater pick: in COOLING mode
