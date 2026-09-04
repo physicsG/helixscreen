@@ -749,7 +749,13 @@ void AmsBackendSnapmaker::prepare_for_resume(int slot_index, ResumeReadyCallback
         return;
     }
 
-    std::string chain = fmt::format("AUTO_FEEDING EXTRUDER={0} LOAD=1 PRINTING=1", slot);
+    // No PRINTING=1, for the same reason do_load_filament() omits it: FEED_AUTO
+    // silent-returns ("LOAD skipped: channel[N] is_printing=1") when PRINTING is
+    // set and the port sensor reads no filament, which is precisely the state a
+    // runout leaves behind. Sending it here made every Resume a no-op that
+    // re-raised CHECK_FILAMENT_RUNOUT, and the same load succeeded the moment the
+    // flag was dropped.
+    std::string chain = fmt::format("AUTO_FEEDING EXTRUDER={0} LOAD=1", slot);
     spdlog::info("{} prepare_for_resume: tool {} runout latched — driving AMS load "
                  "(AUTO_FEEDING) before RESUME",
                  backend_log_tag(), slot);

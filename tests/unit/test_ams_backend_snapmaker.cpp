@@ -2224,8 +2224,15 @@ TEST_CASE_METHOD(SnapmakerFixture,
     const auto& hist = h.client.gcode_script_history();
 
     // (a) The single firmware load call was issued: AUTO_FEEDING with LOAD=1
-    // PRINTING=1 (#991) — homes, switches tool, feeds, heats, extrudes, flushes.
-    REQUIRE(any_script_contains(hist, "AUTO_FEEDING EXTRUDER=0 LOAD=1 PRINTING=1"));
+    // (#991) — homes, switches tool, feeds, heats, extrudes, flushes.
+    REQUIRE(any_script_contains(hist, "AUTO_FEEDING EXTRUDER=0 LOAD=1"));
+
+    // (a2) And WITHOUT PRINTING=1. FEED_AUTO silent-returns ("LOAD skipped:
+    // channel[N] is_printing=1") when that flag is set and the port sensor reads
+    // no filament — precisely the state a runout leaves behind, and precisely
+    // when this function runs. With it, every Resume is a no-op that re-raises
+    // CHECK_FILAMENT_RUNOUT. do_load_filament() omits it for the same reason.
+    REQUIRE_FALSE(any_script_contains(hist, "PRINTING"));
 
     // (b) None of the old hand-rolled chain pieces survive — the sensor is NOT
     // disabled (that silently neutered FEED_AUTO), config is NOT re-asserted
