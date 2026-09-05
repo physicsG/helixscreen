@@ -106,6 +106,7 @@ class AmsEnvironmentOverlay : public OverlayBase {
 
     static void on_start_stop_clicked(lv_event_t* e);
     static void on_preset_changed(lv_event_t* e);
+    static void on_auto_dry_toggled(lv_event_t* e);
 
     // === State ===
 
@@ -176,6 +177,14 @@ class AmsEnvironmentOverlay : public OverlayBase {
 
     lv_subject_t preset_text_subject_;
     char preset_text_buf_[64] = {};
+
+    /// Humidity-controlled drying. A separate capability from the dryer itself —
+    /// a backend can have one without the other — so it carries its own
+    /// visibility rather than riding on dryer_visible_subject_.
+    lv_subject_t auto_dry_visible_subject_;
+    lv_subject_t auto_dry_on_subject_;
+    lv_subject_t auto_dry_text_subject_;
+    char auto_dry_text_buf_[96] = {};
 };
 
 /**

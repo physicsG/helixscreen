@@ -1,0 +1,2037 @@
+<title>HelixScreen — Snapmaker U1 + multiACE mockups</title>
+
+<style>
+/* ===================================================================
+   FRAME TOKENS — the document around the mockups.
+   Deliberately NOT HelixScreen's palette, so the device screens read
+   as "the product" and everything else reads as "the memo".
+   =================================================================== */
+:root {
+  --ground:    #F6F5F8;
+  --ground-2:  #ECEAF1;
+  --ink:       #1B1A21;
+  --ink-2:     #4A4856;
+  --muted:     #6E6C7C;
+  --rule:      #DCDAE4;
+  --rule-soft: #E8E6EE;
+  --accent:    #1F7F8C;
+  --accent-dim:#8FC6CE;
+  --bad:       #B5322E;
+  --good:      #3E7F41;
+  --bench:     #17161C;
+
+  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "Roboto Mono",
+          Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+
+  --measure: 68ch;
+  --pad: clamp(1.25rem, 4vw, 3rem);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground:    #111015;
+    --ground-2:  #191821;
+    --ink:       #EAE9EF;
+    --ink-2:     #B9B7C6;
+    --muted:     #8E8C9A;
+    --rule:      #2C2A36;
+    --rule-soft: #23212C;
+    --accent:    #6FC6D2;
+    --accent-dim:#2E5F67;
+    --bad:       #E4736F;
+    --good:      #7FC182;
+    --bench:     #0B0A0E;
+  }
+}
+:root[data-theme="dark"] {
+  --ground:#111015; --ground-2:#191821; --ink:#EAE9EF; --ink-2:#B9B7C6;
+  --muted:#8E8C9A; --rule:#2C2A36; --rule-soft:#23212C;
+  --accent:#6FC6D2; --accent-dim:#2E5F67; --bad:#E4736F; --good:#7FC182;
+  --bench:#0B0A0E;
+}
+:root[data-theme="light"] {
+  --ground:#F6F5F8; --ground-2:#ECEAF1; --ink:#1B1A21; --ink-2:#4A4856;
+  --muted:#6E6C7C; --rule:#DCDAE4; --rule-soft:#E8E6EE;
+  --accent:#1F7F8C; --accent-dim:#8FC6CE; --bad:#B5322E; --good:#3E7F41;
+  --bench:#17161C;
+}
+
+/* ===================================================================
+   DEVICE TOKENS — HelixScreen's shipped default theme, verbatim from
+   assets/config/themes/defaults/helixscreen.json (dark).
+   These never follow the page theme: the panel is dark on the printer.
+   =================================================================== */
+.dev {
+  --d-screen:   #19191C;
+  --d-card:     #202023;
+  --d-elevated: #4A4A52;
+  --d-border:   #36363C;
+  --d-text:     #E8E8EC;
+  --d-muted:    #B8B8C0;
+  --d-subtle:   #787882;
+  --d-primary:  #3A7CC8;
+  --d-success:  #5CB85C;
+  --d-warning:  #E8A83A;
+  --d-danger:   #D94848;
+}
+
+/* ------------------------------- base ------------------------------ */
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 var(--pad) 6rem; }
+.prose { max-width: var(--measure); }
+
+h1, h2, h3, h4 { font-family: var(--mono); font-weight: 600; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(1.75rem, 4vw, 2.6rem); line-height: 1.12; letter-spacing: -0.02em; }
+h2 { font-size: 1.35rem; letter-spacing: -0.01em; }
+h3 { font-size: 1.02rem; letter-spacing: 0; }
+p  { margin: 0; }
+a  { color: var(--accent); text-underline-offset: 3px; }
+code, .mono { font-family: var(--mono); font-size: 0.875em; }
+code { background: var(--ground-2); padding: 0.1em 0.36em; border-radius: 3px; }
+strong { font-weight: 650; color: var(--ink); }
+
+.eyebrow {
+  font-family: var(--mono); font-size: 0.7rem; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted);
+}
+.lede { font-size: 1.08rem; color: var(--ink-2); }
+
+/* ------------------------------ header ----------------------------- */
+.masthead { padding: 4rem 0 2.5rem; border-bottom: 1px solid var(--rule); }
+.masthead > * + * { margin-top: 1rem; }
+.masthead .prose > * + * { margin-top: 0.9rem; }
+.meta {
+  display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem;
+  font-family: var(--mono); font-size: 0.72rem; color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+/* ------------------------------ sections --------------------------- */
+section { padding-top: 3.5rem; }
+.sec-head { display: flex; align-items: baseline; gap: 0.85rem; margin-bottom: 1.4rem; }
+.sec-head .tick {
+  font-family: var(--mono); font-size: 0.72rem; font-weight: 700;
+  color: var(--accent); letter-spacing: 0.08em; flex: none;
+  padding-top: 0.2rem;
+}
+.stack > * + * { margin-top: 1.05rem; }
+
+/* --------------------------- claim / verdict ----------------------- */
+.claim {
+  border-left: 2px solid var(--accent);
+  padding: 0.15rem 0 0.15rem 1.1rem;
+  color: var(--ink-2);
+}
+.claim strong { color: var(--ink); }
+
+.verdict {
+  display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.8rem;
+  align-items: start;
+  background: var(--ground-2); border: 1px solid var(--rule-soft);
+  border-radius: 4px; padding: 0.9rem 1.1rem;
+}
+.verdict .tag {
+  font-family: var(--mono); font-size: 0.68rem; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  padding-top: 0.28rem;
+}
+.verdict.is-bad  .tag { color: var(--bad); }
+.verdict.is-good .tag { color: var(--good); }
+
+/* ------------------------------ tables ----------------------------- */
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 4px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; min-width: 34rem; }
+th, td { text-align: left; padding: 0.62rem 0.9rem; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+th {
+  font-family: var(--mono); font-size: 0.68rem; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
+  background: var(--ground-2); border-bottom: 1px solid var(--rule);
+}
+tbody tr:last-child td { border-bottom: 0; }
+td.num { font-variant-numeric: tabular-nums; }
+
+/* ============================ THE ARGUMENT =========================
+   Left: the shape the panel draws. Right: the shape that is wired.
+   =================================================================== */
+.compare { display: grid; gap: 1.1rem; grid-template-columns: 1fr; }
+@media (min-width: 62rem) { .compare { grid-template-columns: 0.85fr 1.15fr; } }
+
+.model {
+  border: 1px solid var(--rule); border-radius: 5px;
+  background: var(--ground-2); padding: 1.1rem 1.15rem 1.35rem;
+  display: flex; flex-direction: column; gap: 0.85rem;
+}
+.model-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.model-head h3 { font-size: 0.92rem; }
+.model-note { font-size: 0.82rem; color: var(--muted); }
+.model.is-wrong { border-color: color-mix(in srgb, var(--bad) 35%, var(--rule)); }
+.model.is-real  { border-color: color-mix(in srgb, var(--good) 35%, var(--rule)); }
+
+/* the "unit" box the panel invents */
+.unitbox {
+  border: 1px dashed color-mix(in srgb, var(--bad) 55%, transparent);
+  border-radius: 4px; padding: 0.7rem 0.6rem 0.5rem;
+  display: flex; flex-direction: column; gap: 0.5rem;
+}
+.unitbox-label {
+  font-family: var(--mono); font-size: 0.63rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--bad);
+}
+.row4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; }
+
+/* spool chip */
+.spool { display: flex; flex-direction: column; align-items: center; gap: 0.28rem; }
+.disc {
+  width: 26px; height: 26px; border-radius: 50%;
+  border: 4px solid var(--sw, var(--muted));
+  background: var(--ground);
+  box-sizing: border-box;
+}
+.disc.is-empty { border-style: dotted; border-color: var(--rule); }
+.spool small { font-family: var(--mono); font-size: 0.6rem; color: var(--muted); letter-spacing: 0.04em; }
+
+/* the drop from source to head */
+.drops { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; height: 22px; }
+.drop { position: relative; }
+.drop::after {
+  content: ""; position: absolute; left: 50%; top: 0; bottom: 0;
+  width: 2px; transform: translateX(-50%);
+  background: var(--sw, var(--rule));
+}
+.heads { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; }
+.head {
+  border: 1px solid var(--rule); border-radius: 3px;
+  background: var(--ground); padding: 0.32rem 0.2rem;
+  text-align: center;
+  font-family: var(--mono); font-size: 0.68rem; font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.head span { display: block; font-weight: 400; font-size: 0.6rem; color: var(--muted); letter-spacing: 0.02em; }
+
+/* the source matrix — reality */
+.matrix { display: grid; grid-template-columns: 4.2rem repeat(4, 1fr); gap: 0.34rem; align-items: center; }
+.matrix .rowlab {
+  font-family: var(--mono); font-size: 0.63rem; letter-spacing: 0.06em;
+  color: var(--muted); text-align: right; padding-right: 0.15rem;
+}
+.cell {
+  border: 1px solid var(--rule-soft); border-radius: 3px;
+  background: var(--ground); padding: 0.3rem 0.2rem;
+  display: flex; flex-direction: column; align-items: center; gap: 0.18rem;
+  min-height: 2.6rem; justify-content: center;
+}
+.cell.is-live {
+  border-color: var(--good);
+  background: color-mix(in srgb, var(--good) 9%, var(--ground));
+}
+.cell.is-off { opacity: 0.42; }
+.cell small { font-family: var(--mono); font-size: 0.55rem; color: var(--muted); }
+.dot { width: 16px; height: 16px; border-radius: 50%; border: 3px solid var(--sw, var(--rule)); box-sizing: border-box; }
+.dot.is-empty { border-style: dotted; border-color: var(--rule); background: transparent; }
+.colhead {
+  font-family: var(--mono); font-size: 0.68rem; font-weight: 700;
+  letter-spacing: 0.06em; text-align: center; color: var(--ink-2);
+}
+
+/* ============================ DEVICE BENCH =========================
+   Screens rendered at true pixel size against a dark bench.
+   =================================================================== */
+.bench {
+  background: var(--bench);
+  border-radius: 6px;
+  padding: 1.6rem clamp(0.75rem, 3vw, 2rem);
+  overflow-x: auto;
+  display: flex; flex-direction: column; align-items: center; gap: 0.9rem;
+}
+.bench-caption {
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: #7C7A88; text-align: center;
+}
+.scaler { transform-origin: top center; transition: transform 140ms ease; }
+@media (prefers-reduced-motion: reduce) { .scaler { transition: none; } }
+
+.zoombar { display: flex; gap: 0.4rem; align-items: center; justify-content: center; flex-wrap: wrap; }
+.zoombar button {
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.06em;
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--rule); border-radius: 3px;
+  padding: 0.24rem 0.6rem; cursor: pointer;
+}
+.zoombar button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.zoombar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* --------------------------- device screen ------------------------- */
+.screen {
+  background: var(--d-screen); color: var(--d-text);
+  font-family: var(--sans); font-size: 12px; line-height: 1.3;
+  display: flex; overflow: hidden; position: relative;
+  box-shadow: 0 0 0 1px #000, 0 14px 40px rgba(0,0,0,0.55);
+}
+.screen * { box-sizing: border-box; }
+/* Every mockup on this page is the U1's real panel. There is deliberately no
+   larger frame: if a screen does not fit here, it does not ship. */
+.s-480 { width: 480px; height: 320px; }
+
+/* nav rail */
+.rail {
+  width: 56px; flex: none; background: var(--d-screen);
+  border-right: 1px solid var(--d-border);
+  display: flex; flex-direction: column; align-items: center;
+  padding: 10px 0; gap: 16px;
+}
+.s-480 .rail { width: 42px; gap: 12px; }
+.rail i {
+  width: 22px; height: 22px; border-radius: 3px;
+  background: var(--d-elevated); display: block; opacity: 0.55;
+}
+.rail i.on { background: var(--d-primary); opacity: 1; }
+
+.pane { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--d-card); }
+
+.p-head {
+  height: 40px; flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 0 12px; border-bottom: 1px solid var(--d-border);
+}
+.s-480 .p-head { height: 34px; padding: 0 9px; }
+.p-title {
+  font-family: var(--mono); font-size: 13px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.s-480 .p-title { font-size: 11px; letter-spacing: 0.06em; }
+.p-title em { font-style: normal; color: var(--d-muted); font-weight: 400; }
+.chev { color: var(--d-muted); font-size: 15px; }
+
+.p-body { flex: 1; display: flex; min-height: 0; }
+.p-main { flex: 1; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.s-480 .p-main { padding: 7px 8px; gap: 6px; }
+
+/* head-major column */
+.headgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; flex: 1; min-height: 0; }
+.s-480 .headgrid { gap: 5px; }
+
+.hcol { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.s-480 .hcol { gap: 4px; }
+
+.hcap {
+  font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+  text-align: center; color: var(--d-muted);
+}
+.s-480 .hcap { font-size: 10px; }
+.hcap.mounted { color: var(--d-success); }
+
+/* the seated spool — the big statement of each column */
+.seat {
+  border: 1px solid var(--d-border); border-radius: 4px; background: var(--d-screen);
+  padding: 8px 6px 7px; display: flex; flex-direction: column; align-items: center; gap: 5px;
+}
+.s-480 .seat { padding: 5px 4px; gap: 3px; }
+.seat.is-mounted { border-color: var(--d-primary); }
+.seat.is-empty { border-style: dashed; }
+
+.ring {
+  width: 40px; height: 40px; border-radius: 50%;
+  border: 7px solid var(--sw, var(--d-subtle)); background: var(--d-card);
+}
+.s-480 .ring { width: 28px; height: 28px; border-width: 5px; }
+.ring.is-empty { border-style: dotted; border-color: var(--d-border); }
+
+.mat { font-size: 12px; font-weight: 600; letter-spacing: 0.01em; }
+.s-480 .mat { font-size: 10px; }
+.src {
+  font-family: var(--mono); font-size: 10px; color: var(--d-muted); letter-spacing: 0.04em;
+}
+.s-480 .src { font-size: 9px; }
+.src.warn { color: var(--d-warning); }
+
+/* the tube — visual link between source stack and head */
+.tube { height: 12px; position: relative; flex: none; }
+.s-480 .tube { height: 8px; }
+.tube::after {
+  content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 3px;
+  transform: translateX(-50%); border-radius: 2px;
+  background: var(--sw, var(--d-border));
+}
+.tube.dim::after { opacity: 0.3; }
+
+/* source stack */
+.stackbox { display: flex; flex-direction: column; gap: 3px; }
+.srow {
+  display: flex; align-items: center; gap: 5px;
+  border: 1px solid transparent; border-radius: 3px;
+  padding: 3px 5px; background: var(--d-screen);
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.03em;
+  color: var(--d-muted);
+}
+.s-480 .srow { font-size: 9px; padding: 2px 4px; gap: 4px; }
+.srow.live { border-color: var(--d-success); color: var(--d-text); background: var(--d-card); }
+.srow.gone { opacity: 0.4; }
+.pip { width: 9px; height: 9px; border-radius: 50%; background: var(--sw, var(--d-border)); flex: none; }
+.pip.hollow { background: transparent; border: 2px solid var(--d-border); }
+.srow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.more {
+  font-family: var(--mono); font-size: 9px; color: var(--d-primary);
+  text-align: center; padding: 2px 0; letter-spacing: 0.04em;
+}
+
+/* right sidebar */
+.side {
+  width: 210px; flex: none; border-left: 1px solid var(--d-border);
+  padding: 10px; display: flex; flex-direction: column; gap: 8px; background: var(--d-card);
+}
+.card {
+  border: 1px solid var(--d-border); border-radius: 4px; background: var(--d-screen);
+  padding: 8px 9px; display: flex; flex-direction: column; gap: 5px;
+}
+.card-lab {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--d-subtle);
+}
+.kv { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
+.kv b { font-weight: 600; }
+.kv .v { color: var(--d-muted); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.btn {
+  border: 1px solid var(--d-border); border-radius: 4px; background: var(--d-elevated);
+  color: var(--d-text); padding: 8px; text-align: center;
+  font-size: 12px; font-weight: 600;
+}
+.btn.pri { background: var(--d-primary); border-color: var(--d-primary); }
+.btn.ghost { background: transparent; color: var(--d-muted); }
+
+/* unit strip (ACE health) */
+.units { display: flex; gap: 6px; flex: none; }
+.s-480 .units { gap: 4px; }
+.unit {
+  flex: 1; border: 1px solid var(--d-border); border-radius: 3px;
+  background: var(--d-screen); padding: 4px 6px;
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+}
+.s-480 .unit { padding: 3px 4px; gap: 4px; }
+.unit b { font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; }
+.s-480 .unit b { font-size: 9px; }
+.unit .env {
+  font-family: var(--mono); font-size: 9px; color: var(--d-muted);
+  font-variant-numeric: tabular-nums; margin-left: auto; white-space: nowrap;
+}
+.s-480 .unit .env { font-size: 8px; }
+.led { width: 6px; height: 6px; border-radius: 50%; background: var(--d-success); flex: none; }
+.led.off { background: var(--d-danger); }
+.led.warm { background: var(--d-warning); }
+
+/* modal sheet */
+.scrim { position: absolute; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; }
+.sheet {
+  width: 400px; background: var(--d-card); border: 1px solid var(--d-border);
+  border-radius: 6px; display: flex; flex-direction: column; overflow: hidden;
+}
+.s-480 .sheet { width: 400px; }
+.sheet-head {
+  padding: 9px 11px; border-bottom: 1px solid var(--d-border);
+  display: flex; align-items: baseline; gap: 7px;
+}
+.sheet-head h4 { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; }
+.sheet-head em { font-style: normal; font-family: var(--sans); font-size: 10px; color: var(--d-muted); }
+.sheet-body { padding: 7px; display: flex; flex-direction: column; gap: 4px; }
+.opt {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--d-border); border-radius: 4px;
+  padding: 6px 8px; background: var(--d-screen);
+}
+.opt.sel { border-color: var(--d-success); background: color-mix(in srgb, var(--d-success) 12%, var(--d-screen)); }
+.opt.dis { opacity: 0.42; }
+.opt .ring2 { width: 20px; height: 20px; border-radius: 50%; border: 4px solid var(--sw, var(--d-subtle)); flex: none; }
+.opt .who { font-family: var(--mono); font-size: 10px; letter-spacing: 0.05em; color: var(--d-muted); width: 62px; flex: none; }
+.opt .what { font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opt .tail { font-family: var(--mono); font-size: 9px; color: var(--d-subtle); white-space: nowrap; }
+.opt.sel .tail { color: var(--d-success); }
+.sheet-foot {
+  display: flex; gap: 6px; padding: 7px; border-top: 1px solid var(--d-border);
+}
+.sheet-foot .btn { flex: 1; padding: 7px; font-size: 11px; }
+
+/* swap plan */
+.plan { display: flex; flex-direction: column; gap: 4px; flex: none; }
+.planrow {
+  display: grid; grid-template-columns: 24px 1fr 44px; gap: 6px; align-items: center;
+  border: 1px solid var(--d-border); border-radius: 3px; padding: 4px 7px; background: var(--d-screen);
+}
+.planrow .tool { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; }
+.planrow .dest {
+  display: flex; align-items: center; gap: 5px; font-size: 10px;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.planrow .dest em {
+  font-style: normal; font-family: var(--mono); font-size: 9px; color: var(--d-subtle);
+}
+.planrow .cost { font-family: var(--mono); font-size: 9px; text-align: right; color: var(--d-muted); font-variant-numeric: tabular-nums; }
+.planrow.swap { border-color: color-mix(in srgb, var(--d-warning) 55%, var(--d-border)); }
+.planrow.swap .cost { color: var(--d-warning); }
+/* ---- row view: one row per physical head (the 480-wide answer) ---- */
+.hdr-tail {
+  margin-left: auto; font-family: var(--mono); font-size: 9px;
+  letter-spacing: 0.06em; color: var(--d-subtle); white-space: nowrap;
+}
+.hrow {
+  display: flex; align-items: center; gap: 7px; flex: none;
+  border: 1px solid var(--d-border); border-radius: 4px;
+  background: var(--d-screen); padding: 6px 7px;
+}
+.hrow.busy { border-color: color-mix(in srgb, var(--d-warning) 55%, var(--d-border)); }
+.hbadge {
+  font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+  color: var(--d-muted); width: 20px; flex: none; text-align: center;
+}
+.hbadge.on { color: var(--d-success); }
+.ring.sm { width: 24px; height: 24px; border-width: 5px; flex: none; }
+.hmeta { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.hmeta b {
+  font-size: 12px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hmeta small {
+  font-family: var(--mono); font-size: 9px; color: var(--d-muted); letter-spacing: 0.03em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hmeta small.warn { color: var(--d-warning); }
+.chip {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.04em; flex: none;
+  color: var(--d-primary); border: 1px solid var(--d-border); border-radius: 3px;
+  padding: 2px 5px;
+}
+.chip.warn { color: var(--d-warning); border-color: color-mix(in srgb, var(--d-warning) 50%, var(--d-border)); }
+.hchev { color: var(--d-subtle); font-size: 13px; flex: none; }
+
+.footbar { display: flex; gap: 6px; flex: none; margin-top: auto; }
+.footbar .btn { flex: 1; padding: 7px; font-size: 11px; }
+
+/* ---- fit tripwire: measured in the browser, not asserted by the author ---- */
+.fit {
+  display: inline-block; margin-right: 0.5rem;
+  font-family: var(--mono); font-size: 0.6rem; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 0.1rem 0.42rem; border-radius: 3px; vertical-align: 1px;
+}
+.fit.ok  { color: #A3DDA5; border: 1px solid rgba(92,184,92,0.45); }
+.fit.bad { color: #F0A6A4; border: 1px solid rgba(217,72,72,0.6); background: rgba(217,72,72,0.14); }
+#fit-summary.ok  { color: var(--good); }
+#fit-summary.bad { color: var(--bad); font-weight: 700; }
+
+.banner {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  border: 1px solid color-mix(in srgb, var(--d-warning) 50%, var(--d-border));
+  background: color-mix(in srgb, var(--d-warning) 10%, var(--d-screen));
+  border-radius: 4px; padding: 6px 9px; font-size: 11px;
+}
+.banner b { font-weight: 600; }
+.banner .num { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--d-warning); font-weight: 700; }
+
+/* step bar (a swap in progress) */
+.steps { display: flex; gap: 4px; flex: none; }
+.step { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.step .bar { height: 3px; border-radius: 2px; background: var(--d-border); }
+.step.done .bar { background: var(--d-success); }
+.step.now  .bar { background: var(--d-primary); }
+.step small { font-family: var(--mono); font-size: 8px; letter-spacing: 0.04em; color: var(--d-subtle); text-align: center; }
+.step.now small { color: var(--d-primary); }
+
+/* ------------------------------ callouts --------------------------- */
+.grid2 { display: grid; gap: 1rem; grid-template-columns: 1fr; }
+@media (min-width: 52rem) { .grid2 { grid-template-columns: 1fr 1fr; } }
+.note {
+  border: 1px solid var(--rule); border-radius: 4px; padding: 0.95rem 1.05rem;
+  background: var(--ground-2); font-size: 0.92rem; color: var(--ink-2);
+}
+.note h4 { font-size: 0.78rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.45rem; }
+.note ul { margin: 0; padding-left: 1.1rem; }
+.note li + li { margin-top: 0.3rem; }
+
+pre {
+  margin: 0; background: var(--ground-2); border: 1px solid var(--rule-soft);
+  border-radius: 4px; padding: 0.85rem 1rem; overflow-x: auto;
+  font-family: var(--mono); font-size: 0.8rem; line-height: 1.6; color: var(--ink-2);
+}
+pre b { color: var(--accent); font-weight: 600; }
+
+footer {
+  margin-top: 4.5rem; padding-top: 1.4rem; border-top: 1px solid var(--rule);
+  font-family: var(--mono); font-size: 0.72rem; color: var(--muted);
+}
+/* ============ merger vs toolheads: the before/after comparison ========= */
+.pathsvg { width: 100%; flex: 1; min-height: 0; display: block; }
+.beforeafter { display: flex; gap: 1.25rem; align-items: flex-start; }
+.ba-item { display: flex; flex-direction: column; gap: 0.7rem; align-items: center; }
+.ba-tag {
+  font-family: var(--mono); font-size: 0.66rem; font-weight: 700;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  padding: 0.2rem 0.6rem; border-radius: 3px;
+}
+.ba-tag.bad  { color: #F0A6A4; background: rgba(217,72,72,0.16); }
+.ba-tag.good { color: #A3DDA5; background: rgba(92,184,92,0.16); }
+
+/* chain-of-cause list */
+.chain { counter-reset: step; display: flex; flex-direction: column; gap: 0.55rem; }
+.chain li {
+  list-style: none; display: grid; grid-template-columns: 1.55rem 1fr; gap: 0.7rem;
+  align-items: start; font-size: 0.93rem; color: var(--ink-2);
+}
+.chain li::before {
+  counter-increment: step; content: counter(step);
+  font-family: var(--mono); font-size: 0.68rem; font-weight: 700; color: var(--accent);
+  border: 1px solid var(--accent-dim); border-radius: 3px;
+  text-align: center; line-height: 1.5rem; height: 1.5rem;
+}
+.chain code { font-size: 0.82em; }
+ul.chain { margin: 0; padding: 0; }
+
+/* pixel budget bars */
+.budget { display: flex; flex-direction: column; gap: 0.5rem; }
+.bline { display: grid; grid-template-columns: 9.5rem 1fr 4.5rem; gap: 0.7rem; align-items: center; font-size: 0.88rem; }
+.bline .lab { color: var(--ink-2); }
+.bline .track { height: 12px; background: var(--ground-2); border: 1px solid var(--rule-soft); border-radius: 2px; overflow: hidden; display: flex; }
+.bline .seg { height: 100%; }
+.bline .seg.chrome { background: var(--rule); }
+.bline .seg.free   { background: var(--accent); opacity: 0.55; }
+.bline .val { font-family: var(--mono); font-size: 0.78rem; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* three-stack table emphasis */
+tr.picked td { background: color-mix(in srgb, var(--good) 10%, transparent); }
+tr.broken td { background: color-mix(in srgb, var(--bad) 9%, transparent); }
+.pill {
+  font-family: var(--mono); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.06em;
+  padding: 0.1rem 0.42rem; border-radius: 3px; white-space: nowrap;
+}
+.pill.good { color: var(--good); border: 1px solid color-mix(in srgb, var(--good) 45%, transparent); }
+.pill.bad  { color: var(--bad);  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent); }
+.pill.warn { color: var(--muted); border: 1px solid var(--rule); }
+
+/* ======================= interactive prototype ======================== */
+.proto {
+  display: grid; gap: 1.1rem; grid-template-columns: 1fr;
+  align-items: start;
+}
+@media (min-width: 60rem) { .proto { grid-template-columns: auto 1fr; } }
+
+.proto-stage {
+  background: var(--bench); border-radius: 6px; padding: 1.3rem;
+  display: flex; flex-direction: column; align-items: center; gap: 0.8rem;
+}
+.proto-side { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
+
+.ctrl { display: flex; flex-direction: column; gap: 0.42rem; }
+.ctrl > .eyebrow { font-size: 0.64rem; }
+.seg { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.seg button {
+  font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.03em;
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--rule); border-radius: 3px;
+  padding: 0.3rem 0.62rem; cursor: pointer; text-align: left;
+}
+.seg button:hover { color: var(--ink); border-color: var(--accent-dim); }
+.seg button[aria-pressed="true"] {
+  color: var(--accent); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.cmdlog {
+  border: 1px solid var(--rule); border-radius: 4px; background: var(--ground-2);
+  padding: 0.7rem 0.85rem; font-family: var(--mono); font-size: 0.72rem;
+  line-height: 1.75; color: var(--ink-2);
+  min-height: 7.5rem; max-height: 13rem; overflow-y: auto;
+}
+.cmdlog .t { color: var(--muted); }
+.cmdlog .g { color: var(--accent); }
+.cmdlog .hint { color: var(--muted); font-style: italic; font-family: var(--sans); font-size: 0.8rem; }
+.cmdlog div + div { margin-top: 0.1rem; }
+
+/* tappable regions inside the prototype */
+.is-tap { cursor: pointer; }
+.is-tap:hover { border-color: var(--d-primary); }
+.is-tap:focus-visible { outline: 2px solid var(--d-primary); outline-offset: 1px; }
+.opt.is-tap:hover { border-color: var(--d-success); }
+
+.proto-hint {
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.08em;
+  text-transform: uppercase; color: #7C7A88; text-align: center;
+}
+
+/* ---------------- Currently Loaded card states ---------------- */
+.cardrow { display: flex; gap: 0.9rem; flex-wrap: wrap; justify-content: center; }
+.cardcase { display: flex; flex-direction: column; gap: 0.5rem; align-items: center; width: 178px; }
+.cardcase.hilite .loadcard { border-color: var(--d-success); }
+.loadcard {
+  width: 100%; background: var(--d-card); border: 1px solid var(--d-border);
+  border-radius: 5px; padding: 9px; display: flex; flex-direction: column; gap: 7px;
+}
+.lc-title {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.11em;
+  text-transform: uppercase; color: var(--d-subtle);
+}
+.lc-body { display: flex; align-items: center; gap: 8px; min-height: 34px; }
+.lc-ring { width: 26px; height: 26px; border-radius: 50%; border: 6px solid var(--sw, var(--d-subtle)); flex: none; box-sizing: border-box; }
+.lc-ring.is-empty { border-style: dotted; border-color: var(--d-border); }
+.lc-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.lc-txt b { font-size: 12px; font-weight: 600; color: var(--d-text); }
+.lc-txt small { font-family: var(--mono); font-size: 9px; color: var(--d-muted); }
+.lc-none { font-size: 12px; color: var(--d-subtle); }
+.lc-state {
+  font-size: 10px; color: var(--d-muted); text-align: center;
+  border-top: 1px solid var(--d-border); padding-top: 6px;
+}
+.lc-state.ok   { color: var(--d-success); }
+.lc-state.warn { color: var(--d-warning); }
+.lc-state.busy { color: var(--d-primary); }
+.lc-btns { display: flex; gap: 5px; }
+.lc-btns .btn { flex: 1; padding: 5px; font-size: 10px; }
+.sig {
+  font-family: var(--mono); font-size: 0.62rem; color: var(--muted);
+  text-align: center; letter-spacing: 0.02em; line-height: 1.5;
+}
+.sig b { font-weight: 700; }
+.sig b.yes  { color: var(--good); }
+.sig b.no   { color: var(--muted); }
+.sig b.busy { color: var(--accent); }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">HelixScreen · design record · 2026-08-09 · verified on hardware</p>
+  <div class="prose">
+    <h1>Four toolheads, not one merger</h1>
+    <p class="lede">The Snapmaker U1 has four physically independent toolheads. HelixScreen
+      was drawing them fanned into a single merger box feeding one nozzle. Here is why, the
+      fix, and what multiACE adds on top.</p>
+    <p style="color:var(--ink-2)">Every mockup here is drawn at <strong>480&nbsp;&times;&nbsp;320,
+      1:1</strong> — the U1's actual panel. There is no wider frame on this page on purpose: a
+      layout that only works at 800&nbsp;px is not a layout for this machine. Each screen is
+      measured in your browser on load and labelled <span class="mono">fits</span> or
+      <span class="mono">overflows</span>.</p>
+    <p style="color:var(--muted); font-size:0.92rem">Everything below was read from the U1 at
+      <span class="mono">192.168.2.242</span> — Klipper 1.5.2.13, multiACE 0.99.6.1b. Device
+      screens are drawn at true pixel size in HelixScreen's shipped theme.</p>
+  </div>
+  <div class="meta">
+    <span>plan · 2026-08-09-snapmaker-u1-multiace-plan.md</span>
+    <span>fixture · tests/fixtures/multiace/u1-multiace-head-mode-idle.json</span>
+    <span>§01 fixed · §04+ proposed</span>
+    <span id="fit-summary">measuring&hellip;</span>
+  </div>
+</header>
+
+<!-- ================================================================ -->
+<section>
+  <div class="sec-head"><span class="tick">00</span><h2>Try it</h2></div>
+
+  <div class="prose stack" style="margin-bottom:1.4rem">
+    <p>A working prototype of the panel at the U1's real size. Tap a head to change its
+      source; the swap runs with its step bar and the head updates. Every action prints the
+      G-code HelixScreen would actually send, so this reviews as a <em>protocol</em> proposal,
+      not just a picture.</p>
+    <p style="color:var(--muted);font-size:0.9rem">Swaps are time-compressed — a real
+      <span class="mono">ACE_SWAP_HEAD</span> takes up to three minutes.</p>
+  </div>
+
+  <div class="proto">
+    <div class="proto-stage">
+      <div class="screen s-480 dev" id="proto-screen">
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane" id="proto-pane"></div>
+      </div>
+      <p class="proto-hint" id="proto-hint">tap a head to change its source</p>
+    </div>
+
+    <div class="proto-side">
+      <div class="ctrl">
+        <span class="eyebrow">Hardware</span>
+        <div class="seg" id="seg-rig">
+          <button type="button" data-rig="yours" aria-pressed="true">Your rig — 1 ACE, head mode</button>
+          <button type="button" data-rig="multi" aria-pressed="false">3 ACE, multi mode</button>
+          <button type="button" data-rig="stock" aria-pressed="false">Stock U1 — no ACE</button>
+        </div>
+      </div>
+
+      <div class="ctrl">
+        <span class="eyebrow">Layout — the open question</span>
+        <div class="seg" id="seg-view">
+          <button type="button" data-view="columns" aria-pressed="true">Columns (4 across)</button>
+          <button type="button" data-view="rows" aria-pressed="false">Rows (4 stacked)</button>
+        </div>
+      </div>
+
+      <div class="ctrl">
+        <span class="eyebrow">Screen</span>
+        <div class="seg" id="seg-screen">
+          <button type="button" data-screen="panel" aria-pressed="true">Multi-Filament</button>
+          <button type="button" data-screen="plan" aria-pressed="false">Pre-print plan</button>
+        </div>
+      </div>
+
+      <div class="ctrl">
+        <span class="eyebrow">Command log</span>
+        <div class="cmdlog" id="cmdlog" aria-live="polite"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- ================================================================ -->
+<section>
+  <div class="sec-head"><span class="tick">01</span><h2>The merger, and the fix</h2></div>
+
+  <div class="bench dev" style="align-items:flex-start">
+    <div class="beforeafter">
+      <div class="ba-item">
+        <span class="ba-tag bad">before</span>
+        <div class="screen s-480">
+          <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+          <div class="pane">
+            <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">Multi-Filament: <em>AFC</em></span></div>
+            <div class="p-body"><div class="p-main">
+              <svg class="pathsvg" viewBox="0 0 400 230" preserveAspectRatio="xMidYMid meet" role="img"
+                   aria-label="Four lanes converging into one hub box and a single nozzle">
+                <!-- spools -->
+                <g fill="none" stroke-width="7">
+                  <circle cx="50"  cy="26" r="15" stroke="#36363C"/>
+                  <circle cx="150" cy="26" r="15" stroke="#36363C"/>
+                  <circle cx="250" cy="26" r="15" stroke="#36363C"/>
+                  <circle cx="350" cy="26" r="15" stroke="#83AFFF"/>
+                </g>
+                <g font-family="ui-monospace,monospace" font-size="11" fill="#787882" text-anchor="middle">
+                  <text x="50"  y="60">E0</text><text x="150" y="60">E1</text>
+                  <text x="250" y="60">E2</text><text x="350" y="60">E3</text>
+                </g>
+                <!-- converging lanes into the hub -->
+                <g fill="none" stroke-width="3" stroke-linecap="round">
+                  <path d="M50 68 L50 96 Q50 108 62 112 L188 126" stroke="#36363C"/>
+                  <path d="M150 68 L150 100 Q150 110 160 116 L192 126" stroke="#36363C"/>
+                  <path d="M250 68 L250 100 Q250 110 240 116 L208 126" stroke="#36363C"/>
+                  <path d="M350 68 L350 96 Q350 108 338 112 L212 126" stroke="#83AFFF"/>
+                </g>
+                <!-- hub box -->
+                <rect x="120" y="128" width="160" height="30" rx="4" fill="#202023" stroke="#5CB85C" stroke-width="2"/>
+                <text x="200" y="148" font-family="ui-monospace,monospace" font-size="12"
+                      fill="#E8E8EC" text-anchor="middle" letter-spacing="2">HUB</text>
+                <!-- single output -->
+                <path d="M200 158 L200 186" fill="none" stroke="#83AFFF" stroke-width="3"/>
+                <circle cx="200" cy="172" r="4.5" fill="#83AFFF"/>
+                <!-- one nozzle -->
+                <path d="M186 186 h28 l-6 20 h-16 z" fill="#4A4A52"/>
+                <path d="M196 206 h8 l-4 9 z" fill="#83AFFF"/>
+                <text x="200" y="228" font-family="ui-monospace,monospace" font-size="11"
+                      fill="#D94848" text-anchor="middle">1 nozzle</text>
+              </svg>
+            </div></div>
+          </div>
+        </div>
+        <p class="bench-caption">PathTopology::HUB &mdash; four heads swallowed</p>
+      </div>
+
+      <div class="ba-item">
+        <span class="ba-tag good">after</span>
+        <div class="screen s-480">
+          <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+          <div class="pane">
+            <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">Multi-Filament: <em>Snapmaker U1</em></span></div>
+            <div class="p-body"><div class="p-main">
+              <svg class="pathsvg" viewBox="0 0 400 230" preserveAspectRatio="xMidYMid meet" role="img"
+                   aria-label="Four independent columns, each spool feeding its own nozzle">
+                <g fill="none" stroke-width="7">
+                  <circle cx="50"  cy="26" r="15" stroke="#36363C"/>
+                  <circle cx="150" cy="26" r="15" stroke="#36363C"/>
+                  <circle cx="250" cy="26" r="15" stroke="#36363C"/>
+                  <circle cx="350" cy="26" r="15" stroke="#83AFFF"/>
+                </g>
+                <g fill="none" stroke-width="3" stroke-linecap="round">
+                  <path d="M50 50 L50 104"  stroke="#36363C" stroke-dasharray="4 5"/>
+                  <path d="M150 50 L150 104" stroke="#36363C" stroke-dasharray="4 5"/>
+                  <path d="M250 50 L250 104" stroke="#36363C" stroke-dasharray="4 5"/>
+                  <path d="M350 50 L350 104" stroke="#83AFFF"/>
+                </g>
+                <g>
+                  <circle cx="50"  cy="118" r="5" fill="none" stroke="#36363C" stroke-width="2.5"/>
+                  <circle cx="150" cy="118" r="5" fill="none" stroke="#36363C" stroke-width="2.5"/>
+                  <circle cx="250" cy="118" r="5" fill="none" stroke="#36363C" stroke-width="2.5"/>
+                  <circle cx="350" cy="118" r="5" fill="#83AFFF"/>
+                </g>
+                <g fill="none" stroke-width="3" stroke-linecap="round">
+                  <path d="M50 132 L50 158"  stroke="#36363C" stroke-dasharray="4 5"/>
+                  <path d="M150 132 L150 158" stroke="#36363C" stroke-dasharray="4 5"/>
+                  <path d="M250 132 L250 158" stroke="#36363C" stroke-dasharray="4 5"/>
+                  <path d="M350 132 L350 158" stroke="#83AFFF"/>
+                </g>
+                <g fill="#4A4A52" opacity="0.55">
+                  <path d="M36 158 h28 l-6 20 h-16 z"/>
+                  <path d="M136 158 h28 l-6 20 h-16 z"/>
+                  <path d="M236 158 h28 l-6 20 h-16 z"/>
+                </g>
+                <path d="M336 158 h28 l-6 20 h-16 z" fill="#4A4A52"/>
+                <path d="M346 178 h8 l-4 9 z" fill="#83AFFF"/>
+                <g font-family="ui-monospace,monospace" font-size="12" text-anchor="middle" fill="#787882">
+                  <text x="50" y="204">T0</text><text x="150" y="204">T1</text>
+                  <text x="250" y="204">T2</text>
+                  <text x="350" y="204" fill="#5CB85C">T3</text>
+                </g>
+                <text x="200" y="228" font-family="ui-monospace,monospace" font-size="11"
+                      fill="#5CB85C" text-anchor="middle">4 nozzles</text>
+              </svg>
+            </div></div>
+          </div>
+        </div>
+        <p class="bench-caption">PathTopology::PARALLEL &mdash; the machine as built</p>
+      </div>
+    </div>
+    <p class="bench-caption">480 &times; 320, 1:1 &mdash; real state at capture: heads 0&ndash;2 empty
+      (<span class="mono">wait_insert</span>), head 3 loaded PETG Kingroon <span class="mono">#83AFFF</span></p>
+  </div>
+
+  <div class="prose stack" style="margin-top:1.8rem">
+    <h3>Why it happened</h3>
+    <ul class="chain">
+      <li>Your U1 runs a community <strong>AFC compatibility shim</strong>,
+        <code>extended/klipper/afc.cfg</code>, which declares the four toolheads as four
+        <code>AFC_lane</code>s so AFC-aware UIs can see them. HelixScreen therefore detects
+        AFC, not Snapmaker.</li>
+      <li>The AFC backend infers per-unit topology from three inputs: the unit's
+        <code>extruders[]</code>, its <code>hubs[]</code>, and each lane's <code>hub</code>
+        field. On the shim <strong>all three are blank</strong> — it declares no
+        <code>[AFC_extruder]</code> sections, no hubs, and publishes no per-lane
+        <code>hub</code> key.</li>
+      <li>With nothing to count, every arm of the chain at
+        <code>ams_backend_afc.cpp:2903</code> fails and control reaches the trailing
+        <code>else { topology = PathTopology::HUB; }</code>.</li>
+      <li><code>HUB</code> selects <code>render_linear_hub()</code> — lanes fan into a hub box
+        and out to one nozzle. The merger.</li>
+    </ul>
+
+    <div class="verdict is-good">
+      <span class="tag">Fix</span>
+      <p>The answer was in the payload the whole time: every lane names its own extruder
+        (<code>E0&rarr;extruder</code>, <code>E1&rarr;extruder1</code>, …), and the backend
+        already parsed it for other purposes. <strong>When a unit reports no extruders of its
+        own, derive them from its lanes</strong> — four distinct extruders means four
+        independent toolheads. Guarded three ways so a real Box Turtle is untouched: it fires
+        only when the unit's own list is empty, only when every lane's extruder is known (so a
+        partial Moonraker delta can't trigger it), and only when they are distinct.</p>
+    </div>
+    <p style="font-size:0.9rem;color:var(--muted)">
+      <code>include/ams_backend_afc.h</code> ·
+      <code>src/printer/ams_backend_afc.cpp</code> ·
+      <code>tests/unit/test_afc_shim_unit_topology.cpp</code> (4 cases)
+    </p>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <div class="sec-head"><span class="tick">02</span><h2>Three stacks, one winner</h2></div>
+
+  <div class="prose stack" style="margin-bottom:1.3rem">
+    <p>Your printer has three filament-management stacks installed at once. All three publish
+      Klipper objects. HelixScreen's detection picks exactly one — and which one it picks is
+      decided by object <em>names</em>, so changing what is installed silently changes which
+      backend you get.</p>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Stack</th><th>Objects</th><th>What it knows</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Native Snapmaker</strong></td>
+          <td class="mono">filament_detect<br>filament_feed left/right<br>print_task_config</td>
+          <td>The truth. Per-head type/vendor/colour, <span class="mono">channel_state</span>,
+            RFID, and the 32&rarr;4 <span class="mono">extruder_map_table</span>.</td>
+        </tr>
+        <tr class="picked">
+          <td><strong>AFC shim</strong> <span class="pill good">selected</span></td>
+          <td class="mono">AFC<br>AFC_unit U1<br>AFC_lane E0…E3</td>
+          <td>A hand-written adapter: 4 lanes &rarr; <span class="mono">extruder</span>…<span class="mono">extruder3</span>,
+            each with its own toolhead sensor, plus macros forwarding colour/material edits to
+            the native API. No extruder sections, no hubs, no steppers.</td>
+        </tr>
+        <tr>
+          <td><strong>multiACE</strong></td>
+          <td class="mono">ace<br>ace_bg_swap<br>ace_tipform</td>
+          <td>1&times; ACE Pro 2, <span class="mono">mode: head</span>, per-head
+            source/feeder/manual maps, dryer, Spoolman binding.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="prose stack" style="margin-top:1.5rem">
+    <h3>So should you delete the shim?</h3>
+    <p>No — not yet. It is currently load-bearing, and removing it makes things worse:</p>
+  </div>
+
+  <div class="tablewrap" style="margin-top:0.9rem">
+    <table>
+      <thead><tr><th>If you…</th><th>HelixScreen picks</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr class="picked">
+          <td>change nothing</td><td class="mono">AFC</td>
+          <td><span class="pill good">works</span> Four heads, drawn correctly after the §01 fix.</td>
+        </tr>
+        <tr class="broken">
+          <td>delete <span class="mono">afc.cfg</span></td><td class="mono">ACE</td>
+          <td><span class="pill bad">broken</span> The bare name <span class="mono">ace</span>
+            matches the <em>Anycubic</em> backend, which needs a top-level
+            <span class="mono">slots[]</span>. multiACE publishes
+            <span class="mono">aces[].slots[]</span> instead, so it falls through to a REST
+            bridge multiACE doesn't serve, 404s, and gives up. Empty panel.</td>
+        </tr>
+        <tr>
+          <td>delete both</td><td class="mono">SNAPMAKER</td>
+          <td><span class="pill warn">correct, but</span> the native 4-head backend — and no
+            multiACE.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="prose stack" style="margin-top:1.4rem">
+    <div class="claim">
+      <p>The ACE misdetection is a real latent bug for every multiACE user who <em>doesn't</em>
+      have the shim. Next step is to detect multiACE on <strong>shape, not name</strong> —
+      an <code>ace</code> object carrying <code>aces[]</code> and <code>device_count</code> is
+      multiACE; one carrying <code>slots[]</code> is Anycubic. Then the shim becomes optional
+      and you can delete it.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <div class="sec-head"><span class="tick">03</span><h2>The pixel budget</h2></div>
+
+  <div class="prose stack" style="margin-bottom:1.3rem">
+    <p>The U1's panel is <strong>480 &times; 320</strong> — HelixScreen's TINY tier and the
+      smallest resolution it supports. Before any of this work, the
+      <a href="../480x320_UI_AUDIT.md">480&times;320 audit</a> already lists the filament panel
+      as having cards pushed off-screen. Every layout decision downstream is a consequence of
+      these numbers.</p>
+  </div>
+
+  <div class="budget">
+    <div class="bline">
+      <span class="lab">Panel width</span>
+      <span class="track"><span class="seg chrome" style="width:8.75%"></span><span class="seg free" style="width:91.25%"></span></span>
+      <span class="val">480 px</span>
+    </div>
+    <div class="bline">
+      <span class="lab">&minus; nav rail</span>
+      <span class="track"><span class="seg chrome" style="width:8.75%"></span></span>
+      <span class="val">42 px</span>
+    </div>
+    <div class="bline">
+      <span class="lab">&minus; panel padding</span>
+      <span class="track"><span class="seg chrome" style="width:3.3%"></span></span>
+      <span class="val">16 px</span>
+    </div>
+    <div class="bline">
+      <span class="lab"><strong>Usable width</strong></span>
+      <span class="track"><span class="seg free" style="width:88%"></span></span>
+      <span class="val">422 px</span>
+    </div>
+    <div class="bline">
+      <span class="lab"><strong>Per head, 4 across</strong></span>
+      <span class="track"><span class="seg free" style="width:22%"></span></span>
+      <span class="val">103 px</span>
+    </div>
+    <div class="bline">
+      <span class="lab">Usable height</span>
+      <span class="track"><span class="seg chrome" style="width:10.6%"></span><span class="seg free" style="width:89.4%"></span></span>
+      <span class="val">279 px</span>
+    </div>
+  </div>
+
+  <div class="grid2" style="margin-top:1.4rem">
+    <div class="note">
+      <h4>What 103 px buys</h4>
+      <p>About six characters of body text, or one 28&nbsp;px spool ring with a two-line caption
+        under it. A four-deep source stack with readable labels does not fit — which is the
+        single constraint driving the design in §05.</p>
+    </div>
+    <div class="note">
+      <h4>So turn the grid</h4>
+      <p>103 px is enough for one head with one source (§04). It is not enough for a head with
+        four. The fix is not to page like the stock UI does — it is to <strong>swap the
+        axis</strong>: one row per head gives each 406 px instead of 103, and four rows still
+        leave 60 px of vertical slack (§05). Same data, same panel, no truncation.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <div class="sec-head"><span class="tick">04</span><h2>Your rig, drawn honestly</h2></div>
+
+  <div class="prose stack" style="margin-bottom:1.4rem">
+    <p>Not a hypothetical three-ACE setup — what the printer actually reports:
+      <span class="mono">mode: head</span>, one ACE Pro 2, heads 0&ndash;2 on stock feeders,
+      head 3 fed from ACE&nbsp;1 slot&nbsp;1. Three of the four columns have a source stack of
+      exactly <em>one</em>, and the layout has to look deliberate when that is true, not like
+      a table with empty cells.</p>
+  </div>
+
+  <div class="zoombar" data-zoom-for="bench-rig">
+    <span class="eyebrow" style="margin-right:0.4rem">scale</span>
+    <button type="button" data-scale="1" aria-pressed="true">1&times; (true size)</button>
+    <button type="button" data-scale="1.5" aria-pressed="false">1.5&times;</button>
+    <button type="button" data-scale="2" aria-pressed="false">2&times;</button>
+  </div>
+
+  <div class="bench dev" id="bench-rig" style="margin-top:0.75rem">
+    <div class="scaler">
+      <div class="screen s-480">
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">Multi-Filament</span></div>
+          <div class="p-body"><div class="p-main">
+            <div class="units">
+              <div class="unit"><span class="led"></span><b>ACE 1</b><span class="env">32&deg; &middot; 33%</span></div>
+              <div class="unit" style="flex:0 0 auto"><span class="led"></span><b>head mode</b></div>
+            </div>
+            <div class="headgrid">
+              <div class="hcol">
+                <span class="hcap">T0</span>
+                <div class="seat is-empty">
+                  <span class="ring is-empty"></span>
+                  <span class="mat" style="color:var(--d-subtle)">Empty</span>
+                  <span class="src">feeder</span>
+                </div>
+                <span class="tube dim"></span>
+                <div class="srow"><span class="pip hollow"></span><span>insert</span></div>
+              </div>
+              <div class="hcol">
+                <span class="hcap">T1</span>
+                <div class="seat is-empty">
+                  <span class="ring is-empty"></span>
+                  <span class="mat" style="color:var(--d-subtle)">Empty</span>
+                  <span class="src">feeder</span>
+                </div>
+                <span class="tube dim"></span>
+                <div class="srow"><span class="pip hollow"></span><span>insert</span></div>
+              </div>
+              <div class="hcol">
+                <span class="hcap">T2</span>
+                <div class="seat is-empty">
+                  <span class="ring is-empty"></span>
+                  <span class="mat" style="color:var(--d-subtle)">Empty</span>
+                  <span class="src">feeder</span>
+                </div>
+                <span class="tube dim"></span>
+                <div class="srow"><span class="pip hollow"></span><span>insert</span></div>
+              </div>
+              <div class="hcol">
+                <span class="hcap mounted">T3</span>
+                <div class="seat is-mounted">
+                  <span class="ring" style="--sw:#83AFFF"></span>
+                  <span class="mat">PETG</span>
+                  <span class="src">A1&middot;1</span>
+                </div>
+                <span class="tube" style="--sw:#83AFFF"></span>
+                <div class="srow live"><span class="pip" style="--sw:#83AFFF"></span><span>+3 slots</span></div>
+              </div>
+            </div>
+          </div></div>
+        </div>
+      </div>
+    </div>
+    <p class="bench-caption">480 &times; 320 &middot; live state &middot; three feeder heads, one ACE-fed head</p>
+  </div>
+
+  <div class="prose stack" style="margin-top:1.5rem">
+    <div class="claim">
+      <p>Feeder heads get a one-line source row that reads as a <em>statement</em>
+        (&ldquo;feeder&rdquo;), not a truncated list. Only the ACE-fed head shows a count chip,
+        because only it has somewhere to go. The asymmetry is the information.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <div class="sec-head"><span class="tick">05</span><h2>When a head has more than one source</h2></div>
+
+  <div class="prose stack" style="margin-bottom:1.4rem">
+    <p>Add ACE units, or switch to <span class="mono">multi</span> mode, and a head gains a
+      stack of candidates — up to four ACE slots plus the stock feeder plus a hand-fed bypass.
+      Four columns of 103&nbsp;px cannot show that. <strong>Turn the grid ninety degrees:</strong>
+      one row per head gives each one the full 406&nbsp;px of usable width, which is enough for
+      the live source, its state, and a count chip — no truncation, no tap required to see
+      what is loaded.</p>
+  </div>
+
+  <div class="zoombar" data-zoom-for="bench-full">
+    <span class="eyebrow" style="margin-right:0.4rem">scale</span>
+    <button type="button" data-scale="1" aria-pressed="true">1&times; (true size)</button>
+    <button type="button" data-scale="1.5" aria-pressed="false">1.5&times;</button>
+    <button type="button" data-scale="2" aria-pressed="false">2&times;</button>
+  </div>
+
+  <div class="bench dev" id="bench-full" style="margin-top:0.75rem">
+    <div class="scaler">
+      <div class="screen s-480">
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head">
+            <span class="chev">&#8249;</span>
+            <span class="p-title">Multi-Filament</span>
+            <span class="hdr-tail">3 ACE &middot; multi</span>
+          </div>
+          <div class="p-body"><div class="p-main">
+
+            <div class="hrow">
+              <span class="hbadge on">T0</span>
+              <span class="ring sm" style="--sw:#1E9E4A"></span>
+              <span class="hmeta"><b>PLA Basic</b><small>Green &middot; feeder</small></span>
+              <span class="chip">+2</span>
+              <span class="hchev">&#8250;</span>
+            </div>
+
+            <div class="hrow">
+              <span class="hbadge">T1</span>
+              <span class="ring sm" style="--sw:#C71585"></span>
+              <span class="hmeta"><b>PLA Magenta</b><small>feeder</small></span>
+              <span class="chip">+1</span>
+              <span class="hchev">&#8250;</span>
+            </div>
+
+            <div class="hrow busy">
+              <span class="hbadge">T2</span>
+              <span class="ring sm" style="--sw:#19C3D6"></span>
+              <span class="hmeta"><b>PLA Cyan</b><small class="warn">&rarr; A3&middot;3 Silk Violet</small></span>
+              <span class="chip warn">1:47</span>
+              <span class="hchev">&#8250;</span>
+            </div>
+
+            <div class="hrow">
+              <span class="hbadge">T3</span>
+              <span class="ring sm" style="--sw:#83AFFF"></span>
+              <span class="hmeta"><b>PETG</b><small>Kingroon &middot; ACE 1&middot;1</small></span>
+              <span class="chip">+3</span>
+              <span class="hchev">&#8250;</span>
+            </div>
+
+            <div class="steps">
+              <div class="step done"><span class="bar"></span><small>HOME</small></div>
+              <div class="step done"><span class="bar"></span><small>TIP</small></div>
+              <div class="step now"><span class="bar"></span><small>RETRACT</small></div>
+              <div class="step"><span class="bar"></span><small>FEED</small></div>
+              <div class="step"><span class="bar"></span><small>PURGE</small></div>
+            </div>
+
+          </div></div>
+        </div>
+      </div>
+    </div>
+    <p class="bench-caption">480 &times; 320 &middot; row view &middot; a swap in flight on T2</p>
+  </div>
+
+  <div class="prose stack" style="margin-top:1.5rem">
+    <div class="claim">
+      <p>Two layouts, one panel: <strong>columns</strong> (&sect;04) keep the spatial mapping to
+        the four physical heads and are right when each head has a single source — your rig
+        today. <strong>Rows</strong> earn their keep the moment a head has somewhere else to go.
+        Both fit 480&nbsp;&times;&nbsp;320; the backend picks, or it becomes a setting.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <div class="sec-head"><span class="tick">06</span><h2>Choosing a source</h2></div>
+
+  <div class="prose stack" style="margin-bottom:1.4rem">
+    <p>One head, every spool that can physically reach it, and what each choice costs. A swap
+      is up to three minutes; the sheet says so <em>before</em> you commit. The chosen row
+      emits one command.</p>
+  </div>
+
+  <div class="bench dev" id="bench-sheet">
+    <div class="scaler">
+      <div class="screen s-480">
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">Multi-Filament</span></div>
+          <div class="p-body"><div class="p-main"></div></div>
+        </div>
+        <div class="scrim">
+          <div class="sheet">
+            <div class="sheet-head"><h4>Source for T3</h4><em>currently ACE 1 &middot; slot 1</em></div>
+            <div class="sheet-body">
+              <div class="opt sel">
+                <span class="ring2" style="--sw:#83AFFF"></span>
+                <span class="who">ACE 1 &middot; 1</span>
+                <span class="what">PETG &middot; Kingroon Sky Blue</span>
+                <span class="tail">loaded</span>
+              </div>
+              <div class="opt dis">
+                <span class="ring2" style="--sw:#787882"></span>
+                <span class="who">ACE 1 &middot; 2</span>
+                <span class="what">Slot empty</span>
+                <span class="tail">&mdash;</span>
+              </div>
+              <div class="opt dis">
+                <span class="ring2" style="--sw:#787882"></span>
+                <span class="who">ACE 1 &middot; 3</span>
+                <span class="what">Slot empty</span>
+                <span class="tail">&mdash;</span>
+              </div>
+              <div class="opt">
+                <span class="ring2" style="--sw:#4A4A52"></span>
+                <span class="who">feeder 3</span>
+                <span class="what">Stock feeder &middot; hand-load</span>
+                <span class="tail">switch mode</span>
+              </div>
+            </div>
+            <div class="sheet-foot">
+              <span class="btn ghost">Cancel</span>
+              <span class="btn pri">Keep ACE 1 &middot; 1</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="bench-caption">480 &times; 320 &middot; source sheet &rarr;
+      <span class="mono">ACE_SWAP_HEAD HEAD=3 ACE=0 SLOT=n</span></p>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <div class="sec-head"><span class="tick">07</span><h2>Before the print: the swap bill</h2></div>
+
+  <div class="prose stack" style="margin-bottom:1.4rem">
+    <p>A job can use more colours than there are heads, so the number that decides whether you
+      press Start is <em>how many swaps and how long they add</em>. Underneath, two native U1
+      commands: <code>SET_PRINT_EXTRUDER_MAP</code> routes logical tools onto physical heads,
+      then <code>SET_PRINT_USED_EXTRUDERS</code> stops the slicer's baked prestart block
+      auto-feeding heads the job never touches — which also fixes a standing false-runout on a
+      bare U1.</p>
+  </div>
+
+  <div class="bench dev" id="bench-plan">
+    <div class="scaler">
+      <div class="screen s-480">
+        <nav class="rail"><i></i><i></i><i class="on"></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head">
+            <span class="chev">&#8249;</span>
+            <span class="p-title">Filament plan</span>
+            <span class="hdr-tail">lamp-shade_6c</span>
+          </div>
+          <div class="p-body"><div class="p-main">
+
+            <div class="banner">
+              <b>6 colours &middot; 4 heads</b>
+              <span><span class="num">2</span> swaps &middot; <span class="num">+5 min</span></span>
+            </div>
+
+            <div class="plan">
+              <div class="planrow"><span class="tool">T0</span>
+                <span class="dest"><span class="pip" style="--sw:#1E9E4A"></span>H0 feeder PLA Green</span>
+                <span class="cost">seated</span></div>
+              <div class="planrow"><span class="tool">T1</span>
+                <span class="dest"><span class="pip" style="--sw:#C71585"></span>H1 feeder PLA Magenta</span>
+                <span class="cost">seated</span></div>
+              <div class="planrow"><span class="tool">T2</span>
+                <span class="dest"><span class="pip" style="--sw:#19C3D6"></span>H2 feeder PLA Cyan</span>
+                <span class="cost">seated</span></div>
+              <div class="planrow"><span class="tool">T3</span>
+                <span class="dest"><span class="pip" style="--sw:#83AFFF"></span>H3 ACE 1&middot;1 PETG</span>
+                <span class="cost">seated</span></div>
+              <div class="planrow swap"><span class="tool">T4</span>
+                <span class="dest"><span class="pip" style="--sw:#B87333"></span>H3 ACE 1&middot;2 Copper
+                  <em>L84</em></span>
+                <span class="cost">2:40</span></div>
+              <div class="planrow swap"><span class="tool">T5</span>
+                <span class="dest"><span class="pip" style="--sw:#C0C0C8"></span>H3 ACE 1&middot;3 Silver
+                  <em>L140</em></span>
+                <span class="cost">2:40</span></div>
+            </div>
+
+            <div class="footbar">
+              <span class="btn ghost">Edit mapping</span>
+              <span class="btn pri">Start print</span>
+            </div>
+
+          </div></div>
+        </div>
+      </div>
+    </div>
+    <p class="bench-caption">480 &times; 320 &middot; swaps land only on ACE-fed heads &mdash; a feeder head
+      cannot change filament mid-print</p>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <div class="sec-head"><span class="tick">08</span><h2>Driving it</h2></div>
+
+  <div class="prose stack" style="margin-bottom:1.2rem">
+    <p>Against your real printer, with an isolated socket and config dir so it cannot collide
+      with another instance:</p>
+  </div>
+
+  <pre>export HELIX_SOCK=/tmp/helix-u1.sock HELIX_CONFIG_DIR=/tmp/helix-config-u1
+mkdir -p "$HELIX_CONFIG_DIR"
+./build/bin/helix-screen <b>--moonraker 192.168.2.242:7125</b> -vv --remote-socket "$HELIX_SOCK" &amp;
+./build/bin/helix-screen ctl -s "$HELIX_SOCK" navigate ams
+./build/bin/helix-screen ctl -s "$HELIX_SOCK" screenshot /tmp/u1-ams.png
+
+<span style="color:var(--muted)"># or with no printer at all — mock modes</span>
+HELIX_MOCK_AMS=u1 ./build/bin/helix-screen --test -vv          <span style="color:var(--muted)"># exists today</span>
+HELIX_MOCK_AMS=multiace HELIX_MOCK_ACE_COUNT=1 \
+  HELIX_MOCK_ACE_MODE=head HELIX_MOCK_ACE_FEEDER=0,1,2         <span style="color:var(--muted)"># your rig (to build)</span></pre>
+
+  <div class="grid2" style="margin-top:1.2rem">
+    <div class="note">
+      <h4>No rebuild for layout</h4>
+      <p>Everything visual lives in <code>ui_xml/*.xml</code>, loaded at runtime. Set
+        <code>HELIX_HOT_RELOAD=1</code>, save the file, and the running panel rebuilds within
+        about half a second. Change spacing, wording, colour without a compiler.</p>
+    </div>
+    <div class="note">
+      <h4>Still open</h4>
+      <ul>
+        <li>Do project colours map to <em>heads</em> or to <em>(ACE, slot)</em>? Orca has the
+          same question open; both surfaces should answer it the same way.</li>
+        <li>Four columns at 480&times;320, or page them like the stock UI does? Decide after
+          seeing it on the real panel.</li>
+        <li>Keep the AFC shim long-term, or retire it once multiACE is detected natively?</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <div class="sec-head"><span class="tick">09</span><h2>The "Currently Loaded" card</h2></div>
+
+  <div class="prose stack" style="margin-bottom:1.5rem">
+    <p>The card has three facts available to it and currently renders only one of them.
+      <strong>Mounted</strong> (which head is on the carriage) comes from the extruder pins.
+      <strong>Present</strong> (filament is in this head) comes from two independent sensors
+      that agree. <strong>Fed</strong> (it reached the nozzle) comes from the
+      <code>channel_state</code> latch — the only one of the three that can be wrong, because
+      it is derived from a transition HelixScreen has to witness.</p>
+    <p>Below: what the card should say in each real state, and the signals behind it.</p>
+  </div>
+
+  <div class="bench dev" id="bench-card">
+    <div class="cardrow">
+
+      <div class="cardcase">
+        <span class="ba-tag">nothing mounted</span>
+        <div class="loadcard">
+          <span class="lc-title">Currently Loaded</span>
+          <div class="lc-body"><span class="lc-none">No tool mounted</span></div>
+          <span class="lc-state">Idle</span>
+          <div class="lc-btns"><span class="btn ghost">Load</span><span class="btn ghost">Unload</span></div>
+        </div>
+        <p class="sig">mounted <b class="no">—</b> · present <b class="no">—</b> · fed <b class="no">—</b></p>
+      </div>
+
+      <div class="cardcase">
+        <span class="ba-tag">mounted, empty</span>
+        <div class="loadcard">
+          <span class="lc-title">Currently Loaded</span>
+          <div class="lc-body">
+            <span class="lc-ring is-empty"></span>
+            <span class="lc-txt"><b>Empty</b><small>T2 mounted</small></span>
+          </div>
+          <span class="lc-state">Idle</span>
+          <div class="lc-btns"><span class="btn pri">Load</span><span class="btn ghost">Unload</span></div>
+        </div>
+        <p class="sig">mounted <b class="yes">T2</b> · present <b class="no">no</b> · fed <b class="no">no</b></p>
+      </div>
+
+      <div class="cardcase hilite">
+        <span class="ba-tag good">today's T3</span>
+        <div class="loadcard">
+          <span class="lc-title">Currently Loaded</span>
+          <div class="lc-body">
+            <span class="lc-ring" style="--sw:#83AFFF"></span>
+            <span class="lc-txt"><b>PETG</b><small>Kingroon · T3</small></span>
+          </div>
+          <span class="lc-state warn">In toolhead · heat to extrude</span>
+          <div class="lc-btns"><span class="btn ghost">Load</span><span class="btn pri">Unload</span></div>
+        </div>
+        <p class="sig">mounted <b class="yes">T3</b> · present <b class="yes">yes</b> · fed <b class="no">latch lost</b></p>
+      </div>
+
+      <div class="cardcase">
+        <span class="ba-tag">loaded &amp; hot</span>
+        <div class="loadcard">
+          <span class="lc-title">Currently Loaded</span>
+          <div class="lc-body">
+            <span class="lc-ring" style="--sw:#83AFFF"></span>
+            <span class="lc-txt"><b>PETG</b><small>Kingroon · T3</small></span>
+          </div>
+          <span class="lc-state ok">Ready · 245 °C</span>
+          <div class="lc-btns"><span class="btn ghost">Load</span><span class="btn pri">Unload</span></div>
+        </div>
+        <p class="sig">mounted <b class="yes">T3</b> · present <b class="yes">yes</b> · fed <b class="yes">yes</b></p>
+      </div>
+
+      <div class="cardcase">
+        <span class="ba-tag">loading</span>
+        <div class="loadcard">
+          <span class="lc-title">Currently Loaded</span>
+          <div class="lc-body">
+            <span class="lc-ring" style="--sw:#1E9E4A"></span>
+            <span class="lc-txt"><b>PLA Basic</b><small>Green · T0</small></span>
+          </div>
+          <span class="lc-state busy">Feeding… 2 of 5</span>
+          <div class="lc-btns"><span class="btn ghost">Load</span><span class="btn ghost">Unload</span></div>
+        </div>
+        <p class="sig">mounted <b class="yes">T0</b> · present <b class="yes">yes</b> · fed <b class="busy">in progress</b></p>
+      </div>
+
+    </div>
+    <p class="bench-caption">the sidebar card at panel scale · buttons shown enabled/disabled as they should gate</p>
+  </div>
+
+  <div class="prose stack" style="margin-top:1.6rem">
+    <div class="claim">
+      <p>The load-bearing change is the third case. <strong>Present</strong> — not
+      <strong>fed</strong> — should decide whether the card names a filament and whether
+      Unload is offered, because presence is what two sensors actually measure. The latch then
+      only refines the <em>state line</em>: "In toolhead · heat to extrude" versus "Ready".
+      That way a latch HelixScreen never witnessed downgrades the wording, not your ability to
+      get the filament out.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>HelixScreen · docs/devel/plans/2026-08-09-snapmaker-u1-multiace-plan.md ·
+     §01 is implemented and tested; §04 onward are proposals.</p>
+</footer>
+
+</div>
+
+<script>
+document.querySelectorAll('.zoombar').forEach(function (bar) {
+  var target = document.getElementById(bar.dataset.zoomFor);
+  if (!target) return;
+  var scaler = target.querySelector('.scaler');
+  bar.addEventListener('click', function (e) {
+    var btn = e.target.closest('button[data-scale]');
+    if (!btn) return;
+    bar.querySelectorAll('button').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+    var s = parseFloat(btn.dataset.scale);
+    var screen = scaler.querySelector('.screen');
+    scaler.style.transform = 'scale(' + s + ')';
+    scaler.style.height = (screen.offsetHeight * s) + 'px';
+    scaler.style.width = (screen.offsetWidth * s) + 'px';
+  });
+});
+
+/* Fit check. Every mockup on this page claims to fit the U1's 480x320 panel;
+   this measures it in your browser rather than taking the author's word.
+   .screen has overflow:hidden, so scrollWidth/scrollHeight still report the
+   content extent -- anything larger than the frame is content that would be
+   clipped on the real device. Re-run after every prototype render, so an
+   interaction that overflows is caught too, not just the initial state. */
+window.__fitCheck = function () {
+  var screens = document.querySelectorAll('.screen');
+  var bad = 0;
+  screens.forEach(function (s) {
+    var dw = s.scrollWidth  - s.clientWidth;
+    var dh = s.scrollHeight - s.clientHeight;
+    var host = s.closest('.ba-item') || s.closest('.bench') || s.closest('.proto-stage');
+    var cap = host && host.querySelector('.bench-caption, .proto-hint');
+    if (!cap) return;
+    var prev = cap.querySelector('.fit');
+    if (prev) prev.remove();
+    var badge = document.createElement('span');
+    if (dw > 0 || dh > 0) {
+      bad++;
+      badge.className = 'fit bad';
+      badge.textContent = 'overflows ' +
+        (dw > 0 ? dw + ' px wide' : '') + (dw > 0 && dh > 0 ? ' / ' : '') +
+        (dh > 0 ? dh + ' px tall' : '');
+    } else {
+      badge.className = 'fit ok';
+      badge.textContent = 'fits 480\u00D7320';
+    }
+    cap.insertBefore(badge, cap.firstChild);
+  });
+  var sum = document.getElementById('fit-summary');
+  if (sum) {
+    sum.className = bad ? 'bad' : 'ok';
+    sum.textContent = bad
+      ? bad + ' of ' + screens.length + ' screens overflow'
+      : 'all ' + screens.length + ' screens fit 480\u00D7320';
+  }
+};
+
+/* =====================================================================
+   Interactive prototype. State -> render -> tap -> gcode -> state.
+   Deliberately small: the point is to feel the layout at 480x320 and to
+   see exactly which command each tap would emit.
+   ===================================================================== */
+(function () {
+  var pane = document.getElementById('proto-pane');
+  if (!pane) return;
+
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var SPOOLS = {
+    green:  {mat:'PLA Basic',    color:'#1E9E4A', brand:'Green'},
+    mag:    {mat:'PLA Magenta',  color:'#C71585', brand:'Magenta'},
+    cyan:   {mat:'PLA Cyan',     color:'#19C3D6', brand:'Cyan'},
+    petg:   {mat:'PETG',         color:'#83AFFF', brand:'Kingroon'},
+    copper: {mat:'PLA Silk',     color:'#B87333', brand:'Copper'},
+    silver: {mat:'PLA Silk',     color:'#C0C0C8', brand:'Silver'},
+    violet: {mat:'PLA Silk',     color:'#7C6CC8', brand:'Violet'},
+    white:  {mat:'PETG',         color:'#F0F0F0', brand:'White'},
+    amber:  {mat:'PETG',         color:'#E8A83A', brand:'Amber'},
+    tpu:    {mat:'TPU 95A',      color:'#D94848', brand:'Red'}
+  };
+
+  var RIGS = {
+    yours: {
+      label: '1 ACE · head mode', mode: 'head',
+      aces: [{name:'ACE 1', temp:32, rh:33, slots:['petg', null, null, null]}],
+      bound: {3: 0},
+      heads: [
+        {src:{k:'feeder'}, spool:null},
+        {src:{k:'feeder'}, spool:null},
+        {src:{k:'feeder'}, spool:null},
+        {src:{k:'ace', a:0, s:0}, spool:'petg'}
+      ]
+    },
+    multi: {
+      label: '3 ACE · multi mode', mode: 'multi',
+      aces: [
+        {name:'ACE 1', temp:32, rh:33, slots:['green','mag','cyan', null]},
+        {name:'ACE 2', temp:30, rh:52, slots:['amber','petg','white','tpu']},
+        {name:'ACE 3', temp:55, rh:18, slots:['copper','silver','violet', null], drying:true}
+      ],
+      bound: {},
+      heads: [
+        {src:{k:'ace', a:0, s:0}, spool:'green'},
+        {src:{k:'ace', a:1, s:1}, spool:'petg'},
+        {src:{k:'ace', a:0, s:2}, spool:'cyan'},
+        {src:{k:'feeder'}, spool:'tpu'}
+      ]
+    },
+    stock: {
+      label: 'stock feeders', mode: 'normal',
+      aces: [], bound: {},
+      heads: [
+        {src:{k:'feeder'}, spool:'green'},
+        {src:{k:'feeder'}, spool:'mag'},
+        {src:{k:'feeder'}, spool:'cyan'},
+        {src:{k:'feeder'}, spool:'tpu'}
+      ]
+    }
+  };
+
+  var S = {rig:'yours', view:'columns', screen:'panel', sheet:null, swap:null, rigData:null};
+  function clone(o) { return JSON.parse(JSON.stringify(o)); }
+  function loadRig(name) { S.rig = name; S.rigData = clone(RIGS[name]); S.sheet = null; S.swap = null; }
+  loadRig('yours');
+
+  /* ---- command log ---------------------------------------------------- */
+  var log = document.getElementById('cmdlog');
+  function emit(gcode, note) {
+    var d = document.createElement('div');
+    d.innerHTML = '<span class="t">&gt;</span> <span class="g"></span>';
+    d.querySelector('.g').textContent = gcode;
+    if (note) {
+      var n = document.createElement('span');
+      n.className = 't';
+      n.textContent = '   ' + note;
+      d.appendChild(n);
+    }
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  }
+  function say(text) {
+    var d = document.createElement('div');
+    d.className = 'hint';
+    d.textContent = text;
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  }
+  function resetLog() {
+    log.textContent = '';
+    say('Rig: ' + RIGS[S.rig].label + '. Tap a head to change its source.');
+  }
+
+  /* ---- model ---------------------------------------------------------- */
+  function sp(key) { return key ? SPOOLS[key] : null; }
+
+  /* Which sources can physically reach head h, given the rig's wiring. */
+  function sourcesFor(h) {
+    var r = S.rigData, out = [];
+    if (r.mode === 'multi') {
+      r.aces.forEach(function (a, ai) {
+        out.push({k:'ace', a:ai, s:h, spool:a.slots[h]});   // slot h of every ACE -> head h
+      });
+    } else if (r.mode === 'head' && r.bound[h] !== undefined) {
+      var ai = r.bound[h];
+      r.aces[ai].slots.forEach(function (sk, si) {
+        out.push({k:'ace', a:ai, s:si, spool:sk});          // all 4 slots of the bound ACE
+      });
+    }
+    out.push({k:'feeder', spool:null});
+    return out;
+  }
+  function srcLabel(src) {
+    if (src.k === 'feeder') return 'feeder';
+    return 'A' + (src.a + 1) + '·' + (src.s + 1);
+  }
+  function sameSrc(a, b) {
+    if (!a || !b || a.k !== b.k) return false;
+    return a.k === 'feeder' ? true : (a.a === b.a && a.s === b.s);
+  }
+
+  /* ---- render --------------------------------------------------------- */
+  function el(tag, cls, txt) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (txt !== undefined) e.textContent = txt;
+    return e;
+  }
+  function ring(color, small) {
+    var e = el('span', 'ring' + (small ? ' sm' : ''));
+    if (color) { e.style.setProperty('--sw', color); } else { e.classList.add('is-empty'); }
+    return e;
+  }
+
+  function headTap(h, node) {
+    node.classList.add('is-tap');
+    node.tabIndex = 0;
+    node.setAttribute('role', 'button');
+    node.addEventListener('click', function () { openSheet(h); });
+    node.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openSheet(h); }
+    });
+  }
+
+  function renderHeadsColumns() {
+    var grid = el('div', 'headgrid');
+    S.rigData.heads.forEach(function (hd, h) {
+      var col = el('div', 'hcol');
+      var busy = S.swap && S.swap.head === h;
+      var cap = el('span', 'hcap' + (h === 0 && !busy ? ' mounted' : ''),
+                   'T' + h + (busy ? ' · swap' : ''));
+      col.appendChild(cap);
+
+      var seat = el('div', 'seat' + (hd.spool ? '' : ' is-empty'));
+      seat.appendChild(ring(hd.spool ? sp(hd.spool).color : null));
+      var mat = el('span', 'mat', hd.spool ? sp(hd.spool).mat.split(' ')[0] : 'Empty');
+      if (!hd.spool) mat.style.color = 'var(--d-subtle)';
+      seat.appendChild(mat);
+      seat.appendChild(el('span', 'src' + (busy ? ' warn' : ''),
+                          busy ? '→ ' + srcLabel(S.swap.to) : srcLabel(hd.src)));
+      col.appendChild(seat);
+      headTap(h, seat);
+
+      var tube = el('span', 'tube' + (hd.spool && !busy ? '' : ' dim'));
+      if (hd.spool) tube.style.setProperty('--sw', sp(hd.spool).color);
+      col.appendChild(tube);
+
+      var n = sourcesFor(h).length - 1;
+      var row = el('div', 'srow' + (hd.spool ? ' live' : ''));
+      var pip = el('span', 'pip' + (hd.spool ? '' : ' hollow'));
+      if (hd.spool) pip.style.setProperty('--sw', sp(hd.spool).color);
+      row.appendChild(pip);
+      row.appendChild(el('span', null, n > 0 ? '+' + n : 'feeder'));
+      col.appendChild(row);
+
+      grid.appendChild(col);
+    });
+    return grid;
+  }
+
+  function renderHeadsRows() {
+    var wrap = document.createDocumentFragment();
+    S.rigData.heads.forEach(function (hd, h) {
+      var busy = S.swap && S.swap.head === h;
+      var row = el('div', 'hrow' + (busy ? ' busy' : ''));
+      row.appendChild(el('span', 'hbadge' + (h === 0 && !busy ? ' on' : ''), 'T' + h));
+      row.appendChild(ring(hd.spool ? sp(hd.spool).color : null, true));
+
+      var meta = el('div', 'hmeta');
+      meta.appendChild(el('b', null, hd.spool ? sp(hd.spool).mat : 'Empty'));
+      var sub = el('small', busy ? 'warn' : null);
+      sub.textContent = busy
+        ? '→ ' + srcLabel(S.swap.to) + ' ' + (sp(S.swap.spool) ? sp(S.swap.spool).brand : '')
+        : (hd.spool ? sp(hd.spool).brand + ' · ' + srcLabel(hd.src) : srcLabel(hd.src));
+      meta.appendChild(sub);
+      row.appendChild(meta);
+
+      var n = sourcesFor(h).length - 1;
+      if (busy) {
+        row.appendChild(el('span', 'chip warn', S.swap.left));
+      } else if (n > 0) {
+        row.appendChild(el('span', 'chip', '+' + n));
+      }
+      row.appendChild(el('span', 'hchev', '›'));
+      headTap(h, row);
+      wrap.appendChild(row);
+    });
+    return wrap;
+  }
+
+  var STEPS = ['HOME', 'TIP', 'RETRACT', 'FEED', 'PURGE'];
+  function renderSteps() {
+    var box = el('div', 'steps');
+    STEPS.forEach(function (name, i) {
+      var st = el('div', 'step' + (i < S.swap.step ? ' done' : i === S.swap.step ? ' now' : ''));
+      st.appendChild(el('span', 'bar'));
+      st.appendChild(el('small', null, name));
+      box.appendChild(st);
+    });
+    return box;
+  }
+
+  function renderPanel() {
+    var main = el('div', 'p-main');
+    var r = S.rigData;
+
+    if (r.aces.length) {
+      var units = el('div', 'units');
+      r.aces.forEach(function (a) {
+        var u = el('div', 'unit');
+        u.appendChild(el('span', 'led' + (a.drying ? ' warm' : '')));
+        u.appendChild(el('b', null, a.name.replace('ACE ', 'A')));
+        u.appendChild(el('span', 'env', a.drying ? 'dry ' + a.temp + '°' : a.temp + '° · ' + a.rh + '%'));
+        units.appendChild(u);
+      });
+      main.appendChild(units);
+    }
+
+    main.appendChild(S.view === 'columns' ? renderHeadsColumns() : renderHeadsRows());
+    if (S.swap) main.appendChild(renderSteps());
+    return main;
+  }
+
+  function renderPlan() {
+    var main = el('div', 'p-main');
+    var aceHeads = S.rigData.heads
+      .map(function (h, i) { return h.src.k === 'ace' ? i : -1; })
+      .filter(function (i) { return i >= 0; });
+    var swaps = aceHeads.length ? 2 : 0;
+
+    var banner = el('div', 'banner');
+    banner.appendChild(el('b', null, (4 + swaps) + ' colours · 4 heads'));
+    var tail = el('span');
+    tail.innerHTML = '<span class="num">' + swaps + '</span> swaps · <span class="num">+' +
+                     (swaps * 2.6).toFixed(0) + ' min</span>';
+    banner.appendChild(tail);
+    main.appendChild(banner);
+
+    var plan = el('div', 'plan');
+    S.rigData.heads.forEach(function (hd, h) {
+      var row = el('div', 'planrow');
+      row.appendChild(el('span', 'tool', 'T' + h));
+      var dest = el('span', 'dest');
+      var pip = el('span', 'pip');
+      if (hd.spool) pip.style.setProperty('--sw', sp(hd.spool).color);
+      else pip.classList.add('hollow');
+      dest.appendChild(pip);
+      dest.appendChild(document.createTextNode(
+        'H' + h + ' ' + srcLabel(hd.src) + ' ' + (hd.spool ? sp(hd.spool).mat : 'empty')));
+      row.appendChild(dest);
+      row.appendChild(el('span', 'cost', hd.spool ? 'seated' : 'load'));
+      plan.appendChild(row);
+    });
+    aceHeads.slice(0, 2).forEach(function (h, i) {
+      var extra = ['copper', 'silver'][i];
+      var row = el('div', 'planrow swap');
+      row.appendChild(el('span', 'tool', 'T' + (4 + i)));
+      var dest = el('span', 'dest');
+      var pip = el('span', 'pip');
+      pip.style.setProperty('--sw', sp(extra).color);
+      dest.appendChild(pip);
+      dest.appendChild(document.createTextNode('H' + h + ' ' + sp(extra).brand + ' '));
+      dest.appendChild(el('em', null, 'L' + (84 + i * 56)));
+      row.appendChild(dest);
+      row.appendChild(el('span', 'cost', '2:40'));
+      plan.appendChild(row);
+    });
+    main.appendChild(plan);
+
+    var foot = el('div', 'footbar');
+    var edit = el('span', 'btn ghost', 'Edit mapping');
+    var start = el('span', 'btn pri is-tap', 'Start print');
+    start.addEventListener('click', function () {
+      aceHeads.slice(0, 2).forEach(function (h, i) {
+        emit('SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=' + (4 + i) + ' MAP_EXTRUDER=' + h);
+      });
+      emit('SET_PRINT_USED_EXTRUDERS EXTRUDERS=0,1,2,3', '← stops prestart feeding unused heads');
+      emit('SDCARD_PRINT_FILE FILENAME=lamp-shade_6c.gcode');
+    });
+    foot.appendChild(edit);
+    foot.appendChild(start);
+    main.appendChild(foot);
+    return main;
+  }
+
+  function renderSheet() {
+    var h = S.sheet;
+    var hd = S.rigData.heads[h];
+    var scrim = el('div', 'scrim');
+    var sheet = el('div', 'sheet');
+
+    var head = el('div', 'sheet-head');
+    head.appendChild(el('h4', null, 'Source for T' + h));
+    head.appendChild(el('em', null, 'now ' + srcLabel(hd.src)));
+    sheet.appendChild(head);
+
+    var body = el('div', 'sheet-body');
+    sourcesFor(h).forEach(function (src) {
+      var cur = sameSrc(src, hd.src);
+      var empty = src.k === 'ace' && !src.spool;
+      var opt = el('div', 'opt' + (cur ? ' sel' : '') + (empty ? ' dis' : ' is-tap'));
+      var r2 = el('span', 'ring2');
+      if (src.spool) r2.style.setProperty('--sw', sp(src.spool).color);
+      else r2.style.setProperty('--sw', '#4A4A52');
+      opt.appendChild(r2);
+      opt.appendChild(el('span', 'who', src.k === 'feeder' ? 'feeder ' + h : 'ACE ' + (src.a + 1) + ' · ' + (src.s + 1)));
+      opt.appendChild(el('span', 'what',
+        src.spool ? sp(src.spool).mat + ' · ' + sp(src.spool).brand
+                  : (src.k === 'feeder' ? 'Stock feeder · hand-load' : 'Slot empty')));
+      opt.appendChild(el('span', 'tail', cur ? 'loaded' : empty ? '—' : 'swap ≈ 2:40'));
+      if (!empty && !cur) {
+        opt.addEventListener('click', function () { chooseSource(h, src); });
+      }
+      body.appendChild(opt);
+    });
+    sheet.appendChild(body);
+
+    var foot = el('div', 'sheet-foot');
+    var cancel = el('span', 'btn ghost is-tap', 'Cancel');
+    cancel.addEventListener('click', function () { S.sheet = null; render(); });
+    foot.appendChild(cancel);
+    if (hd.spool) {
+      var unload = el('span', 'btn is-tap', 'Unload T' + h);
+      unload.addEventListener('click', function () {
+        emit('ACE_UNLOAD_HEAD HEAD=' + h);
+        hd.spool = null;
+        S.sheet = null;
+        render();
+      });
+      foot.appendChild(unload);
+    }
+    sheet.appendChild(foot);
+    scrim.appendChild(sheet);
+    return scrim;
+  }
+
+  function render() {
+    pane.textContent = '';
+    var head = el('div', 'p-head');
+    head.appendChild(el('span', 'chev', '‹'));
+    head.appendChild(el('span', 'p-title',
+      S.screen === 'plan' ? 'Filament plan' : 'Multi-Filament'));
+    var tail = el('span', 'hdr-tail',
+      S.screen === 'plan' ? 'lamp-shade_6c' : S.rigData.label);
+    head.appendChild(tail);
+    pane.appendChild(head);
+
+    var body = el('div', 'p-body');
+    body.appendChild(S.screen === 'plan' ? renderPlan() : renderPanel());
+    pane.appendChild(body);
+
+    var scr = document.getElementById('proto-screen');
+    var old = scr.querySelector('.scrim');
+    if (old) old.remove();
+    if (S.sheet !== null && S.screen === 'panel') scr.appendChild(renderSheet());
+
+    // Set the caption text BEFORE measuring: __fitCheck appends its badge into
+    // this node, and textContent would wipe it back out.
+    var hint = document.getElementById('proto-hint');
+    hint.textContent = S.swap ? 'swapping T' + S.swap.head + ' — ' + S.swap.left + ' remaining'
+                     : S.sheet !== null ? 'pick a source, or cancel'
+                     : S.screen === 'plan' ? 'press Start print to see the pre-print commands'
+                     : 'tap a head to change its source';
+
+    if (window.__fitCheck) window.__fitCheck();
+  }
+
+  /* ---- actions -------------------------------------------------------- */
+  function openSheet(h) {
+    if (S.swap) return;
+    S.sheet = h;
+    render();
+  }
+
+  function chooseSource(h, src) {
+    var hd = S.rigData.heads[h];
+    S.sheet = null;
+    if (src.k === 'feeder') {
+      emit('ACE_SET_HEAD_FEEDER HEAD=' + h + ' ENABLE=1');
+      hd.src = {k:'feeder'};
+      render();
+      return;
+    }
+    emit('ACE_SWAP_HEAD HEAD=' + h + ' ACE=' + src.a + ' SLOT=' + src.s,
+         '← ' + sp(src.spool).mat + ' ' + sp(src.spool).brand);
+    S.swap = {head:h, to:src, spool:src.spool, step:0, left:'2:40'};
+    render();
+    if (reduce) { finishSwap(); return; }
+    var secs = 160;
+    var tick = setInterval(function () {
+      secs -= 32;
+      S.swap.step = Math.min(STEPS.length - 1, S.swap.step + 1);
+      S.swap.left = Math.max(0, Math.floor(secs / 60)) + ':' + ('0' + Math.max(0, secs % 60)).slice(-2);
+      if (S.swap.step >= STEPS.length - 1) { clearInterval(tick); setTimeout(finishSwap, 600); }
+      render();
+    }, 620);
+  }
+
+  function finishSwap() {
+    if (!S.swap) return;
+    var hd = S.rigData.heads[S.swap.head];
+    hd.src = {k:'ace', a:S.swap.to.a, s:S.swap.to.s};
+    hd.spool = S.swap.spool;
+    emit('// swap complete — T' + S.swap.head + ' now ' + srcLabel(hd.src));
+    S.swap = null;
+    render();
+  }
+
+  /* ---- controls ------------------------------------------------------- */
+  function wireSeg(id, attr, fn) {
+    var bar = document.getElementById(id);
+    bar.addEventListener('click', function (e) {
+      var b = e.target.closest('button[data-' + attr + ']');
+      if (!b) return;
+      bar.querySelectorAll('button').forEach(function (x) {
+        x.setAttribute('aria-pressed', String(x === b));
+      });
+      fn(b.getAttribute('data-' + attr));
+    });
+  }
+  wireSeg('seg-rig', 'rig', function (v) { loadRig(v); resetLog(); render(); });
+  wireSeg('seg-view', 'view', function (v) { S.view = v; render(); });
+  wireSeg('seg-screen', 'screen', function (v) { S.screen = v; S.sheet = null; render(); });
+
+  resetLog();
+  render();
+})();
+
+window.__fitCheck();
+</script>

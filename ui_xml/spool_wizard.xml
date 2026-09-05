@@ -196,8 +196,7 @@
       <!-- Create button: visible on step 2 only -->
       <ui_button name="create_btn" variant="primary" text="Create Spool" translation_tag="Create Spool" hidden="true">
         <bind_flag_if_not_eq subject="spool_wizard_step" flag="hidden" ref_value="2"/>
-        <bind_state_if_eq subject="spool_wizard_can_proceed" state="disabled" ref_value="0"/>
-        <bind_state_if_eq subject="wizard_creating" state="disabled" ref_value="1"/>
+        <bind_state_if cond="spool_wizard_can_proceed eq 0 or wizard_creating eq 1" state="disabled"/>
         <event_cb trigger="clicked" callback="on_wizard_create"/>
       </ui_button>
     </lv_obj>

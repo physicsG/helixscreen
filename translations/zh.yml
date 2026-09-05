@@ -210,6 +210,10 @@ translations:
   Auto-Detect: 自动检测
   Auto-Heat on Load: 加载时自动加热
   Auto-detect: 自动检测
+  Auto-dry: '自动烘干'
+  Auto-dry off: '自动烘干已关闭'
+  Auto-dry on: '自动烘干已开启'
+  Auto-dry unchanged: '自动烘干未更改'
   Auto-install only works on local Moonraker: 自动安装仅适用于本地 Moonraker
   Auto-lock: 自动锁定
   Auto-poll for weight updates: 自动轮询重量更新
@@ -609,6 +613,7 @@ translations:
   Could not save filament: 无法保存耗材
   Could not start Bluetooth discovery: 无法启动蓝牙发现
   Could not update filaments: 无法更新耗材
+  Could not update slot: '无法更新槽位'
   Could not verify Spoolman status. Moonraker may still be restarting.: 无法验证 Spoolman
     状态。Moonraker 可能仍在重启中。
   Couldn't update Spoolman — saved locally: 无法更新 Spoolman — 已保存在本地
@@ -736,6 +741,7 @@ translations:
   Downloading...: 下载中...
   Downloading... {:.1f}/{:.1f} MB: 下载中... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: 在每次触摸时绘制涟漪 — 有助于诊断偏移
+  Dries above %d%%, stops below %d%%: '高于 %d%% 时烘干，低于 %d%% 时停止'
   Drive Cal: 驱动校准
   Drop shadow strength (0 = disabled): 阴影强度（0 = 禁用）
   Drying: 烘干中
@@ -1059,6 +1065,7 @@ translations:
   Flying Toasters: 飞行烤面包机
   Follow active tool: 跟随当前工具
   Follow graph screen: 跟随图表屏幕
+  Follows unit %d: '跟随单元 %d'
   Forget: 忘记
   Forget Network?: 忘记网络？
   Forget network '{}'? You will need the password to reconnect.: 忘记网络 '{}'？重新连接时需要密码。
@@ -1707,8 +1714,9 @@ translations:
   Open: 打开
   Open Source Licenses: 开源许可证
   Open color and brightness controls: 打开颜色和亮度控制
-  Open feeder macro: 打开送料器宏
   Open feeder: 打开送料器
+  Open feeder macro: 打开送料器宏
+  Open in ACE: '在 ACE 中打开'
   Open motion controls for jogging: 打开手动移动控制
   Operation already in progress: 操作正在进行中
   Operations: 操作
@@ -2679,6 +2687,7 @@ translations:
   Toolhead LED: '工具头 LED'
   Toolhead Sensor: 工具头传感器
   Toolhead Style: 工具头样式
+  Toolhead command failed: '工具头命令失败'
   Toolhead jam: 工具头堵塞
   Toolhead, G-code, limits, and materials: 打印头、G代码、限制和材料
   Tools Used: 已使用工具

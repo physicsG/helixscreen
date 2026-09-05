@@ -24,6 +24,7 @@
 #include "ams_backend_qidi.h"
 #endif
 #if HELIX_HAS_SNAPMAKER
+#include "ams_backend_multiace.h"
 #include "ams_backend_snapmaker.h"
 #endif
 #include "ams_backend_toolchanger.h"
@@ -382,6 +383,9 @@ create_mock_with_features(int gate_count, IMoonrakerClient* mock_client = nullpt
         } else if (ams_type == "snapmaker" || ams_type == "snapswap" || ams_type == "u1") {
             mock->set_snapmaker_mode(true);
             spdlog::info("[AMS Backend] Mock Snapmaker U1 mode enabled");
+        } else if (ams_type == "multiace" || ams_type == "u1_ace" || ams_type == "ace2") {
+            mock->set_multiace_mode(true);
+            spdlog::info("[AMS Backend] Mock U1 + 2x ACE mode enabled");
         }
     }
 
@@ -532,6 +536,7 @@ bool AmsBackend::sensor_belongs_to_backend(AmsType type, const std::string& bare
     case AmsType::ACE:
     case AmsType::TOOL_CHANGER:
     case AmsType::SNAPMAKER:
+    case AmsType::MULTIACE:
     case AmsType::QIDI_BOX:
     case AmsType::NONE:
     default:
@@ -604,6 +609,7 @@ std::unique_ptr<AmsBackend> AmsBackend::create(AmsType detected_type) {
 #endif
 
     case AmsType::SNAPMAKER:
+    case AmsType::MULTIACE:
 #if HELIX_HAS_SNAPMAKER && defined(HELIX_ENABLE_MOCKS)
         spdlog::warn("[AMS Backend] Snapmaker detected but no API/client provided - using mock");
         return std::make_unique<AmsBackendMock>(config->mock_ams_gate_count);
@@ -721,6 +727,14 @@ std::unique_ptr<AmsBackend> AmsBackend::create(AmsType detected_type, IMoonraker
         spdlog::info("[AMS Backend] Snapmaker support not compiled in");
         return nullptr;
 #endif
+
+    case AmsType::MULTIACE:
+        if (!api || !client) {
+            spdlog::error("[AMS Backend] multiACE requires IMoonrakerAPI and MoonrakerClient");
+            return nullptr;
+        }
+        spdlog::debug("[AMS Backend] Creating multiACE backend (U1 SnapSwap + ACE units)");
+        return std::make_unique<AmsBackendMultiAce>(api, client);
 
     case AmsType::QIDI_BOX:
 #if HELIX_HAS_QIDI

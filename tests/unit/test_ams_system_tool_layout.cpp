@@ -5,6 +5,10 @@
 #include "ams_types.h"
 #include "ui/ams_drawing_utils.h"
 
+#include <map>
+#include <optional>
+#include <vector>
+
 #include "../catch_amalgamated.hpp"
 
 /**
@@ -983,4 +987,246 @@ TEST_CASE("SystemToolLayout: 2 HUB units sharing hub_tool_label=0 merge to 1 noz
     CHECK(layout.units[1].first_physical_tool == 0);
     CHECK(layout.units[0].tool_count == 1);
     CHECK(layout.units[1].tool_count == 1);
+}
+
+// ============================================================================
+// Cross-unit head sharing (multiACE: an ACE feeds a head the U1 already owns)
+// ============================================================================
+
+TEST_CASE("SystemToolLayout: a unit feeding an already-owned head shares its nozzle",
+          "[ams][tool_layout][multiace]") {
+    // Snapmaker U1 + multiACE in head mode. Unit 0 is the four toolheads; unit 1
+    // is an ACE whose four bays all feed head 3. The ACE is a SOURCE for T3, not
+    // a fifth head — before this, the overview drew five nozzles and labelled T3
+    // twice on a four-head machine.
+    AmsSystemInfo info;
+    info.type = AmsType::MULTIACE;
+
+    AmsUnit u1;
+    u1.unit_index = 0;
+    u1.slot_count = 4;
+    u1.topology = PathTopology::PARALLEL;
+    for (int s = 0; s < 4; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = s;
+        slot.mapped_tool = s;
+        slot.extruder_name = (s == 0) ? "extruder" : ("extruder" + std::to_string(s));
+        u1.slots.push_back(slot);
+    }
+    info.units.push_back(u1);
+
+    AmsUnit ace;
+    ace.unit_index = 1;
+    ace.slot_count = 4;
+    ace.first_slot_global_index = 4;
+    ace.topology = PathTopology::HUB; // head mode: four bays, one head
+    for (int s = 0; s < 4; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = 4 + s;
+        slot.mapped_tool = 3; // every bay feeds T3
+        ace.slots.push_back(slot);
+    }
+    info.units.push_back(ace);
+    info.total_slots = 8;
+
+    auto layout = compute_system_tool_layout(info, nullptr);
+
+    CHECK(layout.total_physical_tools == 4); // four heads, not five
+    REQUIRE(layout.units.size() == 2);
+    CHECK(layout.units[1].first_physical_tool == 3); // the ACE points AT T3
+    CHECK(layout.units[1].tool_count == 1);
+    CHECK(layout.virtual_to_physical.at(3) == 3);
+}
+
+TEST_CASE("SystemToolLayout: multi mode shares every head with the U1",
+          "[ams][tool_layout][multiace]") {
+    // The same rig with the ACE in multi mode: bay s feeds head s. All four
+    // heads are already owned, so the ACE still adds no nozzles.
+    AmsSystemInfo info;
+    info.type = AmsType::MULTIACE;
+
+    for (int u = 0; u < 2; ++u) {
+        AmsUnit unit;
+        unit.unit_index = u;
+        unit.slot_count = 4;
+        unit.first_slot_global_index = u * 4;
+        unit.topology = PathTopology::PARALLEL;
+        for (int s = 0; s < 4; ++s) {
+            SlotInfo slot;
+            slot.slot_index = s;
+            slot.global_index = u * 4 + s;
+            slot.mapped_tool = s;
+            if (u == 0) {
+                slot.extruder_name = (s == 0) ? "extruder" : ("extruder" + std::to_string(s));
+            }
+            unit.slots.push_back(slot);
+        }
+        info.units.push_back(unit);
+    }
+    info.total_slots = 8;
+
+    auto layout = compute_system_tool_layout(info, nullptr);
+
+    CHECK(layout.total_physical_tools == 4);
+    CHECK(layout.units[1].first_physical_tool == 0);
+    CHECK(layout.units[1].tool_count == 4);
+}
+
+TEST_CASE("SystemToolLayout: a unit adding a new head still allocates",
+          "[ams][tool_layout][multiace]") {
+    // The guard that keeps ordinary multi-unit rigs untouched: unit 1 feeds one
+    // head unit 0 owns AND one it does not, so it is not purely a source and
+    // must allocate for the new head rather than silently sharing.
+    AmsSystemInfo info;
+    info.type = AmsType::AFC;
+
+    AmsUnit a;
+    a.unit_index = 0;
+    a.slot_count = 2;
+    a.topology = PathTopology::PARALLEL;
+    for (int s = 0; s < 2; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = s;
+        slot.mapped_tool = s; // heads 0, 1
+        a.slots.push_back(slot);
+    }
+    info.units.push_back(a);
+
+    AmsUnit b;
+    b.unit_index = 1;
+    b.slot_count = 2;
+    b.first_slot_global_index = 2;
+    b.topology = PathTopology::PARALLEL;
+    for (int s = 0; s < 2; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = 2 + s;
+        slot.mapped_tool = 1 + s; // head 1 (shared) and head 2 (new)
+        b.slots.push_back(slot);
+    }
+    info.units.push_back(b);
+    info.total_slots = 4;
+
+    auto layout = compute_system_tool_layout(info, nullptr);
+
+    CHECK(layout.total_physical_tools == 4); // 2 + 2, allocated as before
+}
+
+// ============================================================================
+// feeds_mask: which of its nozzles a unit actually supplies
+// ============================================================================
+
+namespace {
+/// A backend that answers only the two questions the mask needs: which slots
+/// are owned by another unit, and each unit's topology.
+class OwnedHeadsBackend : public AmsBackendMock {
+  public:
+    OwnedHeadsBackend() : AmsBackendMock(4) {}
+    std::map<int, int> owner_of; ///< global slot -> owning unit index
+    std::vector<PathTopology> topo;
+
+    [[nodiscard]] std::optional<int> slot_identity_owner_unit(int slot_index) const override {
+        auto it = owner_of.find(slot_index);
+        return it == owner_of.end() ? std::nullopt : std::optional<int>(it->second);
+    }
+    [[nodiscard]] PathTopology get_unit_topology(int unit_index) const override {
+        return unit_index >= 0 && unit_index < static_cast<int>(topo.size())
+                   ? topo[static_cast<size_t>(unit_index)]
+                   : PathTopology::PARALLEL;
+    }
+};
+
+/// U1 (four heads) plus `ace_count` head-mode ACEs; ACE k feeds head fed[k].
+AmsSystemInfo u1_with_aces(const std::vector<int>& fed) {
+    AmsSystemInfo info;
+    info.type = AmsType::MULTIACE;
+    AmsUnit u1;
+    u1.unit_index = 0;
+    u1.slot_count = 4;
+    u1.topology = PathTopology::PARALLEL;
+    for (int s = 0; s < 4; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = s;
+        slot.mapped_tool = s;
+        u1.slots.push_back(slot);
+    }
+    info.units.push_back(u1);
+    int next = 4;
+    for (size_t k = 0; k < fed.size(); ++k) {
+        AmsUnit ace;
+        ace.unit_index = static_cast<int>(k) + 1;
+        ace.slot_count = 4;
+        ace.first_slot_global_index = next;
+        ace.topology = PathTopology::HUB;
+        for (int s = 0; s < 4; ++s) {
+            SlotInfo slot;
+            slot.slot_index = s;
+            slot.global_index = next++;
+            slot.mapped_tool = fed[k];
+            ace.slots.push_back(slot);
+        }
+        info.units.push_back(ace);
+    }
+    info.total_slots = next;
+    return info;
+}
+} // namespace
+
+TEST_CASE("SystemToolLayout: feeds_mask clears the nozzles a unit does not supply",
+          "[ams][tool_layout][multiace]") {
+    // The U1 owns four heads; an ACE bound to head 3 supplies it. The U1's mask
+    // must drop bit 3 -- otherwise the overview draws a U1 feeder line AND the
+    // ACE's line to one nozzle, saying two things feed it -- while the ACE, a
+    // source for its own bays, keeps its one bit.
+    OwnedHeadsBackend backend;
+    backend.topo = {PathTopology::PARALLEL, PathTopology::HUB};
+    backend.owner_of[3] = 1; // head 3's identity belongs to the ACE (unit 1)
+    const auto info = u1_with_aces({3});
+
+    auto layout = compute_system_tool_layout(info, &backend);
+    REQUIRE(layout.units.size() == 2);
+    CHECK(layout.units[0].feeds_mask == 0b0111u);
+    CHECK(layout.units[1].feeds_mask == 0b1u);
+}
+
+TEST_CASE("SystemToolLayout: a unit feeding NONE of its heads gets a mask of 0",
+          "[ams][tool_layout][multiace]") {
+    // Four ACEs, one per head: the U1 supplies nothing. 0 is the true answer
+    // and must be delivered as such -- the canvas used to read 0 as "unset"
+    // and drew every U1 feeder line, the exact double-feed the mask prevents.
+    OwnedHeadsBackend backend;
+    backend.topo = {PathTopology::PARALLEL, PathTopology::HUB, PathTopology::HUB, PathTopology::HUB,
+                    PathTopology::HUB};
+    for (int h = 0; h < 4; ++h) {
+        backend.owner_of[h] = h + 1;
+    }
+    const auto info = u1_with_aces({0, 1, 2, 3});
+
+    auto layout = compute_system_tool_layout(info, &backend);
+    REQUIRE(layout.units.size() == 5);
+    CHECK(layout.units[0].feeds_mask == 0u);
+    for (size_t k = 1; k < 5; ++k) {
+        INFO("ACE unit " << k);
+        CHECK(layout.units[k].feeds_mask == 0b1u);
+    }
+}
+
+TEST_CASE("SystemToolLayout: feeds_mask is all-set with no backend or no ownership",
+          "[ams][tool_layout]") {
+    // Every ordinary system: nothing is owned elsewhere, every nozzle a unit
+    // has it also feeds.
+    const auto info = u1_with_aces({3});
+    auto layout = compute_system_tool_layout(info, nullptr);
+    REQUIRE(layout.units.size() == 2);
+    CHECK(layout.units[0].feeds_mask == 0b1111u);
+    CHECK(layout.units[1].feeds_mask == 0b1u);
+
+    OwnedHeadsBackend backend;
+    backend.topo = {PathTopology::PARALLEL, PathTopology::HUB};
+    layout = compute_system_tool_layout(info, &backend);
+    CHECK(layout.units[0].feeds_mask == 0b1111u);
 }

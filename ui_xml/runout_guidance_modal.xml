@@ -81,16 +81,19 @@
                   text="Manual" translation_tag="Manual" style_text_color="#text_muted" style_text_align="left"/>
     </lv_obj>
     <!-- ACTION BUTTONS ROW - horizontal, beneath message. Prominent on basic
-         sensors (autofeed==0). On autofeed backends (autofeed==1) Resume alone
-         recovers the runout, so the manual Load/Unload/Purge row is hidden
-         entirely and the dialog reduces to message + Cancel/Resume (#991). -->
+         sensors (autofeed==0). On an autofeed backend Resume normally reloads by
+         itself, so the row is noise there - except while PAUSED, below. -->
     <lv_obj name="manual_action_row"
             width="100%" height="content" style_pad_all="#space_lg" style_pad_top="#space_sm" flex_flow="row"
             style_flex_main_place="space_between" style_pad_gap="#space_sm">
-      <!-- Hidden when the backend recovers on Resume (autofeed), and while a
-           print is actively running - Load/Unload/Purge mid-print destroys the
-           print. Paused (2) deliberately keeps them: that is the runout case. -->
-      <bind_flag_if cond="runout_autofeed_capable eq 1 or print_state_enum eq 1" flag="hidden"/>
+      <!-- PRINTING (1) always hides these: Load/Unload/Purge mid-print destroys
+           the print. PAUSED (2) always shows them, autofeed or not - a paused
+           runout is the one state where the user may have to load by hand, and
+           an autofeed Resume that the firmware declines to carry out leaves no
+           other way to recover. AmsSubscriptionBackend::refuse_if_printing()
+           permits the op there, so the buttons are not offered into a refusal. -->
+      <bind_flag_if cond="(runout_autofeed_capable eq 1 and print_state_enum ne 2) or print_state_enum eq 1"
+                    flag="hidden"/>
       <!-- Load button (wired programmatically by RunoutGuidanceModal::on_show → wire_ok_button) -->
       <ui_button name="btn_load_filament" flex_grow="1" icon="arrow_down" text="Load" translation_tag="Load"/>
       <!-- Unload button (wired programmatically by RunoutGuidanceModal::on_show → wire_quaternary_button) -->

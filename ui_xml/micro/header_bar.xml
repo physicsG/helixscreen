@@ -101,8 +101,12 @@
                width="$action_button_width" height="$action_button_height" style_radius="$action_button_radius"
                style_bg_color="$action_button_bg_color" hidden="$hide_action_button" icon="$action_button_icon"
                icon_size="$action_button_icon_size" text="$action_button_text" translation_tag="$action_button_text_tag">
-      <!-- Expression-driven disabled binding. Must precede the subject binding below;
-           see the action_button_disabled_cond prop comment in the base header_bar. -->
+      <!-- STATE_BINDING_OK: a caller supplies EITHER action_button_disabled_cond
+           OR action_button_disabled_subject, never both, and the unused one
+           defaults to a constant that fires once at bind and never again. This
+           expression form must precede the subject binding so the subject form
+           wins when it is the one in use; see the prop comment in the base
+           header_bar. -->
       <bind_state_if cond="$action_button_disabled_cond" state="disabled"/>
       <!-- Reactive disabled state binding (enabled when subject exists and is non-empty) -->
       <bind_state_if_eq subject="$action_button_disabled_subject" state="disabled" ref_value="1"/>

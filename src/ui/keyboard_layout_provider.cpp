@@ -314,6 +314,61 @@ static const lv_buttonmatrix_ctrl_t kb_ctrl_numbers_symbols[] = {
                                         LV_BUTTONMATRIX_CTRL_CUSTOM_1 | 3) // Enter
 };
 
+// Numeric keypad — what keyboard_hint="numeric" gets.
+//
+// A 3x3 pad with an action column, not the ?123 page: that one is reachable
+// from the alpha keyboard and carries a full symbol set, which is noise in a
+// field that can only hold a number. Every numeric-hint field in the tree is
+// genuinely numeric (port, temperatures, weights, prices, probe offsets), so
+// there is deliberately no route to letters — a field needing them has the
+// wrong hint.
+//
+// Moved here from ui_keyboard_manager.cpp, where it was registered against
+// LVGL's LV_KEYBOARD_MODE_NUMBER but never actually displayed: nothing ever
+// called lv_keyboard_set_mode() with that mode, because the manager drives the
+// button matrix directly. Two things had therefore never been exercised and are
+// fixed here — every non-printing key now carries CUSTOM_1 (this codebase's
+// marker; LV_KEYBOARD_CTRL_BUTTON_FLAGS does NOT include it, so without it the
+// keys insert their raw icon bytes as text), and the four keys the manager had
+// no handler for now have one.
+static const char* const kb_map_numeric[] = {
+    "1", "2", "3", ICON_KEYBOARD_CLOSE, "\n", "4", "5", "6", ICON_CHECK, "\n", "7", "8", "9",
+    ICON_BACKSPACE, "\n",
+    // Sign toggle and cursor keys: probe offsets go negative, and a numeric
+    // field with no arrows can only be corrected by deleting back to the typo.
+    "+/-", "0", ".", ICON_CHEVRON_LEFT, ICON_CHEVRON_RIGHT, ""};
+
+// Widths are relative WITHIN a row and the field is only 4 bits
+// (LV_BUTTONMATRIX_WIDTH_MASK = 0x000F) — anything above 15 overflows into the
+// flag bits and silently corrupts the control word.
+static const lv_buttonmatrix_ctrl_t kb_ctrl_numeric[] = {
+    // Row 1: 1 2 3 + Close
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_KEYBOARD_CTRL_BUTTON_FLAGS |
+                                        LV_BUTTONMATRIX_CTRL_CUSTOM_1 | 2),
+    // Row 2: 4 5 6 + Confirm
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_KEYBOARD_CTRL_BUTTON_FLAGS |
+                                        LV_BUTTONMATRIX_CTRL_CUSTOM_1 | 2),
+    // Row 3: 7 8 9 + Backspace
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_CHECKED |
+                                        LV_BUTTONMATRIX_CTRL_CUSTOM_1 | 2),
+    // Row 4: +/- 0 . + cursor left/right
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_CUSTOM_1 | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_CHECKED |
+                                        LV_BUTTONMATRIX_CTRL_CUSTOM_1 | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_CHECKED |
+                                        LV_BUTTONMATRIX_CTRL_CUSTOM_1 | 1)};
+
 // Alternative symbols layout (#+= mode, 4 rows)
 // Provides additional ASCII symbols and extended Unicode characters
 static const char* const kb_map_alt_symbols[] = {
@@ -423,6 +478,8 @@ const char* const* keyboard_layout_get_map(keyboard_layout_mode_t mode, bool cap
         return kb_map_numbers_symbols;
     case KEYBOARD_LAYOUT_ALT_SYMBOLS:
         return kb_map_alt_symbols;
+    case KEYBOARD_LAYOUT_NUMERIC:
+        return kb_map_numeric;
     default:
         return kb_map_alpha_lc; // Fallback to lowercase
     }
@@ -439,6 +496,8 @@ const lv_buttonmatrix_ctrl_t* keyboard_layout_get_ctrl_map(keyboard_layout_mode_
         return kb_ctrl_numbers_symbols;
     case KEYBOARD_LAYOUT_ALT_SYMBOLS:
         return kb_ctrl_alt_symbols;
+    case KEYBOARD_LAYOUT_NUMERIC:
+        return kb_ctrl_numeric;
     default:
         return kb_ctrl_alpha_lc; // Fallback to lowercase
     }

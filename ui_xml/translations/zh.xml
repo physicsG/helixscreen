@@ -209,6 +209,10 @@
   <translation tag="Auto-Detect" zh="自动检测"/>
   <translation tag="Auto-Heat on Load" zh="加载时自动加热"/>
   <translation tag="Auto-detect" zh="自动检测"/>
+  <translation tag="Auto-dry" zh="自动烘干"/>
+  <translation tag="Auto-dry off" zh="自动烘干已关闭"/>
+  <translation tag="Auto-dry on" zh="自动烘干已开启"/>
+  <translation tag="Auto-dry unchanged" zh="自动烘干未更改"/>
   <translation tag="Auto-install only works on local Moonraker" zh="自动安装仅适用于本地 Moonraker"/>
   <translation tag="Auto-lock" zh="自动锁定"/>
   <translation tag="Auto-poll for weight updates" zh="自动轮询重量更新"/>
@@ -601,6 +605,7 @@
   <translation tag="Could not save filament" zh="无法保存耗材"/>
   <translation tag="Could not start Bluetooth discovery" zh="无法启动蓝牙发现"/>
   <translation tag="Could not update filaments" zh="无法更新耗材"/>
+  <translation tag="Could not update slot" zh="无法更新槽位"/>
   <translation tag="Could not verify Spoolman status. Moonraker may still be restarting." zh="无法验证 Spoolman 状态。Moonraker 可能仍在重启中。"/>
   <translation tag="Couldn&apos;t update Spoolman — saved locally" zh="无法更新 Spoolman — 已保存在本地"/>
   <translation tag="Cover open" zh="盖子未关闭"/>
@@ -725,6 +730,7 @@
   <translation tag="Downloading..." zh="下载中..."/>
   <translation tag="Downloading... {:.1f}/{:.1f} MB" zh="下载中... {:.1f}/{:.1f} MB"/>
   <translation tag="Draw a ripple at each touch — helps diagnose offsets" zh="在每次触摸时绘制涟漪 — 有助于诊断偏移"/>
+  <translation tag="Dries above %d%%, stops below %d%%" zh="高于 %d%% 时烘干，低于 %d%% 时停止"/>
   <translation tag="Drive Cal" zh="驱动校准"/>
   <translation tag="Drop shadow strength (0 = disabled)" zh="阴影强度（0 = 禁用）"/>
   <translation tag="Drying" zh="烘干中"/>
@@ -1042,6 +1048,7 @@
   <translation tag="Flying Toasters" zh="飞行烤面包机"/>
   <translation tag="Follow active tool" zh="跟随当前工具"/>
   <translation tag="Follow graph screen" zh="跟随图表屏幕"/>
+  <translation tag="Follows unit %d" zh="跟随单元 %d"/>
   <translation tag="Forget" zh="忘记"/>
   <translation tag="Forget Network?" zh="忘记网络？"/>
   <translation tag="Forget network &apos;{}&apos;? You will need the password to reconnect." zh="忘记网络 &apos;{}&apos;？重新连接时需要密码。"/>
@@ -1668,6 +1675,7 @@
   <translation tag="Open color and brightness controls" zh="打开颜色和亮度控制"/>
   <translation tag="Open feeder" zh="打开送料器"/>
   <translation tag="Open feeder macro" zh="打开送料器宏"/>
+  <translation tag="Open in ACE" zh="在 ACE 中打开"/>
   <translation tag="Open motion controls for jogging" zh="打开手动移动控制"/>
   <translation tag="Operation already in progress" zh="操作正在进行中"/>
   <translation tag="Operations" zh="操作"/>
@@ -2588,6 +2596,7 @@
   <translation tag="Toolhead LED" zh="工具头 LED"/>
   <translation tag="Toolhead Sensor" zh="工具头传感器"/>
   <translation tag="Toolhead Style" zh="工具头样式"/>
+  <translation tag="Toolhead command failed" zh="工具头命令失败"/>
   <translation tag="Toolhead jam" zh="工具头堵塞"/>
   <translation tag="Toolhead, G-code, limits, and materials" zh="打印头、G代码、限制和材料"/>
   <translation tag="Tools Used" zh="已使用工具"/>

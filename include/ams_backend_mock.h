@@ -84,6 +84,15 @@ class AmsBackendMock : public AmsBackend {
      *
      * Scoped to tool-changer mode: the mock also stands in for lane-based systems,
      * where the inherited LOADED-status rule is the correct one.
+     *
+     * Snapmaker/multiACE answer separately, and are not tool_changer_mode_: only
+     * a HEAD can be unloaded from the toolhead, exactly as AmsBackendSnapmaker
+     * answers (false for every index >= NUM_TOOLS). Multiace mode is PARALLEL, so
+     * under the base rule every filled ACE bay read "already at the toolhead" —
+     * the slot menu greyed Load on all four bays of an ACE and offered Unload on
+     * all four. Real hardware does neither, so the one scenario the mock exists
+     * to exercise — swapping bays on an ACE-fed head — could not be reached in
+     * `--test` at all.
      */
     [[nodiscard]] bool can_unload_from_toolhead(int slot_index) const override;
 
@@ -598,6 +607,41 @@ class AmsBackendMock : public AmsBackend {
      */
     void set_snapmaker_mode(bool enabled);
 
+    /// Simulate a U1 with TWO ACE units, one bound to each of the first two
+    /// heads. The shape the real rig cannot show on one machine: heads 0 and 1
+    /// ACE-fed (so each draws its feeder's four bays), heads 2 and 3 on their
+    /// stock feeders. Exercises the presentation an ACE-fed position gets —
+    /// bars, a spool-number range, no tool badge, no Load — without a printer.
+    void set_multiace_mode(bool enabled);
+
+    /// In multiace mode heads 0 and 1 are fed by ACE 1 and ACE 2, so their
+    /// spool identity belongs to that unit — exactly as AmsBackendMultiAce
+    /// reports for the real thing. Every other mode answers nullopt, which is
+    /// the base behaviour.
+    [[nodiscard]] std::optional<int> slot_identity_owner_unit(int slot_index) const override;
+    [[nodiscard]] std::optional<int> slot_identity_owner_slot(int slot_index) const override;
+
+    /// Mounting the head an ACE bay feeds moves the carriage and feeds nothing,
+    /// so `T{n}` is not that bay's load — exactly as AmsBackendMultiAce answers.
+    ///
+    /// Without this the mock kept the base's blanket `true`, and plan_load()'s
+    /// swap arm substituted `change_tool(mapped_tool)` for the bay's load. Every
+    /// bay of ACE 1 maps to tool 0, so a bay swap dispatched a tool change the
+    /// mock then refused as out of range — reachable only once the bay gating
+    /// above was corrected, which is how it stayed hidden.
+    [[nodiscard]] bool change_tool_completes_load(int slot_index) const override;
+
+    /// Mirror the real backends' step models so the step bar under test is the
+    /// one that ships.
+    ///
+    /// The mock never overrode this, so every mocked backend fell through to the
+    /// sidebar's legacy coarse bar (Heat → [tip] → Feed/Retract). An unload on a
+    /// mocked U1 rendered two steps where the real one renders four, and the
+    /// firmware-phase bar — including the multiACE swap model this exists to
+    /// show — had no mock representation whatsoever.
+    [[nodiscard]] OperationStepModel get_operation_step_model(StepOperationType op) const override;
+    [[nodiscard]] lv_subject_t* get_operation_step_index_subject(StepOperationType op) override;
+
     /**
      * @brief Configure (or clear) the simulated Snapmaker print task.
      *
@@ -778,6 +822,15 @@ class AmsBackendMock : public AmsBackend {
      */
     void set_action(AmsAction action, const std::string& detail);
 
+    /// Publish a U1 firmware phase id (AmsBackendSnapmaker::*_PHASE_BASE + n)
+    /// while a mocked Snapmaker/multiACE operation runs. No-op in every other
+    /// mock mode, which has no phase model and uses the coarse AmsAction bar.
+    void set_operation_phase(int phase);
+
+    /// Walk the unload half + the ACE-side fetch of a multiACE bay swap.
+    /// Returns false if the operation was cancelled partway.
+    bool run_multiace_swap_prologue(InterruptibleSleep interruptible_sleep);
+
     /**
      * @brief Execute load operation with optional multi-phase sequence
      * @param slot_index Slot being loaded from
@@ -890,6 +943,20 @@ class AmsBackendMock : public AmsBackend {
     bool htlf_toolchanger_mode_ = false; ///< Simulate HTLF + Toolchanger mixed topology
     bool torture_mode_ = false;          ///< Simulate 5 units / 16 lanes / 4 shared extruders
     bool snapmaker_mode_ = false; ///< Simulate Snapmaker U1 (4 slots, PARALLEL, non-editable)
+    bool multiace_mode_ = false;  ///< Simulate a U1 with two ACE units (see set_multiace_mode)
+    /// Which ACE bay is seated at each U1 head in multiace mode, -1 = none.
+    /// Drives slot_identity_owner_slot(), so the head and its bay share one
+    /// spool number instead of each consuming one.
+    std::array<int, 4> multiace_seated_{{-1, -1, -1, -1}};
+
+    /// The head the last multiace load/unload targeted, or -1.
+    ///
+    /// Mirrors AmsBackendMultiAce::op_target_head_ and exists for the same
+    /// reason: get_operation_step_model() takes no slot, and `current_slot` is
+    /// not the head — after a bay load the mock sets it to the BAY's global
+    /// index, so keying the swap model off it picked the plain load model for
+    /// every swap after the first.
+    int multiace_op_head_ = -1;
     /// Declared remap route outside Snapmaker mode. Native by default: every
     /// non-Snapmaker mode stands in for a table-owning backend.
     RemapStrategy remap_strategy_ = RemapStrategy::Native;

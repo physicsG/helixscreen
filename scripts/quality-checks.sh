@@ -334,6 +334,30 @@ else
   echo "⚠️  check_duplicate_xml_names.py not found — skipping"
 fi
 
+# One widget state, one binding. Two <bind_state_if_*> on the same state do not
+# compose into an OR — each asserts both polarities when its own subject moves,
+# so the last one to fire wins and a false condition clears what another set.
+echo "🎚️  Checking for conflicting XML state bindings..."
+
+if [ -f "scripts/check_state_binding_conflicts.py" ]; then
+  if [ "$STAGED_ONLY" = true ]; then
+    STATE_BIND_ARGS="--staged-only"
+  else
+    STATE_BIND_ARGS=""
+  fi
+  # shellcheck disable=SC2086
+  if python3 scripts/check_state_binding_conflicts.py $STATE_BIND_ARGS --summary \
+      >/tmp/state_binding_conflicts.out 2>&1; then
+    cat /tmp/state_binding_conflicts.out
+  else
+    cat /tmp/state_binding_conflicts.out
+    echo "   Run: python3 scripts/check_state_binding_conflicts.py --list"
+    EXIT_CODE=1
+  fi
+else
+  echo "⚠️  check_state_binding_conflicts.py not found — skipping"
+fi
+
 echo ""
 
 # ====================================================================
@@ -1625,7 +1649,14 @@ if [ -f "scripts/check_namespace_compliance.py" ]; then
   # counted there, and ui_gcode_viewer_clear_tool_colors and
   # ui_gcode_viewer_get_tool_colors (declaration + definition each), two more of
   # the same global ui_gcode_viewer_* C-API family.
-  if python3 scripts/check_namespace_compliance.py --max-allowed 2334 --summary >/tmp/namespace_check.out 2>&1; then
+  #
+  # 2334 -> 2277: `ams_draw` is now nested as helix::ams_draw, which retires all
+  # 73 of its foreign-ns declarations at once (46 in the header, 27 in the .cpp).
+  # A global `namespace ams_draw = helix::ams_draw;` alias keeps the ~230 short
+  # call sites spelling it the same way, so nothing outside those two files
+  # moved. That absorbed the multiACE branch's own six additions to that header
+  # rather than baselining them.
+  if python3 scripts/check_namespace_compliance.py --max-allowed 2277 --summary >/tmp/namespace_check.out 2>&1; then
     section_time $SECTION_START
     echo ""
     tail -1 /tmp/namespace_check.out

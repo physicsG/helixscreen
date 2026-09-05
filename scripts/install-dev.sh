@@ -28,11 +28,11 @@ set -eu
 # non-standard tool still resolves as a fallback.
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-# Configuration
+# Configuration. Soft assignments so the environment wins (see bundle-installer.sh).
 # shellcheck disable=SC2034  # consumed by lib/installer/common.sh and release.sh (sourced below)
-GITHUB_REPO="prestonbrown/helixscreen"
+: "${GITHUB_REPO:=prestonbrown/helixscreen}"
 # shellcheck disable=SC2034  # consumed by lib/installer/common.sh, service.sh, uninstall.sh (sourced below)
-SERVICE_NAME="helixscreen"
+: "${SERVICE_NAME:=helixscreen}"
 
 # Source modules (if running from repo, not bundled)
 if [ -z "${_HELIX_BUNDLED_INSTALLER:-}" ]; then

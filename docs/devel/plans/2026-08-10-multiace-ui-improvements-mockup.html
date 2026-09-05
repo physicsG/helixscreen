@@ -1,0 +1,679 @@
+<title>HelixScreen — multiACE UI improvements (4 changes)</title>
+
+<style>
+/* ===================================================================
+   Companion to 2026-08-09-multiace-mockup.html. Same two palettes:
+   the FRAME (this memo) is deliberately not HelixScreen's, so the
+   device screens read as "the product" and everything else as "the
+   page about the product". Tokens copied verbatim so the two
+   documents sit side by side without a seam.
+   =================================================================== */
+:root {
+  --ground:    #F6F5F8;
+  --ground-2:  #ECEAF1;
+  --ink:       #1B1A21;
+  --ink-2:     #4A4856;
+  --muted:     #6E6C7C;
+  --rule:      #DCDAE4;
+  --rule-soft: #E8E6EE;
+  --accent:    #1F7F8C;
+  --accent-dim:#8FC6CE;
+  --bad:       #B5322E;
+  --good:      #3E7F41;
+  --bench:     #17161C;
+
+  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", "Roboto Mono",
+          Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+
+  --measure: 68ch;
+  --pad: clamp(1.25rem, 4vw, 3rem);
+
+  /* device palette — HelixScreen's own dark theme */
+  --d-screen:   #19191C;
+  --d-card:     #202023;
+  --d-elevated: #4A4A52;
+  --d-border:   #36363C;
+  --d-text:     #E8E8EC;
+  --d-muted:    #B8B8C0;
+  --d-subtle:   #787882;
+  --d-primary:  #3A7CC8;
+  --d-success:  #5CB85C;
+  --d-warning:  #E8A83A;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground:#111015; --ground-2:#191821; --ink:#EAE9EF; --ink-2:#B9B7C6;
+    --muted:#8E8C9A; --rule:#2C2A36; --rule-soft:#23212C;
+    --accent:#6FC6D2; --accent-dim:#2E5F67; --bad:#E4736F; --good:#7FC182;
+    --bench:#0B0A0E;
+  }
+}
+:root[data-theme="dark"] {
+  --ground:#111015; --ground-2:#191821; --ink:#EAE9EF; --ink-2:#B9B7C6;
+  --muted:#8E8C9A; --rule:#2C2A36; --rule-soft:#23212C;
+  --accent:#6FC6D2; --accent-dim:#2E5F67; --bad:#E4736F; --good:#7FC182;
+  --bench:#0B0A0E;
+}
+:root[data-theme="light"] {
+  --ground:#F6F5F8; --ground-2:#ECEAF1; --ink:#1B1A21; --ink-2:#4A4856;
+  --muted:#6E6C7C; --rule:#DCDAE4; --rule-soft:#E8E6EE;
+  --accent:#1F7F8C; --accent-dim:#8FC6CE; --bad:#B5322E; --good:#3E7F41;
+  --bench:#17161C;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--ground); color: var(--ink);
+  font-family: var(--sans); font-size: 16px; line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: var(--pad); }
+
+h1 { font-size: clamp(1.7rem, 3.6vw, 2.5rem); line-height: 1.15; margin: 0 0 .5rem;
+     letter-spacing: -0.02em; text-wrap: balance; }
+h2 { font-size: clamp(1.15rem, 2vw, 1.4rem); margin: 0; letter-spacing: -0.01em;
+     text-wrap: balance; }
+h3 { font-size: 0.98rem; margin: 0 0 .35rem; letter-spacing: -0.005em; }
+p  { margin: 0 0 .9rem; max-width: var(--measure); color: var(--ink-2); }
+strong { color: var(--ink); }
+code { font-family: var(--mono); font-size: 0.88em; background: var(--ground-2);
+       padding: 0.1em 0.36em; border-radius: 3px; color: var(--ink); }
+
+.lede { font-size: 1.06rem; color: var(--ink-2); max-width: var(--measure); }
+.eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em;
+           text-transform: uppercase; color: var(--muted); }
+
+header.page { border-bottom: 1px solid var(--rule); padding-bottom: 1.6rem; margin-bottom: 2rem; }
+.meta { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: .8rem; }
+
+section { padding: 2.2rem 0; border-bottom: 1px solid var(--rule-soft); }
+section:last-of-type { border-bottom: 0; }
+.sec-head { display: flex; align-items: baseline; gap: .8rem; margin-bottom: .5rem; }
+/* The numbers are the four asks, in the order they were given — a real
+   list, so numbering them is information rather than ornament. */
+.tick { font-family: var(--mono); font-size: 12px; color: var(--accent);
+        border: 1px solid var(--accent-dim); border-radius: 3px;
+        padding: .1rem .42rem; flex: none; }
+
+/* ------------------------------ bench ------------------------------ */
+.bench {
+  background: var(--bench); border-radius: 8px; padding: 1.3rem;
+  margin: 1.2rem 0 .8rem; overflow-x: auto;
+  display: flex; gap: 1.4rem; align-items: flex-start;
+}
+.ba-item { display: flex; flex-direction: column; gap: .5rem; flex: none; }
+.ba-tag { font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em;
+          text-transform: uppercase; padding: .12rem .45rem; border-radius: 3px;
+          align-self: flex-start; }
+.ba-tag.bad  { color: #E4736F; border: 1px solid #6A2B29; }
+.ba-tag.good { color: #7FC182; border: 1px solid #2F5A31; }
+.ba-note { font-family: var(--mono); font-size: 11px; color: #8E8C9A;
+           max-width: 480px; line-height: 1.45; }
+.fit { font-family: var(--mono); font-size: 10px; letter-spacing: .08em; }
+.fit.ok { color: #7FC182; } .fit.no { color: #E4736F; }
+
+/* --------------------------- device screen ------------------------- */
+.screen {
+  width: 480px; height: 320px; flex: none;
+  background: var(--d-screen); color: var(--d-text);
+  font-family: var(--sans); font-size: 12px; line-height: 1.3;
+  display: flex; overflow: hidden; position: relative;
+  box-shadow: 0 0 0 1px #000, 0 14px 40px rgba(0,0,0,0.55);
+}
+.screen * { box-sizing: border-box; }
+
+.rail { width: 42px; flex: none; background: var(--d-screen);
+        border-right: 1px solid var(--d-border);
+        display: flex; flex-direction: column; align-items: center;
+        padding: 10px 0; gap: 12px; }
+.rail i { width: 20px; height: 20px; border-radius: 3px;
+          background: var(--d-elevated); display: block; opacity: .55; }
+.rail i.on { background: var(--d-primary); opacity: 1; }
+
+.pane { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--d-card); }
+.p-head { height: 34px; flex: none; display: flex; align-items: center; gap: 7px;
+          padding: 0 9px; border-bottom: 1px solid var(--d-border); }
+.chev { color: var(--d-muted); font-size: 15px; }
+.p-title { font-family: var(--mono); font-size: 11px; letter-spacing: .06em;
+           text-transform: uppercase; color: var(--d-text); }
+.p-main { flex: 1; padding: 7px 8px; display: flex; gap: 6px; min-height: 0; }
+.p-body { flex: 1; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+
+/* right sidebar */
+.side { width: 118px; flex: none; display: flex; flex-direction: column; gap: 5px; }
+.side .lab { font-family: var(--mono); font-size: 9px; color: var(--d-subtle);
+             letter-spacing: .06em; text-transform: uppercase; }
+.side .card { border: 1px solid var(--d-border); border-radius: 4px;
+              background: var(--d-screen); padding: 5px 6px; }
+.btn { border: 1px solid var(--d-border); border-radius: 4px; background: var(--d-screen);
+       color: var(--d-text); font-size: 10px; padding: 5px 6px; text-align: center;
+       font-family: var(--sans); }
+.btn.pri { background: var(--d-primary); border-color: var(--d-primary); color: #fff; }
+.btn.off { color: var(--d-subtle); }
+
+/* head columns */
+.headgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; flex: 1; min-height: 0; }
+.hcol { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.hcap { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .08em;
+        text-align: center; color: var(--d-muted); }
+.hcap.mounted { color: var(--d-success); }
+.seat { border: 1px solid var(--d-border); border-radius: 4px; background: var(--d-screen);
+        padding: 5px 4px; display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.seat.is-mounted { border-color: var(--d-primary); }
+.seat.is-empty { border-style: dashed; }
+.ring { width: 28px; height: 28px; border-radius: 50%;
+        border: 5px solid var(--sw, var(--d-subtle)); background: var(--d-card); flex: none; }
+.ring.is-empty { border-style: dotted; border-color: var(--d-border); }
+.mat { font-size: 10px; font-weight: 600; }
+.src { font-family: var(--mono); font-size: 9px; color: var(--d-muted); letter-spacing: .04em; }
+.src.ace { color: var(--d-primary); }
+.tube { height: 8px; position: relative; flex: none; }
+.tube::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 3px;
+               transform: translateX(-50%); border-radius: 2px; background: var(--sw, var(--d-border)); }
+.tube.dim::after { opacity: .3; }
+.nozzle { width: 20px; height: 16px; margin: 0 auto; flex: none;
+          background: var(--d-elevated); border-radius: 2px 2px 4px 4px; position: relative; }
+.nozzle.lit { background: var(--d-primary); }
+.tbadge { font-family: var(--mono); font-size: 9px; text-align: center; color: var(--d-muted);
+          border: 1px solid var(--d-border); border-radius: 3px; padding: 1px 0; }
+.tbadge.on { color: var(--d-success); border-color: var(--d-success); }
+
+/* the duplicate-nozzle "before" row */
+.flatrow { display: flex; gap: 10px; justify-content: center; align-items: flex-end; flex: 1; }
+.flatcol { display: flex; flex-direction: column; gap: 4px; align-items: center; width: 54px; }
+
+/* unit cards */
+.units { display: flex; gap: 4px; }
+.unit { flex: 1; border: 1px solid var(--d-border); border-radius: 4px; background: var(--d-screen);
+        padding: 3px 4px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.unit.sel { border-color: var(--d-primary); }
+.unit b { font-size: 9px; font-weight: 700; display: block; text-align: center; }
+.unit .env { font-family: var(--mono); font-size: 8px; color: var(--d-muted); text-align: center; }
+.bays { display: flex; gap: 2px; justify-content: center; }
+.bay { width: 8px; height: 16px; border-radius: 2px; background: var(--d-border); }
+.bay.full { background: var(--sw, var(--d-primary)); }
+
+/* combiner view */
+.comb { flex: 1; display: flex; flex-direction: column; align-items: center;
+        justify-content: space-between; padding: 2px 0 0; min-height: 0; }
+.baylane { display: flex; gap: 14px; }
+.lane { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 46px; }
+.lanelab { font-family: var(--mono); font-size: 9px; color: var(--d-muted); }
+.combbox { border: 1px solid var(--d-primary); border-radius: 4px; background: var(--d-screen);
+           padding: 3px 12px; font-family: var(--mono); font-size: 9px; letter-spacing: .08em;
+           color: var(--d-text); }
+.funnel { width: 100%; height: 26px; position: relative; }
+
+/* context menu / sheet */
+.menu { position: absolute; border: 1px solid var(--d-border); border-radius: 5px;
+        background: var(--d-card); box-shadow: 0 8px 22px rgba(0,0,0,.6);
+        padding: 4px; display: flex; flex-direction: column; gap: 2px; min-width: 108px; z-index: 5; }
+.menu .mh { font-family: var(--mono); font-size: 9px; color: var(--d-subtle);
+            letter-spacing: .06em; padding: 2px 5px 3px; border-bottom: 1px solid var(--d-border); }
+.menu .mi { font-size: 10px; padding: 4px 6px; border-radius: 3px; display: flex; gap: 5px; align-items: center; }
+.menu .mi:hover { background: var(--d-screen); }
+.menu .ic { color: var(--d-muted); font-size: 10px; width: 11px; text-align: center; }
+.scrim { position: absolute; inset: 0; background: rgba(0,0,0,.5); z-index: 4; }
+
+.sheet { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+         width: 300px; border: 1px solid var(--d-border); border-radius: 6px;
+         background: var(--d-card); box-shadow: 0 10px 28px rgba(0,0,0,.65);
+         padding: 10px; z-index: 5; display: flex; flex-direction: column; gap: 7px; }
+.sheet h4 { margin: 0; font-size: 11px; letter-spacing: .02em; }
+.sheet p { margin: 0; font-size: 10px; color: var(--d-muted); line-height: 1.45; max-width: none; }
+.sheet .row { display: flex; gap: 6px; justify-content: flex-end; }
+.lock { color: var(--d-warning); }
+
+/* takeaway list */
+.takeaway { border-left: 2px solid var(--accent-dim); padding-left: 1rem; margin: 1rem 0 0;
+            max-width: var(--measure); }
+.takeaway dt { font-weight: 600; font-size: .93rem; margin-top: .7rem; }
+.takeaway dd { margin: .15rem 0 0; color: var(--ink-2); font-size: .93rem; }
+.takeaway dt:first-child { margin-top: 0; }
+
+.themebar { position: fixed; right: 12px; top: 12px; z-index: 20; }
+.themebar button { font-family: var(--mono); font-size: 11px; padding: .3rem .6rem;
+                   background: var(--ground-2); color: var(--ink-2);
+                   border: 1px solid var(--rule); border-radius: 4px; cursor: pointer; }
+.themebar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="themebar"><button type="button" id="themetoggle">theme</button></div>
+
+<div class="wrap">
+
+<header class="page">
+  <span class="eyebrow">Snapmaker U1 + multiACE — design memo</span>
+  <h1>Four fixes to the multi-filament panel</h1>
+  <p class="lede">The multiACE backend landed and the data is right: four U1 heads as unit&nbsp;0,
+  the ACE&nbsp;2&nbsp;Pro as unit&nbsp;1, <code>head_source[3]</code> pointing at bay&nbsp;1. What is
+  left is entirely presentation — the aggregate canvas still draws units side by side, which is
+  how T3 ends up on screen twice. These four changes are the ask, in the order given.</p>
+  <p class="meta">Every screen below is 1:1 at 480&nbsp;&times;&nbsp;320 — the U1's real panel.
+  Measured in your browser on load and labelled <span class="fit ok">fits</span> or
+  <span class="fit no">overflows</span>; nothing here is taken on trust.
+  Companion to <code>2026-08-09-multiace-mockup.html</code>.</p>
+</header>
+
+
+<!-- ============================== 1 ============================== -->
+<section>
+  <div class="sec-head"><span class="tick">1</span><h2>T3 appears once</h2></div>
+  <p>In head mode one ACE binds to one head, so all four of its bays map to T3. The aggregate
+  canvas lays units out left to right and gives each its own nozzle row — so T3 is drawn twice
+  and the panel claims five toolheads on a four-head machine. The fix is to group every slot in
+  the system by <code>mapped_tool</code> and render the ACE bays as a <em>stack behind</em> the
+  head they feed, which is the head-major layout the plan already calls Phase&nbsp;3.</p>
+
+  <div class="bench">
+    <div class="ba-item">
+      <span class="ba-tag bad">now</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">Multi-Filament Overview</span></div>
+          <div class="p-main">
+            <div class="p-body">
+              <div class="units">
+                <div class="unit"><b>SnapSwap</b><div class="bays"><span class="bay"></span><span class="bay"></span><span class="bay"></span><span class="bay full" style="--sw:#5B8FD4"></span></div><span class="env">4 slots</span></div>
+                <div class="unit"><b>ACE 2 Pro</b><div class="bays"><span class="bay full" style="--sw:#5B8FD4"></span><span class="bay"></span><span class="bay"></span><span class="bay"></span></div><span class="env">31&deg;C &nbsp;35%</span></div>
+              </div>
+              <div class="flatrow">
+                <div class="flatcol"><div class="tube dim"></div><div class="nozzle"></div><div class="tbadge">T0</div></div>
+                <div class="flatcol"><div class="tube dim"></div><div class="nozzle"></div><div class="tbadge">T1</div></div>
+                <div class="flatcol"><div class="tube dim"></div><div class="nozzle"></div><div class="tbadge">T2</div></div>
+                <div class="flatcol"><div class="tube" style="--sw:#5B8FD4"></div><div class="nozzle lit"></div><div class="tbadge on">T3</div></div>
+                <div class="flatcol"><div class="tube" style="--sw:#5B8FD4"></div><div class="nozzle lit"></div><div class="tbadge on">T3</div></div>
+              </div>
+            </div>
+            <div class="side">
+              <span class="lab">Currently loaded</span>
+              <div class="card"><span class="src">&mdash;&mdash;&mdash;</span></div>
+              <div class="btn off">Unload</div>
+              <div class="btn pri">Reset</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">Five nozzles, T3 twice. The second one is the ACE unit's own row —
+      correct data, drawn as if it were a fifth physical head.</p>
+    </div>
+
+    <div class="ba-item">
+      <span class="ba-tag good">proposed</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">Multi-Filament Overview</span></div>
+          <div class="p-main">
+            <div class="p-body">
+              <div class="headgrid">
+                <div class="hcol">
+                  <div class="hcap">T0</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">feeder</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div>
+                </div>
+                <div class="hcol">
+                  <div class="hcap">T1</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">feeder</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div>
+                </div>
+                <div class="hcol">
+                  <div class="hcap">T2</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">feeder</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div>
+                </div>
+                <div class="hcol">
+                  <div class="hcap mounted">T3</div>
+                  <div class="seat is-mounted"><div class="ring" style="--sw:#5B8FD4"></div><span class="mat">PETG</span><span class="src ace">ACE bay 1</span></div>
+                  <div class="tube" style="--sw:#5B8FD4"></div><div class="nozzle lit"></div>
+                </div>
+              </div>
+            </div>
+            <div class="side">
+              <span class="lab">Currently loaded</span>
+              <div class="card"><span class="mat">PETG</span><br><span class="src">T3 &middot; ACE bay 1</span></div>
+              <div class="btn">Unload</div>
+              <div class="btn pri">Reset</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">Four heads, four nozzles. The ACE is not a peer of the SnapSwap —
+      it is the <em>source</em> behind T3, and says so in the seat.</p>
+    </div>
+  </div>
+</section>
+
+
+<!-- ============================== 2 ============================== -->
+<section>
+  <div class="sec-head"><span class="tick">2</span><h2>Toolheads carry the context menu here too</h2></div>
+  <p>The per-toolhead menu — Select&nbsp;/&nbsp;Park&nbsp;/&nbsp;Load&nbsp;/&nbsp;Unload — is
+  already built and hardware-verified, but it is wired only to the detail panel's canvas. The
+  overview is where you actually land when there is more than one unit, so the same nozzle tap
+  has to open the same menu. Entries stay computed from the backend, so a parked empty head
+  offers only <em>Select</em>, and during a print the menu does not open at all.</p>
+
+  <div class="bench">
+    <div class="ba-item">
+      <span class="ba-tag good">proposed — tap T1's nozzle</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">Multi-Filament Overview</span></div>
+          <div class="p-main">
+            <div class="p-body">
+              <div class="headgrid">
+                <div class="hcol"><div class="hcap">T0</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">feeder</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div></div>
+                <div class="hcol"><div class="hcap">T1</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">feeder</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div></div>
+                <div class="hcol"><div class="hcap">T2</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">feeder</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div></div>
+                <div class="hcol"><div class="hcap mounted">T3</div>
+                  <div class="seat is-mounted"><div class="ring" style="--sw:#5B8FD4"></div><span class="mat">PETG</span><span class="src ace">ACE bay 1</span></div>
+                  <div class="tube" style="--sw:#5B8FD4"></div><div class="nozzle lit"></div></div>
+              </div>
+            </div>
+            <div class="side">
+              <span class="lab">Currently loaded</span>
+              <div class="card"><span class="mat">PETG</span><br><span class="src">T3 &middot; ACE bay 1</span></div>
+              <div class="btn">Unload</div>
+              <div class="btn pri">Reset</div>
+            </div>
+          </div>
+          <div class="menu" style="left:118px; bottom:26px;">
+            <span class="mh">Toolhead T1</span>
+            <span class="mi"><span class="ic">&#8596;</span>Select T1</span>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">T1 is parked and its channel is empty, so the only honest offer is
+      Select. No Park (not mounted), no Load/Unload (nothing to move).</p>
+    </div>
+
+    <div class="ba-item">
+      <span class="ba-tag good">proposed — tap T3's nozzle</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">Multi-Filament Overview</span></div>
+          <div class="p-main">
+            <div class="p-body">
+              <div class="headgrid">
+                <div class="hcol"><div class="hcap">T0</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">feeder</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div></div>
+                <div class="hcol"><div class="hcap">T1</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">feeder</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div></div>
+                <div class="hcol"><div class="hcap">T2</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">feeder</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div></div>
+                <div class="hcol"><div class="hcap mounted">T3</div>
+                  <div class="seat is-mounted"><div class="ring" style="--sw:#5B8FD4"></div><span class="mat">PETG</span><span class="src ace">ACE bay 1</span></div>
+                  <div class="tube" style="--sw:#5B8FD4"></div><div class="nozzle lit"></div></div>
+              </div>
+            </div>
+            <div class="side">
+              <span class="lab">Currently loaded</span>
+              <div class="card"><span class="mat">PETG</span><br><span class="src">T3 &middot; ACE bay 1</span></div>
+              <div class="btn">Unload</div>
+              <div class="btn pri">Reset</div>
+            </div>
+          </div>
+          <div class="menu" style="right:126px; bottom:26px;">
+            <span class="mh">Toolhead T3</span>
+            <span class="mi"><span class="ic">&#8962;</span>Park</span>
+            <span class="mi"><span class="ic">&#8593;</span>Unload</span>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">T3 is the mounted head holding filament: Park and Unload. Unload
+      dispatches <code>ACE_UNLOAD_HEAD</code> here, not the native path.</p>
+    </div>
+  </div>
+</section>
+
+
+<!-- ============================== 3 ============================== -->
+<section>
+  <div class="sec-head"><span class="tick">3</span><h2>The ACE-fed spool is not edited from SnapSwap</h2></div>
+  <p>T3's slot in the SnapSwap unit shows filament that the ACE owns. Editing material, colour or
+  spool there would write to <code>print_task_config</code> and be silently overwritten the next
+  time the ACE reports its inventory — two sources of truth for one spool. So the seat stops
+  opening the edit sheet and explains where the real control lives, with a one-tap route to it.
+  <strong>Load and Unload stay available</strong> — those act on the head, which is still the U1's
+  job; only the spool's <em>identity</em> belongs to the ACE.</p>
+
+  <div class="bench">
+    <div class="ba-item">
+      <span class="ba-tag good">proposed — tap T3's spool</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">Multi-Filament: SnapSwap</span></div>
+          <div class="p-main">
+            <div class="p-body">
+              <div class="headgrid">
+                <div class="hcol"><div class="hcap">T0</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">empty</span></div></div>
+                <div class="hcol"><div class="hcap">T1</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">empty</span></div></div>
+                <div class="hcol"><div class="hcap">T2</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">empty</span></div></div>
+                <div class="hcol"><div class="hcap mounted">T3</div>
+                  <div class="seat is-mounted"><div class="ring" style="--sw:#5B8FD4"></div><span class="mat">PETG</span><span class="src ace">&#128274; ACE</span></div></div>
+              </div>
+            </div>
+            <div class="side">
+              <span class="lab">Currently loaded</span>
+              <div class="card"><span class="mat">PETG</span><br><span class="src">T3</span></div>
+              <div class="btn">Unload</div>
+            </div>
+          </div>
+          <div class="scrim"></div>
+          <div class="sheet">
+            <h4>T3 is fed by the ACE 2 Pro</h4>
+            <p>This spool's material, colour and Spoolman link live on the ACE, in bay&nbsp;1.
+            Editing them here would be overwritten the next time the ACE reports in.</p>
+            <p>Loading and unloading T3 still works from this panel.</p>
+            <div class="row"><span class="btn">Close</span><span class="btn pri">Open ACE 2 Pro</span></div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">A padlock on the seat marks it at a glance; the sheet says why and
+      offers the one useful action rather than just refusing.</p>
+    </div>
+
+    <div class="ba-item">
+      <span class="ba-tag good">the quieter alternative</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">Multi-Filament: SnapSwap</span></div>
+          <div class="p-main">
+            <div class="p-body">
+              <div class="headgrid">
+                <div class="hcol"><div class="hcap">T0</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">empty</span></div></div>
+                <div class="hcol"><div class="hcap">T1</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">empty</span></div></div>
+                <div class="hcol"><div class="hcap">T2</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">empty</span></div></div>
+                <div class="hcol"><div class="hcap mounted">T3</div>
+                  <div class="seat is-mounted"><div class="ring" style="--sw:#5B8FD4"></div><span class="mat">PETG</span><span class="src ace">&#128274; ACE</span></div></div>
+              </div>
+            </div>
+            <div class="side">
+              <span class="lab">Currently loaded</span>
+              <div class="card"><span class="mat">PETG</span><br><span class="src">T3</span></div>
+              <div class="btn">Unload</div>
+            </div>
+          </div>
+          <div class="menu" style="right:126px; top:96px;">
+            <span class="mh">T3 &middot; fed by ACE</span>
+            <span class="mi"><span class="ic">&#8599;</span>Open in ACE</span>
+            <span class="mi"><span class="ic">&#8595;</span>Load</span>
+            <span class="mi"><span class="ic">&#8593;</span>Unload</span>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">No modal at all: the existing slot menu simply drops Edit and Spoolman
+      for an ACE-fed slot and gains "Open in ACE". Fewer taps, less to dismiss.</p>
+    </div>
+  </div>
+
+  <p><strong>Recommendation:</strong> ship the quieter one. The padlock already carries the
+  message, and a full-screen sheet to say "not here" is a lot of ceremony for a slot you tapped
+  by accident. Keep the sheet's wording for the menu's header row.</p>
+</section>
+
+
+<!-- ============================== 4 ============================== -->
+<section>
+  <div class="sec-head"><span class="tick">4</span><h2>The ACE view is a combiner</h2></div>
+  <p>In head mode all four ACE bays feed one head — that is a hub, not a parallel fan, and the
+  renderer already knows how to draw it: <code>render_linear_hub()</code> is the combiner view
+  the AFC unit used, lanes converging through a box to a single nozzle. The backend already
+  reports <code>PathTopology::HUB</code> for an ACE unit in head mode, so this is a matter of
+  routing the unit detail to that renderer rather than the parallel one.</p>
+
+  <div class="bench">
+    <div class="ba-item">
+      <span class="ba-tag good">proposed — ACE unit detail, head mode</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">ACE 2 Pro &mdash; feeding T3</span></div>
+          <div class="p-main">
+            <div class="p-body">
+              <div class="comb">
+                <div class="baylane">
+                  <div class="lane"><div class="ring" style="--sw:#5B8FD4; width:24px; height:24px; border-width:4px"></div><span class="lanelab">1 &middot; PETG</span></div>
+                  <div class="lane"><div class="ring is-empty" style="width:24px; height:24px; border-width:4px"></div><span class="lanelab">2</span></div>
+                  <div class="lane"><div class="ring is-empty" style="width:24px; height:24px; border-width:4px"></div><span class="lanelab">3</span></div>
+                  <div class="lane"><div class="ring is-empty" style="width:24px; height:24px; border-width:4px"></div><span class="lanelab">4</span></div>
+                </div>
+                <svg class="funnel" viewBox="0 0 260 26" aria-hidden="true" preserveAspectRatio="none">
+                  <path d="M14 0 V8 Q14 18 130 18" fill="none" stroke="#5B8FD4" stroke-width="2.5"/>
+                  <path d="M84 0 V8 Q84 18 130 18" fill="none" stroke="#36363C" stroke-width="2"/>
+                  <path d="M176 0 V8 Q176 18 130 18" fill="none" stroke="#36363C" stroke-width="2"/>
+                  <path d="M246 0 V8 Q246 18 130 18" fill="none" stroke="#36363C" stroke-width="2"/>
+                </svg>
+                <div class="combbox">COMBINER</div>
+                <svg class="funnel" viewBox="0 0 260 26" aria-hidden="true" preserveAspectRatio="none" style="height:22px">
+                  <path d="M130 0 V22" fill="none" stroke="#5B8FD4" stroke-width="2.5"/>
+                </svg>
+                <div style="display:flex; flex-direction:column; align-items:center; gap:3px">
+                  <div class="nozzle lit"></div><div class="tbadge on">T3</div>
+                </div>
+              </div>
+            </div>
+            <div class="side">
+              <span class="lab">Unit</span>
+              <div class="card"><span class="src">31&deg;C &middot; 35% RH</span><br><span class="src">ready</span></div>
+              <div class="btn">Dry</div>
+              <div class="btn">Bind head&hellip;</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">Four bays, one combiner, one nozzle — the shape the hardware actually
+      has in head mode. The live lane is the only one drawn in filament colour.</p>
+    </div>
+
+    <div class="ba-item">
+      <span class="ba-tag good">the same unit in multi mode</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">ACE 2 Pro &mdash; one bay per head</span></div>
+          <div class="p-main">
+            <div class="p-body">
+              <div class="headgrid">
+                <div class="hcol"><div class="hcap">bay 1</div>
+                  <div class="seat"><div class="ring" style="--sw:#5B8FD4"></div><span class="mat">PETG</span></div>
+                  <div class="tube" style="--sw:#5B8FD4"></div><div class="nozzle lit"></div><div class="tbadge on">T0</div></div>
+                <div class="hcol"><div class="hcap">bay 2</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">empty</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div><div class="tbadge">T1</div></div>
+                <div class="hcol"><div class="hcap">bay 3</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">empty</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div><div class="tbadge">T2</div></div>
+                <div class="hcol"><div class="hcap">bay 4</div>
+                  <div class="seat is-empty"><div class="ring is-empty"></div><span class="src">empty</span></div>
+                  <div class="tube dim"></div><div class="nozzle"></div><div class="tbadge">T3</div></div>
+              </div>
+            </div>
+            <div class="side">
+              <span class="lab">Unit</span>
+              <div class="card"><span class="src">31&deg;C &middot; 35% RH</span><br><span class="src">ready</span></div>
+              <div class="btn">Dry</div>
+              <div class="btn">Mode&hellip;</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">Not your rig, but the same code path has to answer for it: in multi
+      mode bay <em>s</em> feeds head <em>s</em>, so the unit is a parallel fan and must not
+      draw a combiner.</p>
+    </div>
+  </div>
+
+  <dl class="takeaway">
+    <dt>Topology is per unit, and already correct</dt>
+    <dd>The backend sets <code>HUB</code> for head mode and <code>PARALLEL</code> for multi
+    mode on each ACE unit. The unit detail has to read <code>get_unit_topology()</code>, not the
+    system-wide answer — reading the system-wide one is the exact mistake that drew the U1's
+    four heads as a merger in the first place.</dd>
+
+    <dt>Nothing here needs new backend data</dt>
+    <dd>All four changes are renderer and menu wiring. <code>mapped_tool</code>,
+    <code>head_source</code>, per-unit topology and the ACE inventory are already parsed and
+    unit-tested against the captured payload.</dd>
+  </dl>
+</section>
+
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var btn = document.getElementById('themetoggle');
+  btn.addEventListener('click', function () {
+    var now = root.getAttribute('data-theme');
+    if (!now) {
+      now = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    root.setAttribute('data-theme', now === 'dark' ? 'light' : 'dark');
+  });
+
+  // Measure every device screen for real rather than asserting it fits.
+  // A panel that overflows 480x320 does not ship, so the label has to come
+  // from the browser, not from the author.
+  document.querySelectorAll('[data-fit]').forEach(function (scr) {
+    var over = false;
+    scr.querySelectorAll('*').forEach(function (el) {
+      if (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1) {
+        if (getComputedStyle(el).overflow !== 'visible') over = true;
+      }
+    });
+    if (scr.scrollWidth > 480 + 1 || scr.scrollHeight > 320 + 1) over = true;
+    var tag = document.createElement('span');
+    tag.className = 'fit ' + (over ? 'no' : 'ok');
+    tag.textContent = over ? '480x320 — OVERFLOWS' : '480x320 — fits';
+    var item = scr.closest('.ba-item');
+    if (item) item.appendChild(tag);
+  });
+})();
+</script>

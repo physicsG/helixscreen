@@ -1,0 +1,406 @@
+<title>HelixScreen — ACE dryer in the environment panel</title>
+
+<style>
+/* Same two palettes as the other multiACE mockups: the FRAME is deliberately
+   not HelixScreen's, so the device screens read as "the product". */
+:root {
+  --ground:#F6F5F8; --ground-2:#ECEAF1; --ink:#1B1A21; --ink-2:#4A4856;
+  --muted:#6E6C7C; --rule:#DCDAE4; --rule-soft:#E8E6EE;
+  --accent:#1F7F8C; --accent-dim:#8FC6CE; --bad:#B5322E; --good:#3E7F41;
+  --bench:#17161C;
+  --mono: ui-monospace,"SFMono-Regular","Cascadia Mono","Roboto Mono",Menlo,Consolas,monospace;
+  --sans: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --measure: 68ch;
+  --pad: clamp(1.25rem,4vw,3rem);
+
+  --d-screen:#19191C; --d-card:#202023; --d-elevated:#4A4A52; --d-border:#36363C;
+  --d-text:#E8E8EC; --d-muted:#B8B8C0; --d-subtle:#787882;
+  --d-primary:#3A7CC8; --d-success:#5CB85C; --d-warning:#E8A83A;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --ground:#111015; --ground-2:#191821; --ink:#EAE9EF; --ink-2:#B9B7C6;
+          --muted:#8E8C9A; --rule:#2C2A36; --rule-soft:#23212C;
+          --accent:#6FC6D2; --accent-dim:#2E5F67; --bad:#E4736F; --good:#7FC182; --bench:#0B0A0E; }
+}
+:root[data-theme="dark"] { --ground:#111015; --ground-2:#191821; --ink:#EAE9EF; --ink-2:#B9B7C6;
+  --muted:#8E8C9A; --rule:#2C2A36; --rule-soft:#23212C; --accent:#6FC6D2;
+  --accent-dim:#2E5F67; --bad:#E4736F; --good:#7FC182; --bench:#0B0A0E; }
+:root[data-theme="light"] { --ground:#F6F5F8; --ground-2:#ECEAF1; --ink:#1B1A21; --ink-2:#4A4856;
+  --muted:#6E6C7C; --rule:#DCDAE4; --rule-soft:#E8E6EE; --accent:#1F7F8C;
+  --accent-dim:#8FC6CE; --bad:#B5322E; --good:#3E7F41; --bench:#17161C; }
+
+* { box-sizing: border-box; }
+body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--sans);
+       font-size:16px; line-height:1.6; }
+.wrap { max-width:1180px; margin:0 auto; padding:var(--pad); }
+h1 { font-size:clamp(1.7rem,3.6vw,2.4rem); line-height:1.15; margin:0 0 .5rem;
+     letter-spacing:-0.02em; text-wrap:balance; }
+h2 { font-size:clamp(1.1rem,2vw,1.35rem); margin:0; letter-spacing:-0.01em; text-wrap:balance; }
+p { margin:0 0 .9rem; max-width:var(--measure); color:var(--ink-2); }
+strong { color:var(--ink); }
+code { font-family:var(--mono); font-size:.88em; background:var(--ground-2);
+       padding:.1em .36em; border-radius:3px; color:var(--ink); }
+.lede { font-size:1.05rem; color:var(--ink-2); max-width:var(--measure); }
+.eyebrow { font-family:var(--mono); font-size:11px; letter-spacing:.14em;
+           text-transform:uppercase; color:var(--muted); }
+header.page { border-bottom:1px solid var(--rule); padding-bottom:1.5rem; margin-bottom:2rem; }
+.meta { font-family:var(--mono); font-size:12px; color:var(--muted); margin-top:.8rem; }
+section { padding:2rem 0; border-bottom:1px solid var(--rule-soft); }
+section:last-of-type { border-bottom:0; }
+.sec-head { display:flex; align-items:baseline; gap:.8rem; margin-bottom:.5rem; }
+.tick { font-family:var(--mono); font-size:12px; color:var(--accent);
+        border:1px solid var(--accent-dim); border-radius:3px; padding:.1rem .42rem; flex:none; }
+
+.callout { border-left:3px solid var(--bad); background:var(--ground-2);
+           padding:.85rem 1rem; border-radius:0 5px 5px 0; margin:1rem 0; max-width:var(--measure); }
+.callout p:last-child { margin-bottom:0; }
+.callout .eyebrow { color:var(--bad); }
+.callout.ok { border-left-color:var(--good); }
+.callout.ok .eyebrow { color:var(--good); }
+.strike { text-decoration:line-through; color:var(--muted); }
+
+table.cmd { border-collapse:collapse; margin:1rem 0; font-size:.92rem; width:100%;
+            max-width:var(--measure); }
+table.cmd th, table.cmd td { text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--rule-soft); }
+table.cmd th { font-family:var(--mono); font-size:11px; text-transform:uppercase;
+               letter-spacing:.1em; color:var(--muted); font-weight:400; }
+table.cmd code { background:none; padding:0; }
+
+.bench { background:var(--bench); border-radius:8px; padding:1.3rem; margin:1.2rem 0 .8rem;
+         overflow-x:auto; display:flex; gap:1.4rem; align-items:flex-start; }
+.ba-item { display:flex; flex-direction:column; gap:.5rem; flex:none; }
+.ba-tag { font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+          padding:.12rem .45rem; border-radius:3px; align-self:flex-start;
+          color:#7FC182; border:1px solid #2F5A31; }
+.ba-tag.warn { color:#E8A83A; border-color:#6A5220; }
+.ba-note { font-family:var(--mono); font-size:11px; color:#8E8C9A; max-width:480px; line-height:1.45; }
+.fit { font-family:var(--mono); font-size:10px; letter-spacing:.08em; }
+.fit.ok { color:#7FC182; } .fit.no { color:#E4736F; }
+
+/* device screen */
+.screen { width:480px; height:320px; flex:none; background:var(--d-screen); color:var(--d-text);
+          font-family:var(--sans); font-size:12px; line-height:1.3; display:flex;
+          overflow:hidden; position:relative; box-shadow:0 0 0 1px #000,0 14px 40px rgba(0,0,0,.55); }
+.screen * { box-sizing:border-box; }
+.rail { width:42px; flex:none; background:var(--d-screen); border-right:1px solid var(--d-border);
+        display:flex; flex-direction:column; align-items:center; padding:10px 0; gap:12px; }
+.rail i { width:20px; height:20px; border-radius:3px; background:var(--d-elevated); opacity:.55; }
+.rail i.on { background:var(--d-primary); opacity:1; }
+.pane { flex:1; display:flex; flex-direction:column; min-width:0; background:var(--d-card); }
+.p-head { height:34px; flex:none; display:flex; align-items:center; gap:7px; padding:0 9px;
+          border-bottom:1px solid var(--d-border); }
+.chev { color:var(--d-muted); font-size:15px; }
+.p-title { font-family:var(--mono); font-size:11px; letter-spacing:.06em; text-transform:uppercase; }
+.p-main { flex:1; padding:7px 9px; display:flex; flex-direction:column; gap:6px; min-height:0; }
+
+.card { border:1px solid var(--d-border); border-radius:5px; background:var(--d-screen);
+        padding:6px 8px; display:flex; flex-direction:column; gap:5px; }
+.rowsplit { display:flex; gap:8px; align-items:center; justify-content:space-between; }
+.lab { font-family:var(--mono); font-size:9px; color:var(--d-subtle);
+       letter-spacing:.06em; text-transform:uppercase; }
+.big { font-size:19px; font-weight:650; letter-spacing:-.01em; }
+.pillrow { display:flex; gap:5px; align-items:center; }
+.pillrow .dl { font-family:var(--mono); font-size:9px; color:var(--d-subtle); width:34px; }
+.pill { font-family:var(--mono); font-size:10px; padding:3px 9px; border-radius:11px;
+        border:1px solid var(--d-border); color:var(--d-muted); }
+.pill.on { border-color:var(--d-primary); color:#fff; background:rgba(58,124,200,.30); }
+.field { font-family:var(--mono); font-size:11px; padding:2px 6px; border-radius:4px;
+         border:1px solid var(--d-primary); color:var(--d-text); background:var(--d-card);
+         margin-left:auto; min-width:46px; text-align:right; }
+.field .u { font-size:8px; color:var(--d-subtle); margin-left:2px; }
+.field.editing { background:rgba(58,124,200,.22); }
+.keypad { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; }
+.keypad span { border:1px solid var(--d-border); border-radius:4px; padding:5px 0;
+               text-align:center; font-family:var(--mono); font-size:12px; }
+.keypad span.wide { grid-column:span 2; }
+.chip { font-family:var(--mono); font-size:9px; padding:2px 7px; border-radius:9px;
+        border:1px solid var(--d-border); color:var(--d-muted); }
+.chip.on { border-color:var(--d-primary); color:var(--d-text); background:rgba(58,124,200,.18); }
+.bar { height:7px; border-radius:4px; background:var(--d-border); overflow:hidden; }
+.bar > i { display:block; height:100%; background:var(--d-warning); }
+.btn { border:1px solid var(--d-border); border-radius:4px; background:var(--d-screen);
+       color:var(--d-text); font-size:11px; padding:6px 8px; text-align:center; }
+.btn.pri { background:var(--d-primary); border-color:var(--d-primary); color:#fff; }
+.btn.stop { background:#7a2f2c; border-color:#7a2f2c; color:#fff; }
+.ro { font-family:var(--mono); font-size:10px; color:var(--d-muted); }
+.ro b { color:var(--d-text); font-weight:600; }
+.note { font-size:9px; color:var(--d-subtle); line-height:1.35; }
+.statepill { font-family:var(--mono); font-size:9px; padding:1px 6px; border-radius:8px;
+             border:1px solid var(--d-success); color:var(--d-success); }
+.statepill.idle { border-color:var(--d-subtle); color:var(--d-subtle); }
+.sw { width:30px; height:16px; border-radius:9px; background:var(--d-border); position:relative;
+      flex:none; }
+.sw > i { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%;
+          background:var(--d-subtle); }
+.sw.on { background:rgba(58,124,200,.55); }
+.sw.on > i { left:16px; background:#fff; }
+
+dl.q { border-left:2px solid var(--accent-dim); padding-left:1rem; max-width:var(--measure); }
+dl.q dt { font-weight:600; margin-top:.8rem; }
+dl.q dt:first-child { margin-top:0; }
+dl.q dd { margin:.15rem 0 0; color:var(--ink-2); }
+
+.themebar { position:fixed; right:12px; top:12px; z-index:20; }
+.themebar button { font-family:var(--mono); font-size:11px; padding:.3rem .6rem;
+                   background:var(--ground-2); color:var(--ink-2); border:1px solid var(--rule);
+                   border-radius:4px; cursor:pointer; }
+.themebar button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+@media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
+</style>
+
+<div class="themebar"><button type="button" id="themetoggle">theme</button></div>
+
+<div class="wrap">
+
+<header class="page">
+  <span class="eyebrow">Snapmaker U1 + multiACE — design memo, revised 2026-08-11</span>
+  <h1>Drying the ACE from the environment panel</h1>
+  <p class="lede">HelixScreen already has the whole dryer UI — readout, progress bar,
+  temperature and duration inputs, start/stop — in <code>ams_environment_overlay.xml</code>.
+  It never appeared on this printer because no Snapmaker backend reported a dryer, so
+  <code>get_dryer_info()</code> answered <code>supported = false</code> and the panel showed
+  its "no dryer" branch. The ACE has one, reports it live, and takes its settings as command
+  parameters.</p>
+  <p class="meta">Screens are 1:1 at 480&nbsp;&times;&nbsp;320 and self-measure on load.
+  Live values from the ACE&nbsp;2&nbsp;Pro at <code>192.168.2.242</code>.</p>
+</header>
+
+<section>
+  <div class="sec-head"><span class="tick">✕</span><h2>Correction to the first version</h2></div>
+
+  <div class="callout">
+    <span class="eyebrow">The first version of this memo was wrong</span>
+    <p>It claimed <span class="strike">temperature and duration cannot be set without editing
+    multiACE's config and restarting Klipper</span>, and mocked them read-only. That came from
+    reading only multiACE's README macro table, where <code>ACED__DRY_START_0..3</code> are
+    listed as "uses config settings".</p>
+    <p>Those macros are the parameterless Fluidd buttons. The actual commands take parameters,
+    and OrcaSlicer's own multiACE page uses them. <strong>Nothing needs a restart.</strong></p>
+  </div>
+
+  <table class="cmd">
+    <tr><th>Command</th><th>What it does</th></tr>
+    <tr><td><code>ACE_DRY ACE=n [TEMP=] [DURATION=]</code></td><td>Start drying, temperature in °C and duration in minutes</td></tr>
+    <tr><td><code>ACE_STOP_DRYING [ACE=n]</code></td><td>Stop</td></tr>
+    <tr><td><code>ACE_SET_AUTO_DRY</code></td><td>Humidity-controlled drying, "live&nbsp;+&nbsp;persist"</td></tr>
+  </table>
+
+  <p>All three confirmed in the live printer's <code>gcode/help</code>. The consequence for this
+  design is simple: <strong>the panel's temperature and duration controls are real</strong>, and
+  auto-dry can be a toggle rather than a readout.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="tick">A</span><h2>Idle, and drying</h2></div>
+  <p>Presets as pills for the common cases — the same three OrcaSlicer offers — with an
+  <strong>editable value beside them</strong> for anything else. The field is the truth and the
+  pills are shortcuts into it: tapping a pill fills the field, typing a value the pills do not
+  offer just deselects them. Both write into <code>ACE_DRY</code>'s <code>TEMP=</code> and
+  <code>DURATION=</code>, and duration is entered in <strong>minutes</strong>, which is the unit
+  the command takes — no conversion between what you type and what is sent.</p>
+  <p>Live state comes from <code>dryer_status</code>, so the panel reflects a cycle started
+  anywhere, including from Fluidd or OrcaSlicer.</p>
+
+  <div class="bench">
+    <div class="ba-item">
+      <span class="ba-tag">idle — your rig now</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">ACE 2 Pro &mdash; environment</span></div>
+          <div class="p-main">
+            <div class="card">
+              <div class="rowsplit">
+                <div><span class="lab">Chamber</span><div class="big">31 &deg;C</div></div>
+                <div><span class="lab">Humidity</span><div class="big">35 %</div></div>
+                <span class="statepill idle">Not drying</span>
+              </div>
+            </div>
+            <div class="card">
+              <span class="lab">Dry at</span>
+              <div class="pillrow">
+                <span class="dl">temp</span>
+                <span class="pill">45&deg;</span><span class="pill on">55&deg;</span><span class="pill">65&deg;</span>
+                <span class="field">55<span class="u">&deg;C</span></span>
+              </div>
+              <div class="pillrow">
+                <span class="dl">for</span>
+                <span class="pill">2 h</span><span class="pill on">4 h</span><span class="pill">6 h</span>
+                <span class="field">240<span class="u">min</span></span>
+              </div>
+              <div class="btn pri">Start drying</div>
+            </div>
+            <div class="card">
+              <div class="rowsplit">
+                <span class="lab">Auto-dry</span>
+                <span class="sw"><i></i></span>
+              </div>
+              <p class="note">Start at 45&nbsp;% RH, stop at 35&nbsp;%.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">Two taps and Start. 70&nbsp;°C is multiACE's own safety cap, so the
+      pill set stops below it rather than letting a number through that the firmware would
+      clamp anyway.</p>
+    </div>
+
+    <div class="ba-item">
+      <span class="ba-tag">drying</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">ACE 2 Pro &mdash; environment</span></div>
+          <div class="p-main">
+            <div class="card">
+              <div class="rowsplit">
+                <div><span class="lab">Chamber</span><div class="big">48 &deg;C</div></div>
+                <div><span class="lab">Humidity</span><div class="big">22 %</div></div>
+                <span class="statepill">Drying</span>
+              </div>
+            </div>
+            <div class="card">
+              <div class="rowsplit">
+                <span class="lab">Drying to 55 &deg;C</span>
+                <span class="ro"><b>3 h 12 m</b> left</span>
+              </div>
+              <div class="bar"><i style="width:20%"></i></div>
+              <div class="btn stop">Stop drying</div>
+            </div>
+            <div class="card">
+              <div class="rowsplit">
+                <span class="lab">Auto-dry</span>
+                <span class="sw on"><i></i></span>
+              </div>
+              <p class="note">Started automatically at 45&nbsp;% RH. Stops at 35&nbsp;%.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">The pills are replaced by what is actually running, so the card never
+      shows a setting that is not the one in effect. Progress and remaining come from
+      <code>remain_time</code> / <code>duration</code>, which
+      <code>DryerInfo::get_progress_pct()</code> already computes.</p>
+    </div>
+
+    <div class="ba-item">
+      <span class="ba-tag">typing an exact value</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">ACE 2 Pro &mdash; dry at</span></div>
+          <div class="p-main">
+            <div class="card">
+              <div class="rowsplit">
+                <span class="lab">Temperature</span>
+                <span class="field editing">58<span class="u">&deg;C</span></span>
+              </div>
+              <p class="note">35&ndash;70&nbsp;&deg;C. Above 70 is refused by multiACE.</p>
+            </div>
+            <div class="keypad">
+              <span>1</span><span>2</span><span>3</span>
+              <span>4</span><span>5</span><span>6</span>
+              <span>7</span><span>8</span><span>9</span>
+              <span>&#9003;</span><span>0</span><span>&#10003;</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">Tapping the value field opens the numeric keypad the text_input widget
+      already raises. Typing a value the pills do not offer simply deselects them &mdash; the
+      field is the truth, the pills are shortcuts into it.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="tick">B</span><h2>Several ACEs</h2></div>
+  <p>Up to four. The panel is per unit, so chips select which one and everything below follows.
+  <code>ACE_STOP_DRYING</code> takes an explicit <code>ACE=</code>, so selecting a unit does not
+  have to make it the active one — the stop always names its target.</p>
+
+  <div class="bench">
+    <div class="ba-item">
+      <span class="ba-tag warn">3 ACEs, the middle one drying</span>
+      <div class="screen" data-fit>
+        <nav class="rail"><i></i><i class="on"></i><i></i><i></i></nav>
+        <div class="pane">
+          <div class="p-head"><span class="chev">&#8249;</span><span class="p-title">ACE drying</span></div>
+          <div class="p-main">
+            <div class="pillrow">
+              <span class="chip">ACE 1</span><span class="chip on">ACE 2</span><span class="chip">ACE 3</span>
+            </div>
+            <div class="card">
+              <div class="rowsplit">
+                <div><span class="lab">Chamber</span><div class="big">48 &deg;C</div></div>
+                <div><span class="lab">Humidity</span><div class="big">22 %</div></div>
+                <span class="statepill">Drying</span>
+              </div>
+            </div>
+            <div class="card">
+              <div class="rowsplit">
+                <span class="lab">Drying to 55 &deg;C</span>
+                <span class="ro"><b>3 h 12 m</b> left</span>
+              </div>
+              <div class="bar"><i style="width:20%"></i></div>
+              <div class="btn stop">Stop ACE 2</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="ba-note">The stop button names its unit. With four ACEs on one printer, a bare
+      "Stop" that acts on whichever is current is the kind of button that dries the wrong
+      spools.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="tick">?</span><h2>What is still open</h2></div>
+
+  <dl class="q">
+    <dt>Auto-dry's parameter names</dt>
+    <dd><code>ACE_SET_AUTO_DRY</code> exists and persists, so the toggle above is buildable — but
+    neither multiACE's bundled docs nor OrcaSlicer's page call it, so its arguments are unknown.
+    The live object shows the shape (<code>enabled</code>, <code>rh_start</code>,
+    <code>rh_end</code>, <code>temp</code>, <code>master</code>, <code>add_time</code>). Running
+    it bare in a console would print the usage; probing it blind from here would change machine
+    state, which is why it is not wired yet.</dd>
+
+    <dt>Preset values</dt>
+    <dd>45/55/65&nbsp;°C and 2/4/6&nbsp;h follow OrcaSlicer, and are three numbers in one place
+    if your filaments want different ones. Nothing is lost either way now that any value can be
+    typed.</dd>
+  </dl>
+
+  <p style="margin-top:1.2rem"><strong>Already built:</strong>
+  <code>get_dryer_info()</code> maps <code>aces[].dryer_status</code> onto the existing
+  <code>DryerInfo</code>; <code>start_drying()</code> emits <code>ACE_DRY</code> and
+  <code>stop_drying()</code> emits <code>ACE_STOP_DRYING</code>. Confirmed working on the
+  machine. What remains is this panel's presentation.</p>
+</section>
+
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  document.getElementById('themetoggle').addEventListener('click', function () {
+    var now = root.getAttribute('data-theme');
+    if (!now) now = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    root.setAttribute('data-theme', now === 'dark' ? 'light' : 'dark');
+  });
+  document.querySelectorAll('[data-fit]').forEach(function (scr) {
+    var over = scr.scrollWidth > 481 || scr.scrollHeight > 321;
+    scr.querySelectorAll('*').forEach(function (el) {
+      if ((el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1) &&
+          getComputedStyle(el).overflow !== 'visible') over = true;
+    });
+    var tag = document.createElement('span');
+    tag.className = 'fit ' + (over ? 'no' : 'ok');
+    tag.textContent = over ? '480x320 — OVERFLOWS' : '480x320 — fits';
+    var item = scr.closest('.ba-item');
+    if (item) item.appendChild(tag);
+  });
+})();
+</script>

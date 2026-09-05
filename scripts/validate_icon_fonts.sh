@@ -2,6 +2,13 @@
 # Copyright (C) 2025-2026 356C LLC
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
+# `comm` requires both inputs sorted in ITS collation. A developer locale that
+# orders differently from the `sort` that produced the lists makes comm reject
+# them ("file 1 is not in sorted order") and report icons as missing that are
+# present, failing the gate on a clean tree. Pin the collation for the whole
+# script so sort and comm always agree.
+export LC_ALL=C
+#
 # Bidirectional icon validation:
 #   1. Forward:  codepoints.h → fonts (are defined icons compiled?)
 #   2. Reverse:  XML icon="" → codepoints.h (are used icons defined?)
@@ -187,7 +194,7 @@ echo "Validating ICON_MAP sort order..."
 
 # Extract icon names in order (as they appear in the file)
 ICON_NAMES_ACTUAL=$(grep -E '\{"[^"]+",\s*"\\x' "$CODEPOINTS_FILE" | sed -E 's/.*\{"([^"]+)".*/\1/')
-ICON_NAMES_SORTED=$(echo "$ICON_NAMES_ACTUAL" | env LANG=en_EN.UTF-8 sort)
+ICON_NAMES_SORTED=$(echo "$ICON_NAMES_ACTUAL" | sort)
 
 # Compare actual order with sorted order
 if [[ "$ICON_NAMES_ACTUAL" != "$ICON_NAMES_SORTED" ]]; then

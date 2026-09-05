@@ -253,8 +253,13 @@ std::string FilamentMappingModal::get_slot_display_text(const helix::ToolMapping
         return helix::FilamentMapper::format_slot_label(*slot);
     }
 
+    // Fallback when the slot itself could not be resolved. Still the badge's
+    // spool number rather than mapped_slot + 1 — see spool_display_number().
+    auto* backend = AmsState::instance().get_backend();
+    const int shown =
+        backend ? backend->spool_display_number(mapping.mapped_slot) : mapping.mapped_slot + 1;
     char buf[32];
-    snprintf(buf, sizeof(buf), "%s %d", lv_tr("Slot"), mapping.mapped_slot + 1);
+    snprintf(buf, sizeof(buf), "%s %d", lv_tr("Slot"), shown);
     return buf;
 }
 

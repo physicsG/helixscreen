@@ -52,6 +52,16 @@ endif
 		git config merge.recall-stats.driver "python3 scripts/recall_stats_merge.py %O %A %B"; \
 		echo "$(GREEN)✓ Lesson-stats merge driver registered (counters merge additively)$(RESET)"; \
 	fi
+	@# Auto-register the "ours" merge driver. .gitattributes marks README.md
+	@# merge=ours because this fork's README is its own document, not a patched
+	@# copy of upstream's - see the comment there. Same trap as above: the .name
+	@# key without .driver aborts the merge outright, so set both. The driver is
+	@# just "true"; it succeeds without touching %A, which keeps our version.
+	@if [ -z "$$(git config merge.ours.driver 2>/dev/null)" ]; then \
+		git config merge.ours.name "keep this fork's version"; \
+		git config merge.ours.driver true; \
+		echo "$(GREEN)✓ ours merge driver registered (README.md survives upstream merges)$(RESET)"; \
+	fi
 
 # Auto-install missing dependencies (interactive, requires confirmation)
 install-deps:

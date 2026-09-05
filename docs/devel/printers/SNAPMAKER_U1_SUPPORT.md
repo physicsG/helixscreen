@@ -106,6 +106,36 @@ Manual packaging is also available:
 make package-snapmaker-u1
 ```
 
+### Building the U1 on a fork (`.github/workflows/snapmaker-u1.yml`)
+
+`release.yml` can build this platform, but only on a `v*` tag, and its later jobs
+need secrets a fork does not have (`R2_*`, Android signing, `WEBSITE_DISPATCH_TOKEN`).
+`snapmaker-u1.yml` is the same toolchain + build + package steps with nothing
+secret in them, so a fork can produce an installable build on its own:
+
+| Trigger | Result |
+|---|---|
+| push to `main`, `feat/**`, `fix/**` | builds, uploads `helixscreen-snapmaker-u1` artifact (30 days) |
+| **Run workflow** button (`workflow_dispatch`) | same |
+| pull request to `main` | same |
+| push a **`u1-v*`** tag | the above, plus a GitHub Release on that repo with the `.zip`, `.tar.gz`, `install-fork.sh` and `SHA256SUMS` |
+
+The U1 is the one platform a fork can build unaided: `docker/Dockerfile.snapmaker-u1`
+is Debian Trixie plus `crossbuild-essential-arm64` from apt, with no tarball fetch
+and no private registry (`ad5x`, by contrast, pulls its toolchain from upstream's
+own release assets).
+
+Tag prefix is `u1-v`, **not** `v` — a `v*` tag would also start `release.yml`,
+which then fails on the missing secrets:
+
+```bash
+git tag u1-v0.99.114 && git push origin u1-v0.99.114
+```
+
+This workflow also extracts the toolchain image's CA bundle into
+`build/snapmaker-u1/certs/`, which `release-snapmaker-u1` then packages — a step
+`release.yml` does not perform, so upstream CI tarballs ship without `certs/`.
+
 ## Installation
 
 ### Prerequisites
@@ -129,6 +159,59 @@ curl -sSL https://releases.helixscreen.org/install.sh | sh
 ```
 
 The installer auto-detects the U1 platform, downloads the correct aarch64 binary from the release CDN, deploys platform hooks, and starts HelixScreen. Re-run to upgrade.
+
+### Installing a fork's build
+
+`scripts/install-fork.sh` is a thin front-end for the same installer — it sets
+the two things a fork install needs and hands over, so the install path itself
+(platform detection, service setup, backup/rollback, SHA256 verification,
+`--update` / `--uninstall` / `--local`) is not duplicated:
+
+```sh
+GITHUB_REPO=<owner>/helixscreen   # which repo to install from
+HELIX_GITHUB_ONLY=1               # that repo's GitHub releases ONLY
+```
+
+The second is the load-bearing one. The installer normally tries the upstream
+CDN (`releases.helixscreen.org`) and HTTP mirror *before* GitHub, and those
+serve upstream's artifacts — so setting `GITHUB_REPO` alone would resolve
+upstream's version number and install upstream's binary under it.
+
+```sh
+# From the fork's latest u1-v* release (install-fork.sh is attached to each)
+curl -fsSL https://github.com/<owner>/helixscreen/releases/latest/download/install-fork.sh | sh
+
+# From a branch that carries fork support, before any release exists
+HELIX_FORK_REF=<branch> sh -c "$(curl -fsSL https://raw.githubusercontent.com/<owner>/helixscreen/<branch>/scripts/install-fork.sh)"
+
+# Offline: scp the archive over, unpack, and run the copy shipped inside it
+sh install-fork.sh --local helixscreen-snapmaker-u1.zip
+```
+
+Flags pass straight through to the installer. `GITHUB_REPO` overrides the
+default fork; `HELIX_FORK_REF` picks the branch/tag the installer is fetched
+from when no release provides one.
+
+Where the installer itself comes from, in order: `install.sh` beside the
+script (an unpacked archive), then the fork's **latest release**
+(`releases/latest/download/install.sh` — the installer that built the binary it
+will install), then `HELIX_FORK_REF`. Whichever it finds is **refused unless it
+knows about fork installs** (`HELIX_GITHUB_ONLY`): an older `install.sh`
+hard-assigns `GITHUB_REPO` and would take the environment this script set,
+ignore it, and quietly install upstream's binary from upstream's CDN. That is
+why the release is preferred over a branch, and why `HELIX_FORK_REF=main` fails
+loudly until the fork's `main` carries the new installer.
+
+Two consequences for the fork's releases: they are published as full releases,
+not prereleases (`/releases/latest` — the API the installer discovers versions
+through, and the download URL above — resolves to the newest *non*-prerelease,
+so a prerelease-only repo has no "latest"), and a `u1-v*` tag passes the
+installer's version normalisation untouched (only bare `0.99.x` gets a `v`
+prefixed), so `--version u1-v0.99.114` and the release URLs agree.
+
+Both the Moonraker `[update_manager helixscreen]` block and `release_info.json`
+are written with whichever repo the install came from, so the printer offers
+*that* repo's releases as updates rather than upstream's.
 
 ### Build
 

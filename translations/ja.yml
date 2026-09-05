@@ -211,6 +211,10 @@ translations:
   Auto-Detect: 自動検出
   Auto-Heat on Load: 装填時に自動加熱
   Auto-detect: 自動検出
+  Auto-dry: '自動乾燥'
+  Auto-dry off: '自動乾燥オフ'
+  Auto-dry on: '自動乾燥オン'
+  Auto-dry unchanged: '自動乾燥は変更なし'
   Auto-install only works on local Moonraker: 自動インストールはローカルの Moonraker でのみ動作します
   Auto-lock: 自動ロック
   Auto-poll for weight updates: 重量更新の自動ポーリング
@@ -613,6 +617,7 @@ translations:
   Could not save filament: フィラメントを保存できませんでした
   Could not start Bluetooth discovery: Bluetooth の検出を開始できませんでした
   Could not update filaments: フィラメントを更新できませんでした
+  Could not update slot: 'スロットを更新できませんでした'
   Could not verify Spoolman status. Moonraker may still be restarting.: Spoolman のステータスを確認できませんでした。Moonraker
     がまだ再起動中の可能性があります。
   Couldn't update Spoolman — saved locally: Spoolman を更新できませんでした — ローカルに保存しました
@@ -741,6 +746,7 @@ translations:
   Downloading...: ダウンロード中...
   Downloading... {:.1f}/{:.1f} MB: ダウンロード中... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: タッチごとに波紋を描画 — ズレの診断に役立ちます
+  Dries above %d%%, stops below %d%%: '%d%% を超えると乾燥し、%d%% を下回ると停止します'
   Drive Cal: ドライブキャリブレーション
   Drop shadow strength (0 = disabled): 影の強さ (0 = 無効)
   Drying: 乾燥中
@@ -1065,6 +1071,7 @@ translations:
   Flying Toasters: フライングトースター
   Follow active tool: アクティブツールに追従
   Follow graph screen: グラフ画面に追従
+  Follows unit %d: 'ユニット %d に従う'
   Forget: 登録解除
   Forget Network?: ネットワークを登録解除しますか？
   Forget network '{}'? You will need the password to reconnect.: ネットワーク '{}' を登録解除しますか？再接続にはパスワードが必要です。
@@ -1715,8 +1722,9 @@ translations:
   Open: 開く
   Open Source Licenses: オープンソースライセンス
   Open color and brightness controls: 色と明るさの調整を開く
-  Open feeder macro: フィーダーを開くマクロ
   Open feeder: フィーダーを開く
+  Open feeder macro: フィーダーを開くマクロ
+  Open in ACE: 'ACEで開く'
   Open motion controls for jogging: ジョグ操作を開く
   Operation already in progress: 操作がすでに進行中です
   Operations: 操作
@@ -2689,6 +2697,7 @@ translations:
   Toolhead LED: 'ツールヘッドLED'
   Toolhead Sensor: ツールヘッドセンサー
   Toolhead Style: ツールヘッドスタイル
+  Toolhead command failed: 'ツールヘッドコマンドが失敗しました'
   Toolhead jam: ツールヘッドの詰まり
   Toolhead, G-code, limits, and materials: ツールヘッド、Gコード、制限、材料
   Tools Used: 使用したツール

@@ -234,6 +234,10 @@ translations:
   Auto-Detect: Auto-Detectar
   Auto-Heat on Load: Aquecer Automaticamente ao Carregar
   Auto-detect: Auto-detectar
+  Auto-dry: 'Secagem automática'
+  Auto-dry off: 'Secagem automática desativada'
+  Auto-dry on: 'Secagem automática ativada'
+  Auto-dry unchanged: 'Secagem automática inalterada'
   Auto-install only works on local Moonraker: A instalação automática só funciona
     no Moonraker local
   Auto-lock: Bloqueio automático
@@ -686,6 +690,7 @@ translations:
   Could not save filament: Não foi possível salvar o filamento
   Could not start Bluetooth discovery: Não foi possível iniciar a descoberta Bluetooth
   Could not update filaments: Não foi possível atualizar os filamentos
+  Could not update slot: 'Não foi possível atualizar o slot'
   Could not verify Spoolman status. Moonraker may still be restarting.: Não foi possível
     verificar o status do Spoolman. O Moonraker pode ainda estar reiniciando.
   Couldn't update Spoolman — saved locally: Não foi possível atualizar o Spoolman
@@ -816,6 +821,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Baixando... {:.1f}/{:.1f} MB
   Draw a ripple at each touch — helps diagnose offsets: Desenha uma onda em cada toque
     — ajuda a diagnosticar deslocamentos
+  Dries above %d%%, stops below %d%%: 'Seca acima de %d%%, para abaixo de %d%%'
   Drive Cal: Cal de Drive
   Drop shadow strength (0 = disabled): Intensidade da sombra (0 = desabilitado)
   Drying: Secando
@@ -1160,6 +1166,7 @@ translations:
   Flying Toasters: Torradeiras Voadoras
   Follow active tool: Seguir ferramenta ativa
   Follow graph screen: Acompanhar tela do gráfico
+  Follows unit %d: 'Segue a unidade %d'
   Forget: Esquecer
   Forget Network?: Esquecer Rede?
   Forget network '{}'? You will need the password to reconnect.: Esquecer a rede '{}'? Você precisará da senha para reconectar.
@@ -1864,8 +1871,9 @@ translations:
   Open: Abrir
   Open Source Licenses: Licenças de código aberto
   Open color and brightness controls: Abrir controles de cor e brilho
-  Open feeder macro: Macro de abrir alimentador
   Open feeder: Abrir alimentador
+  Open feeder macro: Macro de abrir alimentador
+  Open in ACE: 'Abrir no ACE'
   Open motion controls for jogging: Abrir os controles de movimento
   Operation already in progress: Operação já em andamento
   Operations: Operações
@@ -2951,6 +2959,7 @@ translations:
   Toolhead LED: 'LED do cabeçote'
   Toolhead Sensor: Sensor do Cabeçote
   Toolhead Style: Estilo do Cabeçote
+  Toolhead command failed: 'Falha no comando do cabeçote'
   Toolhead jam: Atolamento do cabeçote
   Toolhead, G-code, limits, and materials: Cabeçote, G-code, limites e materiais
   Tools Used: Ferramentas Usadas

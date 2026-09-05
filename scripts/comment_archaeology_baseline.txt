@@ -33,7 +33,6 @@
 1 src/printer/ams_subscription_backend.cpp
 1 src/printer/print_start_checks.cpp
 1 src/printer/printer_fan_state.cpp
-1 src/rendering/gcode_gles_renderer.cpp
 1 src/system/panel_widget_config.cpp
 1 src/ui/panel_widget_manager.cpp
 1 src/ui/panel_widgets/active_spool_widget.h
@@ -86,14 +85,11 @@
 1 tests/unit/test_filament_panel_dispatch_wiring.cpp
 1 tests/unit/test_footer_read_need.cpp
 4 tests/unit/test_moonraker_client_robustness.cpp
-1 tests/unit/test_moonraker_mock_behavior.cpp
-1 tests/unit/test_network_settings_teardown_uaf.cpp
 2 tests/unit/test_observer_cleanup_ordering.cpp
 1 tests/unit/test_operation_patterns.cpp
 1 tests/unit/test_panel_widget_config.cpp
 1 tests/unit/test_panel_widget_manager.cpp
 1 tests/unit/test_panel_widget_temp_graph.cpp
-1 tests/unit/test_power_device_widget_teardown_uaf.cpp
 1 tests/unit/test_power_panel_print_lock.cpp
 2 tests/unit/test_preflight_check_modal.cpp
 1 tests/unit/test_print_history_manager.cpp

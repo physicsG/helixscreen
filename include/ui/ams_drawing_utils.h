@@ -17,7 +17,7 @@ class AmsBackend; // Forward declaration for compute_system_tool_layout()
  * Consolidates duplicated drawing code used by ui_ams_mini_status,
  * ui_panel_ams_overview, ui_ams_slot, and ui_spool_canvas.
  */
-namespace ams_draw {
+namespace helix::ams_draw {
 
 // ============================================================================
 // Color Utilities
@@ -46,8 +46,19 @@ SlotError::Severity worst_unit_severity(const AmsUnit& unit);
 // Data Helpers
 // ============================================================================
 
+/**
+ * Minimum rendered fill for a lane that HAS an assigned spool.
+ *
+ * display_fill_level() is 0 for anything not present, and every spool visual
+ * sizes its coloured ring by fill — so without a floor, a lane you just
+ * assigned a spool to renders as bare grey chrome with no hint of its colour.
+ * Shared so the mini-status strip, the overview bars and the slot widget all
+ * agree on what "assigned but empty" looks like.
+ */
+constexpr int SPOOL_ASSIGNED_MIN_FILL_PCT = 5;
+
 /** Calculate fill percentage from SlotInfo weight data (returns min_pct..100, or 100 if unknown) */
-int fill_percent_from_slot(const SlotInfo& slot, int min_pct = 5);
+int fill_percent_from_slot(const SlotInfo& slot, int min_pct = SPOOL_ASSIGNED_MIN_FILL_PCT);
 
 /**
  * Calculate bar width to fit slot_count bars in container_width.
@@ -198,6 +209,15 @@ struct BarStyleParams {
 constexpr int32_t STATUS_LINE_HEIGHT_PX = 3;
 constexpr int32_t STATUS_LINE_GAP_PX = 2;
 
+/// Mini slot-bar geometry. Shared because two surfaces draw the same bars: the
+/// overview's unit cards, and the slot that stands for a position fed from
+/// another unit (an ACE-fed head shows its ACE's bays rather than one spool).
+/// Keeping them here is what stops the two drifting into near-identical.
+constexpr int32_t MINI_BAR_MIN_WIDTH_PX = 6; ///< below this a bar is invisible
+constexpr int32_t MINI_BAR_MAX_WIDTH_PX = 14;
+constexpr int32_t MINI_BAR_HEIGHT_PX = 40; ///< decorative; no responsive scaling
+constexpr int32_t MINI_BAR_RADIUS_PX = 4;
+
 /** Create slot column: bar_bg (with bar_fill child) + status_line in a column flex container */
 SlotColumn create_slot_column(lv_obj_t* parent, int32_t bar_width, int32_t bar_height,
                               int32_t bar_radius);
@@ -236,6 +256,15 @@ struct UnitToolLayout {
     int min_virtual_tool = -1;   ///< Minimum mapped_tool value (for labeling)
     int hub_tool_label =
         -1; ///< Override label for HUB units (from extruder index, -1 = use min_virtual_tool)
+    /// Bit t = this unit actually SUPPLIES physical nozzle first_physical_tool + t.
+    /// A unit can own a nozzle it does not feed: a toolchanger head fed by an
+    /// MMU (an ACE-fed U1 head) belongs to the head's unit, but its slot's
+    /// identity is owned by the MMU -- AmsBackend::slot_identity_owner_unit().
+    /// Cleared for those, so the canvas draws no supply line from the owner to
+    /// filament it is not supplying. Computed HERE, once, from the same walk
+    /// that placed the nozzles: the overview used to re-derive it inline from
+    /// the same data with a per-(tool, slot) backend query.
+    uint32_t feeds_mask = ~0u;
     /// Extruder this unit's single nozzle belongs to, as an opaque name. Set
     /// only for one-nozzle units whose lanes all agree; empty otherwise. Two
     /// units naming the same extruder feed one nozzle — that is string
@@ -327,4 +356,9 @@ struct ToolBadgeLabels {
  */
 SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const AmsBackend* backend);
 
-} // namespace ams_draw
+} // namespace helix::ams_draw
+
+/// Unqualified `ams_draw::` is the spelling at ~230 call sites across the AMS
+/// drawing code. The namespace itself lives under helix:: (every HelixScreen
+/// declaration does); this alias keeps the short spelling working.
+namespace ams_draw = helix::ams_draw;

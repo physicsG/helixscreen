@@ -71,10 +71,8 @@
       <ui_card name="network_list_container"
                height="100%" flex_grow="6" flex_flow="column" scrollable="true" scroll_elastic="false"
                style_clip_corner="true" style_flex_main_place="start" style_flex_cross_place="start">
-        <!-- Reactive state binding: set disabled state when wifi_enabled == 0 -->
-        <bind_state_if_eq subject="wifi_enabled" state="disabled" ref_value="0"/>
-        <!-- Also disable when hardware unavailable -->
-        <bind_state_if_eq subject="wifi_hardware_available" state="disabled" ref_value="0"/>
+        <!-- Disabled when WiFi is off or the hardware is absent. -->
+        <bind_state_if cond="wifi_enabled eq 0 or wifi_hardware_available eq 0" state="disabled"/>
         <!-- Title -->
         <text_heading width="100%"
                       text="Available Networks" translation_tag="Available Networks" style_pad_bottom="#space_sm"/>

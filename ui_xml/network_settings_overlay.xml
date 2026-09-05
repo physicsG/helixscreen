@@ -197,8 +197,7 @@
           </lv_obj>
           <!-- Refresh Button -->
           <ui_button name="refresh_btn" width="content" height="36" variant="ghost" style_border_width="0">
-            <bind_state_if_eq subject="wifi_scanning" state="disabled" ref_value="1"/>
-            <bind_state_if_eq subject="wifi_hardware_available" state="disabled" ref_value="0"/>
+            <bind_state_if cond="wifi_scanning eq 1 or wifi_hardware_available eq 0" state="disabled"/>
             <lv_obj height="100%"
                     style_pad_all="0" scrollable="false" flex_flow="row" style_flex_cross_place="center"
                     style_pad_gap="#space_xs">
