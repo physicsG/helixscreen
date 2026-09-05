@@ -242,7 +242,7 @@ TEST_CASE_METHOD(PausedGateFixture,
 }
 
 // ============================================================================
-// Snapmaker U1 — the backend 329e731e9 missed
+// Snapmaker U1
 //
 // Every op below drives the toolhead: AUTO_FEEDING forwards to FEED_AUTO, which
 // homes and then switches tools before feeding, and `T{n}` moves the carriage.

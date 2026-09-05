@@ -575,8 +575,7 @@ TEST_CASE_METHOD(
 // so an EMPTY head on the carriage is an ordinary state — and it used to render
 // as a full spool with a lit badge, identical to a head holding filament,
 // because the election promoted the active tool's slot to LOADED from carriage
-// state alone. filament_exist is the presence answer and it must win. (Fixed in
-// 70ce3345b against live hardware, which added no test — this is that test.)
+// state alone. filament_exist is the presence answer and it must win.
 TEST_CASE_METHOD(SnapmakerFixture, "Snapmaker a mounted but empty toolhead is not loaded",
                  "[ams][snapmaker][unload]") {
     AmsBackendSnapmaker backend(nullptr, nullptr);

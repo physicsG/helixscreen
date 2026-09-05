@@ -261,10 +261,10 @@ TEST_CASE("AFC shared extruders: configfile extruder_name gives toolheads T<n> i
     REQUIRE(layout.total_physical_tools == 4);
 
     // Every nozzle knows which Klipper extruder it is, so the badge NUMBERS come
-    // from the extruder names — T0..T3. The letter is 'T' on both paths since
-    // 60b5d722e: it labels a toolhead, and only the number's SOURCE differs
-    // between the identity and legacy paths (#1229). That distinction is what
-    // the number assertions below pin.
+    // from the extruder names — T0..T3. The letter is 'T' on both paths: it
+    // labels a toolhead, and only the number's SOURCE differs between the
+    // identity and legacy paths (#1229). That distinction is what the number
+    // assertions below pin.
     REQUIRE(ams_draw::layout_has_extruder_identity(layout));
 
     std::set<std::string> resolved(layout.physical_to_extruder_name.begin(),

@@ -17,7 +17,7 @@ class AmsBackend; // Forward declaration for compute_system_tool_layout()
  * Consolidates duplicated drawing code used by ui_ams_mini_status,
  * ui_panel_ams_overview, ui_ams_slot, and ui_spool_canvas.
  */
-namespace ams_draw {
+namespace helix::ams_draw {
 
 // ============================================================================
 // Color Utilities
@@ -356,4 +356,9 @@ struct ToolBadgeLabels {
  */
 SystemToolLayout compute_system_tool_layout(const AmsSystemInfo& info, const AmsBackend* backend);
 
-} // namespace ams_draw
+} // namespace helix::ams_draw
+
+/// Unqualified `ams_draw::` is the spelling at ~230 call sites across the AMS
+/// drawing code. The namespace itself lives under helix:: (every HelixScreen
+/// declaration does); this alias keeps the short spelling working.
+namespace ams_draw = helix::ams_draw;

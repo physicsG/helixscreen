@@ -1061,7 +1061,8 @@ AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
     // is read is worse than no row: the bar simply holds on "Retract filament"
     // across it, which is honest.
     //
-    // Labels carry no product name, per 99dbe2774 ("Remove specific ACE naming").
+    // Labels carry no product name: the step bar names the operation, not the
+    // hardware performing it.
     if (op == StepOperationType::LOAD_SWAP && ace_fed) {
         OperationStepModel model;
         model.steps.push_back({lv_tr("Home"), UNLOAD_PHASE_BASE + 0, false, false});

@@ -17,7 +17,7 @@
 #include <map>
 #include <set>
 
-namespace ams_draw {
+namespace helix::ams_draw {
 
 // ============================================================================
 // Color Utilities
@@ -1076,4 +1076,4 @@ lv_obj_t* create_lane_badge(lv_obj_t* parent, int lane_number, int32_t size, boo
     return badge;
 }
 
-} // namespace ams_draw
+} // namespace helix::ams_draw
