@@ -92,7 +92,8 @@
            an autofeed Resume that the firmware declines to carry out leaves no
            other way to recover. AmsSubscriptionBackend::refuse_if_printing()
            permits the op there, so the buttons are not offered into a refusal. -->
-      <bind_flag_if cond="(runout_autofeed_capable eq 1 and print_state_enum ne 2) or print_state_enum eq 1" flag="hidden"/>
+      <bind_flag_if cond="(runout_autofeed_capable eq 1 and print_state_enum ne 2) or print_state_enum eq 1"
+                    flag="hidden"/>
       <!-- Load button (wired programmatically by RunoutGuidanceModal::on_show → wire_ok_button) -->
       <ui_button name="btn_load_filament" flex_grow="1" icon="arrow_down" text="Load" translation_tag="Load"/>
       <!-- Unload button (wired programmatically by RunoutGuidanceModal::on_show → wire_quaternary_button) -->
