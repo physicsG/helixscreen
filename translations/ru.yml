@@ -229,10 +229,10 @@ translations:
   Auto-Detect: Автоопределение
   Auto-Heat on Load: Автонагрев при загрузке
   Auto-detect: Автоопределение
-  Auto-dry: ''
-  Auto-dry off: ''
-  Auto-dry on: ''
-  Auto-dry unchanged: ''
+  Auto-dry: 'Автосушка'
+  Auto-dry off: 'Автосушка выключена'
+  Auto-dry on: 'Автосушка включена'
+  Auto-dry unchanged: 'Автосушка без изменений'
   Auto-install only works on local Moonraker: Автоустановка работает только с локальным
     Moonraker
   Auto-lock: Автоблокировка
@@ -677,7 +677,7 @@ translations:
   Could not save filament: Не удалось сохранить филамент
   Could not start Bluetooth discovery: Не удалось запустить поиск Bluetooth
   Could not update filaments: Не удалось обновить филаменты
-  Could not update slot: ''
+  Could not update slot: 'Не удалось обновить слот'
   Could not verify Spoolman status. Moonraker may still be restarting.: Не удалось
     проверить статус Spoolman. Moonraker может ещё перезапускаться.
   Couldn't update Spoolman — saved locally: Не удалось обновить Spoolman — сохранено
@@ -808,7 +808,7 @@ translations:
   Downloading... {:.1f}/{:.1f} MB: Загрузка... {:.1f}/{:.1f} МБ
   Draw a ripple at each touch — helps diagnose offsets: Рисовать круг при каждом касании
     — помогает диагностировать смещения
-  Dries above %d%%, stops below %d%%: ''
+  Dries above %d%%, stops below %d%%: 'Сушит выше %d%%, останавливается ниже %d%%'
   Drive Cal: Кал. привода
   Drop shadow strength (0 = disabled): Интенсивность тени (0 = отключено)
   Drying: Сушка
@@ -1150,7 +1150,7 @@ translations:
   Flying Toasters: Летающие тостеры
   Follow active tool: Следовать активному инструменту
   Follow graph screen: Следовать экрану графика
-  Follows unit %d: ''
+  Follows unit %d: 'Следует за блоком %d'
   Forget: Забыть
   Forget Network?: Забыть сеть?
   Forget network '{}'? You will need the password to reconnect.: Забыть сеть «{}»? Для повторного подключения потребуется пароль.
@@ -1849,7 +1849,7 @@ translations:
   Open color and brightness controls: Управление цветом и яркостью
   Open feeder: Открыть фидер
   Open feeder macro: Макрос для открытия фидера
-  Open in ACE: ''
+  Open in ACE: 'Открыть в ACE'
   Open motion controls for jogging: Управление перемещением осей
   Operation already in progress: Операция уже выполняется
   Operations: Операции
@@ -2914,7 +2914,7 @@ translations:
   Toolhead LED: 'LED печатающей головки'
   Toolhead Sensor: Датчик печатающей головки
   Toolhead Style: Стиль печатающей головки
-  Toolhead command failed: ''
+  Toolhead command failed: 'Команда инструментальной головки не выполнена'
   Toolhead jam: Замятие в печатающей головке
   Toolhead, G-code, limits, and materials: Печатающая головка, G-code, лимиты и материалы
   Tools Used: Использовано инструментов
